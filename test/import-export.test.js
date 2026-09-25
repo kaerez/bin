@@ -148,4 +148,34 @@ describe('admin import', () => {
     expect((await importDoc(base, { system: false, users: { 'not-in-doc': {} } })).status).toBe(400);
     expect((await importDoc(base, { system: false, users: { 'ie-validate': { as: 'bad name!' } } })).status).toBe(400);
   });
+
+  it('review hardening: API keys revoked on credential overwrite, no self-block, full audit, clean notes', async () => {
+    const a = await makeUser('ie-keys-a', 'keys-password-123');
+    await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: a.id, channel: 'all', patch: { apiEnabled: true } } });
+    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: a.cookie, body: { name: 'k' } })).json()).key;
+    const doc = await exportDoc({ users: [a.id], credentials: true });
+    const pre = await (await importDoc(doc, { system: false, users: { 'ie-keys-a': { overwrite: true } } })).json();
+    expect(pre.plan.users[0].note).toMatch(/revokes its API keys/);
+    expect((await importDoc(doc, { system: false, users: { 'ie-keys-a': { overwrite: true } } }, false)).status).toBe(200);
+    const withKey = await fetchJson('/api/private/paste', { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: { paste: {} } });
+    expect(withKey.status).toBe(401);
+
+    // An imported block rule covering the importing owner's own address is refused.
+    const sys = await exportDoc({ system: true });
+    sys.system.ipRules = [{ cidr: '203.0.113.0/24', action: 'block', note: 'line1\nline2' }];
+    const imp = (ip) => fetchJson('/api/private/admin/import', { method: 'POST', cookie: oc, ip, body: { current: CURRENT, document: sys, decisions: { system: true, users: {} }, dryRun: false } });
+    const self = await imp('203.0.113.7');
+    expect(self.status).toBe(409);
+    expect((await self.json()).plan.errors.join(' ')).toMatch(/block your own address/);
+    // From elsewhere it applies, with the note cleaned and every change audited.
+    sys.system.settings['guard.login.max'] = 50;
+    expect((await imp('198.51.100.200')).status).toBe(200);
+    const rules = await (await fetchJson('/api/private/admin/ip-rules', { cookie: oc })).json();
+    expect(rules.rules.find((r) => r.cidr === '203.0.113.0/24').note).toBe('line1 line2');
+    const audit = (await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json()).rows;
+    expect(audit.some((r) => r.action === 'settings.updated' && /guard\.login\.max=50/.test(r.detail))).toBe(true);
+    expect(audit.some((r) => r.action === 'iprule.added' && /block 203\.0\.113\.0\/24/.test(r.detail))).toBe(true);
+    expect(audit.some((r) => r.action === 'export.users' && /credentials: ie-keys-a/.test(r.detail))).toBe(true);
+    await fetchJson(`/api/private/admin/ip-rules/${rules.rules.find((r) => r.cidr === '203.0.113.0/24').id}`, { method: 'DELETE', cookie: oc, headers: { 'x-secbin-intent': '1' } });
+  });
 });

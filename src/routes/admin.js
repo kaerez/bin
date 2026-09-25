@@ -112,10 +112,10 @@ export async function handleAdmin(request, env, url) {
     }
     if (!isImport) {
       const users = body.users === 'all' ? 'all' : Array.isArray(body.users) ? body.users.filter((u) => ID_RE.test(String(u))).slice(0, MAX_EXPORT_USERS) : [];
-      const doc = await dir.exportData({
+      const r = await dir.exportData({
         system: body.system === true, users, credentials: body.credentials === true, config: body.config === true, origin: url.origin,
       }, me);
-      return json({ document: doc });
+      return r.ok ? json({ document: r.doc }) : fromDir(r);
     }
     let doc;
     let decisions;
@@ -126,7 +126,7 @@ export async function handleAdmin(request, env, url) {
       if (e instanceof PortableError) return err(400, 'invalid_import', e.message);
       throw e;
     }
-    const r = await dir.importData(doc, decisions, { dryRun: body.dryRun !== false }, me);
+    const r = await dir.importData(doc, decisions, { dryRun: body.dryRun !== false, callerIp: g.ip }, me);
     if (!r.ok) return json({ error: r.error, message: r.message, plan: r.plan }, r.status);
     if (r.applied) invalidateGuardCaches();
     return json(r);

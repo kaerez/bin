@@ -105,6 +105,8 @@ function importCard(users, profile) {
     try {
       doc = await openExport(await f.text(), pass.value);
       if (!doc || doc.format !== 'secbin-export/v1' || !Array.isArray(doc.users)) throw new ExportCryptError('The decrypted file is not a secbin export.');
+      // Bound the review table before building it (the server re-validates everything).
+      if (doc.users.length > 5000) throw new ExportCryptError('This export holds more than 5000 users, which is more than an import accepts.');
       msg.hidden = true;
       renderReview(review, doc, users, profile);
     } catch (e) {
@@ -224,8 +226,9 @@ function renderPlan(box, plan) {
   }
   for (const u of plan.users) {
     if (u.action === 'skip') continue;
-    items.push(`${u.username}${u.as && u.as !== u.username ? ` → ${u.as}` : ''}: ${u.action}${u.parts?.length ? ` (${u.parts.join(' + ')})` : ''}`);
+    items.push(`${u.username}${u.as && u.as !== u.username ? ` → ${u.as}` : ''}: ${u.action}${u.parts?.length ? ` (${u.parts.join(' + ')})` : ''}${u.note ? ` — ${u.note}` : ''}`);
   }
   box.append(h('h3.field-label', { text: 'Changes' }), h('ul.plan-list', {}, ...items.map((t) => h('li.mono', { text: t }))));
+  if (plan.warnings?.length) box.append(h('h3.field-label', { text: 'Check these' }), h('ul.plan-list', {}, ...plan.warnings.map((t) => h('li.type-hint.warn', { text: t }))));
   if (plan.errors.length) box.append(h('h3.field-label', { text: 'Problems' }), h('ul.plan-list', {}, ...plan.errors.map((t) => h('li.msg.error', { text: t }))));
 }

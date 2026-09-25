@@ -297,9 +297,14 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
 - Imports are re-validated field by field on the server with the same checkers as the admin API
   (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
   previewed as a dry run, and are applied in one storage transaction or not at all. Replacing
-  an account's credentials ends its sessions. IP rules are only ever added, never removed.
-- Exports and imports are recorded in the audit log (`export.created`, `import.system`,
-  `user.imported`).
+  an account's credentials ends its sessions and revokes its API keys (its shares stay). IP
+  rules are only ever added, never removed, and an import that would block the importing
+  owner's own address is refused. The preview calls out changes to `guard.*` / `lockout.*`
+  settings and added allow rules.
+- Exports and imports are audited as fully as the equivalent manual changes: `export.created`
+  and `export.users` (which accounts, with or without verifiers), `import.system`,
+  `settings.updated`, `limits.updated`, `quotas.updated`, `viewer_rules.updated`,
+  `iprule.added` (with the values) and `user.imported`.
 - The passphrase is the only protection of the file: keep file and passphrase apart. Whether
   exported verifiers may leave the environment at all is a policy decision for your Security /
   Compliance function.

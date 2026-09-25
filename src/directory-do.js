@@ -21,8 +21,8 @@ import {
   SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES,
 } from './lib/settings.js';
-import { normalizeRule } from './lib/ip.js';
-import { EXPORT_FORMAT } from './lib/portable.js';
+import { normalizeRule, parseIp, parseCidr, cidrContains } from './lib/ip.js';
+import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
 import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
 
 const SCHEMA = `
@@ -967,8 +967,12 @@ export class Directory extends DurableObject {
       };
     }
     const rows = users === 'all'
-      ? this.sql.exec("SELECT * FROM users WHERE role = 'user' ORDER BY username").toArray()
-      : (Array.isArray(users) ? users : []).slice(0, 5000).map((id) => this.#user(id)).filter((u) => u && u.role === 'user');
+      ? this.sql.exec("SELECT * FROM users WHERE role = 'user' ORDER BY username LIMIT ?", MAX_EXPORT_USERS + 1).toArray()
+      : (Array.isArray(users) ? users : []).slice(0, MAX_EXPORT_USERS + 1).map((id) => this.#user(id)).filter((u) => u && u.role === 'user');
+    // Never produce a file that the import would refuse.
+    if (rows.length > MAX_EXPORT_USERS && (credentials || config)) {
+      return fail(413, 'too_many_users', `An export holds at most ${MAX_EXPORT_USERS} users — export them in parts.`);
+    }
     if (credentials || config) {
       for (const u of rows) {
         const e = { username: u.username };
@@ -985,7 +989,21 @@ export class Directory extends DurableObject {
     }
     this.#log(actorId, null, 'export.created',
       `system=${system ? 1 : 0} users=${doc.users.length} credentials=${credentials ? 1 : 0} config=${config ? 1 : 0}`);
-    return doc;
+    // Which accounts left the system (and whether with verifiers), in chunks
+    // that fit the audit detail field.
+    this.#logChunks(actorId, null, 'export.users', `${[credentials ? 'credentials' : null, config ? 'config' : null].filter(Boolean).join('+')}: `, doc.users.map((e) => e.username));
+    return { ok: true, doc };
+  }
+
+  /** Log `items` as as many entries as needed to fit the detail field (nothing truncated). */
+  #logChunks(actorId, subject, action, prefix, items) {
+    let cur = [];
+    const flush = () => { if (cur.length) this.#log(actorId, subject, action, `${prefix}${cur.join(', ')}`); cur = []; };
+    for (const it of items) {
+      if (cur.length && `${prefix}${[...cur, it].join(', ')}`.length > 480) flush();
+      cur.push(String(it).slice(0, 400));
+    }
+    flush();
   }
 
   #quotaRows(userId) {
@@ -997,8 +1015,8 @@ export class Directory extends DurableObject {
    * decisions (portable.js). Applying is all-or-nothing: one storage
    * transaction, and any planning error refuses the whole import.
    */
-  async importData(doc, decisions, { dryRun = true } = {}, actorId) {
-    const plan = { system: null, users: [], errors: [] };
+  async importData(doc, decisions, { dryRun = true, callerIp = null } = {}, actorId) {
+    const plan = { system: null, users: [], errors: [], warnings: [] };
     if (decisions.system) {
       const cur = this.#settings();
       const existingRules = new Set((await this.ipRules()).map((r) => `${r.action} ${r.cidr}`));
@@ -1006,6 +1024,20 @@ export class Directory extends DurableObject {
       const ipAdd = doc.system.ipRules.filter((r) => (r.expires === null || r.expires > ts) && !existingRules.has(`${r.action} ${r.cidr}`));
       const merged = { ...cur, ...doc.system.settings };
       if (merged['session.idleSec'] > merged['session.absSec']) plan.errors.push('system: the idle timeout would exceed the absolute timeout');
+      // Never lock out the owner who is importing: a new block rule covering
+      // the caller (with no allow rule for it) refuses the import.
+      const me = parseIp(callerIp ?? '');
+      if (me) {
+        const after = [...(await this.ipRules()), ...ipAdd].map((r) => ({ action: r.action, c: parseCidr(r.cidr) }));
+        const allowed = after.some((r) => r.action === 'allow' && cidrContains(r.c, me));
+        const blocking = ipAdd.find((r) => r.action === 'block' && cidrContains(parseCidr(r.cidr), me));
+        if (blocking && !allowed) plan.errors.push(`system: the IP rule "block ${blocking.cidr}" would block your own address — remove it from the file or add an allow rule for yourself first`);
+      }
+      // Security-relevant changes are called out in the preview.
+      for (const [k, v] of Object.entries(doc.system.settings)) {
+        if (/^(guard|lockout)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
+      }
+      for (const r of ipAdd) if (r.action === 'allow') plan.warnings.push(`adds an allow rule (exempts ${r.cidr} from brute-force protection and blocks)`);
       plan.system = {
         settings: Object.entries(doc.system.settings).filter(([k, v]) => cur[k] !== v).map(([key, to]) => ({ key, from: cur[key], to })),
         limits: { all: Object.keys(doc.system.limits.all).length, api: Object.keys(doc.system.limits.api).length },
@@ -1033,12 +1065,13 @@ export class Directory extends DurableObject {
         plan.errors.push(`"${d.as}" does not exist here and the export has no credentials for it — it cannot be created`);
       } else {
         entry.action = existing ? 'overwrite' : 'create';
+        if (existing && u.credentials) entry.note = 'ends its sessions and revokes its API keys; its shares stay';
       }
       plan.users.push(entry);
     }
     const out = (applied) => {
       const { _ipAdd, ...system } = plan.system ?? {};
-      return { ok: true, applied, plan: { system: plan.system ? system : null, users: plan.users, errors: plan.errors } };
+      return { ok: true, applied, plan: { system: plan.system ? system : null, users: plan.users, errors: plan.errors, warnings: plan.warnings } };
     };
     if (dryRun) return out(false);
     if (plan.errors.length) return fail(409, 'import_conflicts', `The import was not applied: ${plan.errors.length} problem${plan.errors.length === 1 ? '' : 's'} (run the preview).`, { plan: out(false).plan });
@@ -1061,7 +1094,14 @@ export class Directory extends DurableObject {
         for (const [k, v] of Object.entries(s.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
         replaceScope('', s.limits, s.quotas, s.viewerRules);
         for (const r of plan.system._ipAdd) this.sql.exec('INSERT INTO ip_rules (id, cidr, action, expires, note, created) VALUES (?, ?, ?, ?, ?, ?)', newId(), r.cidr, r.action, r.expires, r.note, ts);
+        // The same entries the admin API writes, so an import is as visible as
+        // the equivalent manual changes.
         this.#log(actorId, null, 'import.system', `settings=${plan.system.settings.length} ipRules+${plan.system._ipAdd.length}`);
+        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${JSON.stringify(c.to)}`));
+        for (const ch of ['all', 'api']) this.#logChunks(actorId, null, 'limits.updated', `import global ${ch}: `, Object.entries(s.limits[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`).concat(Object.keys(s.limits[ch]).length ? [] : ['none']));
+        this.#logChunks(actorId, null, 'quotas.updated', 'import global: ', s.quotas.length ? s.quotas.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`) : ['none']);
+        this.#log(actorId, null, 'viewer_rules.updated', `import global: ${s.viewerRules.length} rules`);
+        for (const r of plan.system._ipAdd) this.#log(actorId, null, 'iprule.added', `import: ${r.action} ${r.cidr}${r.note ? ` (${r.note})` : ''}`);
       }
       for (const [i, u] of doc.users.entries()) {
         const e = plan.users[i];
@@ -1076,13 +1116,20 @@ export class Directory extends DurableObject {
           id = this.#userByName(e.as).id;
           if (u.credentials) {
             const c = u.credentials;
-            // New credentials end every existing session and clear the lockout.
+            // New credentials end every existing session, revoke the account's
+            // API keys (they are not tied to the password) and clear lockouts.
             this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, disabled = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?',
               c.salt, c.t, c.verifier, c.disabled ? 1 : 0, ts, id);
             this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
+            this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', id);
+            this.sql.exec('DELETE FROM api_keys WHERE user_id = ?', id);
           }
         }
-        if (u.config) replaceScope(id, u.config.limits, u.config.quotas, u.config.viewerRules);
+        if (u.config) {
+          replaceScope(id, u.config.limits, u.config.quotas, u.config.viewerRules);
+          const L = u.config.limits;
+          for (const ch of ['all', 'api']) this.#logChunks(actorId, id, 'limits.updated', `import ${ch}: `, Object.keys(L[ch]).length ? Object.entries(L[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`) : ['none']);
+        }
         this.#log(actorId, id, 'user.imported', `${e.action}${e.as !== u.username ? ` from=${u.username}` : ''} parts=${e.parts.join('+')}`);
       }
     });

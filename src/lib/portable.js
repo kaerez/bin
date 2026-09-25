@@ -44,8 +44,9 @@ function list(v, where, max) {
   return v;
 }
 
+const short = (k) => String(k).slice(0, 60);
 const wrap = (where, fn) => {
-  try { return fn(); } catch (e) { throw new PortableError(`${where}: ${e.message}`); }
+  try { return fn(); } catch (e) { throw new PortableError(`${where}: ${String(e.message).slice(0, 200)}`); }
 };
 
 function limitsBlock(v, where) {
@@ -53,7 +54,7 @@ function limitsBlock(v, where) {
   const out = { all: {}, api: {} };
   for (const ch of ['all', 'api']) {
     keys(v[ch], `${where}.${ch}`, [], Object.keys(v[ch] ?? {}));
-    for (const [k, val] of Object.entries(v[ch])) out[ch][k] = wrap(`${where}.${ch}.${k}`, () => checkLimit(k, val, ch));
+    for (const [k, val] of Object.entries(v[ch])) out[ch][k] = wrap(`${where}.${ch}.${short(k)}`, () => checkLimit(k, val, ch));
   }
   return out;
 }
@@ -68,8 +69,12 @@ function ipRule(r, where) {
   if (r.action !== 'allow' && r.action !== 'block') throw new PortableError(`${where}: action must be allow or block`);
   const expires = r.expires ?? null;
   if (expires !== null && !Number.isSafeInteger(expires)) throw new PortableError(`${where}: invalid expiry`);
-  const note = r.note ?? '';
-  if (typeof note !== 'string' || note.length > 100) throw new PortableError(`${where}: notes are up to 100 characters`);
+  const raw = r.note ?? '';
+  if (typeof raw !== 'string') throw new PortableError(`${where}: invalid note`);
+  // Same cleaning as the admin API's notes (control characters → spaces, trimmed).
+  // eslint-disable-next-line no-control-regex
+  const note = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  if (note.length > 100) throw new PortableError(`${where}: notes are up to 100 characters`);
   return { cidr, action: r.action, expires, note };
 }
 
@@ -77,7 +82,7 @@ function system(v) {
   keys(v, 'system', ['settings', 'limits', 'quotas', 'viewerRules', 'ipRules']);
   keys(v.settings, 'system.settings', [], Object.keys(v.settings ?? {}));
   const settings = {};
-  for (const [k, val] of Object.entries(v.settings)) settings[k] = wrap(`system.settings.${k}`, () => checkSetting(k, val));
+  for (const [k, val] of Object.entries(v.settings)) settings[k] = wrap(`system.settings.${short(k)}`, () => checkSetting(k, val));
   if (settings['session.idleSec'] !== undefined && settings['session.absSec'] !== undefined && settings['session.idleSec'] > settings['session.absSec']) {
     throw new PortableError('system.settings: the idle timeout cannot exceed the absolute timeout');
   }
