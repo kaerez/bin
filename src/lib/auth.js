@@ -35,6 +35,9 @@ export async function issueSession(env, { uid, act = null, ver, settings, sid = 
 
 export const logoutCookie = () => clearCookie(SESSION_COOKIE);
 
+/** A disabled account: refused everywhere, even with a still-valid session or key. */
+export const accountDisabled = (headers) => new HttpError(403, 'account_disabled', 'This account is disabled. Contact the administrator.', undefined, headers);
+
 /**
  * Resolve the session on a request. Returns
  *   { ok: true, user, actor, claims, setCookie? }  or
@@ -54,6 +57,7 @@ export async function readSession(request, env) {
   }
   const res = await directory(env).resolveSession({ sid: c.sid, uid: c.uid, act: c.act ?? null, ver: c.ver });
   if (!res) return { ok: false, reason: 'invalid' };
+  if (res.disabled) return { ok: false, reason: 'disabled' };
   const { idleSec, absSec } = res.settings;
   if (t - c.lat > idleSec || t - c.iat > absSec) return { ok: false, reason: 'invalid' };
   let setCookie;
@@ -76,12 +80,14 @@ export async function authenticate(request, env, { allowApiKey = false } = {}) {
     if (!m) throw new HttpError(401, 'invalid_api_key', 'Invalid API key.');
     if (!allowApiKey) throw new HttpError(403, 'api_key_not_allowed', 'API keys can only be used to create shares.');
     const res = await directory(env).authKey(await hashToken(m[1]));
+    if (res?.disabled) throw accountDisabled();
     if (!res) throw new HttpError(401, 'invalid_api_key', 'Invalid, expired or disabled API key.');
     return { user: res.user, actor: null, channel: 'api' };
   }
   const s = await readSession(request, env);
   if (!s.ok) {
     if (s.reason === 'unconfigured') throw unconfigured();
+    if (s.reason === 'disabled') throw accountDisabled({ 'set-cookie': logoutCookie() });
     throw new HttpError(401, 'unauthenticated', 'Please log in.');
   }
   return { user: s.user, actor: s.actor, claims: s.claims, setCookie: s.setCookie, channel: 'all' };

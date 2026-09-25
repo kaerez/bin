@@ -83,24 +83,40 @@ so they do not land in logged request URLs.
 Any script on the page can read `location.hash` and the decrypted content, so XSS equals full
 compromise. Defenses:
 
-- **Strict CSP** on every page and asset (`public/_headers`, mirrored in `src/lib/http.js` for
-  Worker-served dashboard pages):
+- **Strict CSP** on every page and asset (`public/_headers`, kept identical to
+  `src/lib/http.js` for Worker-served pages by `test-node/headers.test.js`):
   ```
   default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self';
   img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self';
   worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';
-  frame-src 'none'; object-src 'none'
+  frame-src 'none'; object-src 'none'; require-trusted-types-for 'script';
+  trusted-types secbin; upgrade-insecure-requests
   ```
   - `'wasm-unsafe-eval'` allows **WebAssembly compilation only** (Argon2id; pdf.js image
     decoders). JavaScript `eval`/`new Function` remain blocked.
   - `blob:` for images/media is used only by the viewer for content it has sniffed itself.
   - `worker-src 'self'` is for pdf.js's parser worker.
-- **First-party only.** No CDNs, analytics or third-party scripts. The two vendored libraries
-  (hash-wasm, pdf.js) are pinned, SHA-256-verified and rebuilt reproducibly by
-  `tools/vendor.mjs` (`public/THIRD-PARTY-NOTICES.md`).
+  - **Trusted Types** are enforced. DOM XSS sinks (`innerHTML`, script and worker URLs, and
+    similar) refuse plain strings, and exactly one policy, `secbin` (`public/js/tt.js`), may
+    exist. It mints script URLs only for this origin's `/js/*.js` and `/sw.js`, and refuses
+    to create HTML or script strings at all. pdf.js's worker is created through it.
+- **Isolation headers.** Framing is denied both ways: `frame-ancestors 'none'`,
+  `X-Frame-Options: DENY`, and `frame-src 'none'` (the app embeds nothing). Beyond that:
+  - COOP `same-origin`, COEP `require-corp`, CORP `same-origin` and `Origin-Agent-Cluster`
+    make every page cross-origin isolated.
+  - `Permissions-Policy` denies every powerful feature (camera, microphone, geolocation,
+    payment, USB, and so on) except clipboard writes, fullscreen and picture-in-picture for
+    the app itself.
+  - `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and a two-year
+    HSTS with preload.
+- **First-party only.** No CDNs, analytics or third-party scripts. The vendored libraries
+  (hash-wasm, pdf.js, qrcode-generator) are pinned, SHA-256-verified and rebuilt reproducibly
+  by `tools/vendor.mjs` (`public/THIRD-PARTY-NOTICES.md`).
 - **DOM construction only.** Decrypted content, file names and server strings are rendered
-  with `textContent`; the element helper refuses `innerHTML`, `on*`, `style` and `srcdoc`.
-  Markdown is a raw-HTML-free subset with an `http`/`https`/`mailto` link allowlist.
+  with `textContent`. The element helper refuses `innerHTML`, `outerHTML`, `on*`, `style`
+  and `srcdoc`. URL-valued attributes (`href`, `src`, …) accept only relative URLs, `http`,
+  `https`, `mailto` and `blob:` URLs, plus `data:image/*` for images. Markdown is a
+  raw-HTML-free subset with an `http`/`https`/`mailto` link allowlist.
 - **Safe viewer** (optional, admin-governed, sender opt-in per share):
   - text/Markdown/code: inert DOM, size-capped;
   - images: the type comes from our own signature sniffing (never the sender's label); the
@@ -149,7 +165,8 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   audited; the admin panel warns while `AUTHN` is still set.
 - **Passwords** never reach the server: the client sends `Argon2id(password, salt)`; the server
   stores `SHA-256("secbin-auth/v2" ‖ that)`. Prelogin returns a stable, secret-keyed fake salt
-  for unknown usernames (no enumeration). Minimum length (12) is enforced client-side — the
+  for unknown usernames, and every account uses the same Argon2id time cost, so the response
+  never reveals whether an account exists. Minimum length (12) is enforced client-side — the
   server cannot see the password. Trade-off: the stretched value is password-equivalent in
   transit (TLS-protected), as with any client-side stretching scheme.
 - **Sessions**: `__Host-` cookie, HttpOnly, Secure, SameSite=Strict, containing a JWS (HS256,
@@ -158,8 +175,15 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   session version (bumped by password change/reset/disable), plus admin-configured idle and
   absolute timeouts. Missing/invalid `SIG`/`ENC` ⇒ login is unavailable (`503`), public links
   keep working.
+- **Disabled accounts** are refused on every authenticated route, including the dashboard,
+  My shares, account and share creation, even with a still-valid session cookie or API key.
+  - The response is `403 account_disabled`, and the session cookie is cleared.
+  - Disabling also bumps the session version, so re-enabling never brings old sessions back.
+  - Capabilities held by link holders (a share's delete token, an open download grant) are
+    not account credentials, so they keep working.
 - **CSRF**: state-changing calls must be non-simple (JSON content type or `X-Secbin-Intent`), are
-  refused when `Sec-Fetch-Site: cross-site`, and cookies are SameSite=Strict. The API has no CORS.
+  refused when `Sec-Fetch-Site` is `cross-site` **or `same-site`** (a sibling subdomain is not
+  trusted), and cookies are SameSite=Strict. The API has no CORS.
 - **API keys** (`sbk_…`, stored hashed) authenticate share creation only — never account or
   admin endpoints. The owner decides who may hold keys and how many; API limits and quotas can
   only narrow the account's limits. Revoking API permission disables existing keys at once.
@@ -173,7 +197,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     and tracking;
   - manual allow/block rules for IPv4/IPv6 addresses and CIDR ranges (allow wins; blocks deny
     the whole API and dashboard);
-  - account lockout after X failed logins (owner exempt — recover via setup if needed).
+  - account lockout after X wrong passwords, counting both login and the "current password"
+    check when changing a password, so a stolen session cannot guess the password without
+    limit (owner exempt — recover via setup if needed).
   - Kill switches: `DISABLE_BFP=true` (everything, including IP rules) and
     `DISABLE_BFP_SETUP=true` (setup only).
 
@@ -183,6 +209,12 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   file chunks, with the exact expected size enforced).
 - Every value is re-validated server-side (formats, views, expiry, limits, quotas, settings).
 - Reads that spend views need custom headers (non-simple): ambient GETs never consume anything.
+- Download grants are stored apart from the share record, and at most 2000 may be live per
+  file share. Beyond that, opens get `429 busy` with `Retry-After`, so repeated opens of an
+  unlimited share cannot grow its record until it breaks.
+- A missing or invalid binding (KV, R2, a Durable Object namespace) answers
+  `503 not_configured` naming the binding. Missing or garbage environment variables never
+  throw; the feature that needs them reports that it is unavailable.
 
 ## 7. Cryptographic summary
 

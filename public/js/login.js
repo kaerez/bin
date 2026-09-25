@@ -7,6 +7,10 @@ import { showMsg, wirePeek, friendlyError } from './common.js';
 
 const $ = (s) => document.querySelector(s);
 
+if (new URLSearchParams(location.search).get('disabled') === '1') {
+  showMsg($('#login-msg'), 'Your account has been disabled. Contact the administrator.');
+}
+
 (async () => {
   try {
     const s = await session();

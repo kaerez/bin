@@ -10,6 +10,7 @@ import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js'
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
 import { b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
+import { binding } from '../lib/config.js';
 
 const GONE = 'This share does not exist, has expired, or has no views left.';
 
@@ -132,6 +133,9 @@ async function openFile(env, g, id, { lh, kh }) {
     return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded });
   }
   if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
+  if (r.status === 'busy') {
+    return json({ error: 'busy', message: 'Too many downloads of this share are in progress. Try again in a few minutes.' }, 429, { 'retry-after': '300' });
+  }
   return failed(env, g, err(410, 'gone', GONE));
 }
 
@@ -142,7 +146,7 @@ async function downloadChunk(request, env, g, id, i) {
   if (r.status === 'bad_index') return err(404, 'not_found', 'No such chunk.');
   if (r.status !== 'ok') return failed(env, g, err(r.status === 'bad_grant' ? 403 : 410, r.status === 'bad_grant' ? 'bad_grant' : 'gone',
     r.status === 'bad_grant' ? 'The download window has expired — open the link again.' : GONE));
-  const obj = await env.FILES.get(r.key);
+  const obj = await binding(env, 'FILES').get(r.key);
   if (!obj) return err(410, 'gone', GONE);
   return new Response(obj.body, {
     status: 200,

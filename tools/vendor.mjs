@@ -12,6 +12,10 @@
 //   public/js/vendor/pdfjs/…          pdf.js "legacy" display + worker builds (polyfilled
 //                                     for current browsers), its wasm
 //                                     image decoders, standard fonts and cmaps
+//   public/js/qrcode.js               qrcode-generator's UMD build, byte-for-byte
+//                                     (its MIT notice is in the file header; the
+//                                     CLI copy cli/vendor/qrcode.cjs is synced by
+//                                     cli/scripts/sync-shared.mjs)
 //
 // Never hand-edit the outputs; bump the version + pin here and re-run instead.
 // The pins are recorded again in public/THIRD-PARTY-NOTICES.md.
@@ -27,6 +31,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PINS = {
   'hash-wasm': { version: '4.12.0', sha256: '1db32a125fb46177932ec8ac438d3cd8214ebdfaccb5d6611b657d88eb586f92' },
   'pdfjs-dist': { version: '6.3.289', sha256: '06f25e887adc6489f04c9fcb14198c77e4e5623a59a0bba5c4cea5838a4f1241' },
+  'qrcode-generator': { version: '2.0.4', sha256: '02e2e18a99a90b02dad940851f59b7c3c5fd1ab79cbdece8595cb06328878159' },
 };
 
 async function fetchPackage(tmp, name) {
@@ -73,10 +78,14 @@ try {
   for (const d of ['wasm', 'standard_fonts', 'cmaps']) await cp(path.join(pdf, d), path.join(pdfDir, d), { recursive: true });
   await cp(path.join(pdf, 'LICENSE'), path.join(pdfDir, 'LICENSE'));
 
+  const qr = await fetchPackage(tmp, 'qrcode-generator');
+  await cp(path.join(qr, 'dist', 'qrcode.js'), path.join(root, 'public', 'js', 'qrcode.js'));
+
   const sha = async (p) => createHash('sha256').update(await readFile(p)).digest('hex');
   console.log('argon2.js           ', await sha(path.join(vendorDir, 'argon2.js')));
   console.log('pdfjs/pdf.min.mjs   ', await sha(path.join(pdfDir, 'pdf.min.mjs')));
   console.log('pdfjs/pdf.worker.min.mjs', await sha(path.join(pdfDir, 'pdf.worker.min.mjs')));
+  console.log('qrcode.js           ', await sha(path.join(root, 'public', 'js', 'qrcode.js')));
 } finally {
   await rm(tmp, { recursive: true, force: true });
 }

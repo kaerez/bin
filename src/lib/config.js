@@ -51,3 +51,27 @@ export function bfpDisabled(env) {
   const all = envFlag(env, 'DISABLE_BFP');
   return { all, setup: all || envFlag(env, 'DISABLE_BFP_SETUP') };
 }
+
+/**
+ * A required Cloudflare binding (KV, R2, Durable Object namespace). A missing
+ * or wrong-typed binding is a deployment error: answer a clear 503 naming the
+ * binding instead of throwing a TypeError deep inside a handler.
+ */
+const BINDING_SHAPE = {
+  PASTES: 'get', FILES: 'put', BURN: 'idFromName', FILESHARE: 'idFromName', DIRECTORY: 'idFromName', GUARD: 'idFromName',
+};
+
+export class BindingMissing extends Error {
+  constructor(name) {
+    super(`binding ${name} is not configured`);
+    this.name = 'BindingMissing';
+    this.binding = name;
+  }
+}
+
+export function binding(env, name) {
+  const b = env?.[name];
+  const method = BINDING_SHAPE[name];
+  if (!b || (method && typeof b[method] !== 'function')) throw new BindingMissing(name);
+  return b;
+}

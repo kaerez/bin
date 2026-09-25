@@ -52,6 +52,31 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 
 ### Changed
 
+- **Security hardening** (items reported by the review sweep):
+  - **Disabled accounts** get an explicit `403 account_disabled`, and their session cookie is
+    cleared, on every authenticated route. The dashboard sends them to login with a message.
+  - **Missing bindings** return `503 not_configured` naming the binding instead of a 500. File
+    shares no longer wedge when R2 is unbound.
+  - **Headers:**
+    - Trusted Types are enforced, with a single same-origin `secbin` policy that pdf.js's
+      worker now goes through.
+    - `upgrade-insecure-requests`.
+    - COEP `require-corp` and `Origin-Agent-Cluster`, so pages are cross-origin isolated.
+    - A full-deny `Permissions-Policy`.
+    - `test-node/headers.test.js` keeps `public/_headers` identical to the Worker's headers.
+  - **CSRF:** `Sec-Fetch-Site: same-site` is refused on state-changing requests.
+  - **`h()`** refuses unsafe URL schemes in URL-valued attributes.
+  - **File shares:** download grants are stored outside the share record and capped at 2000
+    live grants per share (`429 busy`).
+  - **Password change:** a wrong current password counts toward account lockout and the login
+    guard.
+  - **Time cost:** account passwords must use the default Argon2id time cost, so prelogin cannot
+    reveal which accounts exist.
+  - **My shares:** totals honor the search and status filters.
+  - **CLI `update`:** requires an npm provenance attestation and a sha512 integrity hash, and
+    installs exactly the version it verified with `--ignore-scripts`.
+  - **Vendoring:** qrcode-generator is pinned at 2.0.4 via `tools/vendor.mjs`.
+
 - Dev dependencies: vitest 4.1.11, @cloudflare/vitest-pool-workers 0.22.0, wrangler 4.124+.
   npm `overrides` pin patched `sharp` (≥ 0.35.4) and `brace-expansion` (≥ 1.1.21), so
   `npm audit` reports no known vulnerabilities.

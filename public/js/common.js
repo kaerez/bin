@@ -5,6 +5,27 @@
 import { ApiError } from './api.js';
 
 /** h('tag.class', { attr: v, on: { click } }, ...children) — DOM construction only. */
+// Attributes whose value is a URL the browser may navigate to or fetch.
+const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction', 'xlink:href', 'poster', 'data', 'cite', 'background', 'ping', 'srcset']);
+const SAFE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'blob:']);
+
+/**
+ * Defense in depth (the CSP already blocks javascript: URLs): URL-valued
+ * attributes accept only relative URLs, http(s), mailto and blob: — plus
+ * data:image/(png|gif|jpeg|webp) for images (QR codes).
+ */
+export function safeUrl(attr, value) {
+  const v = String(value).trim();
+  // eslint-disable-next-line no-control-regex
+  const probe = v.replace(/[\u0000- \u007f]/g, '');
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(probe);
+  if (!scheme) return v; // relative
+  const s = `${scheme[1].toLowerCase()}:`;
+  if (SAFE_SCHEMES.has(s)) return v;
+  if (s === 'data:' && (attr === 'src' || attr === 'poster') && /^data:image\/(png|gif|jpeg|webp)[;,]/i.test(probe)) return v;
+  throw new Error(`refusing unsafe URL in ${attr}`);
+}
+
 export function h(spec, props = {}, ...children) {
   const [tag, ...classes] = spec.split('.');
   const el = document.createElement(tag || 'div');
@@ -16,7 +37,8 @@ export function h(spec, props = {}, ...children) {
     if (k === 'dataset') { Object.assign(el.dataset, v); continue; }
     if (k === 'hidden' || k === 'disabled' || k === 'checked' || k === 'selected') { el[k] = !!v; continue; }
     if (k === 'value') { el.value = v; continue; }
-    if (/^on/i.test(k) || k === 'style' || k === 'innerHTML' || k === 'srcdoc') throw new Error(`refusing unsafe prop ${k}`);
+    if (/^on/i.test(k) || k === 'style' || k === 'innerHTML' || k === 'outerHTML' || k === 'srcdoc') throw new Error(`refusing unsafe prop ${k}`);
+    if (URL_ATTRS.has(k.toLowerCase()) && v !== true) { el.setAttribute(k, safeUrl(k.toLowerCase(), v)); continue; }
     el.setAttribute(k, v === true ? '' : String(v));
   }
   for (const c of children.flat()) {

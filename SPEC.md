@@ -198,7 +198,14 @@ setting, default 1 h).
 
 All responses are JSON with real status codes; errors are `{ "error": "<code>", "message": "…" }`.
 The API sends **no CORS headers**. State-changing requests must be non-simple (JSON content
-type, or a custom header) and `Sec-Fetch-Site: cross-site` is refused (`403`).
+type, or a custom header), and `Sec-Fetch-Site` values `cross-site` and `same-site` are refused
+(`403 cross_site`).
+
+Common errors on any route:
+- `503 not_configured` (with `binding`): a required Cloudflare binding is missing.
+- `503 server_not_configured`: `SIG`/`ENC` are missing or invalid (auth and private routes only).
+- `403 account_disabled`: a disabled account's session or API key. The session cookie is also
+  cleared.
 
 ### Public (capability-gated)
 
@@ -209,7 +216,7 @@ type, or a custom header) and `Sec-Fetch-Site: cross-site` is refused (`403`).
 | `POST /api/paste/:id/open` | `X-Link-Proof`, `X-Key-Proof`; spends a view if limited | 200 opened note | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `cross_site`, 404, 410, 429 |
 | `DELETE /api/paste/:id` | `X-Delete-Token` | 200 | 400, 403 `bad_token`, 404 |
 | `GET /api/file/:id` | head | 200 | 410, 429 |
-| `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes |
+| `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes; 429 `busy` (+ `Retry-After`) when 2000 grants are live |
 | `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
 | `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
 | `POST /api/paste` | v1 anonymous create — removed | — | 410 |
@@ -224,12 +231,13 @@ Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` count
 | `GET /api/auth/session` | — | `{configured, authenticated, user, impersonatedBy}` |
 | `GET /api/auth/setup` | — | `{enabled, ownerExists?, configured}` |
 | `POST /api/auth/setup` | `{token, username, salt, t, proof}` | owner created or recovered; 404 if `AUTHN` unset; 403 wrong token; 410 token already used |
-| `POST /api/auth/prelogin` | `{username}` | `{salt, t}` (a stable fake salt for unknown users) |
+| `POST /api/auth/prelogin` | `{username}` | `{salt, t}` (a stable fake salt for unknown users; `t` is always the default, 3) |
 | `POST /api/auth/login` | `{username, proof}` | session cookie; 401, 423 locked, 403 disabled, 429, 503 not configured |
 | `POST /api/auth/logout` | `X-Secbin-Intent: 1` | session revoked |
 
 `proof = b64url(Argon2id(UTF8(NFC(password)), salt, m=64 MiB, t, p=1, 32 B))`. The server stores
-`verifier = hex(SHA-256(UTF8("secbin-auth/v2") ‖ proof_bytes))`.
+`verifier = hex(SHA-256(UTF8("secbin-auth/v2") ‖ proof_bytes))`. Account passwords must use
+`t = 3`, so prelogin reveals nothing about which accounts exist.
 
 ### Private (session, or API key where marked)
 
@@ -240,7 +248,7 @@ Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` count
 | `PUT /api/private/file/:id/chunk/:i` (octet-stream, `X-Upload-Token`) | session / key | upload chunk `i` (exact size, §12) |
 | `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
 | `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy |
-| `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions) |
+| `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions). A wrong `current` → 403 `wrong_password` and counts toward account lockout (423) and the per-IP login guard (429) |
 | `GET /api/private/me/activity` | session | own activity (never shows the actor) |
 | `GET/POST /api/private/me/keys`, `DELETE …/keys/:id` | session | API keys |
 | `GET /api/private/shares`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session | My shares |

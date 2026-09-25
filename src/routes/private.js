@@ -4,7 +4,7 @@
 
 import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
 import { authenticate, issueSession, actorId } from '../lib/auth.js';
-import { directory, cachedSettings } from '../lib/guard.js';
+import { directory, cachedSettings, ipContext, isBlocked, recordFailure } from '../lib/guard.js';
 import { genId, parseId, genDeleteToken, genToken, genApiKey, hashToken } from '../lib/ids.js';
 import { ttlSeconds, MAX_BODY, MAX_BURN_RECORD, kvExists, kvPut, kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
 import { validateCreate, FormatError, MAX_CT_B64, expireSeconds, MAX_VIEWS, MAX_TTL } from '../../public/js/format.js';
@@ -12,6 +12,7 @@ import { MAX_CHUNK_CT, HARD_MAX_SHARE_BYTES, PAD } from '../../public/js/files.j
 import { r2Key } from '../fileshare-do.js';
 import { verifierFrom } from './auth.js';
 import { handleAdmin } from './admin.js';
+import { binding } from '../lib/config.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const fromDir = (r) => err(r.status, r.error, r.message, r.max !== undefined ? { max: r.max } : r.quota ? { quota: r.quota } : undefined);
@@ -79,12 +80,18 @@ export async function handlePrivate(request, env, url, ctx) {
   if (p === '/api/private/me/password') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     if (a.actor) return err(403, 'impersonating', 'Use the admin panel to reset this user’s password.');
+    const g = await ipContext(env, request);
+    const b = await isBlocked(env, g, 'login');
+    if (b.blocked) return err(429, 'blocked', 'Too many attempts from your network. Try again later.', b.until ? { until: b.until } : undefined);
     const body = await readJsonBody(request);
     const current = await verifierFrom(body.current);
     const next = await verifierFrom(body.proof);
     if (!current || !next) return err(400, 'invalid_credential', 'Invalid password proof.');
-    const r = await dir.changePassword(a.user.id, { current, salt: body.salt, t: body.t, verifier: next });
-    if (!r.ok) return fromDir(r);
+    const r = await dir.changePassword(a.user.id, { current, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
+    if (!r.ok) {
+      if (r.error === 'wrong_password') await recordFailure(env, g, 'login');
+      return fromDir(r);
+    }
     // The session version moved on (all other sessions end); keep this device signed in.
     const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env) });
     return json({ ok: true }, 200, { 'set-cookie': cookie });
@@ -244,7 +251,7 @@ async function putChunk(request, env, a, id, i) {
   if (auth.status === 'bad_index') return err(400, 'bad_index', 'No such chunk index.');
   if (auth.status === 'bad_size') return err(400, 'bad_size', `Chunk ${i} must be exactly ${auth.expected} bytes.`);
   if (auth.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
-  await env.FILES.put(r2Key(id, i), bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
+  await binding(env, 'FILES').put(r2Key(id, i), bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
   const c = await stub.commitChunk(a.user.id, uth, i, bytes.length);
   if (c.status !== 'ok') return err(410, 'gone', 'This upload has expired.');
   return json({ ok: true });

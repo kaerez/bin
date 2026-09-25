@@ -192,9 +192,18 @@ a URL. A bare id needs `--server` or `SECBIN_SERVER`.
 
 ### `secbin update` / `secbin version`
 
-These commands only trust an npm release whose package metadata points to
-`github.com/kaerez/bin`. Anything else is refused and never installed. Until such a release
-exists, update by pulling the repository and re-running `npm install -g ./cli`.
+These commands only trust an npm release that meets all three conditions:
+- its package metadata points to `github.com/kaerez/bin`;
+- it carries an npm provenance attestation;
+- it has a sha512 integrity hash.
+
+npm accepts a provenance attestation only for a package built by CI in the repository the
+package names, so a look-alike package that merely claims this repository is refused. Anything
+else is refused and never installed.
+
+`update` installs exactly the version it verified, never a moving `@latest` tag, with
+lifecycle scripts disabled (`--ignore-scripts`). Until such a release exists, update by
+pulling the repository and re-running `npm install -g ./cli`.
 `secbin --version` prints the installed version without any network access.
 
 ## What the server can and cannot see

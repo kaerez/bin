@@ -36,12 +36,19 @@ export function runProcess(command, args) {
 
 // The npm name must actually be this project's: the registry name "secbin" is
 // not reserved by this repository, and `update` runs a global install of
-// whatever it points at. Only a release whose package metadata names this
-// repository is trusted — anything else is refused, never installed.
+// whatever it points at. A self-declared repository URL alone proves nothing
+// (anyone can write one), so a release is trusted only when it ALSO carries an
+// npm provenance attestation — npm accepts one only when the package was built
+// by CI in the repository its metadata names. Anything else is refused, never
+// installed. The exact version checked here is the one installed, with its
+// lifecycle scripts disabled.
 const REPOSITORY = 'github.com/kaerez/bin';
 const REPOSITORY_RE = /^(?:git\+)?(?:https|ssh|git):\/\/(?:git@)?github\.com[/:]kaerez\/bin(?:\.git)?\/?$/i;
+const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const PROVENANCE_RE = /^https:\/\/slsa\.dev\/provenance\/v\d+$/;
+const VIEW_FIELDS = ['version', 'repository.url', 'dist.integrity', 'dist.attestations.provenance.predicateType'];
 
-/** Parse `npm view <pkg>@latest version repository.url --json` → the verified version. */
+/** Parse `npm view <pkg>@latest <VIEW_FIELDS> --json` → the verified version. */
 function parseLatest(value, source) {
   let data;
   try {
@@ -56,6 +63,13 @@ function parseLatest(value, source) {
   const repo = data !== null && typeof data === 'object' ? data['repository.url'] : undefined;
   if (typeof repo !== 'string' || !REPOSITORY_RE.test(repo)) {
     throw new Error(`the npm package "${PACKAGE_NAME}" is not published from ${REPOSITORY} — refusing to use it for updates (install or update from a clone of the repository: npm install -g ./cli)`);
+  }
+  if (typeof data['dist.integrity'] !== 'string' || !INTEGRITY_RE.test(data['dist.integrity'])) {
+    throw new Error(`the npm release ${version} has no sha512 integrity — refusing to use it for updates`);
+  }
+  const provenance = data['dist.attestations.provenance.predicateType'];
+  if (typeof provenance !== 'string' || !PROVENANCE_RE.test(provenance)) {
+    throw new Error(`the npm release ${version} has no provenance attestation linking it to ${REPOSITORY} — refusing to use it for updates (install or update from a clone of the repository: npm install -g ./cli)`);
   }
   return version;
 }
@@ -115,7 +129,7 @@ function npmRunner(io) {
 }
 
 async function latestVersion(invoke) {
-  const view = await invoke(['view', `${PACKAGE_NAME}@latest`, 'version', 'repository.url', '--json']);
+  const view = await invoke(['view', `${PACKAGE_NAME}@latest`, ...VIEW_FIELDS, '--json']);
   failure(view, 'checking for updates');
   return parseLatest(view.stdout, 'npm');
 }
@@ -162,8 +176,10 @@ export async function cmdUpdate(args, io) {
   }
 
   io.stderr(`updating ${PACKAGE_NAME} ${VERSION} → ${latest}…\n`);
+  // Exactly the version verified above (never a moving `@latest` tag), and no
+  // install scripts: the CLI has none, so any would be unexpected.
   const install = await invoke([
-    'install', '--global', '--no-audit', '--no-fund', `${PACKAGE_NAME}@latest`,
+    'install', '--global', '--no-audit', '--no-fund', '--ignore-scripts', `${PACKAGE_NAME}@${latest}`,
   ]);
   failure(install, `updating ${PACKAGE_NAME}`);
   io.stdout(`updated ${PACKAGE_NAME} ${VERSION} → ${latest}\n`);

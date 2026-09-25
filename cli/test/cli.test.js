@@ -878,9 +878,14 @@ describe('update', () => {
   }
 
   const ok = (stdout = '', stderr = '') => ({ code: 0, stdout, stderr });
-  // `npm view secbin@latest version repository.url --json` for a release of this repo.
-  const release = (version) => ok(JSON.stringify({ version, 'repository.url': 'git+https://github.com/kaerez/bin.git' }) + '\n');
-  const VIEW = ['view', 'secbin@latest', 'version', 'repository.url', '--json'];
+  // `npm view secbin@latest <fields> --json` for a provenance-attested release of this repo.
+  const INTEGRITY = `sha512-${'A'.repeat(86)}==`;
+  const meta = (version, extra = {}) => ({
+    version, 'repository.url': 'git+https://github.com/kaerez/bin.git', 'dist.integrity': INTEGRITY,
+    'dist.attestations.provenance.predicateType': 'https://slsa.dev/provenance/v1', ...extra,
+  });
+  const release = (version, extra) => ok(JSON.stringify(meta(version, extra)) + '\n');
+  const VIEW = ['view', 'secbin@latest', 'version', 'repository.url', 'dist.integrity', 'dist.attestations.provenance.predicateType', '--json'];
 
   it('reports when the installed version is current', async () => {
     const a = updateIo([release('0.1.0')]);
@@ -913,7 +918,7 @@ describe('update', () => {
     expect(a.text.err()).toBe('updating secbin 0.1.0 → 0.2.0…\n');
     expect(a.text.out()).toBe('updated secbin 0.1.0 → 0.2.0\n');
     expect(a.calls[2]).toEqual(['npm', [
-      'install', '--global', '--no-audit', '--no-fund', 'secbin@latest',
+      'install', '--global', '--no-audit', '--no-fund', '--ignore-scripts', 'secbin@0.2.0',
     ]]);
   });
 
@@ -938,7 +943,7 @@ describe('update', () => {
   });
 
   it('rejects malformed registry versions and npm failures', async () => {
-    const malformed = updateIo([ok(JSON.stringify({ version: 'latest; rm -rf /', 'repository.url': 'git+https://github.com/kaerez/bin.git' }))]);
+    const malformed = updateIo([ok(JSON.stringify(meta('latest; rm -rf /')))]);
     expect(await run(['version'], malformed.io)).toBe(1);
     expect(malformed.text.err()).toContain('invalid version');
 
@@ -958,6 +963,22 @@ describe('update', () => {
       expect(a.calls).toHaveLength(1); // never reached `npm install`
       const b = updateIo([ok(stdout)]);
       expect(await run(['version'], b.io)).toBe(1);
+    }
+  });
+
+  it('refuses a release without provenance or integrity, even with the right repository URL', async () => {
+    // A look-alike package can claim this repository in its package.json; only
+    // an npm provenance attestation proves where it was built.
+    for (const [extra, reason] of [
+      [{ 'dist.attestations.provenance.predicateType': undefined }, /no provenance attestation/],
+      [{ 'dist.attestations.provenance.predicateType': 'https://evil.example/provenance' }, /no provenance attestation/],
+      [{ 'dist.integrity': undefined }, /no sha512 integrity/],
+      [{ 'dist.integrity': 'sha1-abc' }, /no sha512 integrity/],
+    ]) {
+      const a = updateIo([release('0.2.0', extra), ok('/usr/local/lib/node_modules\n'), ok('')], { global: true });
+      expect(await run(['update'], a.io)).toBe(1);
+      expect(a.text.err()).toMatch(reason);
+      expect(a.calls).toHaveLength(1); // never reached `npm install`
     }
   });
 

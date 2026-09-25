@@ -8,15 +8,15 @@ import { friendlyError } from '../../js/common.js';
 
 const $ = (s) => document.querySelector(s);
 
-function toLogin() {
-  location.replace('/dashboard/login/');
+function toLogin(reason) {
+  location.replace(reason === 'account_disabled' ? '/dashboard/login/?disabled=1' : '/dashboard/login/');
 }
 
 export async function loadMe() {
   try {
     return await me();
   } catch (e) {
-    if (e instanceof ApiError && (e.status === 401 || e.status === 503)) { toLogin(); return new Promise(() => {}); }
+    if (e instanceof ApiError && (e.status === 401 || e.status === 503 || e.code === 'account_disabled')) { toLogin(e.code); return new Promise(() => {}); }
     throw e;
   }
 }

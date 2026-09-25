@@ -7,15 +7,27 @@
 
 import * as pdfjs from './vendor/pdfjs/pdf.min.mjs';
 import { h } from './common.js';
+import { scriptURL } from './tt.js';
 
 const BASE = '/js/vendor/pdfjs/';
-pdfjs.GlobalWorkerOptions.workerSrc = `${BASE}pdf.worker.min.mjs`;
+// The CSP enforces Trusted Types, so pdf.js must not construct its worker from
+// a plain string: create it here through our policy and hand pdf.js the port.
+// One worker is shared by every preview on the page.
+let workerPort = null;
+function pdfWorker() {
+  if (!workerPort) {
+    workerPort = new Worker(scriptURL(`${BASE}pdf.worker.min.mjs`), { type: 'module' });
+    pdfjs.GlobalWorkerOptions.workerPort = workerPort;
+  }
+  return workerPort;
+}
 
 export const MAX_PAGES = 500;
 export const MAX_CANVAS_PIXELS = 16_000_000;
 
 /** Render `bytes` into `container`; returns a cleanup function. */
 export async function renderPdf(container, bytes) {
+  pdfWorker();
   const task = pdfjs.getDocument({
     data: bytes.slice(), // pdf.js transfers the buffer to its worker
     enableXfa: false,
