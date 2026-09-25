@@ -1,9 +1,19 @@
-# binthere — Protocol Specification (v1)
+# secbin — Protocol Specification (v1 + view-limit extension)
 
-> **Status: FROZEN.** This document defines the binthere paste format v1 and the exact
-> byte-level cryptographic protocol. Implementation follows this spec; the spec is not
-> changed silently. Any protocol change requires a new `v` value, an updated spec, and new
-> test vectors *before* code changes.
+> **Status: cryptography FROZEN.** This document defines paste format v1 and the exact
+> byte-level cryptographic protocol. secbin is based on
+> [binthere](https://github.com/nxfu/binthere); the cryptographic protocol (§1–§4, §11) is
+> **unchanged** from binthere v1, including its wire labels (`"binthere/v1"`, `"binthere/v1 kek"`),
+> so the frozen test vectors still apply byte-for-byte. secbin adds a **non-cryptographic
+> metadata extension** — configurable view limits and custom expiry (§5, §8, §9) — that does
+> not touch the ciphertext, the wrapped key, or the AAD. Any change to the cryptographic
+> protocol still requires a new `v` value, an updated spec, and new test vectors *before* code
+> changes.
+>
+> **Compatibility.** Because `v` stays `1`, a secbin server stores and serves ciphertext that
+> any v1 implementation can decrypt. However, upstream binthere clients validate `meta`
+> strictly and will **reject** secbin pastes that carry `meta.views` / `meta.left` or a custom
+> expiry (e.g. `"90m"`). Use the clients in this repository with a secbin server.
 
 This is a zero-knowledge pastebin: paste plaintext is encrypted and decrypted **only on the
 client** (the browser, or the official CLI — both implement this spec and are verified against
@@ -121,7 +131,7 @@ a tampering server without breaking GCM authentication.
 
 ## 4. Canonical Additional Authenticated Data (AAD)
 
-The AAD binds every field that affects decryption, rendering, compression, or burn semantics
+The AAD binds every field that affects decryption, rendering, compression, or view-limit semantics
 to **both** GCM operations (`wk` and `ct`). It is a **fixed-order** byte string and **never**
 depends on JSON object key ordering.
 
@@ -133,7 +143,7 @@ AAD = UTF8(
   "iter=" + iter         + "\n" +   // decimal integer; 0 when no password
   "comp=" + comp         + "\n" +   // "gzip" | "none"
   "fmt="  + fmt          + "\n" +   // "plaintext" | "code" | "markdown"
-  "bar="  + (bar?"1":"0")+ "\n" +   // burn-after-read flag
+  "bar="  + (bar?"1":"0")+ "\n" +   // view-limited flag ("burn after reading")
   "ivc="  + b64url(iv_content) + "\n" +
   "ivw="  + b64url(iv_wrap)    + "\n" +
   "skdf=" + skdf         + "\n"     // b64url(salt_kdf), or "" when no password
@@ -164,25 +174,36 @@ in §5.2) and returns it (minus private fields) on read.
     "iter": 310000 | 0,               // PBKDF2 iterations; MUST be 0 iff kdf == "hkdf"
     "comp": "gzip" | "none",
     "fmt":  "plaintext" | "code" | "markdown",
-    "bar":  false | true,              // burn after reading
+    "bar":  false | true,              // view-limited (true) or unlimited (false)
     "ivc":  "<b64url>",                // exactly 12 bytes
     "ivw":  "<b64url>",                // exactly 12 bytes
     "skdf": "<b64url>" | ""            // 16 bytes iff kdf=="pbkdf2-hkdf", else ""
   },
   "meta": {
-    "expire": "5min"|"10min"|"1hour"|"1day"|"1week"|"1month"|"1year"|"never"
+    "expire": "<preset>" | "<n>m" | "<n>h" | "<n>d",   // see §9
+    "views":  1 … 100000               // OPTIONAL; only when bar == true; default 1
   }
 }
 ```
+
+- `bar: true` ⇒ a **view-limited** paste (id prefix `"b"`, Durable Object, §8). `meta.views`
+  sets how many times it can be opened; omitted means **1** (classic burn-after-read).
+- `bar: false` ⇒ an **unlimited-view** paste (id prefix `"k"`, KV). It MUST NOT carry
+  `meta.views`.
+- Any `meta.left` sent by a client is ignored on create; the server owns the counter.
 
 ### 5.2 Server-added fields
 
 On create the server augments `meta` and stores private data never returned to a reader:
 
 - `meta.created` — integer Unix seconds (server clock).
+- `meta.views` — for view-limited pastes, the effective view limit (the client value, or 1).
 - `dth` — hex `SHA-256(deleteToken)` (**private**; stored, never serialized to a reader).
 
 On read the server returns the stored object with `dth` removed and `meta.created` present.
+For view-limited pastes, reads (head and consume) also carry **`meta.left`** — the number of
+views remaining *after* that response (so the consume that spends the last view returns
+`left: 0`). The counter is kept by the Durable Object, not in the stored `meta`.
 
 ### 5.3 Validation (fail-closed, prototype-pollution-safe)
 
@@ -201,7 +222,11 @@ Parsing is strict. The validator:
    - `comp ∈ {"gzip","none"}`; `fmt ∈ {"plaintext","code","markdown"}`; `bar` is a boolean.
    - `ivc`, `ivw` decode to exactly 12 bytes; `skdf` decodes to exactly 16 bytes iff
      `kdf==="pbkdf2-hkdf"`, else is `""`.
-   - `meta.expire` ∈ the allowed set.
+   - `meta` contains only `expire`, `created`, `views`, `left`; unknown keys are rejected.
+   - `meta.expire` is a valid preset or custom duration within bounds (§9).
+   - `meta.views`, if present, is an integer in `[1, MAX_VIEWS]`; `meta.left`, if present, is
+     an integer in `[0, views]` (views defaulting to 1).
+   - `meta.views` / `meta.left` are present **only** when `adata.bar === true`.
 3. Any malformed JSON, bad base64url, wrong type, wrong length, unknown field, unsupported
    version/alg, out-of-range iteration count, or pollution-shaped key ⇒ **HTTP 400**, no
    storage, no partial state.
@@ -215,7 +240,10 @@ Parsing is strict. The validator:
 | `MAX_PLAINTEXT`  | 1 MiB        | Client, before compression; and as decompression cap.     |
 | `MAX_CT_B64`     | 3 000 000    | Server: max length of `ct` (b64url chars). Else **413**.  |
 | `MAX_BODY`       | 4 MiB        | Server: max request body bytes. Else **413**.             |
-| `MAX_BURN_RECORD`| 1 900 000    | Server: max serialized burn record (`{paste,dth,exp}` JSON chars) — SQLite-backed DO storage caps a value at ~2 MB, below what `MAX_CT_B64` admits. Burn creates over this get **413**; KV pastes are unaffected. |
+| `MAX_BURN_RECORD`| 1 900 000    | Server: max serialized view-limited record (`{paste,dth,exp,left}` JSON chars) — SQLite-backed DO storage caps a value at ~2 MB, below what `MAX_CT_B64` admits. View-limited creates over this get **413**; KV pastes are unaffected. |
+| `MAX_VIEWS`      | 100 000      | Client + server: maximum `meta.views`.                    |
+| `MIN_TTL`        | 60 s         | Client + server: shortest custom expiry (KV's `expirationTtl` minimum). |
+| `MAX_TTL`        | 31 536 000 s | Client + server: longest custom expiry (365 days).        |
 | `ITER` (v1)      | 310000      | PBKDF2 iterations for new pastes.                         |
 | `ITER_MIN`       | 100000      | Validation floor for `adata.iter` on password pastes.     |
 | `ITER_MAX`       | 1000000     | Validation ceiling for `adata.iter`.                      |
@@ -226,7 +254,7 @@ Parsing is strict. The validator:
 
 - **Paste id** = `classPrefix ‖ b64url(random(16))`, where `classPrefix ∈ {"k","b"}`:
   - `"k"` — normal paste, stored in **KV** (`PASTES`), immutable, with native TTL expiry.
-  - `"b"` — burn-after-read paste, stored in the **`BurnPaste` Durable Object**.
+  - `"b"` — view-limited paste (1…`MAX_VIEWS` views), stored in the **`BurnPaste` Durable Object**.
   The 16 random bytes provide 128 bits of entropy independent of the 1-char class prefix.
   The read path selects the store by inspecting the prefix — no extra lookup.
 - **Delete token** = `b64url(random(32))` (256 bits). The server stores only
@@ -236,35 +264,40 @@ Parsing is strict. The validator:
 
 ---
 
-## 8. Burn-after-read semantics (strict)
+## 8. View-limited semantics (strict, generalised burn-after-read)
 
-Burn pastes (`bar:true`, id prefix `"b"`) are stored in the `BurnPaste` Durable Object, one
-instance per id (`idFromName(id)`). Because a DO instance is single-threaded, the consume
-operation is **atomic**:
+View-limited pastes (`bar:true`, id prefix `"b"`) are stored in the `BurnPaste` Durable Object,
+one instance per id (`idFromName(id)`), together with a remaining-view counter `left`
+(initialised to `meta.views`, default 1). Because a DO instance is single-threaded and every
+mutation runs inside `blockConcurrencyWhile`, each consume is **atomic**:
 
-- The first `POST /api/paste/:id/consume` transactionally reads the blob, deletes it, and
-  returns it (**200**).
-- Any concurrent or subsequent consume finds no blob and returns **410 Gone**.
+- Each `POST /api/paste/:id/consume` transactionally reads the record, decrements `left`, and
+  returns the paste with `meta.left` set to the remaining count (**200**). The consume that
+  takes `left` to 0 **deletes** the record in the same step.
+- Exactly `views` consumes succeed, regardless of concurrency; every later consume finds no
+  record and returns **410 Gone**. (With `views = 1` this is the original single-consumer
+  burn-after-read.)
 - Expiry is enforced by a DO `alarm` (set to `created + ttl`) and by a lazy check on read
-  (an expired blob is deleted and yields 410).
-- Consumption is **never reachable by `GET`**. A plain `GET` on a burn id (with or without
-  `?meta=1`) returns the non-consuming head (below), so an ambient GET — an `<img>` tag, a
-  navigation prefetch, a link-scanning bot — can never destroy a note whose id it learned.
+  (an expired record is deleted and yields 410).
+- Records created before view limits existed carry no counter and are treated as `left = 1`.
+- Consumption is **never reachable by `GET`**. A plain `GET` on a view-limited id (with or
+  without `?meta=1`) returns the non-consuming head (below), so an ambient GET — an `<img>`
+  tag, a navigation prefetch, a link-scanning bot — can never spend a view.
   The consume request is deliberately CORS *non-simple*: it must be a `POST` carrying the
   custom header `X-Burn-Intent: consume`, which forces a cross-origin browser to preflight;
   the API serves no CORS headers, so the preflight fails and the consume never happens.
   Requests bearing `Sec-Fetch-Site: cross-site` are rejected outright (**403**) as defense
   in depth. Non-browser clients simply set the header.
 
-This provides genuine single-consumer semantics that eventually-consistent KV cannot.
+This provides exact view counting that eventually-consistent KV cannot.
 
 ### Non-consuming metadata peek
 
-A burn paste's *head* — `adata` and the wrapped key `wk`, but **never** the ciphertext `ct` —
-is what any `GET /api/paste/:id` returns for a burn id, with or without `?meta=1`, and reading
-it never consumes. This lets the client verify a password by unwrapping the CEK from `wk`
-**before** the single destructive read, so a wrong or absent password never burns the paste
-(only the explicit `POST …/consume` does). The content `ct` is never returned by a peek. The
+A view-limited paste's *head* — `adata`, the wrapped key `wk`, and `meta` (including `views`
+and `left`), but **never** the ciphertext `ct` — is what any `GET /api/paste/:id` returns for a
+`"b"` id, with or without `?meta=1`, and reading it never spends a view. This lets the client
+verify a password by unwrapping the CEK from `wk` **before** a destructive read, so a wrong or
+absent password never spends a view (only the explicit `POST …/consume` does). The content `ct` is never returned by a peek. The
 client validates the peeked head
 with the same fail-closed rules as §5.3 (minus `ct`) **before** deriving any key, so a hostile
 response cannot demand an out-of-range `iter` or feed malformed fields into key derivation.
@@ -272,13 +305,13 @@ response cannot demand an out-of-range `iter` or feed malformed fields into key 
 Trade-off: because `wk` is released without consuming, a password-protected paste's password is
 subject to *offline* guessing by anyone who already holds the fragment secret `F`. Use a strong
 password. This does not weaken the AES-256-GCM confidentiality/integrity of the content itself;
-it only removes the "an attacker's guess also burns the note" side effect.
+it only removes the "an attacker's guess also spends a view" side effect.
 
 ### Delete vs. expiry
 
-`DELETE` on a burn id verifies the delete token and removes the record; unlike `peek`/`consume`
+`DELETE` on a view-limited id verifies the delete token and removes the record; unlike `peek`/`consume`
 it does **not** apply a lazy expiry check first. A valid delete-token holder may therefore
-delete a burn record that has expired but has not yet been purged by its `alarm`. This is
+delete a view-limited record that has expired but has not yet been purged by its `alarm`. This is
 harmless — an expired record is destined for deletion either way, and only the token holder can
 trigger it — and never releases content (`DELETE` returns no paste body).
 
@@ -286,7 +319,7 @@ trigger it — and never releases content (`DELETE` returns no paste body).
 
 ## 9. Expiry
 
-`meta.expire` maps to a TTL in seconds:
+`meta.expire` maps to a TTL in seconds. It is either a **preset**:
 
 | key     | seconds   |   | key      | seconds    |
 |---------|-----------|---|----------|------------|
@@ -296,8 +329,17 @@ trigger it — and never releases content (`DELETE` returns no paste body).
 | `1day`  | 86400     |   |          |            |
 | `1week` | 604800    |   |          |            |
 
+or a **custom duration** `^[1-9][0-9]{0,6}(m|h|d)$` — a positive integer of minutes (`m`),
+hours (`h`) or days (`d`), e.g. `"90m"`, `"24h"`, `"7d"` — whose value in seconds must lie in
+`[MIN_TTL, MAX_TTL]` (1 minute … 365 days). Preset lookup is own-property only, so keys like
+`"__proto__"` never resolve. The web client defaults to `"24h"`.
+
 - KV pastes: passed as `expirationTtl` (omitted when `never`).
-- Burn (DO) pastes: an `alarm` is scheduled at `created + ttl` (none when `never`).
+- View-limited (DO) pastes: an `alarm` is scheduled at `created + ttl` (none when `never`).
+
+The presets are retained for compatibility with existing pastes and third-party clients; the
+web client only offers custom durations. `never` is still accepted by the API (see the cost
+note in `README.md`).
 
 ---
 
@@ -305,29 +347,27 @@ trigger it — and never releases content (`DELETE` returns no paste body).
 
 | Method & path            | Body / params                    | Success        | Errors                          |
 |--------------------------|----------------------------------|----------------|---------------------------------|
-| `POST /api/paste`        | format v1 JSON (§5.1)            | `201` + result | `400` invalid · `413` too large · `415` wrong content-type · `429` rate-limited |
-| `GET /api/paste/:id`     | — (burn ids: head only, no consume) | `200` + paste (KV) / head (burn) | `404` missing/expired · `410` burned/expired |
-| `GET /api/paste/:id?meta=1` | — (head for every class, no consume) | `200` + head | `404` missing · `410` burned/expired |
-| `POST /api/paste/:id/consume` | `X-Burn-Intent: consume` header (burn ids only) | `200` + paste | `400` missing header · `403` cross-site · `404` malformed/non-burn id · `410` burned/expired |
+| `POST /api/paste`        | format v1 JSON (§5.1)            | `201` + result | `400` invalid · `403` cross-site · `413` too large · `415` wrong content-type · `429` rate-limited |
+| `GET /api/paste/:id`     | — (`"b"` ids: head only, no consume) | `200` + paste (KV) / head (view-limited) | `404` missing/expired · `410` no views left/expired |
+| `GET /api/paste/:id?meta=1` | — (head for every class, no consume) | `200` + head | `404` missing · `410` no views left/expired |
+| `POST /api/paste/:id/consume` | `X-Burn-Intent: consume` header (`"b"` ids only) | `200` + paste (with `meta.left`) | `400` missing header · `403` cross-site · `404` malformed/non-`"b"` id · `410` no views left/expired |
 | `DELETE /api/paste/:id`  | `X-Delete-Token: <deleteToken>` header | `200`    | `400` missing token · `403` wrong token · `404` missing |
-
-The site also serves `GET /api/stars`, which answers `{ "stars": <integer> }` from a cached
-proxy of the repository's public GitHub star count (`502` when GitHub is unavailable). It exists
-for the topbar badge, touches no paste state, and is **not part of this protocol** — a
-conforming client never calls it.
 
 `POST /api/paste` requires `Content-Type: application/json` (parameters such as `charset`
 are allowed); anything else is a `415`. This forces a CORS preflight for cross-origin browser
 requests — since the API sends no CORS headers, a hostile page cannot create pastes from a
-visitor's browser with a no-preflight `text/plain` POST. Any other method on `/api/paste`,
+visitor's browser with a no-preflight `text/plain` POST. As defense in depth, a create
+request carrying `Sec-Fetch-Site: cross-site` is rejected with `403` (this matters when the
+site sits behind an identity proxy such as Cloudflare Access, whose session cookie a
+cross-site request might otherwise carry). Any other method on `/api/paste`,
 `/api/paste/:id`, or `/api/paste/:id/consume` returns `405` with an `Allow` header.
 
-`GET /api/paste/:id` is **always safe**: for a KV id it returns the full paste; for a burn id
-it returns only the head and never consumes. `?meta=1` returns the head (no `ct`) for every
+`GET /api/paste/:id` is **always safe**: for a KV id it returns the full paste; for a view-limited id
+it returns only the head and never spends a view. `?meta=1` returns the head (no `ct`) for every
 storage class — ciphertext must not ride along on a metadata request. The only destructive
 read is `POST /api/paste/:id/consume`, which requires the `X-Burn-Intent: consume` header
 (making it CORS non-simple, §8); a missing/wrong header is a `400`, a `Sec-Fetch-Site:
-cross-site` sender is a `403`, and a well-formed non-burn id is a `404`. The delete token is presented in the
+cross-site` sender is a `403`, and a well-formed non-`"b"` id is a `404`. The delete token is presented in the
 `X-Delete-Token` request header — **never** in the URL — so the raw token cannot land in
 request-URL logs (the server stores and compares only its SHA-256, §7). A *missing* token is a
 `400`; a present-but-wrong or malformed token fails closed as `403`. Ids with malformed
@@ -337,20 +377,20 @@ percent-encoding are a `404`.
 the shareable URL `"/p/" + id + "#" + b64url(F)` locally; **`F` is never sent to the server.**
 Unlike the legacy PrivateBin API, real HTTP status codes are used (the client reads them).
 
-**`404` vs `410` for burn ids.** A `404` means the id was malformed (failed structural
-parsing). For a *well-formed* burn (DO) id, the Durable Object cannot distinguish "never
-existed" from "already consumed or expired" — its single-consumer state is deleted on read —
-so both return **`410 Gone`**, the honest answer. `404` for burn ids is therefore effectively
-limited to malformed ids; KV (non-burn) ids return `404` for missing/expired as usual. This
-per-storage-class asymmetry is deliberate and clients should treat `410` on a burn id as
-"not available: never existed, already read, or expired".
+**`404` vs `410` for view-limited ids.** A `404` means the id was malformed (failed structural
+parsing). For a *well-formed* view-limited (DO) id, the Durable Object cannot distinguish "never
+existed" from "all views used or expired" — its state is deleted on the last view —
+so both return **`410 Gone`**, the honest answer. `404` for `"b"` ids is therefore effectively
+limited to malformed ids; KV (unlimited) ids return `404` for missing/expired as usual. This
+per-storage-class asymmetry is deliberate and clients should treat `410` on a `"b"` id as
+"not available: never existed, no views left, or expired".
 
 **No CORS, by design.** The API serves no `Access-Control-*` headers. Browsers may call it
 same-origin only (the official web client); non-browser clients (the CLI, scripts, other
 spec implementations) are unaffected, since CORS is a browser-enforcement mechanism. The
 absence of CORS is a load-bearing part of the abuse posture: together with the `415`
 content-type requirement and the non-simple consume POST, it means a hostile third-party
-page can neither create pastes from a visitor's browser nor destroy a one-time note whose
+page can neither create pastes from a visitor's browser nor spend a view of a note whose
 id it has learned. Do not add permissive CORS headers without revisiting §8 and the create
 endpoint's protections.
 

@@ -1,10 +1,62 @@
 # Changelog
 
-All notable changes to binthere are documented here. The format follows
-[Keep a Changelog], and the project adheres to [Semantic Versioning]. The paste format is
-versioned separately from the application (see [`SPEC.md`](./SPEC.md), currently **v1**).
+All notable changes to secbin are documented here. The format follows [Keep a Changelog], and
+the project adheres to [Semantic Versioning]. The paste format is versioned separately from the
+application (see [`SPEC.md`](./SPEC.md), currently **v1** with the secbin view-limit extension).
 
-## [Unreleased]
+secbin is maintained by KSEC - Erez Kalman at <https://github.com/kaerez/bin> and is based on
+[binthere](https://github.com/nxfu/binthere) by nxfu. The upstream history is kept below the
+secbin entries.
+
+## [secbin 1.0.0] — 2026-09-25
+
+Forked from binthere at upstream commit `63e5544` (binthere 1.1.0 plus unreleased changes).
+
+### Added
+
+- **Configurable view limits.** The composer has a *Views* control: any whole number from 1 to
+  100 000 (default 1), or ∞ for unlimited. Finite limits use the `BurnPaste` Durable Object,
+  which now keeps a remaining-view counter and decrements it atomically on each consume; the
+  last view deletes the record. Exactly N consumers succeed under any concurrency. Unlimited
+  pastes use KV. Viewers see the remaining count ("2 views left", "last view · now deleted"),
+  and the reveal and password screens describe the limit. Wire format: optional `meta.views`
+  on create; `meta.left` on reads of view-limited pastes (SPEC §5, §8).
+- **Configurable expiry.** An *Expires in* control takes any whole number of minutes, hours, or
+  days from 1 minute to 365 days (default 24 hours), sent as a custom duration such as `"90m"`,
+  `"24h"`, or `"7d"`. The legacy presets remain valid (SPEC §9). Opened notes show a
+  "deletes in …" indicator.
+- **Cross-site create guard.** `POST /api/paste` rejects `Sec-Fetch-Site: cross-site` with
+  `403`, so a hostile page cannot create pastes using a visitor's Cloudflare Access session.
+- `test/limits.test.js` — view-limit, custom-expiry, concurrency, alarm, validation, and
+  cross-site-guard tests in the real `workerd` runtime.
+
+### Changed
+
+- **Renamed to secbin** (wordmark *sec*bin, with "sec" in italics), including the page title,
+  link-preview name, screen-reader labels, wordmark SVGs, and the theme preference key. The
+  cryptographic wire labels (`"binthere/v1"`, `"binthere/v1 kek"`) are intentionally unchanged,
+  so existing pastes and the frozen test vectors remain valid.
+- The success screen, QR seal label, and composer summary line describe the chosen view limit
+  and expiry; *Open link* asks for confirmation only when the paste is view-limited.
+- Documentation rewritten for secbin, including Cloudflare Access deployment guidance.
+
+### Removed
+
+- The GitHub star badge, its `GET /api/stars` Worker route, and the page script — the Worker
+  now makes no outbound requests.
+- The announcement banner and its script.
+- Footer links (Source, Threat Model, Security, Developer).
+- `/.well-known/security.txt`, upstream `og:url`/`og:image` metadata, `opengraph.png`, and
+  `cli-preview.png`.
+
+### Compatibility
+
+- The cryptographic protocol is unchanged (`v: 1`). Upstream binthere clients validate `meta`
+  strictly and reject secbin pastes that carry `meta.views`/`meta.left` or a custom expiry.
+- View-limited records created before this release carry no counter and are treated as having
+  one view left.
+
+## [binthere Unreleased] — upstream, at fork point `63e5544`
 
 ### Added
 
@@ -73,7 +125,7 @@ versioned separately from the application (see [`SPEC.md`](./SPEC.md), currently
   (16+32+48) for agents that probe by convention (it previously fell through to the
   SPA HTML).
 
-## [1.1.0] — 2026-07-20
+## [binthere 1.1.0] — 2026-07-20
 
 ### Changed
 
@@ -210,7 +262,7 @@ versioned separately from the application (see [`SPEC.md`](./SPEC.md), currently
     the intro and shine-sweep animations, QR rendering, failure paths and raw-mode
     prompts) runs as a second vitest project via `npm test` / `npm run test:cli`.
 
-## [1.0.0] — 2026-07-18
+## [binthere 1.0.0] — 2026-07-18
 
 First public, open-source release: a clean-room, security-first, zero-knowledge encrypted
 pastebin on a single Cloudflare Worker (Static Assets + KV + a `BurnPaste` Durable Object +
@@ -299,6 +351,7 @@ stores nothing but ciphertext and non-secret metadata.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
-[Unreleased]: https://github.com/nxfu/binthere/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/nxfu/binthere/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/nxfu/binthere/releases/tag/v1.0.0
+[binthere Unreleased]: https://github.com/nxfu/binthere/compare/v1.1.0...63e5544
+[binthere 1.1.0]: https://github.com/nxfu/binthere/compare/v1.0.0...v1.1.0
+[binthere 1.0.0]: https://github.com/nxfu/binthere/releases/tag/v1.0.0
+[secbin 1.0.0]: https://github.com/kaerez/bin

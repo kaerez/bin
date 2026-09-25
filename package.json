@@ -1,15 +1,15 @@
 {
-  "name": "bin",
-  "version": "1.1.0",
+  "name": "secbin",
+  "version": "1.0.0",
   "private": true,
-  "description": "A zero-knowledge, end-to-end encrypted pastebin. Content is encrypted/decrypted in the browser (AES-256-GCM); the server only ever stores ciphertext.",
+  "description": "secbin — zero-knowledge, end-to-end encrypted pastebin with view limits and expiry (based on binthere). Content is encrypted/decrypted in the browser (AES-256-GCM); the server only ever stores ciphertext.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nxfu/binthere.git"
+    "url": "git+https://github.com/kaerez/bin.git"
   },
   "bugs": {
-    "url": "https://github.com/nxfu/binthere/issues"
+    "url": "https://github.com/kaerez/bin/issues"
   },
   "type": "module",
   "engines": {
