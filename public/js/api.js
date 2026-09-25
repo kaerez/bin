@@ -122,6 +122,8 @@ export const admin = {
   addIpRule: (body) => request(`${A}/ip-rules`, { method: 'POST', body }),
   removeIpRule: (id) => request(`${A}/ip-rules/${enc(id)}`, { method: 'DELETE', headers: INTENT }),
   shares: (qs) => request(`${A}/shares?${qs}`),
+  publicAccess: () => request(`${A}/public`),
+  tracker: (id, action) => request(`${A}/public/trackers/${enc(id)}`, { method: 'POST', body: { action } }),
   exportData: (body) => request(`${A}/export`, { method: 'POST', body }),
   importData: (body) => request(`${A}/import`, { method: 'POST', body }),
   updateShare: (id, patch) => request(`${A}/shares/${enc(id)}`, { method: 'PATCH', body: patch }),
@@ -130,8 +132,10 @@ export const admin = {
 };
 
 /** Binary chunk upload (kept separate: `request` is JSON-only). */
-export async function uploadChunk(id, i, bytes, uploadToken) {
-  const res = await fetch(`/api/private/file/${enc(id)}/chunk/${i}`, {
+export const uploadChunk = (id, i, bytes, uploadToken) => putChunkTo(`/api/private/file/${enc(id)}/chunk/${i}`, bytes, uploadToken);
+
+async function putChunkTo(path, bytes, uploadToken) {
+  const res = await fetch(path, {
     method: 'PUT', body: bytes, cache: 'no-store', credentials: 'same-origin', redirect: 'manual',
     headers: { 'content-type': 'application/octet-stream', 'x-upload-token': uploadToken },
   });
@@ -140,3 +144,24 @@ export async function uploadChunk(id, i, bytes, uploadToken) {
   if (!res.ok) throw new ApiError((data && data.message) || `Upload failed (${res.status}).`, res.status, data && data.error);
   return data;
 }
+
+// ── public (anonymous) creation, when the admin has enabled it ──────────────
+// The tracker id (public/js/tracker.js) goes in X-Secbin-Aid next to its
+// HttpOnly cookie; the server requires both to match.
+let publicAid = '';
+export const setPublicAid = (aid) => { publicAid = typeof aid === 'string' ? aid : ''; };
+const aidHeaders = () => (publicAid ? { 'x-secbin-aid': publicAid } : {});
+const P = '/api/public';
+export const publicProfile = () => request(`${P}/profile`);
+export const publicApi = {
+  async createNote(paste) {
+    const d = await request(`${P}/paste`, { method: 'POST', headers: aidHeaders(), body: { paste } });
+    if (typeof d.id !== 'string' || typeof d.deletetoken !== 'string') throw malformed();
+    return d;
+  },
+  initFileShare: (body) => request(`${P}/file`, { method: 'POST', headers: aidHeaders(), body }),
+  finalizeFileShare: (id, uploadToken, paste) =>
+    request(`${P}/file/${enc(id)}/finalize`, { method: 'POST', headers: { 'x-upload-token': uploadToken }, body: { paste } }),
+  uploadChunk: (id, i, bytes, uploadToken) => putChunkTo(`${P}/file/${enc(id)}/chunk/${i}`, bytes, uploadToken),
+  deleteShare,
+};

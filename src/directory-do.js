@@ -15,7 +15,7 @@
 // keys and the setup token as SHA-256 hashes.
 
 import { DurableObject } from 'cloudflare:workers';
-import { b64urlFromBytes, randomBytes, utf8, timingSafeEqualHex } from '../public/js/bytes.js';
+import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, timingSafeEqualHex } from '../public/js/bytes.js';
 import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi,
@@ -55,6 +55,10 @@ CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id, created);
 CREATE TABLE IF NOT EXISTS ip_rules (id TEXT PRIMARY KEY, cidr TEXT NOT NULL, action TEXT NOT NULL, expires INTEGER,
   note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS trackers (id_hash TEXT PRIMARY KEY, created INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+  uses INTEGER NOT NULL DEFAULT 0, ip_hash TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS trackers_ip ON trackers(ip_hash, created);
+CREATE INDEX IF NOT EXISTS trackers_seen ON trackers(last_seen);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -74,6 +78,13 @@ const MIGRATIONS = [
     m.sql.exec('CREATE INDEX IF NOT EXISTS shares_created ON shares(created)');
     m.sql.exec('CREATE INDEX IF NOT EXISTS shares_expires ON shares(expires)');
   },
+  // 3: anonymous-creator trackers (public access)
+  (m) => {
+    m.sql.exec(`CREATE TABLE IF NOT EXISTS trackers (id_hash TEXT PRIMARY KEY, created INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+      uses INTEGER NOT NULL DEFAULT 0, ip_hash TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '')`);
+    m.sql.exec('CREATE INDEX IF NOT EXISTS trackers_ip ON trackers(ip_hash, created)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS trackers_seen ON trackers(last_seen)');
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -88,6 +99,19 @@ function migrator(sql) {
 }
 
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{2,63}$/;
+/**
+ * The built-in public (anonymous) account: owns shares created without an
+ * account. It has no password, cannot sign in, cannot be deleted, renamed,
+ * disabled, impersonated or exported, and never holds API keys. Its name is
+ * outside USERNAME_RE, so no real account can take it.
+ */
+export const PUBLIC_ID = 'public-user-0000';
+const PUBLIC_NAME = '(public)';
+// Anonymous tracker ids are stateless until first used to create a share:
+// 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
+const TRACKER_RE = /^[A-Za-z0-9_-]{32}$/;
+// Hard ceiling on stored trackers (each costs one row in this singleton).
+const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
@@ -117,6 +141,7 @@ export class Directory extends DurableObject {
       this.sql.exec(SCHEMA);
       this.#migrate();
       if (!this.#meta('secret')) this.#setMeta('secret', b64urlFromBytes(randomBytes(32)));
+      this.#seedPublic();
       if (!this.#meta('viewer_seeded')) {
         for (const r of DEFAULT_VIEWER_RULES) {
           this.sql.exec('INSERT INTO viewer_rules (user_id, match, value, renderer) VALUES (?, ?, ?, ?)', '', r.match, r.value, r.renderer);
@@ -125,6 +150,23 @@ export class Directory extends DurableObject {
       }
       if ((await ctx.storage.getAlarm()) === null) await ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     });
+  }
+
+  /**
+   * The public account and conservative defaults for it (created once; the
+   * admin can change them — public access itself stays off until enabled).
+   */
+  #seedPublic() {
+    const ts = now();
+    this.sql.exec("INSERT OR IGNORE INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'public', '', 0, '', ?, ?)",
+      PUBLIC_ID, PUBLIC_NAME, ts, ts);
+    if (this.#meta('public_seeded')) return;
+    const defaults = { files: false, url: false, secret: false, openerDelete: false, maxViews: 10, allowUnlimitedViews: false, maxExpireSec: 7 * 86400, apiEnabled: false };
+    for (const [k, v] of Object.entries(defaults)) {
+      this.sql.exec('INSERT OR IGNORE INTO limits (user_id, channel, key, value) VALUES (?, ?, ?, ?)', PUBLIC_ID, 'all', k, JSON.stringify(v));
+    }
+    this.sql.exec('INSERT INTO quotas (id, user_id, channel, kind, n, unit, max) VALUES (?, ?, ?, ?, ?, ?, ?)', newId(), PUBLIC_ID, 'all', 'all', 1, 'd', 10);
+    this.#setMeta('public_seeded', '1');
   }
 
   #migrate() {
@@ -155,6 +197,11 @@ export class Directory extends DurableObject {
   }
   #userByName(name) {
     return this.sql.exec('SELECT * FROM users WHERE username = ? COLLATE NOCASE', name).toArray()[0] || null;
+  }
+  /** An account that can sign in (never the public account). */
+  #loginUser(name) {
+    const u = typeof name === 'string' ? this.#userByName(name) : null;
+    return u && (u.role === 'owner' || u.role === 'user') ? u : null;
   }
   #owner() {
     return this.sql.exec("SELECT * FROM users WHERE role = 'owner'").toArray()[0] || null;
@@ -252,7 +299,7 @@ export class Directory extends DurableObject {
 
   // ── login / sessions ─────────────────────────────────────────────────────
   async prelogin(username) {
-    const u = typeof username === 'string' ? this.#userByName(username) : null;
+    const u = this.#loginUser(username);
     if (u) return { salt: u.pw_salt, t: u.pw_t };
     // Unknown user: a stable, secret-keyed fake salt, so the response does not
     // reveal whether the account exists.
@@ -262,7 +309,7 @@ export class Directory extends DurableObject {
   }
 
   async login({ username, verifier, lockoutOff = false }) {
-    const u = typeof username === 'string' ? this.#userByName(username) : null;
+    const u = this.#loginUser(username);
     const ts = now();
     const s = this.#settings();
     if (!u) {
@@ -314,7 +361,7 @@ export class Directory extends DurableObject {
     if (typeof sid !== 'string' || typeof uid !== 'string') return null;
     if (this.sql.exec('SELECT 1 FROM revoked_sessions WHERE sid = ?', sid).toArray().length) return null;
     const u = this.#user(uid);
-    if (!u) return null;
+    if (!u || u.role === 'public') return null;
     // While impersonating, a disabled target simply ends the impersonated
     // session — it must not tell the owner that *their* account is disabled.
     if (u.disabled) return act ? null : { disabled: true };
@@ -340,7 +387,7 @@ export class Directory extends DurableObject {
     const o = this.#user(ownerId);
     const t = this.#user(targetId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can impersonate.');
-    if (!t || t.id === o.id) return fail(404, 'not_found', 'User not found.');
+    if (!t || t.id === o.id || t.role === 'public') return fail(404, 'not_found', 'User not found.');
     if (t.disabled) return fail(409, 'account_disabled', 'That account is disabled.');
     this.#log(o.id, t.id, 'impersonate.start', `as=${t.username}`);
     return { ok: true, target: this.#publicUser(t), ver: o.sess_ver, settings: this.#sessionSettings() };
@@ -465,6 +512,7 @@ export class Directory extends DurableObject {
   async createKey(uid, { name, hash, expires }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
+    if (u.role === 'public') return fail(403, 'api_disabled', 'The public account never has API keys.');
     const eff = this.#effective(u).all;
     if (!eff.apiEnabled) return fail(403, 'api_disabled', 'API keys are not enabled for this account.');
     const count = this.sql.exec('SELECT COUNT(*) AS c FROM api_keys WHERE user_id = ?', uid).one().c;
@@ -494,7 +542,7 @@ export class Directory extends DurableObject {
     const ts = now();
     if (k.expires && k.expires <= ts) return null;
     const u = this.#user(k.user_id);
-    if (!u) return null;
+    if (!u || u.role === 'public') return null;
     if (u.disabled) return { disabled: true };
     if (!this.#effective(u).all.apiEnabled) return null; // disallowing API use stops existing keys at once
     if (!k.last_used || ts - k.last_used > 60) this.sql.exec('UPDATE api_keys SET last_used = ? WHERE key_hash = ?', ts, hash);
@@ -511,6 +559,11 @@ export class Directory extends DurableObject {
     const u = this.#user(uid);
     if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
     const s = this.#settings();
+    // Public (anonymous) creation: only while enabled, and quotas are counted
+    // per anonymous subject (tracker and/or network), never for the account.
+    const pub = u.role === 'public';
+    if (pub && !s['public.enabled']) return fail(403, 'public_disabled', 'Anonymous sharing is not enabled on this server.');
+    if (pub && !(req.subjects && Array.isArray(req.subjects.keys) && req.subjects.keys.length)) return fail(400, 'subject_required', 'Missing anonymous subject.');
     const ch = channel === 'api' ? 'api' : 'all';
     const eff = this.#effective(u);
     const L = ch === 'api' ? eff.api : eff.all;
@@ -563,21 +616,28 @@ export class Directory extends DurableObject {
 
     const ts = now();
     const applicable = this.#applicableQuotas(uid).filter((q) => (q.kind === 'all' || q.kind === req.kind) && (q.channel === 'all' || ch === 'api'));
+    // Who is counted: the account itself, or — for the public account — each
+    // anonymous subject. `mode: 'all'` refuses when every subject is over
+    // (both-permissive); otherwise any subject over refuses.
+    const keys = pub ? req.subjects.keys.slice(0, 4).map(String) : [uid];
+    const needAll = pub && req.subjects.mode === 'all';
     const hits = [];
     for (const q of applicable) {
       const bucket = quotaBucket(q, ts);
-      const row = this.sql.exec('SELECT count FROM usage WHERE quota_id = ? AND user_id = ? AND bucket = ?', q.id, uid, bucket).toArray()[0];
-      const used = row ? row.count : 0;
-      if (used >= q.max) {
+      const over = keys.map((k) => {
+        const row = this.sql.exec('SELECT count FROM usage WHERE quota_id = ? AND user_id = ? AND bucket = ?', q.id, k, bucket).toArray()[0];
+        return (row ? row.count : 0) >= q.max;
+      });
+      if (needAll ? over.every(Boolean) : over.some(Boolean)) {
         const what = q.kind === 'all' ? 'shares' : q.kind === 'text' ? 'notes' : 'file shares';
         return fail(429, 'quota_exceeded', `Quota reached: ${q.max} ${what} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''}.`, { quota: { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max } });
       }
-      hits.push({ quota_id: q.id, bucket });
+      for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k });
     }
     this.ctx.storage.transactionSync(() => {
       for (const h of hits) {
         this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, 1, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + 1',
-          h.quota_id, uid, h.bucket, ts);
+          h.quota_id, h.key, h.bucket, ts);
       }
     });
     return { ok: true, refund: hits };
@@ -586,8 +646,180 @@ export class Directory extends DurableObject {
   async refund(uid, hits) {
     if (!Array.isArray(hits)) return;
     for (const h of hits) {
-      this.sql.exec('UPDATE usage SET count = MAX(0, count - 1) WHERE quota_id = ? AND user_id = ? AND bucket = ?', h.quota_id, uid, h.bucket);
+      // Public hits carry their subject key; the account's own hits use uid.
+      const key = typeof h.key === 'string' && uid === PUBLIC_ID && h.key.startsWith('pub:') ? h.key : uid;
+      this.sql.exec('UPDATE usage SET count = MAX(0, count - 1) WHERE quota_id = ? AND user_id = ? AND bucket = ?', h.quota_id, key, h.bucket);
     }
+  }
+
+  // ── public access: profile, trackers, subjects ────────────────────────────
+  /** What the public composer needs (no secrets). */
+  async publicProfile() {
+    const s = this.#settings();
+    const u = this.#user(PUBLIC_ID);
+    const L = this.#effective(u).all;
+    return {
+      enabled: s['public.enabled'],
+      tracking: s['public.tracking'],
+      notice: s['public.notice'] ? s['public.noticeText'] : null,
+      limits: { ...L, apiEnabled: false },
+      caps: { maxShareBytes: Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity), grantSec: s['files.grantSec'] },
+      viewer: { enabled: s['viewer.enabled'] && L.viewer, maxBytes: s['viewer.maxBytes'], rules: s['viewer.enabled'] && L.viewer ? this.#viewerRules(u, L) : [] },
+      quotas: this.#applicableQuotas(PUBLIC_ID).map((q) => ({ kind: q.kind, n: q.n, unit: q.unit, max: q.max })),
+    };
+  }
+
+  async #subjectHash(kind, value) {
+    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(`secbin-public/${kind}:${value}`))).subarray(0, 18));
+  }
+
+  /** The quota subject for a network key (salted, keyed hash — the address itself is never stored). */
+  async ipSubject(ipKey) {
+    return `pub:ip:${await this.#subjectHash('ip', String(ipKey))}`;
+  }
+
+  async #hmacTag(data) {
+    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', key, data)).subarray(0, 8);
+  }
+
+  /** A fresh, stateless tracker id (nothing is stored until it creates a share). */
+  async #issueTracker(ts) {
+    const b = new Uint8Array(24);
+    b.set(randomBytes(12), 0);
+    new DataView(b.buffer).setUint32(12, ts >>> 0);
+    const body = b.subarray(0, 16);
+    b.set(await this.#hmacTag(utf8('secbin-public/tid:' + b64urlFromBytes(body))), 16);
+    return b64urlFromBytes(b);
+  }
+
+  /** A presented id → { h, issued } when this server issued it, else null. */
+  async #checkTracker(value) {
+    if (typeof value !== 'string' || !TRACKER_RE.test(value)) return null;
+    let b;
+    try { b = bytesFromB64url(value); } catch { return null; }
+    if (b.length !== 24) return null;
+    const tag = await this.#hmacTag(utf8('secbin-public/tid:' + b64urlFromBytes(b.subarray(0, 16))));
+    let diff = 0;
+    for (let i = 0; i < 8; i++) diff |= tag[i] ^ b[16 + i];
+    if (diff) return null;
+    return { h: await this.#subjectHash('tracker', value), issued: new DataView(b.buffer, b.byteOffset).getUint32(12) };
+  }
+
+  /**
+   * Resolve the anonymous tracker from every copy the browser presented
+   * (`candidates`: [{ src, value }], at most one per source). A copy is valid
+   * when this server issued it (HMAC tag) and it has not been idle for
+   * `public.trackerIdleSec`. The id presented most often wins and the caller
+   * re-seeds every missing or corrupt copy from it. A tie is broken in favour
+   * of the only tied id that has created shares, or else the oldest; when two
+   * or more tied ids have each created shares, the right one cannot be
+   * determined and all of them are blocked. With no valid copy a new id is
+   * issued — statelessly, so page visits store nothing and cannot exhaust any
+   * per-network budget (that is spent when an id first creates a share).
+   */
+  async resolveTracker({ candidates = [] }) {
+    const idle = this.#settings()['public.trackerIdleSec'];
+    const ts = now();
+    const votes = new Map();
+    const seenSrc = new Set();
+    let invalid = 0;
+    let presented = 0;
+    for (const c of (Array.isArray(candidates) ? candidates : []).slice(0, 8)) {
+      if (!c || typeof c.value !== 'string' || !c.value || seenSrc.has(c.src)) continue;
+      seenSrc.add(c.src);
+      presented++;
+      const t = await this.#checkTracker(c.value);
+      if (!t) { invalid++; continue; }
+      const row = this.sql.exec('SELECT * FROM trackers WHERE id_hash = ?', t.h).toArray()[0] || null;
+      if ((row ? row.last_seen : t.issued) < ts - idle) { invalid++; continue; }
+      const v = votes.get(t.h) ?? { h: t.h, value: c.value, row, issued: t.issued, n: 0 };
+      v.n++;
+      votes.set(t.h, v);
+    }
+    if (!votes.size) return { ok: true, id: await this.#issueTracker(ts), status: 'new' };
+    const all = [...votes.values()];
+    const top = Math.max(...all.map((v) => v.n));
+    const tied = all.filter((v) => v.n === top);
+    let win = tied[0];
+    if (tied.length > 1) {
+      const used = tied.filter((v) => v.row);
+      if (used.length > 1) {
+        this.ctx.storage.transactionSync(() => {
+          for (const v of used) this.sql.exec("UPDATE trackers SET blocked = 1, reason = 'conflict' WHERE id_hash = ?", v.h);
+        });
+        this.#log(null, PUBLIC_ID, 'tracker.conflict', `${used.length} ids that created shares disagree`);
+        return fail(403, 'tracker_conflict', 'Your browser presented conflicting identifiers, so anonymous sharing is blocked for it. Contact the administrator.');
+      }
+      win = used[0] ?? tied.reduce((a, b) => (b.issued < a.issued ? b : a));
+    }
+    if (win.row?.blocked) return fail(403, 'tracker_blocked', 'Anonymous sharing is blocked for this browser. Contact the administrator.');
+    if (win.row) this.sql.exec('UPDATE trackers SET last_seen = ? WHERE id_hash = ?', ts, win.h);
+    const healed = invalid > 0 || win.n < presented;
+    return { ok: true, id: win.value, status: healed ? 'healed' : 'ok' };
+  }
+
+  /**
+   * The quota subject for a create request's tracker. The first create by an
+   * id stores it, at most `public.newTrackersPerIp` new ids per network per
+   * `public.newTrackersWindowSec` (and `MAX_TRACKERS` in all).
+   */
+  async trackerSubject(value, ipKey) {
+    const t = await this.#checkTracker(value);
+    const ipHash = await this.#subjectHash('ip', String(ipKey));
+    // No awaits below: the checks and the insert are one atomic step.
+    const s = this.#settings();
+    const ts = now();
+    if (!t) return fail(428, 'tracker_required', 'Reload the page to continue.');
+    const row = this.sql.exec('SELECT * FROM trackers WHERE id_hash = ?', t.h).toArray()[0];
+    if (row) {
+      if (row.last_seen < ts - s['public.trackerIdleSec']) return fail(428, 'tracker_required', 'Reload the page to continue.');
+      if (row.blocked) return fail(403, 'tracker_blocked', 'Anonymous sharing is blocked for this browser. Contact the administrator.');
+      this.sql.exec('UPDATE trackers SET last_seen = ? WHERE id_hash = ?', ts, t.h);
+      return { ok: true, subject: `pub:t:${t.h}` };
+    }
+    if (t.issued < ts - s['public.trackerIdleSec']) return fail(428, 'tracker_required', 'Reload the page to continue.');
+    const recent = this.sql.exec('SELECT COUNT(*) AS c FROM trackers WHERE ip_hash = ? AND created > ?', ipHash, ts - s['public.newTrackersWindowSec']).one().c;
+    if (recent >= s['public.newTrackersPerIp']) {
+      return fail(429, 'tracker_rate_limited', 'Too many new anonymous senders from your network. Try again later.');
+    }
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM trackers').one().c >= MAX_TRACKERS) {
+      return fail(429, 'busy', 'Anonymous sharing is at capacity. Try again later.');
+    }
+    this.sql.exec('INSERT INTO trackers (id_hash, created, last_seen, ip_hash) VALUES (?, ?, ?, ?)', t.h, ts, ts, ipHash);
+    return { ok: true, subject: `pub:t:${t.h}` };
+  }
+
+  /** Count one share created under a tracker subject (after it succeeded). */
+  async trackerUsed(subject) {
+    if (typeof subject !== 'string' || !subject.startsWith('pub:t:')) return;
+    this.sql.exec('UPDATE trackers SET uses = uses + 1 WHERE id_hash = ?', subject.slice(6));
+  }
+
+  async listTrackers({ limit = 100, blocked = null } = {}) {
+    const lim = Math.max(1, Math.min(500, limit | 0));
+    const rows = blocked === true
+      ? this.sql.exec('SELECT id_hash, created, last_seen, uses, blocked, reason FROM trackers WHERE blocked = 1 ORDER BY last_seen DESC LIMIT ?', lim).toArray()
+      : this.sql.exec('SELECT id_hash, created, last_seen, uses, blocked, reason FROM trackers ORDER BY last_seen DESC LIMIT ?', lim).toArray();
+    const total = this.sql.exec('SELECT COUNT(*) AS c, SUM(blocked) AS b FROM trackers').one();
+    return { rows: rows.map((r) => ({ ...r, id: r.id_hash.slice(0, 12) })), total: total.c, blocked: total.b ?? 0 };
+  }
+
+  /** Admin: unblock, block or forget a tracker (by its hash prefix shown in the list). */
+  async adminTracker(prefix, action, actorId) {
+    if (typeof prefix !== 'string' || !/^[A-Za-z0-9_-]{12}$/.test(prefix)) return fail(400, 'invalid', 'Unknown tracker.');
+    const rows = this.sql.exec("SELECT id_hash FROM trackers WHERE substr(id_hash, 1, 12) = ?", prefix).toArray();
+    if (rows.length !== 1) return fail(404, 'not_found', 'Unknown tracker.');
+    const h = rows[0].id_hash;
+    if (action === 'unblock') this.sql.exec("UPDATE trackers SET blocked = 0, reason = '' WHERE id_hash = ?", h);
+    else if (action === 'block') this.sql.exec("UPDATE trackers SET blocked = 1, reason = 'admin' WHERE id_hash = ?", h);
+    else if (action === 'forget') {
+      this.sql.exec('DELETE FROM trackers WHERE id_hash = ?', h);
+      this.sql.exec('DELETE FROM usage WHERE user_id = ?', `pub:t:${h}`);
+    } else return fail(400, 'invalid', 'action must be unblock, block or forget');
+    this.#log(actorId, PUBLIC_ID, `tracker.${action}`, `id=${prefix}`);
+    return { ok: true };
   }
 
   /** Limits check for raising views/expiry on an existing share (no quota use). */
@@ -768,6 +1000,7 @@ export class Directory extends DurableObject {
   async updateUser(id, { username, disabled }, actorId) {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
+    if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in: turn public access on or off in its settings.');
     if (disabled !== undefined) {
       if (typeof disabled !== 'boolean') return fail(400, 'invalid', 'disabled must be true or false');
       if (u.role === 'owner' && disabled) return fail(403, 'forbidden', 'The owner cannot be disabled.');
@@ -789,6 +1022,7 @@ export class Directory extends DurableObject {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'owner') return fail(403, 'forbidden', 'The owner cannot be deleted.');
+    if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in and cannot be deleted.');
     const shares = this.sql.exec("SELECT id FROM shares WHERE user_id = ? AND status = 'active'", id).toArray().map((r) => r.id);
     this.ctx.storage.transactionSync(() => {
       for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
@@ -801,6 +1035,7 @@ export class Directory extends DurableObject {
   async setPassword(id, { salt, t, verifier }, actorId) {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
+    if (u.role === 'public') return fail(403, 'forbidden', 'The public account has no password.');
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
     this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), id);
@@ -1035,7 +1270,7 @@ export class Directory extends DurableObject {
       }
       // Security-relevant changes are called out in the preview.
       for (const [k, v] of Object.entries(doc.system.settings)) {
-        if (/^(guard|lockout)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
+        if (/^(guard|lockout|public)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
       }
       for (const r of ipAdd) if (r.action === 'allow') plan.warnings.push(`adds an allow rule (exempts ${r.cidr} from brute-force protection and blocks)`);
       plan.system = {
@@ -1157,6 +1392,10 @@ export class Directory extends DurableObject {
     const ts = now();
     this.sql.exec('DELETE FROM revoked_sessions WHERE exp < ?', ts);
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
+    // Anonymous trackers expire after being idle, with their usage counters.
+    const idleBefore = ts - this.#settings()['public.trackerIdleSec'];
+    this.sql.exec("DELETE FROM usage WHERE user_id IN (SELECT 'pub:t:' || id_hash FROM trackers WHERE last_seen < ?)", idleBefore);
+    this.sql.exec('DELETE FROM trackers WHERE last_seen < ?', idleBefore);
     this.sql.exec('DELETE FROM ip_rules WHERE expires IS NOT NULL AND expires < ?', ts);
     this.sql.exec("UPDATE shares SET status = 'expired' WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
     this.sql.exec("DELETE FROM shares WHERE status != 'active' AND locked = 0 AND expires < ?", ts - SHARE_PRUNE_SEC);

@@ -246,6 +246,24 @@ Common errors on any route:
 Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` counts as an
 **invalid** failure for the caller's IP (§13).
 
+### Public creation (anonymous, off by default)
+
+Only when the admin sets `public.enabled`; otherwise `403 public_disabled` (the profile answers
+`{enabled:false}`). Shares are created as the built-in public account; the bodies, validation
+and results are exactly those of the private routes. See SECURITY.md "Public (anonymous)
+access" for the counting modes.
+
+| Method & path | Notes | Success | Errors |
+|---|---|---|---|
+| `GET /api/public/profile` | what the composer needs | 200 `{enabled, tracking, notice, limits, caps, viewer, quotas}` | |
+| `GET /api/public/t` | resolve the tracker: cookie `__Host-secbin_aid`, `If-None-Match`, and `X-Secbin-Aid-Copies: ls=<id>;idb=<id>` | 200 `{mode, aid, status: new\|ok\|healed}` + cookie + `ETag`; 304 when every copy agrees; `{mode:"ip", aid:null}` in `ip` mode | 403 `tracker_conflict` / `tracker_blocked` |
+| `POST /api/public/paste` `{paste}` (any `label` is dropped) | tracker modes: the cookie and `X-Secbin-Aid` must match | 201 as §10 private | 428 `tracker_required`, 403 `tracker_blocked` or any creation limit, 429 `quota_exceeded` / `tracker_rate_limited` (a new id's first creation over the per-network limit) / `busy` |
+| `POST /api/public/file` | as the private route | 201 | as above |
+| `PUT /api/public/file/:id/chunk/:i`, `POST …/finalize` | `X-Upload-Token` | as the private routes | as the private routes |
+
+Admin: `GET /api/private/admin/public[?blocked=true]` → `{profile, trackers: {rows, total,
+blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|block|forget}`.
+
 ### Auth
 
 | Method & path | Body | Result |
@@ -277,7 +295,6 @@ Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` count
 | `/api/private/admin/*` | owner session, not impersonating | overview, settings, limits, quotas, viewer rules, users (+ password, unlock, impersonate, keys), unimpersonate, audit, guard, ip-rules, shares |
 | `GET /api/private/admin/shares` `?users=id,id&kind=&status=&q=&locked=true\|false&createdFrom=&createdTo=&expiresFrom=&expiresTo=&limit=&offset=` | owner | every user's shares, filtered (times in unix seconds, each bound optional) → `{rows, total}` |
 | `GET/PATCH /api/private/admin/shares/:id`, `POST …/:id/revoke`, `POST …/:id/lock` `{locked}` | owner | inspect, change (increase-only, protocol maxima), revoke, lock/unlock — logged as admin actions |
-
 | `POST /api/private/admin/export` `{current, system?, users?: "all"\|[id…], credentials?, config?}` | owner | the plaintext `secbin-export/v1` document for the browser to encrypt (never the owner) |
 | `POST /api/private/admin/import` `{current, document, decisions: {system, users: {name: {as?, overwrite?}}}, dryRun}` | owner | `dryRun` (default) → `{plan}`; otherwise applied atomically → `{applied: true, plan}`; `409 import_conflicts` with the plan when anything would conflict |
 

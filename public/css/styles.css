@@ -789,3 +789,9 @@ html.pwa-banner-open body { padding-bottom: calc(10rem + env(safe-area-inset-bot
 
 /* ── admin import / export ─────────────────────────────────────────────── */
 .plan-list { margin: 0; padding-left: 1.1rem; display: grid; gap: .2rem; font-size: .8rem; white-space: pre-wrap; word-break: break-word; }
+
+/* ── public composer ───────────────────────────────────────────────────── */
+.notice { font-size: .8rem; color: var(--ink-2); border-left: 2px solid var(--warn); padding: .5rem .8rem; margin: 0 0 1rem; }
+.token-box { display: grid; gap: .4rem; margin-top: 1rem; }
+.radio-opt { display: flex; gap: .6rem; align-items: flex-start; padding: .4rem 0; min-height: 44px; }
+.radio-opt .block { display: block; font-size: .72rem; margin-top: .15rem; }

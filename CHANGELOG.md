@@ -11,10 +11,17 @@ secbin entries.
 ## [Unreleased] — secbin 2.0.0
 
 **Breaking:** protocol v2. Links created by earlier versions (v1, `binthere/v1` labels) can no
-longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
+longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`410`).
 
 ### Added
 
+- **Public (anonymous) sharing**, off by default (Admin → Public access): a built-in `(public)`
+  account with its own limits and quotas (notes only, ≤ 10 views, ≤ 7 days and 10 per day by
+  default); a composer on the home page with an editable notice and the delete token on
+  success; counting per browser tracker (cookie + ETag + localStorage + IndexedDB, self-healing,
+  blocked on unresolvable conflicts, new senders rate-limited per network on first creation), per network, or both
+  (permissive / restrictive); tracker administration (unblock, block, forget). Requires Legal /
+  Compliance review before it is enabled.
 - **Encrypted admin import/export** (Admin → Import / export): system configuration and/or
   selected users (credentials and/or configuration), never the owner, sessions or API keys;
   encrypted in the browser with a passphrase; imports are decrypted locally, previewed, then

@@ -33,7 +33,7 @@ administration, backed by KV, R2 and four Durable Object classes. One deploy, on
 | `k…` | KV `PASTES` | Unlimited-view notes, native TTL; `{paste, dth, acc}` |
 | `b…` | `BurnPaste` DO (per id) | View-limited notes; proof check + view spend in one critical section; alarm expiry |
 | `f…` | `FileShare` DO (per id) + R2 `FILES` (`f/<id>/<i>`) | Upload state, view counting, download grants, alarm purges R2 |
-| accounts & config | `Directory` DO (singleton, SQLite) | users, revoked sessions, API keys, limits, quotas + usage, settings, viewer rules, IP rules, share index, activity |
+| accounts & config | `Directory` DO (singleton, SQLite) | users (incl. the built-in public account), revoked sessions, API keys, limits, quotas + usage, settings, viewer rules, IP rules, share index, activity, public-access trackers (keyed hashes) |
 | brute-force state | `Guard` DOs (8 shards by IP hash) | per-scope failure counters and blocks with alarm cleanup |
 
 The Directory's schema is versioned: `SCHEMA` always describes the latest shape, and an ordered
@@ -52,6 +52,7 @@ need atomic, immediately consistent read-modify-write.
 | `src/routes/auth.js` | Session probe, setup/recovery, prelogin/login/logout |
 | `src/routes/private.js` | Note creation, file upload, account, API keys, My shares |
 | `src/routes/admin.js` | Owner administration |
+| `src/routes/publicapi.js` | Anonymous creation as the public account (off by default), tracker resolution |
 | `src/lib/auth.js`, `jwt.js` | Sessions (JWS-in-JWE cookie), API-key auth |
 | `src/lib/guard.js`, `ip.js` | Manual IP rules, Guard scopes, IPv4/IPv6/CIDR |
 | `src/lib/settings.js` | Settings/limits/quotas schema and resolution |
