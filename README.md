@@ -64,6 +64,7 @@ flowchart TD
 | Admin | Users, impersonation ("log in as"), password resets, limits, quotas, session timeouts, file-size caps, viewer policy, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (unknown links, wrong keys, wrong passwords); account lockout. |
 | CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
+| Installable | A PWA: install from the banner (or the browser menu; on iOS, Share → Add to Home Screen). The service worker caches only the static shell — never shares or API responses. |
 | Minimal surface | Strict CSP, self-hosted fonts, no third-party scripts, no analytics, no outbound requests. |
 
 > [!WARNING]
@@ -154,6 +155,31 @@ working.
 
 Cloudflare Access is no longer needed. You may still layer it in front of `/dashboard*` and
 `/api/private/*` as defense in depth.
+
+## Installing as an app (PWA)
+
+secbin is a Progressive Web App: every page links `/manifest.webmanifest` and registers the
+service worker `/sw.js` (both need HTTPS, or `http://localhost` in development).
+
+- **Chrome, Edge and other Chromium browsers** show an *Install secbin* banner once the page is
+  installable; **Install** opens the browser's own install dialog. The install icon in the
+  address bar keeps working after the banner is dismissed.
+- **iPhone and iPad** have no install prompt API, so the banner shows the manual step instead:
+  *Tap Share, then Add to Home Screen*.
+- The banner is never shown inside the installed app. **Not now** or the close button hides it
+  for a year (remembered in the first-party cookie `secbin_pwa_dismiss`; clear site data to
+  see it again).
+
+What the service worker does and doesn't cache: it is network-first, stores only same-origin
+static assets (`/css`, `/js`, `/fonts`, `/img`, the manifest) and the landing page `/` as an
+offline fallback, and **never** intercepts or caches `/api/*`, share pages under `/p/*`,
+dashboard pages, or any URL with a query string. Opening a share always needs the network. See
+[`SECURITY.md`](./SECURITY.md) §4 for the full rules. Because it is network-first, a deploy
+takes effect immediately for online clients; bump `VERSION` in `public/sw.js` when the caching
+rules change, and every older cache is deleted when the new worker activates.
+
+The app icons (`public/img/icon-192.png`, `icon-512.png`, `icon-maskable-512.png`) are generated
+from the favicon's rosette with `node tools/icons.mjs` and committed.
 
 ## CLI
 

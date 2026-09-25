@@ -18,6 +18,8 @@
         <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png" />
         <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
         <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
+        <link rel="manifest" href="/manifest.webmanifest" />
+        <meta name="apple-mobile-web-app-title" content="secbin" />
         <!-- Blocking, first-party (CSP-safe): sets the theme class before paint. -->
         <script src="/js/theme-init.js"></script>
         <link rel="stylesheet" href="/css/styles.css" />
@@ -25,6 +27,8 @@
         <script defer src="/js/theme.js"></script>
         <script defer src="/js/qrcode.js"></script>
         <script type="module" src="/dashboard/js/create.js"></script>
+        <!-- Service worker + install banner (public/js/pwa.js). -->
+        <script type="module" src="/js/pwa.js"></script>
     </head>
     <body>
         <!-- Guilloché watermark — security-print ambience; pure ornament. -->
