@@ -1,4 +1,4 @@
-// index.js — binthere Worker entry.
+// index.js — secbin Worker entry.
 //
 // Serves the zero-knowledge paste API under /api/* (run_worker_first); every
 // other path is handled by Workers Static Assets (the SPA frontend), so the
@@ -10,7 +10,6 @@ import { validatePaste, FormatError, MAX_CT_B64 } from '../public/js/format.js';
 import { genId, parseId, genDeleteToken, hashToken, verifyToken } from './lib/ids.js';
 import { ttlSeconds, MAX_BODY, MAX_BURN_RECORD, kvExists, kvPut, kvGet, kvDelete, burnStub } from './lib/store.js';
 import { allowCreate } from './lib/ratelimit.js';
-import { fetchStars, STARS_TTL, STARS_ERROR_TTL } from './lib/stars.js';
 
 export { BurnPaste } from './burn-do.js';
 
@@ -41,10 +40,6 @@ export default {
       return err('Method not allowed', 405, { allow: 'POST' });
     }
 
-    if (pathname === '/api/stars') {
-      if (request.method === 'GET') return readStars();
-      return err('Method not allowed', 405, { allow: 'GET' });
-    }
 
     const mc = pathname.match(/^\/api\/paste\/([^/]+)\/consume$/);
     if (mc) {
@@ -124,6 +119,12 @@ async function createPaste(request, env, _ctx) {
     return err('Content-Type must be application/json.', 415);
   }
 
+  // Defense in depth on top of the JSON preflight: browsers mark cross-site
+  // requests, so a hostile page can never create pastes from a visitor's session
+  // (e.g. riding an Access cookie).
+  if ((request.headers.get('sec-fetch-site') || '').toLowerCase() === 'cross-site') {
+    return err('Cross-site paste creation is not allowed.', 403);
+  }
   if (!(await allowCreate(env, request))) {
     return err('Rate limit exceeded. Try again shortly.', 429);
   }
@@ -170,18 +171,22 @@ async function createPaste(request, env, _ctx) {
   const dth = await hashToken(deleteToken);
   const created = Math.floor(Date.now() / 1000);
 
+  // View-limited pastes (bar) carry a view count; absent means 1 (classic
+  // burn-after-read). Unlimited-view pastes are ordinary KV pastes.
+  const views = burn ? (clean.meta.views ?? 1) : undefined;
+
   // The stored/returned paste carries meta.created but never the token hash.
-  const paste = {
-    v: clean.v, ct: clean.ct, wk: clean.wk, adata: clean.adata,
-    meta: { expire: clean.meta.expire, created },
-  };
+  // `left` is never stored in meta — the DO tracks it and adds it on reads.
+  const meta = { expire: clean.meta.expire, created };
+  if (burn) meta.views = views;
+  const paste = { v: clean.v, ct: clean.ct, wk: clean.wk, adata: clean.adata, meta };
 
   // Burn records live in SQLite-backed DO storage, whose ~2 MB per-value limit
   // is below what MAX_CT_B64 admits: a valid-per-format record between the two
   // caps would make storage.put throw an uncaught 500 inside the DO. Reject it
   // here with a clean 413 instead (SPEC §6). KV (25 MiB values) is unaffected.
-  if (burn && JSON.stringify({ paste, dth, exp: 0 }).length > MAX_BURN_RECORD) {
-    return err('Document is too large for a one-time-view paste.', 413);
+  if (burn && JSON.stringify({ paste, dth, exp: 0, left: views }).length > MAX_BURN_RECORD) {
+    return err('Document is too large for a view-limited paste.', 413);
   }
 
   // Generate an unused id (128-bit; collisions are astronomically unlikely, but
@@ -190,7 +195,7 @@ async function createPaste(request, env, _ctx) {
   for (let attempt = 0; ; attempt++) {
     id = genId(burn);
     if (burn) {
-      if (await burnStub(env, id).create(paste, dth, ttl)) break;
+      if (await burnStub(env, id).create(paste, dth, ttl, views)) break;
     } else {
       if (!(await kvExists(env, id))) { await kvPut(env, id, paste, dth, ttl); break; }
     }
@@ -212,7 +217,7 @@ async function readPaste(id, env, peekOnly) {
     // a note whose id it happened to learn.
     const res = await burnStub(env, id).peek();
     if (res.status === 'ok') return json(res.head, 200);
-    return err('This document was single-use and has already been read, or has expired.', 410);
+    return err('This document has used all of its views, or has expired.', 410);
   }
 
   const rec = await kvGet(env, id);
@@ -242,23 +247,11 @@ async function consumePaste(id, request, env) {
 
   const info = parseId(id);
   if (!info) return err('Document does not exist, has expired or has been deleted.', 404);
-  if (!info.burn) return err('Only one-time-view pastes can be consumed.', 404);
+  if (!info.burn) return err('Only view-limited pastes can be consumed.', 404);
 
   const res = await burnStub(env, id).consume();
   if (res.status === 'ok') return json(res.paste, 200);
-  return err('This document was single-use and has already been read, or has expired.', 410);
-}
-
-// The repository's star count for the topbar badge. Unlike every other route
-// this response is public, identical for all visitors, and cheap to be slightly
-// stale — so it is cached rather than no-store'd, which is also what keeps a
-// flood of page loads from turning into a flood of GitHub requests.
-async function readStars() {
-  const stars = await fetchStars();
-  if (stars === null) {
-    return err('Star count unavailable.', 502, { 'cache-control': `public, max-age=${STARS_ERROR_TTL}` });
-  }
-  return json({ stars }, 200, { 'cache-control': `public, max-age=${STARS_TTL}` });
+  return err('This document has used all of its views, or has expired.', 410);
 }
 
 async function deletePaste(id, request, env) {
