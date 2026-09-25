@@ -10,6 +10,23 @@ updates:
       dev-dependencies:
         dependency-type: development
         patterns: ['*']
+    # vitest 5 is held: the workerd test project runs on
+    # @cloudflare/vitest-pool-workers, whose latest release (0.22.0) declares
+    # peer vitest ^4.1.0 — a vitest 5 bump fails `npm ci` with ERESOLVE, and
+    # forced past that the pool cannot start workers under vitest 5. Remove
+    # this rule once a pool-workers release supports vitest 5, and bump
+    # vitest, @vitest/coverage-istanbul and pool-workers together.
+    #
+    # wrangler is deliberately NOT ignored (so security updates still arrive),
+    # but keep it on the exact version @cloudflare/vitest-pool-workers pins
+    # (4.124.0 for 0.22.0): tests then run on the same wrangler/miniflare/
+    # workerd that deploys, and it is the last version known to build on
+    # Cloudflare Workers Builds. Drop a lone wrangler bump from the group PR.
+    ignore:
+      - dependency-name: vitest
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@vitest/coverage-istanbul'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: npm
     directory: /cli

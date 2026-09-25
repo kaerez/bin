@@ -33,7 +33,7 @@ export function isStandalone(win = globalThis.window) {
 
 /** True when the dismissal cookie is present. */
 export function isDismissed(doc = globalThis.document) {
-  let jar = '';
+  let jar;
   try { jar = String(doc.cookie || ''); } catch { return false; }
   return jar.split(';').some((c) => c.trim() === `${DISMISS_COOKIE}=1`);
 }
