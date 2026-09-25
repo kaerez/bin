@@ -3,7 +3,7 @@
 // The stored delete-token hash (`dth`) is kept alongside the paste and never
 // returned to a reader. See SPEC.md §7–§9.
 
-import { EXPIRE_SECONDS } from '../../public/js/format.js';
+import { expireSeconds } from '../../public/js/format.js';
 
 export const MAX_BODY = 4 * 1024 * 1024; // 4 MiB request-body cap
 
@@ -15,7 +15,7 @@ export const MAX_BODY = 4 * 1024 * 1024; // 4 MiB request-body cap
 export const MAX_BURN_RECORD = 1900000;
 
 export function ttlSeconds(expire) {
-  return EXPIRE_SECONDS[expire] ?? 0;
+  return expireSeconds(expire) ?? 0;
 }
 
 // ── KV (normal pastes) ───────────────────────────────────────────────────────
