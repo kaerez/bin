@@ -114,6 +114,10 @@ export const admin = {
   ipRules: () => request(`${A}/ip-rules`),
   addIpRule: (body) => request(`${A}/ip-rules`, { method: 'POST', body }),
   removeIpRule: (id) => request(`${A}/ip-rules/${enc(id)}`, { method: 'DELETE', headers: INTENT }),
+  shares: (qs) => request(`${A}/shares?${qs}`),
+  updateShare: (id, patch) => request(`${A}/shares/${enc(id)}`, { method: 'PATCH', body: patch }),
+  revokeShare: (id) => request(`${A}/shares/${enc(id)}/revoke`, { method: 'POST', headers: INTENT }),
+  lockShare: (id, locked) => request(`${A}/shares/${enc(id)}/lock`, { method: 'POST', body: { locked } }),
 };
 
 /** Binary chunk upload (kept separate: `request` is JSON-only). */

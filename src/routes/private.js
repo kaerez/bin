@@ -288,13 +288,9 @@ async function liveStatus(env, id) {
   return rec ? { status: 'ok', views: null, left: null, expires: rec.paste.meta.expires } : { status: 'gone' };
 }
 
-async function listShares(env, a, url) {
-  const q = (url.searchParams.get('q') || '').slice(0, 100);
-  const status = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : '';
-  const offset = Number(url.searchParams.get('offset')) || 0;
-  const dir = directory(env);
-  const { rows, total } = await dir.listShares(a.user.id, { q, status, limit: 50, offset });
-  const out = await Promise.all(rows.map(async (r) => {
+/** Refresh active rows from their live store (views left, expiry, gone). */
+export async function withLiveStatus(env, dir, rows) {
+  return Promise.all(rows.map(async (r) => {
     if (r.status !== 'active') return { ...r, left: null };
     const s = await liveStatus(env, r.id);
     if (s.status === 'gone') {
@@ -303,7 +299,15 @@ async function listShares(env, a, url) {
     }
     return { ...r, views_total: s.views ?? r.views_total, left: s.left ?? null, expires: s.expires ?? r.expires };
   }));
-  return { rows: out, total };
+}
+
+async function listShares(env, a, url) {
+  const q = (url.searchParams.get('q') || '').slice(0, 100);
+  const status = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : '';
+  const offset = Number(url.searchParams.get('offset')) || 0;
+  const dir = directory(env);
+  const { rows, total } = await dir.listShares(a.user.id, { q, status, limit: 50, offset });
+  return { rows: await withLiveStatus(env, dir, rows), total };
 }
 
 async function updateShare(request, env, a, id, info) {
@@ -311,6 +315,20 @@ async function updateShare(request, env, a, id, info) {
   const dir = directory(env);
   const row = await dir.getShare(a.user.id, id);
   if (!row) return err(404, 'not_found', 'Share not found.');
+  if (row.locked) return shareLocked();
+  return changeShare(env, dir, row, info, body, { uid: a.user.id, actor: actorId(a) });
+}
+
+const shareLocked = () => err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
+
+/**
+ * Apply a label / views / expiry change to a share and its index row. Users go
+ * through their own limits (authorizeIncrease); the admin (`admin` = owner id)
+ * is bounded only by the hard protocol maxima and may change locked shares.
+ * Views and expiry can only grow — the stores cannot shrink them safely.
+ */
+export async function changeShare(env, dir, row, info, body, { uid, actor, admin = null }) {
+  const id = row.id;
   const patch = {};
   if (body.label !== undefined) patch.label = body.label;
   const change = {};
@@ -325,8 +343,15 @@ async function updateShare(request, env, a, id, info) {
   }
   if (change.views !== undefined || change.expires !== undefined) {
     if (row.status !== 'active') return err(409, 'not_active', 'Only active shares can be changed.');
-    const ok = await dir.authorizeIncrease(a.user.id, { views: change.views, expireAt: change.expires });
-    if (!ok.ok) return fromDir(ok);
+    if (!admin) {
+      const ok = await dir.authorizeIncrease(uid, { views: change.views, expireAt: change.expires });
+      if (!ok.ok) return fromDir(ok);
+    }
+    // Re-check the lock right before touching the store (the admin may have
+    // locked it since `row` was read). A residual window of one RPC remains;
+    // it can only extend a share, never destroy one, and the index update
+    // below then refuses with 423.
+    if (!admin && await dir.isShareLocked(id)) return shareLocked();
     let r;
     if (info.file) r = await fileStub(env, id).extend(change);
     else if (info.burn) r = await burnStub(env, id).extend(change);
@@ -340,7 +365,7 @@ async function updateShare(request, env, a, id, info) {
     if (change.expires !== undefined) patch.expires = r.expires;
   }
   if (Object.keys(patch).length === 0) return err(400, 'invalid', 'Nothing to change.');
-  const u = await dir.updateShare(a.user.id, id, patch, actorId(a));
+  const u = await dir.updateShare(uid, id, patch, actor, { admin });
   return u.ok ? json({ ok: true }) : fromDir(u);
 }
 
@@ -358,8 +383,16 @@ async function revokeShare(env, a, id, info) {
   const dir = directory(env);
   const row = await dir.getShare(a.user.id, id);
   if (!row) return err(404, 'not_found', 'Share not found.');
+  if (row.locked) return shareLocked();
+  if (info && info.file) binding(env, 'FILES'); // fail before marking anything revoked
+  // Mark revoked first: the Directory re-checks the lock atomically, so a
+  // share locked in the meantime is refused before any content is destroyed.
+  // A share already marked revoked (an earlier purge failed) is purged again.
+  if (row.status !== 'revoked') {
+    const u = await dir.updateShare(a.user.id, id, { status: 'revoked' }, actorId(a));
+    if (!u.ok) return fromDir(u);
+  }
   await purgeShare(env, id, info);
-  await dir.updateShare(a.user.id, id, { status: 'revoked' }, actorId(a));
   return json({ ok: true });
 }
 

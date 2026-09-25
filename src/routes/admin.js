@@ -8,11 +8,36 @@ import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSet
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
 import { GUARD_SCOPES } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
-import { purgeShare } from './private.js';
+import { purgeShare, changeShare, withLiveStatus } from './private.js';
+import { parseId } from '../lib/ids.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const now = () => Math.floor(Date.now() / 1000);
+const SHARE_KINDS = ['text', 'files'];
+const SHARE_STATUSES = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'];
+
+/** Parse the admin share-list filters from the query string (all optional). */
+export function shareFilters(sp) {
+  const int = (k) => {
+    const v = sp.get(k);
+    if (v === null || v === '') return null;
+    const n = Number(v);
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  };
+  const users = (sp.get('users') || '').split(',').map((u) => u.trim()).filter((u) => ID_RE.test(u)).slice(0, 100);
+  const kind = SHARE_KINDS.includes(sp.get('kind')) ? sp.get('kind') : '';
+  const status = SHARE_STATUSES.includes(sp.get('status')) ? sp.get('status') : '';
+  const lockedRaw = sp.get('locked');
+  const locked = lockedRaw === 'true' ? true : lockedRaw === 'false' ? false : null;
+  return {
+    users, kind, status, locked,
+    q: (sp.get('q') || '').slice(0, 100),
+    createdFrom: int('createdFrom'), createdTo: int('createdTo'),
+    expiresFrom: int('expiresFrom'), expiresTo: int('expiresTo'),
+    limit: Math.min(200, int('limit') ?? 50), offset: int('offset') ?? 0,
+  };
+}
 
 export async function handleAdmin(request, env, url) {
   const p = url.pathname;
@@ -32,6 +57,40 @@ export async function handleAdmin(request, env, url) {
   if (a.actor) return err(403, 'impersonating', 'Return to your own account to use the admin panel.');
   if (a.user.role !== 'owner') return err(403, 'forbidden', 'Owner only.');
   const me = a.user.id;
+
+  if (p === '/api/private/admin/shares') {
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    const { rows, total } = await dir.adminListShares(shareFilters(url.searchParams));
+    return json({ rows: await withLiveStatus(env, dir, rows), total });
+  }
+
+  const sm = p.match(/^\/api\/private\/admin\/shares\/([A-Za-z0-9_-]{16,32})(?:\/(revoke|lock))?$/);
+  if (sm) {
+    const id = sm[1];
+    const info = parseId(id);
+    if (!info) return err(404, 'not_found', 'Share not found.');
+    const row = await dir.adminShare(id);
+    if (!row) return err(404, 'not_found', 'Share not found.');
+    if (!sm[2]) {
+      if (request.method === 'GET') return json({ share: row });
+      if (request.method !== 'PATCH') return methodNotAllowed('GET, PATCH');
+      const body = await readJsonBody(request);
+      // Direct admin edits: bounded by the protocol maxima only, allowed on
+      // locked shares, and logged as admin actions (not in the user's log).
+      return changeShare(env, dir, row, info, body, { uid: row.user_id, actor: me, admin: me });
+    }
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    if (sm[2] === 'revoke') {
+      assertIntent(request);
+      await purgeShare(env, id, info);
+      const r = await dir.updateShare(row.user_id, id, { status: 'revoked' }, me, { admin: me });
+      return r.ok ? json({ ok: true }) : fromDir(r);
+    }
+    const body = await readJsonBody(request);
+    if (typeof body.locked !== 'boolean') return err(400, 'invalid', 'Send {"locked": true|false}.');
+    const r = await dir.setShareLock(me, id, body.locked);
+    return r.ok ? json({ ok: true, locked: r.locked }) : fromDir(r);
+  }
 
   if (p === '/api/private/admin/overview') {
     if (request.method !== 'GET') return methodNotAllowed('GET');

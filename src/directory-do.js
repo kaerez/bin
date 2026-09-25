@@ -43,15 +43,47 @@ CREATE TABLE IF NOT EXISTS failures (user_id TEXT PRIMARY KEY, count INTEGER NOT
   locked_until INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS pwchange_failures (user_id TEXT PRIMARY KEY, count INTEGER NOT NULL, start INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor_id TEXT,
-  subject_id TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', imp INTEGER NOT NULL DEFAULT 0);
+  subject_id TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', imp INTEGER NOT NULL DEFAULT 0,
+  adm INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
-  created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL);
+  created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL,
+  locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER);
 CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id, created);
 CREATE TABLE IF NOT EXISTS ip_rules (id TEXT PRIMARY KEY, cidr TEXT NOT NULL, action TEXT NOT NULL, expires INTEGER,
   note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 `;
+
+// Ordered, idempotent schema migrations for Directories created by an older
+// release. SCHEMA above always describes the latest shape (fresh instances need
+// nothing); each step only adds what an older instance lacks, and the applied
+// version is recorded in meta so a step runs at most once. Never edit a
+// shipped step — append a new one.
+const MIGRATIONS = [
+  // 1: activity.imp (impersonation flag)
+  (m) => m.addColumn('activity', 'imp', 'INTEGER NOT NULL DEFAULT 0'),
+  // 2: admin share locks + admin-direct-action flag + share filters' indexes
+  (m) => {
+    m.addColumn('shares', 'locked', 'INTEGER NOT NULL DEFAULT 0');
+    m.addColumn('shares', 'locked_by', 'TEXT');
+    m.addColumn('shares', 'locked_at', 'INTEGER');
+    m.addColumn('activity', 'adm', 'INTEGER NOT NULL DEFAULT 0');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS shares_created ON shares(created)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS shares_expires ON shares(expires)');
+  },
+];
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+function migrator(sql) {
+  const columns = (table) => new Set(sql.exec(`PRAGMA table_info(${table})`).toArray().map((c) => c.name));
+  return {
+    sql,
+    addColumn(table, name, decl) {
+      if (!columns(table).has(name)) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+    },
+  };
+}
 
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{2,63}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
@@ -81,6 +113,7 @@ export class Directory extends DurableObject {
     this.sql = ctx.storage.sql;
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(SCHEMA);
+      this.#migrate();
       if (!this.#meta('secret')) this.#setMeta('secret', b64urlFromBytes(randomBytes(32)));
       if (!this.#meta('viewer_seeded')) {
         for (const r of DEFAULT_VIEWER_RULES) {
@@ -90,6 +123,21 @@ export class Directory extends DurableObject {
       }
       if ((await ctx.storage.getAlarm()) === null) await ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     });
+  }
+
+  #migrate() {
+    const from = Number(this.#meta('schema_version')) || 0;
+    if (from >= SCHEMA_VERSION) return;
+    const m = migrator(this.sql);
+    // All steps and the version bump commit together, or not at all.
+    this.ctx.storage.transactionSync(() => {
+      for (let v = from; v < SCHEMA_VERSION; v++) MIGRATIONS[v](m);
+      this.#setMeta('schema_version', String(SCHEMA_VERSION));
+    });
+  }
+
+  async schemaVersion() {
+    return Number(this.#meta('schema_version')) || 0;
   }
 
   // ── small helpers ─────────────────────────────────────────────────────────
@@ -114,13 +162,17 @@ export class Directory extends DurableObject {
   }
   /**
    * `actor` is a user id, or { id, imp: true } when the owner acted while
-   * impersonating `subject` (the user's own log hides this; the audit shows it).
+   * impersonating `subject` (the user's own log shows it as theirs; the audit
+   * shows the truth), or { id, adm: true } when the owner acted directly from
+   * the admin panel on the subject's data (never shown in the user's own log).
    */
   #log(actor, subject, action, detail = '') {
-    const imp = !!(actor && typeof actor === 'object' && actor.imp);
-    const actorIdValue = actor && typeof actor === 'object' ? actor.id : actor;
-    this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp) VALUES (?, ?, ?, ?, ?, ?)',
-      now(), actorIdValue ?? null, subject ?? null, action, cleanDetail(detail), imp ? 1 : 0);
+    const obj = actor && typeof actor === 'object';
+    const imp = !!(obj && actor.imp);
+    const adm = !!(obj && actor.adm);
+    const actorIdValue = obj ? actor.id : actor;
+    this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp, adm) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      now(), actorIdValue ?? null, subject ?? null, action, cleanDetail(detail), imp ? 1 : 0, adm ? 1 : 0);
   }
   #settings() {
     const rows = {};
@@ -378,10 +430,11 @@ export class Directory extends DurableObject {
   async activity(uid, { before = null, limit = 50 } = {}) {
     const lim = Math.max(1, Math.min(200, limit | 0));
     const rows = before
-      ? this.sql.exec('SELECT id, ts, action, detail FROM activity WHERE subject_id = ? AND id < ? ORDER BY id DESC LIMIT ?', uid, before, lim).toArray()
-      : this.sql.exec('SELECT id, ts, action, detail FROM activity WHERE subject_id = ? ORDER BY id DESC LIMIT ?', uid, lim).toArray();
+      ? this.sql.exec('SELECT id, ts, action, detail FROM activity WHERE subject_id = ? AND adm = 0 AND id < ? ORDER BY id DESC LIMIT ?', uid, before, lim).toArray()
+      : this.sql.exec('SELECT id, ts, action, detail FROM activity WHERE subject_id = ? AND adm = 0 ORDER BY id DESC LIMIT ?', uid, lim).toArray();
     // The user's own view never names the actor: actions the owner took while
     // impersonating appear as the user's own (the admin audit shows the truth).
+    // Direct admin-panel actions on the user's shares (adm) are not shown.
     return rows;
   }
 
@@ -512,7 +565,11 @@ export class Directory extends DurableObject {
   // ── shares index ("My shares") ───────────────────────────────────────────
   async recordShare({ id, uid, kind, label, created, expires, views }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
-    this.sql.exec("INSERT OR REPLACE INTO shares (id, user_id, kind, label, created, expires, views_total, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+    // Upsert that never touches the lock columns: re-recording an id must not
+    // silently unlock it.
+    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+      ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, kind = excluded.kind, label = excluded.label, created = excluded.created,
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active'`,
       id, uid, kind, l, created, expires, views ?? null);
     this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
   }
@@ -524,7 +581,7 @@ export class Directory extends DurableObject {
     const where = `WHERE user_id = ? AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}`;
     const args = status ? [uid, like, String(status)] : [uid, like];
     const rows = this.sql.exec(
-      `SELECT id, kind, label, created, expires, views_total, status FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
+      `SELECT id, kind, label, created, expires, views_total, status, locked FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
       ...args, lim, off).toArray();
     // The total counts what the filters match, so pagination is correct.
     const total = this.sql.exec(`SELECT COUNT(*) AS c FROM shares ${where}`, ...args).one().c;
@@ -532,12 +589,37 @@ export class Directory extends DurableObject {
   }
 
   async getShare(uid, id) {
-    return this.sql.exec('SELECT id, kind, label, created, expires, views_total, status FROM shares WHERE user_id = ? AND id = ?', uid, id).toArray()[0] || null;
+    return this.sql.exec('SELECT id, user_id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND id = ?', uid, id).toArray()[0] || null;
   }
 
-  async updateShare(uid, id, { label, expires, views, status }, actorId = uid) {
-    const row = await this.getShare(uid, id);
+  /** Any user's share, for the admin (no owner scoping). */
+  async adminShare(id) {
+    return this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status,
+      s.locked, s.locked_at, lu.username AS locked_by
+      FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by WHERE s.id = ?`, id).toArray()[0] || null;
+  }
+
+  /** Is this share locked by the admin? (Used by the public delete-by-token path.) */
+  async isShareLocked(id) {
+    const r = this.sql.exec('SELECT locked FROM shares WHERE id = ?', id).toArray()[0];
+    return !!(r && r.locked);
+  }
+
+  /**
+   * Change a share's index row. `uid` scopes it to its owner; the admin passes
+   * { admin: ownerId } instead, which bypasses the owner scope and the lock and
+   * logs the action as a direct admin action (hidden from the user's log).
+   */
+  async updateShare(uid, id, { label, expires, views, status }, actorId = uid, { admin = null } = {}) {
+    if (admin) {
+      const o = this.#user(admin);
+      if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can change other users’ shares.');
+    }
+    const row = admin ? await this.adminShare(id) : await this.getShare(uid, id);
     if (!row) return fail(404, 'not_found', 'Share not found.');
+    if (row.locked && !admin) return fail(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
+    const subject = row.user_id;
+    const actor = admin ? { id: admin, adm: true } : actorId;
     const parts = [];
     if (label !== undefined) {
       const l = cleanLabel(label);
@@ -548,8 +630,50 @@ export class Directory extends DurableObject {
     if (expires !== undefined) { this.sql.exec('UPDATE shares SET expires = ? WHERE id = ?', expires, id); parts.push(`expires=${expires}`); }
     if (views !== undefined) { this.sql.exec('UPDATE shares SET views_total = ? WHERE id = ?', views, id); parts.push(`views=${views ?? 'unlimited'}`); }
     if (status !== undefined) { this.sql.exec('UPDATE shares SET status = ? WHERE id = ?', status, id); parts.push(`status=${status}`); }
-    this.#log(actorId, uid, status === 'revoked' ? 'share.revoked' : 'share.updated', `id=${id} ${parts.join(' ')}`);
+    this.#log(actor, subject, status === 'revoked' ? 'share.revoked' : 'share.updated', `id=${id} ${parts.join(' ')}`);
     return { ok: true };
+  }
+
+  /** Admin: lock (freeze) or unlock a share. */
+  async setShareLock(ownerId, id, locked) {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can lock shares.');
+    const row = await this.adminShare(id);
+    if (!row) return fail(404, 'not_found', 'Share not found.');
+    const on = !!locked;
+    this.sql.exec('UPDATE shares SET locked = ?, locked_by = ?, locked_at = ? WHERE id = ?', on ? 1 : 0, on ? ownerId : null, on ? now() : null, id);
+    this.#log({ id: ownerId, adm: true }, row.user_id, on ? 'share.locked' : 'share.unlocked', `id=${id}`);
+    return { ok: true, locked: on };
+  }
+
+  /**
+   * Admin: every user's shares with filters. Times are unix seconds;
+   * `users` is a list of user ids; each range bound is optional.
+   */
+  async adminListShares({ users = [], kind = '', status = '', q = '', locked = null, createdFrom = null, createdTo = null, expiresFrom = null, expiresTo = null, limit = 50, offset = 0 } = {}) {
+    const lim = Math.max(1, Math.min(200, limit | 0));
+    const off = Math.max(0, offset | 0);
+    const where = [];
+    const args = [];
+    const ids = (Array.isArray(users) ? users : []).filter((u) => typeof u === 'string').slice(0, 100);
+    if (ids.length) { where.push(`s.user_id IN (${ids.map(() => '?').join(', ')})`); args.push(...ids); }
+    if (kind) { where.push('s.kind = ?'); args.push(String(kind)); }
+    if (status) { where.push('s.status = ?'); args.push(String(status)); }
+    if (q) { where.push("s.label LIKE ? ESCAPE '\\'"); args.push(`%${String(q).slice(0, 100).replace(/[%_\\]/g, (c) => '\\' + c)}%`); }
+    if (locked === true || locked === false) { where.push('s.locked = ?'); args.push(locked ? 1 : 0); }
+    const range = (col, from, to) => {
+      if (Number.isSafeInteger(from)) { where.push(`${col} >= ?`); args.push(from); }
+      if (Number.isSafeInteger(to)) { where.push(`${col} <= ?`); args.push(to); }
+    };
+    range('s.created', createdFrom, createdTo);
+    range('s.expires', expiresFrom, expiresTo);
+    const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const rows = this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status,
+      s.locked, s.locked_at, lu.username AS locked_by
+      FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by
+      ${w} ORDER BY s.created DESC LIMIT ? OFFSET ?`, ...args, lim, off).toArray();
+    const total = this.sql.exec(`SELECT COUNT(*) AS c FROM shares s ${w}`, ...args).one().c;
+    return { rows, total };
   }
 
   async markShareEnded(id, status) {
@@ -771,7 +895,7 @@ export class Directory extends DurableObject {
     if (before) { where.push('a.id < ?'); args.push(before); }
     if (subject) { where.push('a.subject_id = ?'); args.push(subject); }
     return this.sql.exec(
-      `SELECT a.id, a.ts, a.action, a.detail, a.actor_id, a.subject_id, a.imp, ua.username AS actor, us.username AS subject
+      `SELECT a.id, a.ts, a.action, a.detail, a.actor_id, a.subject_id, a.imp, a.adm, ua.username AS actor, us.username AS subject
        FROM activity a LEFT JOIN users ua ON ua.id = a.actor_id LEFT JOIN users us ON us.id = a.subject_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ?`, ...args, lim).toArray();
   }
@@ -783,7 +907,7 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
     this.sql.exec('DELETE FROM ip_rules WHERE expires IS NOT NULL AND expires < ?', ts);
     this.sql.exec("UPDATE shares SET status = 'expired' WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
-    this.sql.exec("DELETE FROM shares WHERE status != 'active' AND expires < ?", ts - SHARE_PRUNE_SEC);
+    this.sql.exec("DELETE FROM shares WHERE status != 'active' AND locked = 0 AND expires < ?", ts - SHARE_PRUNE_SEC);
     await this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
   }
 }

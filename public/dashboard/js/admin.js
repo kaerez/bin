@@ -9,6 +9,7 @@ import { newCredential, checkNewPassword } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { ready } from './nav.js';
+import { renderShares } from './admin-shares.js';
 
 const $ = (s) => document.querySelector(s);
 const panel = (name) => document.querySelector(`.admin-panel[data-panel="${name}"]`);
@@ -70,7 +71,7 @@ async function refreshOverview() {
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
-  ({ users: renderUsers, defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, audit: renderAudit })[name]();
+  ({ users: renderUsers, shares: () => renderShares(panel('shares')), defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, audit: renderAudit })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────
@@ -383,7 +384,9 @@ async function renderAudit() {
     const r = await guard(() => admin.audit(before));
     if (!r) return;
     for (const a of r.rows) {
-      const who = a.imp ? `${a.actor} as ${a.subject}` : a.actor || 'system';
+      // imp: done while impersonating; adm: an admin's direct change to another
+      // user's share (in this log only, never in the user's own activity).
+      const who = a.imp ? `${a.actor} as ${a.subject}` : `${a.actor || 'system'}${a.adm ? ' (admin)' : ''}`;
       const on = !a.imp && a.subject && a.subject !== a.actor ? a.subject : '';
       body.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'When' }, text: formatDate(a.ts) }), h('td', { dataset: { label: 'Who' }, text: who }),
         h('td', { dataset: { label: 'On user' }, text: on }), h('td.mono', { dataset: { label: 'Action' }, text: a.action }), h('td', { dataset: { label: 'Details' }, text: a.detail })));
