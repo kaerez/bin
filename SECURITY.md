@@ -232,6 +232,11 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   compare). A token value works **once** (its hash is recorded); recovery requires a new value.
   With `AUTHN` unset, setup rejects every request with `404` and never errors. Every setup is
   audited; the admin panel warns while `AUTHN` is still set.
+- **Password policy** (admin-set, global and per user: minimum length 12–128, upper-case,
+  lower-case, digit, symbol) is **enforced only in the browser** — the server receives an
+  Argon2id proof, never the password, so it cannot verify the policy. A modified client can set
+  a weaker password for its own account; the policy protects honest users from weak choices, not
+  the server from a hostile client. The owner always has the built-in policy (12 characters).
 - **Passwords** never reach the server: the client sends `Argon2id(password, salt)`; the server
   stores `SHA-256("secbin-auth/v2" ‖ that)`. Prelogin returns a stable, secret-keyed fake salt
   for unknown usernames, and every account uses the same Argon2id time cost, so the response

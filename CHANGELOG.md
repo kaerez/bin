@@ -15,6 +15,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Password policy** (Defaults & quotas, or per user): minimum length and required character
+  classes (upper-case, lower-case, digit, symbol), shown next to every password field and
+  enforced in the browser (the server never sees passwords). The owner keeps the built-in policy.
 - **Public (anonymous) sharing**, off by default (Admin → Public access): a built-in `(public)`
   account with its own limits and quotas (notes only, ≤ 10 views, ≤ 7 days and 10 per day by
   default); a composer on the home page with an editable notice and the delete token on

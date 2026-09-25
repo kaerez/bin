@@ -32,7 +32,7 @@ const fx = vi.hoisted(() => {
 
 vi.mock('../public/dashboard/js/nav.js', () => ({ ready: Promise.resolve(fx.profile) }));
 vi.mock('../public/js/pwauth.js', () => ({
-  stretch: vi.fn(), newCredential: vi.fn(), checkNewPassword: vi.fn(() => null),
+  stretch: vi.fn(), newCredential: vi.fn(), checkNewPassword: vi.fn(() => null), describePolicy: vi.fn(() => 'At least 12 characters.'),
 }));
 vi.mock('../public/js/api.js', () => {
   class ApiError extends Error {}

@@ -151,9 +151,9 @@
                             </svg>
                         </button>
                     </div>
-                    <label class="field-label" for="pw-new">New password (min. 12 characters)</label>
+                    <label class="field-label" for="pw-new" id="pw-new-label">New password (min. 12 characters)</label>
                     <div class="pw pw-wide">
-                        <input type="password" id="pw-new" class="input" placeholder="New password" autocomplete="new-password" aria-label="New password" />
+                        <input type="password" id="pw-new" class="input" placeholder="New password" autocomplete="new-password" aria-label="New password" aria-describedby="pw-policy" />
                         <button type="button" class="peek" id="pw-new-peek" aria-label="Show password" aria-pressed="false">
                             <svg
                                 class="ico-eye"
@@ -188,6 +188,7 @@
                             </svg>
                         </button>
                     </div>
+                    <p class="mono muted" id="pw-policy">At least 12 characters.</p>
                     <div class="pw pw-wide">
                         <input type="password" id="pw-new2" class="input" placeholder="Repeat new password" autocomplete="new-password" aria-label="Repeat new password" />
                         <button type="button" class="peek" id="pw-new2-peek" aria-label="Show password" aria-pressed="false">

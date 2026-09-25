@@ -114,7 +114,18 @@ export const LIMITS = {
   fileTypeMode:        { type: 'enum', values: FILE_TYPE_MODES, def: 'any' },
   fileTypeRules:       { type: 'rules', def: [] },
   maxFolderDepth:      { type: 'int', min: 0, max: MAX_FOLDER_DEPTH, nullable: true, def: null },
+  // Password policy (public/js/pwauth.js). Enforced by the browser only: the
+  // server receives an Argon2id proof, never the password. `owner` is what
+  // applies to the owner (global settings never do): the built-in minimum.
+  pwMinLength:         { type: 'int', min: 12, max: 128, nullable: false, def: 12, owner: 12 },
+  pwUpper:             { type: 'bool', def: false, owner: false },
+  pwLower:             { type: 'bool', def: false, owner: false },
+  pwDigit:             { type: 'bool', def: false, owner: false },
+  pwSymbol:            { type: 'bool', def: false, owner: false },
 };
+
+/** The password-policy keys of the limits (see public/js/pwauth.js). */
+export const PASSWORD_POLICY_KEYS = ['pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol'];
 
 /** Hard ceiling on API keys per account, whatever the limit says. */
 export const MAX_API_KEYS = 1000;
@@ -180,7 +191,7 @@ export function restrictForApi(all, apiGlobalRows, apiUserRows) {
 }
 
 export const UNLIMITED = Object.freeze(Object.fromEntries(Object.entries(LIMITS).map(([k, s]) => [k,
-  s.type === 'bool' ? true : s.type === 'enum' ? 'any' : s.type === 'rules' ? [] : (s.nullable ? null : 100)])));
+  'owner' in s ? s.owner : s.type === 'bool' ? true : s.type === 'enum' ? 'any' : s.type === 'rules' ? [] : (s.nullable ? null : 100)])));
 
 // ── quotas ───────────────────────────────────────────────────────────────────
 export const QUOTA_UNITS = { s: 1, m: MIN, h: HOUR, d: DAY, mo: null, y: null };

@@ -3,7 +3,7 @@
 
 import '../../js/kdf-progress.js';
 import { changePassword, listKeys, createKey, revokeKey, myActivity, ApiError } from '../../js/api.js';
-import { stretch, newCredential, checkNewPassword } from '../../js/pwauth.js';
+import { stretch, newCredential, checkNewPassword, describePolicy } from '../../js/pwauth.js';
 import { prelogin } from '../../js/api.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
 import { copyText, flashCopied, toast } from '../../js/ui.js';
@@ -52,6 +52,11 @@ function wirePassword() {
   wirePeek(['#pw-current', '#pw-current-peek']);
   wirePeek(['#pw-new', '#pw-new-peek'], ['#pw-new2', '#pw-new2-peek']);
   const form = $('#pw-form');
+  // The policy the administrator set for this account (checked here only:
+  // the server never sees the password).
+  const rule = describePolicy(profile.passwordPolicy);
+  $('#pw-new-label').textContent = 'New password';
+  $('#pw-policy').textContent = rule;
   if (profile.impersonatedBy) {
     form.hidden = true;
     return;
@@ -60,7 +65,7 @@ function wirePassword() {
     e.preventDefault();
     const msg = $('#pw-msg');
     const btn = $('#pw-btn');
-    const bad = checkNewPassword($('#pw-new').value, $('#pw-new2').value);
+    const bad = checkNewPassword($('#pw-new').value, $('#pw-new2').value, profile.passwordPolicy);
     if (!$('#pw-current').value) return showMsg(msg, 'Enter your current password.');
     if (bad) return showMsg(msg, bad);
     btn.disabled = true;
