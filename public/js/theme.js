@@ -21,7 +21,7 @@
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.content = next === 'dark' ? '#0d1117' : '#f2f1ec';
     try {
-      localStorage.setItem('binthere:theme', next);
+      localStorage.setItem('secbin:theme', next);
     } catch {
       /* storage disabled — the toggle still works for this page load */
     }

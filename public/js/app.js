@@ -1,11 +1,11 @@
-// app.js — binthere client controller. Routes between "create" and "view" based
+// app.js — secbin client controller. Routes between "create" and "view" based
 // on the URL path (/p/<id>#<key>), drives encryption/decryption, and renders
 // decrypted content via DOM construction only. The fragment key never leaves the
 // browser and is never placed in a network request.
 
 import { encryptPaste, decryptPaste, decryptContent, deriveContentKey, PasswordRequired } from './crypto.js';
 import { createPaste, fetchPaste, fetchPasteMeta, consumePaste, deletePaste, ApiError } from './api.js';
-import { validateHead, validatePaste, buildAAD, EXPIRE_SECONDS } from './format.js';
+import { validateHead, validatePaste, buildAAD, expireSeconds, MAX_VIEWS } from './format.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, flashCopied, pill } from './ui.js';
@@ -16,6 +16,11 @@ import { $, showView, toast, copyText, flashCopied, pill } from './ui.js';
 // and called `stopExpiryTimer()` before this line was reached — turning every
 // view into a stuck "loading…" screen.
 let expiryTimer = null;
+// Create-option constants, declared up here for the same TDZ reason: the route
+// dispatch below calls initCreate() → readCreateOptions() during module evaluation.
+const UNIT_WORDS = { m: ['minute', 'minutes'], h: ['hour', 'hours'], d: ['day', 'days'] };
+const EXPIRE_ERR = 'Expiry must be a whole number between 1 minute and 365 days.';
+const VIEWS_ERR = `Views must be a whole number from 1 to ${MAX_VIEWS.toLocaleString('en-US')}, or unlimited (∞).`;
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 const route = location.pathname.match(/^\/p\/([^/]+)\/?$/);
@@ -51,13 +56,17 @@ function initCreate() {
   const createBtn = $('#create');
   const sendTxt = createBtn.querySelector('.send-txt');
   const msg = $('#create-msg');
+  wireCreateOptions();
 
   const requestCreate = () => {
     if (createBtn.disabled) return;
     if (!$('#editor').value.trim()) { showMsg(msg, 'Type something first.'); $('#editor').focus(); return; }
+    const opts = readCreateOptions();
+    if (opts.viewsErr) { showMsg(msg, opts.viewsErr); $('#views').focus(); return; }
+    if (opts.expireErr) { showMsg(msg, opts.expireErr); $('#expire-n').focus(); return; }
     msg.hidden = true;
-    if (pwRequired) openPasswordModal((password) => submitPaste(password));
-    else submitPaste('');
+    if (pwRequired) openPasswordModal((password) => submitPaste(password, opts));
+    else submitPaste('', opts);
   };
   createBtn.addEventListener('click', requestCreate);
   // Editor convention: Ctrl/Cmd+Enter submits without leaving the textarea.
@@ -65,10 +74,11 @@ function initCreate() {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); requestCreate(); }
   });
 
-  // Every note is one-time view (bar:true) and auto-deletes within 24h — a
-  // deliberate product choice, not a missing picker. The wire format (and the
-  // CLI/API) supports the full expiry range; the web client does not expose it.
-  async function submitPaste(password) {
+  // View limit and expiry come from the composer controls (default: one view,
+  // 24 hours). A finite view count is a view-limited paste (bar:true, served by
+  // the Durable Object); unlimited views is an ordinary KV paste (bar:false).
+  async function submitPaste(password, opts) {
+    const bar = opts.views !== null;
     createBtn.disabled = true;
     const label = sendTxt ? sendTxt.textContent : '';
     // Press → the arrow leaves the button (`.sending`), then the composer follows
@@ -91,8 +101,9 @@ function initCreate() {
         text: $('#editor').value,
         password,
         fmt,
-        bar: true,
-        expire: '1day',
+        bar,
+        expire: opts.expire,
+        views: bar ? opts.views : undefined,
       });
       const { id, deletetoken } = await createPaste(body);
       const url = `${location.origin}/p/${id}#${fragment}`;
@@ -104,7 +115,7 @@ function initCreate() {
       // served its purpose; don't leave it in the (now hidden) textarea. On any
       // failure it is deliberately kept — the user must not lose their note.
       $('#editor').value = '';
-      showSuccess({ id, deletetoken, url, isBurn: true });
+      showSuccess({ id, deletetoken, url, views: opts.views, expiryText: opts.expiryText });
     } catch (e) {
       clearTimeout(relabel);
       createBtn.classList.remove('sending'); // the arrow glides back in
@@ -209,13 +220,17 @@ function openPasswordModal(onSubmit) {
   $('#pw-modal-dialog').focus();
 }
 
-function showSuccess({ id, deletetoken, url, isBurn }) {
+function showSuccess({ id, deletetoken, url, views, expiryText }) {
   showView('success');
   $('#paste-url').textContent = url;
-  if (isBurn) {
-    $('#success-note').textContent =
-      'Anyone with this link can read the note once.';
-  }
+  const keep = ' Keep the whole link private — the key that unlocks it is inside the link.';
+  $('#success-note').textContent = (views === null
+    ? `Anyone with this link can open the note any number of times until it self-destructs in ${expiryText}.`
+    : views === 1
+      ? `Anyone with this link can read the note once. Unread, it self-destructs in ${expiryText}.`
+      : `Anyone with this link can open the note up to ${views} times. It self-destructs after the last view or in ${expiryText}, whichever comes first.`) + keep;
+  const seal = $('#seal-label');
+  if (seal) seal.textContent = `scan to open · ${views === null ? 'unlimited views' : views === 1 ? 'one-time read' : `${views} views`}`;
   renderQr(url);
 
   $('#copy-url').onclick = async () => {
@@ -223,7 +238,13 @@ function showSuccess({ id, deletetoken, url, isBurn }) {
   };
   // Both irreversible actions are two-step: opening a one-time link consumes it,
   // and delete is permanent. A stray click must not kill a note about to be shared.
-  armConfirm($('#open-link'), 'Uses the one view — open?', () => { location.href = url; });
+  if (views === null) {
+    const open = $('#open-link');
+    open.onblur = null;
+    open.onclick = () => { location.href = url; };
+  } else {
+    armConfirm($('#open-link'), views === 1 ? 'Uses the one view — open?' : `Uses 1 of ${views} views — open?`, () => { location.href = url; });
+  }
   $('#another').onclick = () => { location.href = '/'; };
 
   const delBtn = $('#delete-btn');
@@ -327,12 +348,18 @@ async function initBurnView(id, fragment) {
     return status('Could not read this note — the server response was malformed.', true);
   }
 
+  const total = head.meta.views ?? 1;
+  const left = head.meta.left ?? 1;
   if (head.adata.kdf === 'pbkdf2-hkdf') {
     // Password-protected: prompt + verify against the wrapped key BEFORE consuming.
-    promptPasswordBurn(id, fragment, head);
+    promptPasswordBurn(id, fragment, head, total);
   } else {
-    // No password: an explicit "reveal" click is the consent to burn it.
-    status('This note can only be viewed once.', false, { reveal: true });
+    // No password: an explicit "reveal" click is the consent to spend a view.
+    status(total === 1
+      ? 'This note can only be viewed once.'
+      : left === 1
+        ? `This is the last remaining view of this note (${total} in total). Opening it deletes the note.`
+        : `This note has ${left} views left. Opening it uses one.`, false, { reveal: true });
     const revealBtn = $('#reveal-burn');
     revealBtn.disabled = false;
     // When the countdown hits zero the note is gone server-side — leaving an
@@ -391,13 +418,13 @@ async function consumeBurn(id, head, cek) {
 }
 
 function promptPasswordNormal(paste, fragment) {
-  wirePasswordScreen(false, async (password) => {
+  wirePasswordScreen('normal', async (password) => {
     renderPaste(paste, await decryptPaste({ paste, fragment, password }));
   });
 }
 
-function promptPasswordBurn(id, fragment, head) {
-  wirePasswordScreen(true, async (password) => {
+function promptPasswordBurn(id, fragment, head, total = 1) {
+  wirePasswordScreen(total === 1 ? 'burn' : 'limited', async (password) => {
     // Verify the password against the peeked wrapped key WITHOUT consuming.
     // Throws PasswordRequired / DecryptError, leaving the paste intact.
     const cek = await deriveContentKey({ adata: head.adata, wk: head.wk, fragment, password });
@@ -409,14 +436,16 @@ function promptPasswordBurn(id, fragment, head) {
 
 // Shared password screen. `verify(password)` throws on a bad/empty password
 // (paste untouched) and otherwise transitions the view itself.
-function wirePasswordScreen(isBurn, verify) {
+function wirePasswordScreen(kind, verify) {
   showView('password');
   wirePeek(['#decrypt-password', '#peek2']);
   const sub = $('#password-subtitle');
   if (sub) {
-    sub.textContent = isBurn
+    sub.textContent = kind === 'burn'
       ? 'This single-use note is password-protected. It is destroyed only once the correct password unlocks it.'
-      : 'This note is protected by a password in addition to the key in the link.';
+      : kind === 'limited'
+        ? 'This view-limited note is password-protected. A view is used only once the correct password unlocks it.'
+        : 'This note is protected by a password in addition to the key in the link.';
   }
   const input = $('#decrypt-password');
   const btn = $('#decrypt-btn');
@@ -464,9 +493,9 @@ function handleReadError(e) {
   if (!(e instanceof ApiError)) {
     status('Could not reach the server — check your connection and try again.', true);
   } else if (e.status === 410) {
-    status('This paste has expired or was already opened.', true);
+    status('This paste has expired or has no views left.', true);
   } else {
-    status('This paste has expired, was already opened, or never existed.', true);
+    status('This paste has expired, has no views left, or never existed.', true);
   }
 }
 
@@ -478,14 +507,33 @@ function renderPaste(paste, result) {
   const isMarkdown = result.fmt === 'markdown';
   const isCode = result.fmt === 'code' || (result.fmt === 'plaintext' && looksLikeCode(result.text));
 
-  // Pills: (code|markdown) · (one-time view). Plain text gets no kind pill —
-  // it's the default and adds nothing. No expiry pill either: an opened note is
-  // already consumed, so "expires in 24h" would be misleading.
+  // Pills: (code|markdown) · (views) · (time left). Plain text gets no kind pill.
+  // A note whose last view was just spent gets no expiry pill — it's gone.
   const pills = $('#paste-pills');
   pills.textContent = '';
   if (isMarkdown) pills.appendChild(pill('markdown'));
   else if (isCode) pills.appendChild(pill('code'));
-  if (result.bar) pills.appendChild(pill('one-time view · now deleted', 'bad'));
+  const meta = paste && paste.meta ? paste.meta : {};
+  let stillExists = true;
+  if (result.bar) {
+    const total = Number.isInteger(meta.views) ? meta.views : 1;
+    const left = Number.isInteger(meta.left) ? meta.left : 0;
+    if (left <= 0) {
+      stillExists = false;
+      pills.appendChild(pill(total === 1 ? 'one-time view · now deleted' : 'last view · now deleted', 'bad'));
+    } else {
+      pills.appendChild(pill(`${left} ${left === 1 ? 'view' : 'views'} left`, 'warn'));
+    }
+  } else {
+    pills.appendChild(pill('unlimited views'));
+  }
+  if (stillExists) {
+    const ttl = expireSeconds(meta.expire) ?? 0;
+    if (ttl > 0 && Number.isInteger(meta.created)) {
+      const leftS = meta.created + ttl - Math.floor(Date.now() / 1000);
+      if (leftS > 0) pills.appendChild(pill(`deletes in ${formatCoarse(leftS)}`));
+    }
+  }
 
   // Content (DOM construction only).
   const container = $('#paste-content');
@@ -615,7 +663,7 @@ function startExpiryTimer(meta, onExpire) {
   const box = $('#status-timer');
   const clock = $('#status-timer-clock');
   if (!box || !clock || !meta) return;
-  const ttl = EXPIRE_SECONDS[meta.expire] ?? 0;
+  const ttl = expireSeconds(meta.expire) ?? 0;
   if (ttl <= 0 || !Number.isInteger(meta.created)) return;
 
   const expireAt = (meta.created + ttl) * 1000;
@@ -646,6 +694,81 @@ function formatDuration(ms) {
   const s = total % 60;
   const pad = (n) => String(n).padStart(2, '0');
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+// Seconds → coarse "2d 3h" / "3h 12m" / "12m" / "<1m".
+function formatCoarse(sec) {
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return m > 0 ? `${m}m` : '<1m';
+}
+
+// ── create options (view limit + expiry) ─────────────────────────────────────
+
+/**
+ * Read and validate the composer's view/expiry controls. Returns
+ * { views: number|null (null = unlimited), expire: "<n>m|h|d", expiryText,
+ *   viewsErr, expireErr }. The server re-validates everything (format.js).
+ */
+function readCreateOptions() {
+  const unlimited = $('#views-unlimited')?.getAttribute('aria-pressed') === 'true';
+  const vRaw = ($('#views')?.value ?? '1').trim();
+  const nRaw = ($('#expire-n')?.value ?? '24').trim();
+  const unit = $('#expire-unit')?.value ?? 'h';
+
+  let views = null;
+  let viewsErr = null;
+  if (!unlimited) {
+    if (/^[1-9][0-9]{0,5}$/.test(vRaw) && Number(vRaw) <= MAX_VIEWS) views = Number(vRaw);
+    else viewsErr = VIEWS_ERR;
+  }
+
+  let expire = null;
+  let expireErr = null;
+  let expiryText = '';
+  if (/^[1-9][0-9]{0,6}$/.test(nRaw) && Object.prototype.hasOwnProperty.call(UNIT_WORDS, unit)
+      && expireSeconds(nRaw + unit) !== null) {
+    expire = nRaw + unit;
+    const n = Number(nRaw);
+    expiryText = `${n} ${UNIT_WORDS[unit][n === 1 ? 0 : 1]}`;
+  } else {
+    expireErr = EXPIRE_ERR;
+  }
+  return { views, expire, expiryText, viewsErr, expireErr };
+}
+
+/** Wire the ∞ toggle and keep the ledger line + validity state live. */
+function wireCreateOptions() {
+  const viewsIn = $('#views');
+  const inf = $('#views-unlimited');
+  const expN = $('#expire-n');
+  const expU = $('#expire-unit');
+  if (!viewsIn || !inf || !expN || !expU) return;
+
+  const refresh = () => {
+    const o = readCreateOptions();
+    viewsIn.setAttribute('aria-invalid', String(Boolean(o.viewsErr)));
+    expN.setAttribute('aria-invalid', String(Boolean(o.expireErr)));
+    const fv = $('#feat-views');
+    if (fv && !o.viewsErr) {
+      fv.textContent = o.views === null ? 'Unlimited views' : o.views === 1 ? 'One-time view' : `${o.views} views`;
+    }
+    const fe = $('#feat-expire');
+    if (fe && !o.expireErr) fe.textContent = `Auto-deletes in ${o.expiryText}`;
+  };
+
+  inf.addEventListener('click', () => {
+    const on = inf.getAttribute('aria-pressed') !== 'true';
+    inf.setAttribute('aria-pressed', String(on));
+    viewsIn.disabled = on;
+    refresh();
+  });
+  for (const el of [viewsIn, expN]) el.addEventListener('input', refresh);
+  expU.addEventListener('change', refresh);
+  refresh();
 }
 
 function showMsg(el, message) {

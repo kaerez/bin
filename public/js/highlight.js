@@ -1,6 +1,6 @@
 // highlight.js — tiny, language-agnostic syntax highlighter for decrypted pastes.
 //
-// binthere treats all notes as plain text (no format picker), but "obvious"
+// secbin treats all notes as plain text (no format picker), but "obvious"
 // source code should still read like code. This module:
 //   • heuristically decides whether a blob looks like code (looksLikeCode),
 //   • tokenizes it with a single regex into comments/strings/numbers/keywords/
