@@ -7,7 +7,7 @@ assignees: ''
 ---
 
 > ⚠️ **Do not report security vulnerabilities here.** See
-> [`SECURITY.md`](https://github.com/nxfu/binthere/blob/main/SECURITY.md) and report privately to nxfu@proton.me.
+> [`SECURITY.md`](https://github.com/kaerez/bin/blob/main/SECURITY.md) and report privately via [GitHub private vulnerability reporting](https://github.com/kaerez/bin/security/advisories/new).
 
 **What happened**
 A clear description of the bug.

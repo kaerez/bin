@@ -1,0 +1,7 @@
+# Local development secrets for `wrangler dev` — copy to .dev.vars (gitignored).
+# Generate real values with: openssl rand -hex 32   (never reuse these examples)
+AUTHN=change-me-to-a-long-random-setup-token-0000
+SIG=0000000000000000000000000000000000000000000000000000000000000000
+ENC=1111111111111111111111111111111111111111111111111111111111111111
+# DISABLE_BFP=false
+# DISABLE_BFP_SETUP=false

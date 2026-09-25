@@ -1,6 +1,19 @@
-# Third-party font notices
+# Third-party notices
 
-The fonts self-hosted in this directory are distributed under the **SIL Open Font License,
+## Vendored JavaScript / WebAssembly
+
+Rebuilt reproducibly by `node tools/vendor.mjs`, which fetches the pinned npm tarballs, verifies
+their SHA-256, and writes the files below. Never edit them by hand.
+
+| Library | Version | License | Files | Tarball SHA-256 |
+| --- | --- | --- | --- | --- |
+| [hash-wasm](https://github.com/Daninet/hash-wasm) (Argon2 build) © Dani Biró | 4.12.0 | MIT (`js/vendor/argon2.LICENSE`) | `js/vendor/argon2.js` — upstream `dist/argon2.umd.min.js`, UMD wrapper replaced by an ES-module export; library body unchanged | `1db32a125fb46177932ec8ac438d3cd8214ebdfaccb5d6611b657d88eb586f92` |
+| [pdf.js](https://github.com/mozilla/pdf.js) (`pdfjs-dist`) © Mozilla | 6.3.289 | Apache-2.0 (`js/vendor/pdfjs/LICENSE`) | `js/vendor/pdfjs/` — `legacy/build/pdf.min.mjs`, `pdf.worker.min.mjs`, `wasm/`, `standard_fonts/`, `cmaps/` | `06f25e887adc6489f04c9fcb14198c77e4e5623a59a0bba5c4cea5838a4f1241` |
+| [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) © Kazuhiko Arase | — | MIT | `js/qrcode.js` | — |
+
+## Fonts
+
+The fonts self-hosted in `fonts/` are distributed under the **SIL Open Font License,
 Version 1.1**. Per the license, the copyright notices and license text are reproduced below and
 accompany the font files wherever they are distributed.
 

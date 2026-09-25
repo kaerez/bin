@@ -88,7 +88,7 @@ const { port } = server.address();
 const url = `http://127.0.0.1:${port}/tools/opengraph.html`;
 
 // Chrome refuses to run without a writable profile dir; keep it out of the repo.
-const profile = join(tmpdir(), `binthere-og-${process.pid}`);
+const profile = join(tmpdir(), `secbin-og-${process.pid}`);
 const code = await new Promise((resolve, reject) => {
   const child = spawn(
     chrome,

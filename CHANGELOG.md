@@ -2,11 +2,67 @@
 
 All notable changes to secbin are documented here. The format follows [Keep a Changelog], and
 the project adheres to [Semantic Versioning]. The paste format is versioned separately from the
-application (see [`SPEC.md`](./SPEC.md), currently **v1** with the secbin view-limit extension).
+application (see [`SPEC.md`](./SPEC.md), currently **v2**).
 
 secbin is maintained by KSEC - Erez Kalman at <https://github.com/kaerez/bin> and is based on
 [binthere](https://github.com/nxfu/binthere) by nxfu. The upstream history is kept below the
 secbin entries.
+
+## [Unreleased] — secbin 2.0.0
+
+**Breaking:** protocol v2. Links created by earlier versions (v1, `binthere/v1` labels) can no
+longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
+
+### Added
+
+- **Accounts, built in** (Cloudflare Access is no longer required): one owner/admin created or
+  recovered at `/dashboard/setup` with the single-use `AUTHN` secret (a new value is needed for
+  every recovery; setup is cleanly disabled when `AUTHN` is absent). Users, disable/enable,
+  delete (optionally revoking their shares), password reset without the current password,
+  unlock, and **log in as** (impersonation) with an audit trail that records the real actor.
+- **Sessions**: `__Host-` HttpOnly SameSite=Strict cookie holding a JWS (HS256, `SIG`) inside a
+  JWE (A256GCM, `ENC`); admin-configurable idle and absolute timeouts; server-side revocation.
+- **Capabilities, limits and quotas** per user and as global defaults (notes/files on/off, max
+  views, unlimited views, max expiry, max share size, max file size, max files per share,
+  viewer, API keys + max count); quotas per s/m/h/d/mo/y for all/notes/files; API-channel
+  limits and quotas that can only narrow.
+- **API keys** for the CLI (creation endpoints only), managed on the Account page.
+- **Encrypted file and folder sharing** on R2: drag-and-drop of files and folders, file and
+  folder pickers, auto-detected (editable) MIME types, packed + padded chunked stream so the
+  server learns no names, types, structure or per-file sizes. Recipients browse a tree and
+  download any file raw, any folder as a ZIP, or everything.
+- **Safe in-browser viewer** (admin-governed, sender opt-in): text/Markdown/code, sniffed raster
+  images with pre-decode size checks (SVG never rendered), hardened vendored pdf.js (no PDF
+  scripting), audio/video.
+- **My shares**: list, labels, raise views / extend expiry within limits, revoke now.
+- **Brute-force protection**: per-IP scopes for login, setup and invalid fetches (unknown ids,
+  wrong `#` keys, wrong passwords, bad grants/tokens), admin-configured rules, blocks/tracking
+  view, manual IPv4/IPv6/CIDR allow/block rules, account lockout (owner exempt),
+  `DISABLE_BFP` / `DISABLE_BFP_SETUP` kill switches.
+- **Access proofs**: the server verifies link and password proofs before releasing ciphertext or
+  spending a view; heads no longer contain the wrapped key (no offline password guessing from a
+  link alone).
+- Footer links: **Source** and **Threat Model** (kaerez/bin).
+- Test projects for Node (`test-node/`) and new workerd suites (notes, files, auth, admin,
+  shares); vectors cross-checked in Python.
+
+### Changed
+
+- **Argon2id** (64 MiB, t=3, p=1, vendored hash-wasm) replaces PBKDF2 for share passwords;
+  account passwords use it too (stretched in the browser).
+- Wire labels are now `secbin/v2`; `meta.expires` (absolute) is server-set; expiry presets and
+  `never` are gone (1 minute – 365 days).
+- `/` is a public landing + viewer; the composer moved to `/dashboard/` (session-gated by the
+  Worker); restricted APIs live under `/api/private/*`.
+- CSP adds `'wasm-unsafe-eval'` (WebAssembly only), `worker-src 'self'`, and `blob:` for viewer
+  images/media.
+- The CLI is now **`secbin`** (see `cli/README.md`): no default server, API keys, `--views`,
+  `--expire`, `--label`, `send` for files/folders, and file-share downloads.
+
+### Removed
+
+- The composer texts "One-time view" and "Auto-deletes in 24 hours".
+- The native `CREATE_RL` rate-limit binding (replaced by the Guard).
 
 ## [secbin 1.0.0] — 2026-09-25
 
@@ -334,7 +390,7 @@ stores nothing but ciphertext and non-secret metadata.
 
 - Strict CSP (`default-src 'none'`; first-party `script`/`style`/`font`/`img`/`connect`; no
   inline, no eval, no CDN). Self-hosted Newsreader + Geist + JetBrains Mono (SIL OFL 1.1
-  notices in `public/fonts/THIRD-PARTY-NOTICES.md`). Security headers via `_headers`.
+  notices now in `public/THIRD-PARTY-NOTICES.md`). Security headers via `_headers`.
 - [`SECURITY.md`](./SECURITY.md) documents the threat model, the metadata/anonymity non-goals,
   and the deployment-compromise limitation of in-browser E2E encryption, plus a security
   contact — also published at `/.well-known/security.txt`.
