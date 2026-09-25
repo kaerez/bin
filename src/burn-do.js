@@ -1,81 +1,112 @@
-// burn-do.js — BurnPaste Durable Object: view-limited pastes (SPEC.md §8,
-// extended). One DO instance per paste id. Because a DO is single-threaded and
-// every mutation runs inside blockConcurrencyWhile, each read-and-decrement is
-// atomic: exactly `views` consumers get the ciphertext, everyone after that
-// gets "gone", and the record is purged on the last view.
+// burn-do.js — BurnPaste Durable Object: view-limited notes (SPEC.md §8). One
+// instance per paste id. Every read-and-decrement runs inside
+// blockConcurrencyWhile, so exactly `views` openers get the ciphertext, every
+// later opener gets "gone", and the record is purged on the last view.
+//
+// Access proofs (SPEC.md §5.4) are checked here, atomically with the view
+// spend: a wrong link or wrong password never consumes a view. The stored
+// record never leaves the object except as the released paste, and the proof
+// hashes, the delete-token hash and the owner id never leave it at all.
 
 import { DurableObject } from 'cloudflare:workers';
 import { verifyToken } from './lib/ids.js';
-import { MAX_VIEWS } from '../public/js/format.js';
+import { timingSafeEqualHex } from '../public/js/bytes.js';
 
 const KEY = 'rec';
 
-/** Views remaining on a stored record. Records written before view limits existed hold no `left` → 1. */
-function leftOf(rec) {
-  return Number.isInteger(rec.left) && rec.left > 0 ? rec.left : 1;
-}
+const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && timingSafeEqualHex(a, b);
 
-/** Copy of the stored meta with the live remaining-view count attached. */
-function metaWithLeft(meta, left) {
-  const out = { expire: meta.expire, created: meta.created };
-  if (meta.views !== undefined) out.views = meta.views;
-  out.left = left;
+function metaOut(rec) {
+  const m = rec.paste.meta;
+  const out = { expire: m.expire, created: m.created, expires: m.expires };
+  out.views = rec.views;           // null = raised to unlimited
+  out.left = rec.left;
   return out;
 }
 
 export class BurnPaste extends DurableObject {
-  /**
-   * Store a view-limited paste. Returns false if this instance already holds one
-   * (an id collision), so the caller can regenerate the id. `paste` excludes
-   * `dth`, which is stored separately and never returned to a reader.
-   */
-  async create(paste, dth, ttlSec, views = 1) {
+  async #get() {
+    const rec = await this.ctx.storage.get(KEY);
+    if (!rec || !rec.acc) return null; // pre-v2 records are unreadable by design
+    if (rec.exp && Date.now() > rec.exp) { await this.#purge(); return null; }
+    return rec;
+  }
+
+  /** Store a view-limited paste; false on id collision. */
+  async create(record, ttlSec, views) {
     return this.ctx.blockConcurrencyWhile(async () => {
       if (await this.ctx.storage.get(KEY)) return false;
-      const left = Number.isInteger(views) && views >= 1 && views <= MAX_VIEWS ? views : 1;
       const exp = ttlSec > 0 ? Date.now() + ttlSec * 1000 : 0;
-      await this.ctx.storage.put(KEY, { paste, dth, exp, left });
+      await this.ctx.storage.put(KEY, { ...record, exp, views, left: views });
       if (exp > 0) await this.ctx.storage.setAlarm(exp);
       return true;
     });
   }
 
-  /**
-   * Non-consuming metadata read: returns the paste head (everything EXCEPT the
-   * ciphertext `ct`) so the client can verify a password before spending a
-   * view. Does not decrement. The content itself is never released here.
-   */
-  async peek() {
+  /** Non-secret head: { v, adata, meta } — never wk/ct. */
+  async head() {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const rec = await this.ctx.storage.get(KEY);
+      const rec = await this.#get();
       if (!rec) return { status: 'gone' };
-      if (rec.exp && Date.now() > rec.exp) { await this.#purge(); return { status: 'gone' }; }
       const p = rec.paste;
-      return { status: 'ok', head: { v: p.v, wk: p.wk, adata: p.adata, meta: metaWithLeft(p.meta, leftOf(rec)) } };
+      return { status: 'ok', head: { v: p.v, adata: p.adata, meta: metaOut(rec) } };
     });
   }
 
-  /**
-   * Atomically spend one view and return the paste. The last view purges the
-   * record. { status:'ok', paste } while views remain, then 'gone'.
-   */
-  async consume() {
+  /** Verify both proof hashes, then atomically spend one view and release. */
+  async open(lh, kh) {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const rec = await this.ctx.storage.get(KEY);
+      const rec = await this.#get();
       if (!rec) return { status: 'gone' };
-      if (rec.exp && Date.now() > rec.exp) { await this.#purge(); return { status: 'gone' }; }
-      const left = leftOf(rec) - 1;
-      if (left <= 0) await this.#purge();
-      else await this.ctx.storage.put(KEY, { ...rec, left });
+      if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
+      if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
+      let left = rec.left;
+      if (left !== null) {
+        left -= 1;
+        if (left <= 0) await this.#purge();
+        else await this.ctx.storage.put(KEY, { ...rec, left });
+      }
       const p = rec.paste;
-      return { status: 'ok', paste: { v: p.v, ct: p.ct, wk: p.wk, adata: p.adata, meta: metaWithLeft(p.meta, Math.max(0, left)) } };
+      return { status: 'ok', uid: rec.uid, paste: { v: p.v, ct: p.ct, wk: p.wk, adata: p.adata, meta: metaOut({ ...rec, left: left === null ? null : Math.max(0, left) }) } };
     });
   }
 
-  /** Delete via delete token. 'ok' | 'bad' (wrong token) | 'notfound'. */
+  /** Live status for the owner's share list. */
+  async status() {
+    const rec = await this.#get();
+    if (!rec) return { status: 'gone' };
+    return { status: 'ok', views: rec.views, left: rec.left, expires: rec.paste.meta.expires };
+  }
+
+  /** Raise views (total, or null = unlimited) and/or push expiry later. Never lowers. */
+  async extend({ views, expires }) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const rec = await this.#get();
+      if (!rec) return { status: 'gone' };
+      const next = { ...rec, paste: { ...rec.paste, meta: { ...rec.paste.meta } } };
+      if (views !== undefined) {
+        if (rec.views === null && views !== null) return { status: 'invalid', message: 'Views are already unlimited.' };
+        if (views !== null && views <= rec.views) return { status: 'invalid', message: 'Views can only be increased.' };
+        const used = rec.views === null ? 0 : rec.views - rec.left;
+        next.views = views;
+        next.left = views === null ? null : views - used;
+        next.paste.meta.views = views;
+      }
+      if (expires !== undefined) {
+        if (rec.paste.meta.expires && expires <= rec.paste.meta.expires) return { status: 'invalid', message: 'Expiry can only be extended.' };
+        next.exp = expires * 1000;
+        next.paste.meta.expires = expires;
+        await this.ctx.storage.setAlarm(next.exp);
+      }
+      await this.ctx.storage.put(KEY, next);
+      return { status: 'ok', views: next.views, left: next.left, expires: next.paste.meta.expires };
+    });
+  }
+
+  /** Delete via delete token. 'ok' | 'bad' | 'notfound'. */
   async remove(token) {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const rec = await this.ctx.storage.get(KEY);
+      const rec = await this.#get();
       if (!rec) return { status: 'notfound' };
       if (!(await verifyToken(token, rec.dth))) return { status: 'bad' };
       await this.#purge();
@@ -83,7 +114,14 @@ export class BurnPaste extends DurableObject {
     });
   }
 
-  /** Alarm fires at expiry → drop the paste. */
+  /** Owner revocation (authorization is checked by the Worker). */
+  async revoke() {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.#purge();
+      return { status: 'ok' };
+    });
+  }
+
   async alarm() {
     await this.#purge();
   }

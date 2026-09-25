@@ -4,18 +4,21 @@ import { genId, parseId, genDeleteToken, hashToken, verifyToken } from '../src/l
 
 describe('paste ids', () => {
   it('generates class-prefixed ids of the right shape and entropy', () => {
-    const k = genId(false);
-    const b = genId(true);
+    const k = genId('k');
+    const b = genId('b');
+    const f = genId('f');
     expect(k[0]).toBe('k');
     expect(b[0]).toBe('b');
     expect(k.length).toBe(23); // 1 prefix + 22 b64url chars (16 bytes)
-    expect(parseId(k)).toEqual({ cls: 'k', burn: false });
-    expect(parseId(b)).toEqual({ cls: 'b', burn: true });
+    expect(parseId(k)).toEqual({ cls: 'k', burn: false, file: false });
+    expect(parseId(b)).toEqual({ cls: 'b', burn: true, file: false });
+    expect(parseId(f)).toEqual({ cls: 'f', burn: false, file: true });
+    expect(() => genId('z')).toThrow();
   });
 
   it('ids are unique across many draws', () => {
     const s = new Set();
-    for (let i = 0; i < 1000; i++) s.add(genId(false));
+    for (let i = 0; i < 1000; i++) s.add(genId('k'));
     expect(s.size).toBe(1000);
   });
 

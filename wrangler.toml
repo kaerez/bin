@@ -1,50 +1,79 @@
-# wrangler.toml — binthere: a single Cloudflare Worker that serves the static
-# frontend (Workers Static Assets), the zero-knowledge paste API, the BurnPaste
-# Durable Object (strict burn-after-read), KV storage, and native rate limiting.
-# One deploy unit, one config — see SPEC.md / SECURITY.md / ARCHITECTURE.md.
-
-# Worker script name is "binthere" (→ deploy URL binthere.<subdomain>.workers.dev);
-# the KV namespace keeps the "PASTES" name.
+# wrangler.toml — secbin: a single Cloudflare Worker serving the static frontend
+# (Workers Static Assets), the zero-knowledge share API, accounts/admin, and the
+# storage behind them (KV, R2 and four Durable Object classes). One deploy unit,
+# one config — see SPEC.md / SECURITY.md / ARCHITECTURE.md.
+#
+# Worker script name "bin" (→ bin.<subdomain>.workers.dev — disable that route or
+# keep it unused in production; secbin's own login protects /dashboard either way).
 name = "bin"
 main = "src/index.js"
 compatibility_date = "2025-10-11"
 
 # ── Static assets ────────────────────────────────────────────────────────────
-# The frontend lives in public/. The Worker runs first only for /api/*; every
-# other path is served from static assets, with a single-page-application
-# fallback so /p/<id> serves index.html (the client reads the id + fragment key).
+# The frontend lives in public/. The Worker runs first for the API and for the
+# signed-in app (/dashboard*, which it gates on a valid session); every other path
+# is served straight from static assets, with a single-page-application fallback
+# so /p/<id> serves the viewer (the client reads the id + fragment key).
 [assets]
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = [ "/api/*" ]
+run_worker_first = [ "/api/*", "/dashboard", "/dashboard/*" ]
 
-# ── KV: normal (non-burn) pastes, immutable, native TTL expiry ───────────────
-# Create with:  wrangler kv namespace create PASTES
-# then paste the id below (and a preview_id for local dev).
+# ── KV: unlimited-view notes, immutable, native TTL expiry ───────────────────
 [[kv_namespaces]]
 binding = "PASTES"
 id = "57cb2cce5d0c4399bc760eb65602d7e4"
 preview_id = "3cea39cba48443d2babc78f1af07f39f"
 
-# ── Durable Object: burn-after-read pastes (atomic single-consumer) ──────────
+# ── R2: encrypted file-share chunks (ciphertext only) ────────────────────────
+# Create with:  wrangler r2 bucket create secbin-files
+# Recommended backstop lifecycle rule (the FileShare DO deletes objects itself):
+#   wrangler r2 bucket lifecycle add secbin-files --expire-days 366 --abort-multipart-days 1
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "secbin-files"
+
+# ── Durable Objects ──────────────────────────────────────────────────────────
+# BurnPaste  — view-limited notes (atomic open / view spend), one per id
+# FileShare  — file shares: upload state, views, grants, R2 cleanup, one per id
+# Directory  — accounts, sessions, limits, quotas, settings, audit (singleton)
+# Guard      — brute-force tracking + IP blocks, sharded by IP hash
 [[durable_objects.bindings]]
 name = "BURN"
 class_name = "BurnPaste"
+
+[[durable_objects.bindings]]
+name = "FILESHARE"
+class_name = "FileShare"
+
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "Directory"
+
+[[durable_objects.bindings]]
+name = "GUARD"
+class_name = "Guard"
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = [ "BurnPaste" ]
 
-# ── Native rate limiting: paste creation, keyed by client IP ─────────────────
-# Abuse mitigation, not authentication; the code fails open if unavailable.
-[[ratelimits]]
-name = "CREATE_RL"
-namespace_id = "1001"
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = [ "FileShare", "Directory", "Guard" ]
 
-  [ratelimits.simple]
-  limit = 30
-  period = 60
+# ── Variables ────────────────────────────────────────────────────────────────
+# Secrets are NOT set here — use `wrangler secret put <NAME>` (or the dashboard):
+#   AUTHN  one-time owner setup / recovery token (≥ 32 chars). Delete it after
+#          setup; set a NEW value to recover the owner account.
+#   SIG    session-signing key, 64 hex chars   (openssl rand -hex 32)
+#   ENC    session-encryption key, 64 hex chars (openssl rand -hex 32)
+# Optional kill switches (plain vars, case-insensitive "true"):
+#   DISABLE_BFP        disable all brute-force protection and IP rules
+#   DISABLE_BFP_SETUP  disable it for /dashboard/setup only
+# Everything else (limits, quotas, timeouts, rate limits, viewer policy) is
+# configured by the owner in the admin panel.
 
 # ── Observability ────────────────────────────────────────────────────────────
 [observability]

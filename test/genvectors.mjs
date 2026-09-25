@@ -1,27 +1,21 @@
-// genvectors.mjs — regenerate the FROZEN crypto test vectors pinned in
-// test/crypto.test.js. Run with:  node test/genvectors.mjs
+// genvectors.mjs — regenerate the FROZEN protocol-v2 test vectors pinned in
+// test-node/crypto.test.js. Run with:  node test/genvectors.mjs
 //
-// The vectors freeze protocol v1 (SPEC.md §11) at the byte level: from a set of
-// fixed inputs (F, CEK, IVs, salt, plaintext) it recomputes the canonical AAD,
-// the wrapped CEK, and the content ciphertext for the no-password and password
-// branches, then prints a ready-to-paste `VECTORS` object.
+// From fixed inputs (F, CEK, IVs, salt, password, plaintext) it recomputes the
+// canonical AAD, the Argon2id password key, the KEK, both access proofs (and
+// their stored hashes), the wrapped CEK and the content ciphertext for the
+// no-password and password branches, then prints a ready-to-paste `VECTORS`
+// object.
 //
 // This is a DELIBERATE, spec-first step. Any protocol/format/AAD change MUST
 // update SPEC.md first, then rerun this to regenerate the vectors — never edit
-// the pinned hexes by hand. See CONTRIBUTING.md.
-//
-// CI diffs this script's output against test/vectors.expected.txt byte-for-byte
-// (.github/workflows/ci.yml). When regenerating, refresh both places:
+// the pinned hexes by hand. Refresh both places:
 //   node test/genvectors.mjs > test/vectors.expected.txt
-// and paste the same output over the VECTORS object in test/crypto.test.js.
-//
-// It imports the same shared modules the browser and Worker use, and runs on
-// Node's Web Crypto (Node 18+), so a conforming implementation reproduces the
-// exact bytes committed in test/crypto.test.js.
+// and paste the same output over the VECTORS object in test-node/crypto.test.js.
+// tools/verify-vectors.py re-derives the same bytes independently (Python).
 
-import {
-  deriveKEK, aesGcmEncrypt, aesGcmDecrypt,
-} from '../public/js/crypto.js';
+import { keySchedule, aesGcmEncrypt, aesGcmDecrypt, proofHash } from '../public/js/crypto.js';
+import { argon2idRaw } from '../public/js/kdf.js';
 import { buildAAD } from '../public/js/format.js';
 import { hex, b64urlFromBytes, utf8, fromUtf8 } from '../public/js/bytes.js';
 
@@ -34,44 +28,41 @@ const CEK = seq(0x20, 32);
 const ivc = fill(0x11, 12);
 const ivw = fill(0x22, 12);
 const salt = fill(0x33, 16);
-const VEC_PLAINTEXT = 'binthere vector — zero knowledge ✓';
+const VEC_PLAINTEXT = 'secbin vector — zero knowledge ✓';
 
-// The two branches the vectors cover (SPEC.md §11): no-password (HKDF only) and
-// password-protected (PBKDF2 → HKDF). `iter`/`skdf` mirror what the format stores.
 const CASES = {
   nopw: {
     adata: { alg: 'A256GCM', kdf: 'hkdf', iter: 0, comp: 'none', fmt: 'plaintext', bar: false,
              ivc: b64urlFromBytes(ivc), ivw: b64urlFromBytes(ivw), skdf: '' },
-    usePassword: false, password: '', iter: 0,
+    password: '',
   },
   pw: {
-    adata: { alg: 'A256GCM', kdf: 'pbkdf2-hkdf', iter: 310000, comp: 'none', fmt: 'plaintext', bar: false,
+    adata: { alg: 'A256GCM', kdf: 'argon2id-hkdf', iter: 3, comp: 'none', fmt: 'plaintext', bar: false,
              ivc: b64urlFromBytes(ivc), ivw: b64urlFromBytes(ivw), skdf: b64urlFromBytes(salt) },
-    usePassword: true, password: 'correct horse', iter: 310000,
+    password: 'correct horse',
   },
 };
 
 async function computeVector(c) {
   const aad = buildAAD(c.adata);
-
-  // Wrapped CEK: encrypt the CEK under the KEK derived from F (+ password).
-  const kek = await deriveKEK(F, { usePassword: c.usePassword, password: c.password, salt, iter: c.iter });
+  const pwIkm = c.password ? await argon2idRaw(utf8(c.password.normalize('NFC')), salt, { t: c.adata.iter }) : new Uint8Array(0);
+  const { kek, linkProof, keyProof } = await keySchedule(F, pwIkm);
   const wk = await aesGcmEncrypt(kek, ivw, CEK, aad);
-
-  // Content ciphertext: encrypt the plaintext under the CEK.
   const contentKey = await crypto.subtle.importKey('raw', CEK, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
   const ct = await aesGcmEncrypt(contentKey, ivc, utf8(VEC_PLAINTEXT), aad);
 
-  // Self-check: the wrap unwraps back to the CEK and the ciphertext decrypts.
-  const unwrapped = await aesGcmDecrypt(kek, ivw, wk, aad);
-  if (hex(unwrapped) !== hex(CEK)) throw new Error('self-check failed: CEK unwrap mismatch');
-  const decrypted = fromUtf8(await aesGcmDecrypt(contentKey, ivc, ct, aad));
-  if (decrypted !== VEC_PLAINTEXT) throw new Error('self-check failed: content decrypt mismatch');
+  if (hex(await aesGcmDecrypt(kek, ivw, wk, aad)) !== hex(CEK)) throw new Error('self-check failed: CEK unwrap');
+  if (fromUtf8(await aesGcmDecrypt(contentKey, ivc, ct, aad)) !== VEC_PLAINTEXT) throw new Error('self-check failed: decrypt');
 
   return {
     adata: c.adata,
-    usePassword: c.usePassword, password: c.password, iter: c.iter,
+    password: c.password,
     aadHex: hex(aad),
+    pwIkmHex: hex(pwIkm),
+    linkProof: b64urlFromBytes(linkProof),
+    keyProof: b64urlFromBytes(keyProof),
+    lh: await proofHash(b64urlFromBytes(linkProof)),
+    kh: await proofHash(b64urlFromBytes(keyProof)),
     wkHex: hex(wk),
     ctHex: hex(ct),
   };
@@ -84,10 +75,10 @@ function printVector(name, v) {
   console.log(`  ${name}: {`);
   console.log(`    adata: { alg: ${q(a.alg)}, kdf: ${q(a.kdf)}, iter: ${a.iter}, comp: ${q(a.comp)}, fmt: ${q(a.fmt)}, bar: ${a.bar},`);
   console.log(`             ivc: b64urlFromBytes(ivc), ivw: b64urlFromBytes(ivw), skdf: ${a.skdf === '' ? "''" : 'b64urlFromBytes(salt)'} },`);
-  console.log(`    usePassword: ${v.usePassword}, password: ${q(v.password)}, iter: ${v.iter},`);
-  console.log(`    aadHex: ${q(v.aadHex)},`);
-  console.log(`    wkHex: ${q(v.wkHex)},`);
-  console.log(`    ctHex: ${q(v.ctHex)},`);
+  console.log(`    password: ${q(v.password)},`);
+  for (const k of ['aadHex', 'pwIkmHex', 'linkProof', 'keyProof', 'lh', 'kh', 'wkHex', 'ctHex']) {
+    console.log(`    ${k}: ${q(v[k])},`);
+  }
   console.log('  },');
 }
 
