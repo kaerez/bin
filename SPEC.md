@@ -244,7 +244,7 @@ Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` count
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `POST /api/private/paste` `{paste, label?}` | session / key | create a note → 201 `{id, deletetoken, expires}` |
-| `POST /api/private/file` `{views, expire, padded, files?, maxFile?}` | session / key | start a file share → 201 `{id, uploadtoken, deletetoken, chunks}` |
+| `POST /api/private/file` `{views, expire, padded, files?, maxFile?, types?, depth?}` | session / key | start a file share → 201 `{id, uploadtoken, deletetoken, chunks}` |
 | `PUT /api/private/file/:id/chunk/:i` (octet-stream, `X-Upload-Token`) | session / key | upload chunk `i` (exact size, §12) |
 | `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
 | `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy |
@@ -311,8 +311,16 @@ exact ciphertext size of every chunk: `min(CHUNK, padded − i·CHUNK) + 16`.
 ### 12.3 Upload and read
 
 1. `POST /api/private/file` with `views` (or `null`), `expire`, `padded`; `files` (count) and
-   `maxFile` (largest file size) only when the account has such limits. The server checks
-   capabilities, limits and quotas, then creates a pending share (upload deadline).
+   `maxFile` (largest file size) only when the account has such limits; `types` (the
+   de-duplicated `[{ext, mime}]` of the files, `ext` lower-case without the dot, `""` for none)
+   only under a file-type policy and `depth` (the deepest folder level: `a.txt` → 0,
+   `x/y/a.txt` → 2, an empty folder counts itself) only under a folder-depth policy. A missing
+   required declaration is `400 declaration_required` with the policy
+   `{mode, rules, maxFolderDepth}` attached, so clients can check locally and resend; a refused
+   type is `403 file_type_not_allowed` (with `refused`), too deep is `403 folder_too_deep`.
+   Rules are `ext:<ext>` or `mime:<type>/<subtype|*>`; mode `allow` refuses types matching no
+   rule, `block` refuses types matching any (`public/js/filepolicy.js`). The server checks
+   capabilities, limits, policy and quotas, then creates a pending share (upload deadline).
 2. `PUT …/chunk/:i` for every `i` (retries are idempotent — same bytes).
 3. `POST …/finalize` with the manifest share; `bar`, `views` and `expire` must match step 1.
 4. Readers open with proofs (§10) and receive a **download grant** (default 60 min, capped at

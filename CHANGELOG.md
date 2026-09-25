@@ -21,6 +21,13 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
   - the owner can change labels, views and expiry, revoke, and lock/unlock;
   - a locked share is frozen for its sender and its delete token;
   - direct admin changes are logged in the audit log but not in the user's own activity.
+- **File policy**, globally or per user (Admin → Users → Manage, or Defaults):
+  - an allow list or block list of file types (`ext:pdf`, `mime:image/*`) and a maximum folder
+    depth (which the API channel can only tighten);
+  - the composer and `secbin send` check it before encrypting, naming the offending files;
+  - the file types and folder depth are declared to the server only when a policy applies
+    (see SECURITY.md); the owner is exempt.
+- The admin limits editor refreshes its "effective" values after a save.
 - **Directory schema migrations**: versioned, idempotent and tested, for Directories created by
   older releases.
 
