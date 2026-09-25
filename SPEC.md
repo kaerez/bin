@@ -1,415 +1,326 @@
-# secbin — Protocol Specification (v1 + view-limit extension)
+# secbin — Protocol Specification (v2)
 
-> **Status: cryptography FROZEN.** This document defines paste format v1 and the exact
-> byte-level cryptographic protocol. secbin is based on
-> [binthere](https://github.com/nxfu/binthere); the cryptographic protocol (§1–§4, §11) is
-> **unchanged** from binthere v1, including its wire labels (`"binthere/v1"`, `"binthere/v1 kek"`),
-> so the frozen test vectors still apply byte-for-byte. secbin adds a **non-cryptographic
-> metadata extension** — configurable view limits and custom expiry (§5, §8, §9) — that does
-> not touch the ciphertext, the wrapped key, or the AAD. Any change to the cryptographic
-> protocol still requires a new `v` value, an updated spec, and new test vectors *before* code
-> changes.
->
-> **Compatibility.** Because `v` stays `1`, a secbin server stores and serves ciphertext that
-> any v1 implementation can decrypt. However, upstream binthere clients validate `meta`
-> strictly and will **reject** secbin pastes that carry `meta.views` / `meta.left` or a custom
-> expiry (e.g. `"90m"`). Use the clients in this repository with a secbin server.
+> **Status: v2, frozen by test vectors.** This document defines share format **v2** — the exact
+> byte-level cryptographic protocol, the note and file-share formats, and the HTTP API. v2
+> replaces v1 (inherited from [binthere](https://github.com/nxfu/binthere)) and is **not
+> backward compatible**: v1 links (`"binthere/v1"` labels, PBKDF2) can no longer be opened.
+> Any change to §1–§5 or §12 requires a new `v`, an updated spec and regenerated vectors
+> (`node test/genvectors.mjs`, cross-checked by `python tools/verify-vectors.py`) *before*
+> code changes.
 
-This is a zero-knowledge pastebin: paste plaintext is encrypted and decrypted **only on the
-client** (the browser, or the official CLI — both implement this spec and are verified against
-the same vectors). The decryption secret lives in the URL **fragment** (`#…`) and is never sent
-to the server. See `SECURITY.md` for the threat model and trust boundaries.
+Everything that describes shared content is encrypted and decrypted **only on the client** (the
+browser, or the official CLI — both implement this spec and are verified against the same
+vectors). The decryption secret lives in the URL **fragment** (`#…`) and is never sent to the
+server. See `SECURITY.md` for the threat model.
 
 ---
 
 ## 1. Notation & primitives
 
-- All byte-level values are produced with the CSPRNG `crypto.getRandomValues()`.
-  `Math.random()` is **never** used for any security-sensitive value.
-- `b64url(x)` = unpadded, URL-safe Base64 (RFC 4648 §5, no `=` padding, `-`/`_` for `+`/`/`).
-  Decoders MUST accept only the **canonical** encoding: characters outside the base64url
-  alphabet, lengths `≡ 1 (mod 4)`, and encodings whose final character has non-zero unused
-  bits (RFC 4648 §3.5 — e.g. `Zh` aliasing `Zg` → `0x66`) are all rejected. Every byte string
-  has exactly one valid encoding, so ids, tokens, `skdf`, IVs, and fragments cannot alias.
-  *(Errata 2026-07: canonicity was underspecified and decoders accepted non-zero padding
-  bits; no exploitable consequence was found, and the tightening is applied to both official
-  clients as a protocol-compatibility fix.)*
-- `UTF8(s)` = UTF-8 encoding of string `s`.
-- `‖` = byte concatenation.
-- Crypto primitives are **Web Crypto** (`crypto.subtle`) only:
-  - **AES-256-GCM** — authenticated encryption. 96-bit (12-byte) IV, 128-bit tag.
-  - **PBKDF2-HMAC-SHA256** — password stretching.
-  - **HKDF-SHA256** — high-entropy key combination / derivation.
-  - **SHA-256** — delete-token hashing.
+- Randomness: `crypto.getRandomValues()` only.
+- `b64url(x)` = unpadded, URL-safe Base64 (RFC 4648 §5). Decoders accept only the **canonical**
+  encoding (no characters outside the alphabet, no length ≡ 1 mod 4, zero unused bits in the
+  final character), so no byte string has two encodings.
+- `UTF8(s)` = UTF-8 encoding; `NFC(s)` = Unicode NFC normalization; `‖` = concatenation.
+- Primitives:
+  - **AES-256-GCM** — 96-bit IV, 128-bit tag.
+  - **Argon2id** (RFC 9106, version 0x13) — password stretching; memory `m = 65536 KiB` (64 MiB),
+    lanes `p = 1`, time cost `t` (1…10, default 3), output 32 bytes.
+  - **HKDF-SHA256** — 32-byte outputs; an empty salt means the RFC 5869 all-zero salt.
+  - **SHA-256** — proof hashes, token hashes.
 
-### Random values (per paste)
+### Random values (per share)
 
-| Value          | Size      | Purpose                                                        |
-|----------------|-----------|---------------------------------------------------------------|
-| `CEK`          | 32 bytes  | Content-encryption key (AES-256-GCM). Encrypts the paste.      |
-| `F`            | 32 bytes  | Fragment secret ("URL key"). Placed in the URL fragment.      |
-| `iv_content`   | 12 bytes  | GCM nonce for the content encryption.                         |
-| `iv_wrap`      | 12 bytes  | GCM nonce for the CEK-wrap encryption (distinct from above).  |
-| `salt_kdf`     | 16 bytes  | PBKDF2 salt. Present **only** for password-protected pastes.  |
-| `id` (random)  | 16 bytes  | 128-bit paste identifier entropy.                             |
-| `deleteToken`  | 32 bytes  | 256-bit delete authorization token.                           |
-
-IVs are freshly generated per paste and per encryption operation; an `(key, iv)` pair is
-never reused.
+| Value | Size | Purpose |
+|---|---|---|
+| `CEK` | 32 B | Content-encryption key. |
+| `F` | 32 B | Fragment secret, placed in the URL fragment. |
+| `iv_content`, `iv_wrap` | 12 B each | GCM nonces for content and CEK wrap. |
+| `salt_kdf` | 16 B | Argon2id salt (password-protected shares only). |
+| `id` | 16 B | 128-bit share id entropy. |
+| `deleteToken`, upload token, download grant | 32 B each | Capability tokens (server stores SHA-256 only). |
+| `FK` | 32 B | File-share stream key (inside the encrypted manifest, §12). |
 
 ---
 
-## 2. Key hierarchy (CEK / KEK)
-
-The paste is always encrypted with a random **CEK**. The CEK is then *wrapped* (encrypted)
-with a **KEK** derived from the fragment secret `F` and, if set, the password. There is **no**
-ad-hoc `PBKDF2(F ‖ password)` construction.
+## 2. Key hierarchy and access proofs
 
 ```
-CEK      = random(32)                                              # AES-256-GCM content key
+pw_ikm    = password ? Argon2id(UTF8(NFC(password)), salt_kdf, m=64 MiB, t=adata.iter, p=1, 32 B) : "" (0 bytes)
+KEK       = HKDF(ikm = F,   salt = pw_ikm, info = "secbin/v2 kek",        32 B)
+linkProof = HKDF(ikm = F,   salt = "",     info = "secbin/v2 link-proof", 32 B)
+keyProof  = HKDF(ikm = KEK, salt = "",     info = "secbin/v2 key-proof",  32 B)
 
-# Password stretching (only when a password is set; otherwise pw_ikm is empty)
-pw_ikm   = password ? PBKDF2(hash=SHA-256, pw=UTF8(password),
-                             salt=salt_kdf, iterations=ITER, dkLen=32)
-                    : ""                                           # zero-length byte string
+wk = AES-256-GCM(key = KEK, iv = iv_wrap,    plaintext = CEK,     aad = AAD)
+ct = AES-256-GCM(key = CEK, iv = iv_content, plaintext = payload, aad = AAD)
 
-# Key-encryption key: combine the high-entropy fragment secret with the (stretched) password
-KEK      = HKDF(hash=SHA-256, ikm=F, salt=pw_ikm, info=UTF8("binthere/v1 kek"), L=32)
-
-# Wrap the CEK and encrypt the content, both binding the canonical AAD (§4)
-wk       = AES-256-GCM(key=KEK, iv=iv_wrap,    plaintext=CEK,          additionalData=AAD)
-ct       = AES-256-GCM(key=CEK, iv=iv_content, plaintext=comp(data),   additionalData=AAD)
+acc.lh = b64url(SHA-256(linkProof))
+acc.kh = b64url(SHA-256(keyProof))
 ```
 
-- `ITER` (PBKDF2 iterations) = **310000** for v1. Stored in the format (`adata.iter`); a
-  reader uses the stored value, so the parameter is versioned and upgradable.
-- **Password normalization:** `UTF8(password)` means `UTF8(NFC(password))` — clients MUST
-  Unicode-normalize the password to NFC before encoding, so "café" typed on macOS (NFD) and
-  on Windows (NFC) stretches to the same `pw_ikm`. ASCII passwords are unaffected.
-  *(Errata 2026-07: normalization was previously unspecified and clients used the raw
-  input bytes; the fix removes the cross-device/input-method hazard while adoption is low.
-  Compatibility cost, stated plainly: a pre-errata paste whose password was entered in a
-  non-NFC form can no longer be unlocked by a normalizing client — its `pw_ikm` was
-  stretched from the un-normalized bytes. ASCII and already-NFC passwords, i.e. the
-  overwhelmingly common case, are unaffected.)*
-- **HKDF salt carries the second secret.** HKDF-Extract computes
-  `PRK = HMAC-SHA256(salt = pw_ikm, key = F)`. Recovering `KEK` therefore requires **both**
-  `F` (as IKM) and `pw_ikm` (as salt, ⇒ the password). This is a deliberate, documented use of
-  the HKDF salt input as an additional secret; it only strengthens the derivation.
-- **No password:** `pw_ikm` is empty ⇒ per RFC 5869 HKDF-Extract uses an all-zero salt of
-  `HashLen` bytes. `KEK` is then a deterministic function of `F` alone, so a non-password paste
-  decrypts from the fragment secret without further input. Intended.
+- The server stores `acc` and never returns it. A reader sends `linkProof` and `keyProof`
+  (`X-Link-Proof`, `X-Key-Proof`); the server compares their SHA-256 with `acc` in constant time
+  **before** releasing `wk`/`ct`, spending a view or issuing a download grant (§10).
+- `linkProof` depends only on `F`: a mismatch means the link is wrong (`bad_link`). `keyProof`
+  depends on `F` and the password: a mismatch with a matching link proof means the password is
+  wrong (`bad_password`). Neither spends a view.
+- Knowing `acc` (or observing proofs) does not reveal `F`, the password, `KEK` or `CEK`. Guessing
+  a password needs `F` *and* an online, rate-limited request; the head never contains `wk`.
 
 ### Security properties
 
-| Paste type      | Inputs needed to derive KEK        | F alone | password alone |
-|-----------------|------------------------------------|---------|----------------|
-| No password     | `F`                                | ✅ works | n/a            |
-| Password (`pw`) | `F` **and** `password`             | ❌ fails | ❌ fails        |
-
-`info = "binthere/v1 kek"` provides domain separation and version binding of the derivation.
+- `F` alone opens a password-less share; with a password, `F` and the password are both needed.
+- Distinct HKDF labels separate the KEK and the two proofs; no key is reused across roles.
+- All security-relevant `adata` is bound by the canonical AAD (§4) to both GCM operations.
 
 ---
 
 ## 3. Compression
 
-`comp(data)` is applied to the UTF-8 plaintext bytes before content encryption:
-
-- `comp = "gzip"` — `CompressionStream('gzip')` output, when available.
-- `comp = "none"` — identity (no compression). Used when `CompressionStream` is unavailable,
-  and in deterministic test vectors (gzip output is not guaranteed byte-identical across
-  implementations, so vectors are pinned with `comp="none"`).
-
-Decompression enforces a **maximum decompressed size** (`MAX_PLAINTEXT`, §6) with a running
-byte counter and aborts if exceeded (gzip-bomb defense). The plaintext is also capped at
-`MAX_PLAINTEXT` **before** compression on create.
-
-The chosen `comp` value is part of the authenticated `adata` (§4), so it cannot be altered by
-a tampering server without breaking GCM authentication.
+`payload = gzip(UTF8(text))` if that is shorter than `UTF8(text)` (`adata.comp = "gzip"`), else
+the raw bytes (`"none"`). Decompression is capped at `MAX_PLAINTEXT` (1 MiB) — gzip-bomb defense.
 
 ---
 
-## 4. Canonical Additional Authenticated Data (AAD)
+## 4. Canonical AAD
 
-The AAD binds every field that affects decryption, rendering, compression, or view-limit semantics
-to **both** GCM operations (`wk` and `ct`). It is a **fixed-order** byte string and **never**
-depends on JSON object key ordering.
+Fixed order, newline-terminated, independent of JSON key order:
 
 ```
-AAD = UTF8(
-  "binthere/v1" + "\n" +
-  "alg="  + alg          + "\n" +   // "A256GCM"
-  "kdf="  + kdf          + "\n" +   // "hkdf" | "pbkdf2-hkdf"
-  "iter=" + iter         + "\n" +   // decimal integer; 0 when no password
-  "comp=" + comp         + "\n" +   // "gzip" | "none"
-  "fmt="  + fmt          + "\n" +   // "plaintext" | "code" | "markdown"
-  "bar="  + (bar?"1":"0")+ "\n" +   // view-limited flag ("burn after reading")
-  "ivc="  + b64url(iv_content) + "\n" +
-  "ivw="  + b64url(iv_wrap)    + "\n" +
-  "skdf=" + skdf         + "\n"     // b64url(salt_kdf), or "" when no password
-)
+secbin/v2\n
+alg=A256GCM\n
+kdf=<hkdf|argon2id-hkdf>\n
+iter=<adata.iter>\n
+comp=<gzip|none>\n
+fmt=<plaintext|code|markdown|files>\n
+bar=<0|1>\n
+ivc=<b64url iv_content>\n
+ivw=<b64url iv_wrap>\n
+skdf=<b64url salt_kdf, or empty>\n
 ```
-
-The AAD is recomputed by the reader from the received `adata` and fed to both GCM
-decryptions. Any mismatch (a flipped `bar`, changed `fmt`, swapped IV, altered `iter`, …)
-causes authentication to fail — decryption fails closed.
 
 ---
 
-## 5. Paste format v1 (wire / storage)
+## 5. Share format v2
 
-The client `POST`s this JSON to create a paste. The server persists it (adding server fields
-in §5.2) and returns it (minus private fields) on read.
+### 5.1 `adata` (non-secret, AAD-bound)
 
-### 5.1 Client-supplied object
+| Field | Type | Rules |
+|---|---|---|
+| `alg` | string | `"A256GCM"` |
+| `kdf` | string | `"hkdf"` (no password) or `"argon2id-hkdf"` |
+| `iter` | int | `0` for `hkdf`; Argon2id `t` ∈ [1, 10] for `argon2id-hkdf` |
+| `comp` | string | `"gzip"` or `"none"` |
+| `fmt` | string | `"plaintext"`, `"code"`, `"markdown"` (notes) or `"files"` (file-share manifest, §12) |
+| `bar` | bool | `true` = view-limited, `false` = unlimited views |
+| `ivc`, `ivw` | b64url | 12 bytes each |
+| `skdf` | b64url | 16 bytes for `argon2id-hkdf`, empty string for `hkdf` |
 
-```jsonc
-{
-  "v": 1,                              // integer, MUST equal 1
-  "ct": "<b64url>",                    // content ciphertext + GCM tag
-  "wk": "<b64url>",                    // wrapped CEK + GCM tag (32B CEK + 16B tag = 48B)
-  "adata": {
-    "alg":  "A256GCM",                 // only supported value
-    "kdf":  "hkdf" | "pbkdf2-hkdf",    // "pbkdf2-hkdf" iff password-protected
-    "iter": 310000 | 0,               // PBKDF2 iterations; MUST be 0 iff kdf == "hkdf"
-    "comp": "gzip" | "none",
-    "fmt":  "plaintext" | "code" | "markdown",
-    "bar":  false | true,              // view-limited (true) or unlimited (false)
-    "ivc":  "<b64url>",                // exactly 12 bytes
-    "ivw":  "<b64url>",                // exactly 12 bytes
-    "skdf": "<b64url>" | ""            // 16 bytes iff kdf=="pbkdf2-hkdf", else ""
-  },
-  "meta": {
-    "expire": "<preset>" | "<n>m" | "<n>h" | "<n>d",   // see §9
-    "views":  1 … 100000               // OPTIONAL; only when bar == true; default 1
-  }
-}
+### 5.2 Create body (client → server)
+
+```json
+{ "v": 2, "ct": "…", "wk": "…", "adata": { … }, "meta": { "expire": "24h", "views": 3 }, "acc": { "lh": "…", "kh": "…" } }
 ```
 
-- `bar: true` ⇒ a **view-limited** paste (id prefix `"b"`, Durable Object, §8). `meta.views`
-  sets how many times it can be opened; omitted means **1** (classic burn-after-read).
-- `bar: false` ⇒ an **unlimited-view** paste (id prefix `"k"`, KV). It MUST NOT carry
-  `meta.views`.
-- Any `meta.left` sent by a client is ignored on create; the server owns the counter.
+- `meta.expire`: `"<n>m" | "<n>h" | "<n>d"`, 60 s … 365 days. `meta.views` (1…100 000) only when
+  `bar` is true (absent ⇒ 1). `created`, `expires`, `left` are server-set and rejected on create.
+- `acc.lh`, `acc.kh`: 32-byte hashes (43 b64url chars).
 
-### 5.2 Server-added fields
+### 5.3 Head (public, `GET`)
 
-On create the server augments `meta` and stores private data never returned to a reader:
+`{ v, adata, meta }` — never `wk`, `ct` or `acc`. `meta` gains `created`, `expires` (absolute
+Unix seconds) and, for view-limited shares, `views` and `left` (`null` = raised to unlimited).
 
-- `meta.created` — integer Unix seconds (server clock).
-- `meta.views` — for view-limited pastes, the effective view limit (the client value, or 1).
-- `dth` — hex `SHA-256(deleteToken)` (**private**; stored, never serialized to a reader).
+### 5.4 Opened note (`POST …/open` with matching proofs)
 
-On read the server returns the stored object with `dth` removed and `meta.created` present.
-For view-limited pastes, reads (head and consume) also carry **`meta.left`** — the number of
-views remaining *after* that response (so the consume that spends the last view returns
-`left: 0`). The counter is kept by the Durable Object, not in the stored `meta`.
+`{ v, ct, wk, adata, meta }`.
 
-### 5.3 Validation (fail-closed, prototype-pollution-safe)
+### 5.5 Validation
 
-Parsing is strict. The validator:
-
-1. `JSON.parse`, then rebuild a clean object **field-by-field from an allowlist**. Untrusted
-   objects are never spread/merged into a result. Own keys `__proto__`, `constructor`,
-   `prototype` cause rejection.
-2. Enforces, and rejects on any violation:
-   - `v === 1`.
-   - `ct`, `wk` are non-empty valid b64url within size caps (§6).
-   - `adata` contains **exactly** the allowed keys — unknown keys are rejected.
-   - `alg === "A256GCM"`.
-   - `kdf ∈ {"hkdf","pbkdf2-hkdf"}`; `iter` is an integer, `=== 0` iff `kdf==="hkdf"`, else
-     within `[ITER_MIN, ITER_MAX]` (§6).
-   - `comp ∈ {"gzip","none"}`; `fmt ∈ {"plaintext","code","markdown"}`; `bar` is a boolean.
-   - `ivc`, `ivw` decode to exactly 12 bytes; `skdf` decodes to exactly 16 bytes iff
-     `kdf==="pbkdf2-hkdf"`, else is `""`.
-   - `meta` contains only `expire`, `created`, `views`, `left`; unknown keys are rejected.
-   - `meta.expire` is a valid preset or custom duration within bounds (§9).
-   - `meta.views`, if present, is an integer in `[1, MAX_VIEWS]`; `meta.left`, if present, is
-     an integer in `[0, views]` (views defaulting to 1).
-   - `meta.views` / `meta.left` are present **only** when `adata.bar === true`.
-3. Any malformed JSON, bad base64url, wrong type, wrong length, unknown field, unsupported
-   version/alg, out-of-range iteration count, or pollution-shaped key ⇒ **HTTP 400**, no
-   storage, no partial state.
+Every object is validated fail-closed: exact key sets, prototype-pollution-shaped keys
+rejected, types/ranges/lengths checked, `v` must be 2, `views`/`left` only with `bar`. Clients
+validate heads *before* any key derivation (bounded `iter` ⇒ bounded Argon2 work).
 
 ---
 
 ## 6. Limits
 
-| Constant         | Value        | Enforced where                                            |
-|------------------|--------------|-----------------------------------------------------------|
-| `MAX_PLAINTEXT`  | 1 MiB        | Client, before compression; and as decompression cap.     |
-| `MAX_CT_B64`     | 3 000 000    | Server: max length of `ct` (b64url chars). Else **413**.  |
-| `MAX_BODY`       | 4 MiB        | Server: max request body bytes. Else **413**.             |
-| `MAX_BURN_RECORD`| 1 900 000    | Server: max serialized view-limited record (`{paste,dth,exp,left}` JSON chars) — SQLite-backed DO storage caps a value at ~2 MB, below what `MAX_CT_B64` admits. View-limited creates over this get **413**; KV pastes are unaffected. |
-| `MAX_VIEWS`      | 100 000      | Client + server: maximum `meta.views`.                    |
-| `MIN_TTL`        | 60 s         | Client + server: shortest custom expiry (KV's `expirationTtl` minimum). |
-| `MAX_TTL`        | 31 536 000 s | Client + server: longest custom expiry (365 days).        |
-| `ITER` (v1)      | 310000      | PBKDF2 iterations for new pastes.                         |
-| `ITER_MIN`       | 100000      | Validation floor for `adata.iter` on password pastes.     |
-| `ITER_MAX`       | 1000000     | Validation ceiling for `adata.iter`.                      |
+| Constant | Value | Where |
+|---|---|---|
+| `MAX_PLAINTEXT` | 1 MiB | notes / manifest plaintext, and decompression cap |
+| `MAX_CT_B64` | 3 000 000 | server: max `ct` length (else 413) |
+| `MAX_BODY` | 4 MiB | server: max JSON request body |
+| `MAX_BURN_RECORD` | 1 900 000 | server: max serialized DO record (view-limited notes, manifests) |
+| `MAX_VIEWS` | 100 000 | client + server |
+| `MIN_TTL` / `MAX_TTL` | 60 s / 365 d | client + server |
+| `CHUNK` | 8 MiB | file-share plaintext chunk |
+| `PAD` | 64 KiB | file-share stream padding unit |
+| `HARD_MAX_SHARE_BYTES` | 2 GiB | ceiling for the admin-configured share cap (default 100 MiB) |
+| `MAX_ENTRIES` | 10 000 | manifest entries |
+
+Per-user limits (§13) may be lower.
 
 ---
 
-## 7. Identifiers, storage classes, delete tokens
+## 7. Identifiers and tokens
 
-- **Paste id** = `classPrefix ‖ b64url(random(16))`, where `classPrefix ∈ {"k","b"}`:
-  - `"k"` — normal paste, stored in **KV** (`PASTES`), immutable, with native TTL expiry.
-  - `"b"` — view-limited paste (1…`MAX_VIEWS` views), stored in the **`BurnPaste` Durable Object**.
-  The 16 random bytes provide 128 bits of entropy independent of the 1-char class prefix.
-  The read path selects the store by inspecting the prefix — no extra lookup.
-- **Delete token** = `b64url(random(32))` (256 bits). The server stores only
-  `dth = hex(SHA-256(deleteToken))`. On delete, the presented token is length/encoding
-  validated, hashed, and compared to `dth` with a **timing-safe, fixed-length** comparison.
-  The raw token is never stored.
-
----
-
-## 8. View-limited semantics (strict, generalised burn-after-read)
-
-View-limited pastes (`bar:true`, id prefix `"b"`) are stored in the `BurnPaste` Durable Object,
-one instance per id (`idFromName(id)`), together with a remaining-view counter `left`
-(initialised to `meta.views`, default 1). Because a DO instance is single-threaded and every
-mutation runs inside `blockConcurrencyWhile`, each consume is **atomic**:
-
-- Each `POST /api/paste/:id/consume` transactionally reads the record, decrements `left`, and
-  returns the paste with `meta.left` set to the remaining count (**200**). The consume that
-  takes `left` to 0 **deletes** the record in the same step.
-- Exactly `views` consumes succeed, regardless of concurrency; every later consume finds no
-  record and returns **410 Gone**. (With `views = 1` this is the original single-consumer
-  burn-after-read.)
-- Expiry is enforced by a DO `alarm` (set to `created + ttl`) and by a lazy check on read
-  (an expired record is deleted and yields 410).
-- Records created before view limits existed carry no counter and are treated as `left = 1`.
-- Consumption is **never reachable by `GET`**. A plain `GET` on a view-limited id (with or
-  without `?meta=1`) returns the non-consuming head (below), so an ambient GET — an `<img>`
-  tag, a navigation prefetch, a link-scanning bot — can never spend a view.
-  The consume request is deliberately CORS *non-simple*: it must be a `POST` carrying the
-  custom header `X-Burn-Intent: consume`, which forces a cross-origin browser to preflight;
-  the API serves no CORS headers, so the preflight fails and the consume never happens.
-  Requests bearing `Sec-Fetch-Site: cross-site` are rejected outright (**403**) as defense
-  in depth. Non-browser clients simply set the header.
-
-This provides exact view counting that eventually-consistent KV cannot.
-
-### Non-consuming metadata peek
-
-A view-limited paste's *head* — `adata`, the wrapped key `wk`, and `meta` (including `views`
-and `left`), but **never** the ciphertext `ct` — is what any `GET /api/paste/:id` returns for a
-`"b"` id, with or without `?meta=1`, and reading it never spends a view. This lets the client
-verify a password by unwrapping the CEK from `wk` **before** a destructive read, so a wrong or
-absent password never spends a view (only the explicit `POST …/consume` does). The content `ct` is never returned by a peek. The
-client validates the peeked head
-with the same fail-closed rules as §5.3 (minus `ct`) **before** deriving any key, so a hostile
-response cannot demand an out-of-range `iter` or feed malformed fields into key derivation.
-
-Trade-off: because `wk` is released without consuming, a password-protected paste's password is
-subject to *offline* guessing by anyone who already holds the fragment secret `F`. Use a strong
-password. This does not weaken the AES-256-GCM confidentiality/integrity of the content itself;
-it only removes the "an attacker's guess also spends a view" side effect.
-
-### Delete vs. expiry
-
-`DELETE` on a view-limited id verifies the delete token and removes the record; unlike `peek`/`consume`
-it does **not** apply a lazy expiry check first. A valid delete-token holder may therefore
-delete a view-limited record that has expired but has not yet been purged by its `alarm`. This is
-harmless — an expired record is destined for deletion either way, and only the token holder can
-trigger it — and never releases content (`DELETE` returns no paste body).
+- **Share id** = class prefix ‖ `b64url(random(16))` (23 chars):
+  `k` — unlimited-view note (KV) · `b` — view-limited note (`BurnPaste` DO) · `f` — file share
+  (`FileShare` DO + R2).
+- **Delete token / upload token / download grant** = `b64url(random(32))`. The server stores only
+  `hex(SHA-256(token))` and compares in constant time. Tokens travel in headers, never URLs.
+- **API key** = `"sbk_" ‖ b64url(random(32))`, stored as SHA-256. Sent as
+  `Authorization: Bearer <key>`, and accepted only on the endpoints marked "key" in §10.
+- **Share URL** = `<origin>/p/<id>#<b64url(F)>`.
 
 ---
+
+## 8. Views
+
+- View-limited shares live in a Durable Object, one per id. Each open verifies both proofs and
+  decrements `left` atomically; exactly `views` openers succeed, the rest get `410`.
+- The last view purges a note immediately. A file share becomes *closed*: no new opens, but
+  download grants already issued keep working until they expire, then the share and its R2
+  objects are purged.
+- Owners may raise `views` (or switch to unlimited if allowed) and extend `expires`; never lower.
+- `404` vs `410`: a malformed id is `404`; a well-formed DO id that is gone (never existed,
+  consumed, expired, revoked) is `410`; KV notes answer `404` when missing.
 
 ## 9. Expiry
 
-`meta.expire` maps to a TTL in seconds. It is either a **preset**:
-
-| key     | seconds   |   | key      | seconds    |
-|---------|-----------|---|----------|------------|
-| `5min`  | 300       |   | `1month` | 2592000    |
-| `10min` | 600       |   | `1year`  | 31536000   |
-| `1hour` | 3600      |   | `never`  | 0 (no TTL) |
-| `1day`  | 86400     |   |          |            |
-| `1week` | 604800    |   |          |            |
-
-or a **custom duration** `^[1-9][0-9]{0,6}(m|h|d)$` — a positive integer of minutes (`m`),
-hours (`h`) or days (`d`), e.g. `"90m"`, `"24h"`, `"7d"` — whose value in seconds must lie in
-`[MIN_TTL, MAX_TTL]` (1 minute … 365 days). Preset lookup is own-property only, so keys like
-`"__proto__"` never resolve. The web client defaults to `"24h"`.
-
-- KV pastes: passed as `expirationTtl` (omitted when `never`).
-- View-limited (DO) pastes: an `alarm` is scheduled at `created + ttl` (none when `never`).
-
-The presets are retained for compatibility with existing pastes and third-party clients; the
-web client only offers custom durations. `never` is still accepted by the API (see the cost
-note in `README.md`).
+Notes in KV use `expirationTtl`; DO-backed shares use an alarm at `meta.expires`. File-share
+alarms also delete the R2 objects; an unfinished upload is purged at its deadline (admin
+setting, default 1 h).
 
 ---
 
 ## 10. HTTP API
 
-| Method & path            | Body / params                    | Success        | Errors                          |
-|--------------------------|----------------------------------|----------------|---------------------------------|
-| `POST /api/paste`        | format v1 JSON (§5.1)            | `201` + result | `400` invalid · `403` cross-site · `413` too large · `415` wrong content-type · `429` rate-limited |
-| `GET /api/paste/:id`     | — (`"b"` ids: head only, no consume) | `200` + paste (KV) / head (view-limited) | `404` missing/expired · `410` no views left/expired |
-| `GET /api/paste/:id?meta=1` | — (head for every class, no consume) | `200` + head | `404` missing · `410` no views left/expired |
-| `POST /api/paste/:id/consume` | `X-Burn-Intent: consume` header (`"b"` ids only) | `200` + paste (with `meta.left`) | `400` missing header · `403` cross-site · `404` malformed/non-`"b"` id · `410` no views left/expired |
-| `DELETE /api/paste/:id`  | `X-Delete-Token: <deleteToken>` header | `200`    | `400` missing token · `403` wrong token · `404` missing |
+All responses are JSON with real status codes; errors are `{ "error": "<code>", "message": "…" }`.
+The API sends **no CORS headers**. State-changing requests must be non-simple (JSON content
+type, or a custom header) and `Sec-Fetch-Site: cross-site` is refused (`403`).
 
-`POST /api/paste` requires `Content-Type: application/json` (parameters such as `charset`
-are allowed); anything else is a `415`. This forces a CORS preflight for cross-origin browser
-requests — since the API sends no CORS headers, a hostile page cannot create pastes from a
-visitor's browser with a no-preflight `text/plain` POST. As defense in depth, a create
-request carrying `Sec-Fetch-Site: cross-site` is rejected with `403` (this matters when the
-site sits behind an identity proxy such as Cloudflare Access, whose session cookie a
-cross-site request might otherwise carry). Any other method on `/api/paste`,
-`/api/paste/:id`, or `/api/paste/:id/consume` returns `405` with an `Allow` header.
+### Public (capability-gated)
 
-`GET /api/paste/:id` is **always safe**: for a KV id it returns the full paste; for a view-limited id
-it returns only the head and never spends a view. `?meta=1` returns the head (no `ct`) for every
-storage class — ciphertext must not ride along on a metadata request. The only destructive
-read is `POST /api/paste/:id/consume`, which requires the `X-Burn-Intent: consume` header
-(making it CORS non-simple, §8); a missing/wrong header is a `400`, a `Sec-Fetch-Site:
-cross-site` sender is a `403`, and a well-formed non-`"b"` id is a `404`. The delete token is presented in the
-`X-Delete-Token` request header — **never** in the URL — so the raw token cannot land in
-request-URL logs (the server stores and compares only its SHA-256, §7). A *missing* token is a
-`400`; a present-but-wrong or malformed token fails closed as `403`. Ids with malformed
-percent-encoding are a `404`.
+| Method & path | Notes | Success | Errors |
+|---|---|---|---|
+| `GET /api/config` | public viewer policy | 200 | |
+| `GET /api/paste/:id` | head (§5.3) | 200 | 404, 410, 429 |
+| `POST /api/paste/:id/open` | `X-Link-Proof`, `X-Key-Proof`; spends a view if limited | 200 opened note | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `cross_site`, 404, 410, 429 |
+| `DELETE /api/paste/:id` | `X-Delete-Token` | 200 | 400, 403 `bad_token`, 404 |
+| `GET /api/file/:id` | head | 200 | 410, 429 |
+| `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes |
+| `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
+| `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
+| `POST /api/paste` | v1 anonymous create — removed | — | 410 |
 
-`POST` success result: `{ "id": "<id>", "deletetoken": "<deleteToken>" }`. The client builds
-the shareable URL `"/p/" + id + "#" + b64url(F)` locally; **`F` is never sent to the server.**
-Unlike the legacy PrivateBin API, real HTTP status codes are used (the client reads them).
+Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` counts as an
+**invalid** failure for the caller's IP (§13).
 
-**`404` vs `410` for view-limited ids.** A `404` means the id was malformed (failed structural
-parsing). For a *well-formed* view-limited (DO) id, the Durable Object cannot distinguish "never
-existed" from "all views used or expired" — its state is deleted on the last view —
-so both return **`410 Gone`**, the honest answer. `404` for `"b"` ids is therefore effectively
-limited to malformed ids; KV (unlimited) ids return `404` for missing/expired as usual. This
-per-storage-class asymmetry is deliberate and clients should treat `410` on a `"b"` id as
-"not available: never existed, no views left, or expired".
+### Auth
 
-**No CORS, by design.** The API serves no `Access-Control-*` headers. Browsers may call it
-same-origin only (the official web client); non-browser clients (the CLI, scripts, other
-spec implementations) are unaffected, since CORS is a browser-enforcement mechanism. The
-absence of CORS is a load-bearing part of the abuse posture: together with the `415`
-content-type requirement and the non-simple consume POST, it means a hostile third-party
-page can neither create pastes from a visitor's browser nor spend a view of a note whose
-id it has learned. Do not add permissive CORS headers without revisiting §8 and the create
-endpoint's protections.
+| Method & path | Body | Result |
+|---|---|---|
+| `GET /api/auth/session` | — | `{configured, authenticated, user, impersonatedBy}` |
+| `GET /api/auth/setup` | — | `{enabled, ownerExists?, configured}` |
+| `POST /api/auth/setup` | `{token, username, salt, t, proof}` | owner created or recovered; 404 if `AUTHN` unset; 403 wrong token; 410 token already used |
+| `POST /api/auth/prelogin` | `{username}` | `{salt, t}` (a stable fake salt for unknown users) |
+| `POST /api/auth/login` | `{username, proof}` | session cookie; 401, 423 locked, 403 disabled, 429, 503 not configured |
+| `POST /api/auth/logout` | `X-Secbin-Intent: 1` | session revoked |
+
+`proof = b64url(Argon2id(UTF8(NFC(password)), salt, m=64 MiB, t, p=1, 32 B))`. The server stores
+`verifier = hex(SHA-256(UTF8("secbin-auth/v2") ‖ proof_bytes))`.
+
+### Private (session, or API key where marked)
+
+| Method & path | Auth | Purpose |
+|---|---|---|
+| `POST /api/private/paste` `{paste, label?}` | session / key | create a note → 201 `{id, deletetoken, expires}` |
+| `POST /api/private/file` `{views, expire, padded, files?, maxFile?}` | session / key | start a file share → 201 `{id, uploadtoken, deletetoken, chunks}` |
+| `PUT /api/private/file/:id/chunk/:i` (octet-stream, `X-Upload-Token`) | session / key | upload chunk `i` (exact size, §12) |
+| `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
+| `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy |
+| `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions) |
+| `GET /api/private/me/activity` | session | own activity (never shows the actor) |
+| `GET/POST /api/private/me/keys`, `DELETE …/keys/:id` | session | API keys |
+| `GET /api/private/shares`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session | My shares |
+| `/api/private/admin/*` | owner session, not impersonating | overview, settings, limits, quotas, viewer rules, users (+ password, unlock, impersonate, keys), unimpersonate, audit, guard, ip-rules |
 
 ---
 
 ## 11. Test vectors
 
-Fixed vectors (pinned in `test/crypto.test.js`) use `comp="none"` for determinism and cover:
+Fixed inputs: `F = 00…1f`, `CEK = 20…3f`, `iv_content = 11×12`, `iv_wrap = 22×12`,
+`salt_kdf = 33×16`, plaintext `"secbin vector — zero knowledge ✓"`, password `"correct horse"`,
+`t = 3`. `test/vectors.expected.txt` pins the AAD, `pw_ikm`, both proofs and their hashes, `wk`
+and `ct` for the no-password and password branches; `test-node/crypto.test.js` asserts them, and
+`tools/verify-vectors.py` re-derives them independently in Python (`cryptography` +
+`argon2-cffi`). Argon2id itself is checked against the phc-winner-argon2 reference vector
+(`password`/`somesalt`, t=2, m=64 MiB, p=1 →
+`09316115d5cf24ed5a15a31a3ba326e5cf32edc24702987c02b6566f61913cf7`).
 
-1. **No-password wrap/unwrap:** given `F`, `CEK`, `iv_wrap`, `AAD` ⇒ expected `wk`; unwrap
-   returns `CEK`.
-2. **Content encrypt/decrypt:** given `CEK`, `iv_content`, `AAD`, plaintext ⇒ expected `ct`;
-   decrypt returns plaintext.
-3. **Password wrap:** given `F`, `password`, `salt_kdf`, `iter`, `iv_wrap`, `AAD`, `CEK` ⇒
-   expected `wk`; unwrap with correct `F`+password returns `CEK`; wrong password fails; `F`
-   alone fails; password alone (wrong `F`) fails.
-4. **AAD binding:** altering any `adata` field flips the AAD and causes decryption to fail.
+---
 
-Each vector records `F`, `password` (where applicable), `salt_kdf`, `iter`, `iv`, plaintext,
-the exact `AAD` bytes, and expected ciphertext (hex), so any conforming Web Crypto
-implementation reproduces them. They are regenerated with `node test/genvectors.mjs` (never
-hand-edited) whenever this spec changes.
+## 12. File shares
+
+### 12.1 Manifest
+
+A file share's manifest is a v2 share (§5) with `adata.fmt = "files"`. Its plaintext is JSON:
+
+```json
+{ "v": 2, "fk": "<b64url 32 B>", "chunk": 8388608, "total": 12345,
+  "entries": [ { "path": "docs/a.txt", "type": "text/plain", "size": 5, "mtime": 0, "off": 0 },
+               { "path": "empty", "dir": true } ],
+  "view": null }
+```
+
+- `entries`: files in stream order with contiguous `off`; `dir` entries record (empty) folders.
+- `path`: relative POSIX path; each segment non-empty, not `.`/`..`, ≤ 255 UTF-8 bytes; whole
+  path ≤ 4096 bytes; no leading `/`, backslash, NUL or control characters; no duplicates; a path
+  may not be both a file and a folder. Invalid manifests are rejected (never repaired).
+- `type`: lowercase `type/subtype`, no parameters.
+- `view`: `null`, or the sender's viewer-policy snapshot `{ maxBytes, rules: [{match, value, renderer}] }`
+  (`match` ∈ mime | ext | any; `renderer` ∈ text | markdown | code | image | pdf | media).
+
+### 12.2 Packed stream and chunks
+
+All files are concatenated in entry order (`total` bytes), then zero-padded to
+`padded = max(PAD, ceil(total / PAD) · PAD)`. The stream is cut into `n = ceil(padded / CHUNK)`
+chunks; chunk `i` is encrypted as
+
+```
+chunk_ct[i] = AES-256-GCM(key = FK, iv = BE96(i), aad = UTF8("secbin-file/v2\nidx=" ‖ i ‖ "\ntotal=" ‖ n ‖ "\n"), chunk_pt[i])
+```
+
+`FK` is unique per share, so the deterministic IV never repeats; the AAD binds position and
+count (no reordering or truncation). The server sees only `padded` and `n`, and enforces the
+exact ciphertext size of every chunk: `min(CHUNK, padded − i·CHUNK) + 16`.
+
+### 12.3 Upload and read
+
+1. `POST /api/private/file` with `views` (or `null`), `expire`, `padded`; `files` (count) and
+   `maxFile` (largest file size) only when the account has such limits. The server checks
+   capabilities, limits and quotas, then creates a pending share (upload deadline).
+2. `PUT …/chunk/:i` for every `i` (retries are idempotent — same bytes).
+3. `POST …/finalize` with the manifest share; `bar`, `views` and `expire` must match step 1.
+4. Readers open with proofs (§10) and receive a **download grant** (default 60 min, capped at
+   expiry); chunks are fetched with `X-Download-Grant`, decrypted, and files sliced out of the
+   stream.
+
+---
+
+## 13. Accounts, limits and protection (server-side, non-cryptographic)
+
+- **Sessions**: cookie `__Host-secbin_sess` (HttpOnly, Secure, SameSite=Strict) holding a
+  compact JWE (`alg: dir`, `enc: A256GCM`, key `ENC`) that wraps a JWS (`HS256`, key `SIG`) with
+  claims `{sid, uid, act?, ver, iat, lat, exp}`. Checked against current state on every request
+  (revoked `sid`, disabled user, `ver` = the user's session version — bumped by password changes,
+  resets and disables); idle and absolute timeouts are admin settings.
+- **Limits** resolve per request: user override → global default → built-in default. API-channel
+  limits and quotas can only restrict further. Quota windows are fixed buckets (UTC calendar
+  for months/years); every creation counts toward all-channel quotas, API creations also toward
+  API quotas.
+- **Guard**: per-IP (IPv6 aggregated to a configurable prefix, default /64) failure counters for
+  `login`, `setup` and `invalid`; *X failures within n seconds ⇒ block for n seconds*. Manual
+  IP/CIDR allow/block rules (allow wins). Account lockout after X failed logins (owner exempt).
+  `DISABLE_BFP=true` disables all of it; `DISABLE_BFP_SETUP=true` only for setup.

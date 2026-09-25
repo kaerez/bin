@@ -1,99 +1,129 @@
-// api.js — same-origin fetch client for the paste API (connect-src 'self').
-// Uses real HTTP status codes (unlike the legacy PrivateBin JSON-status hack).
-// Success responses are shape-validated here, at the trust boundary, so a
-// server/proxy regression fails closed as a protocol error instead of leaking
-// into UI state (e.g. a "/p/undefined#…" share link).
+// api.js — same-origin fetch client (connect-src 'self') for the public share
+// API, the auth API and the signed-in /api/private API. Real HTTP status codes;
+// success bodies are shape-checked at this trust boundary so a server/proxy
+// regression fails closed as a protocol error instead of leaking into UI state.
 
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, code, extra) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code || null;
+    this.extra = extra || {};
   }
 }
+
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const malformed = () => new ApiError('Malformed response from the server.', 502, 'malformed');
+const INTENT = { 'x-secbin-intent': '1' };
 
 async function readJson(res) {
   try { return await res.json(); } catch { return null; }
 }
 
-function isPlainObject(v) {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
-const malformed = () => new ApiError('Malformed response.', 502);
-
-/** A success body that must be a JSON object (paste/head; validated further by format.js). */
-function requireObject(data) {
+async function request(path, { method = 'GET', body, headers = {}, raw = false } = {}) {
+  const init = { method, headers: { ...headers }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual' };
+  if (body !== undefined) {
+    init.headers['content-type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, init);
+  if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
+  if (raw && res.ok) return res;
+  const data = await readJson(res);
+  if (!res.ok) {
+    const d = isPlainObject(data) ? data : {};
+    throw new ApiError(typeof d.message === 'string' && d.message ? d.message : `Request failed (${res.status}).`, res.status, typeof d.error === 'string' ? d.error : null, d);
+  }
   if (!isPlainObject(data)) throw malformed();
   return data;
 }
 
-async function throwHttpError(res, fallback) {
-  const data = await readJson(res);
-  throw new ApiError((isPlainObject(data) && typeof data.error === 'string' && data.error) || fallback, res.status);
+const enc = encodeURIComponent;
+
+// ── public share API ──────────────────────────────────────────────────────────
+export const fetchConfig = () => request('/api/config');
+export const fetchHead = (kind, id) => request(`/api/${kind}/${enc(id)}`);
+
+/** Open a note or file share with its access proofs (the only way to get ciphertext). */
+export const openShare = (kind, id, { linkProof, keyProof }) =>
+  request(`/api/${kind}/${enc(id)}/open`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof } });
+
+/** One encrypted chunk of a file share, under a download grant. */
+export async function fetchChunk(id, i, grant) {
+  const res = await request(`/api/file/${enc(id)}/chunk/${i}`, { headers: { 'x-download-grant': grant }, raw: true });
+  return new Uint8Array(await res.arrayBuffer());
 }
 
-/** Create a paste. `body` is the format-v1 object. Returns { id, deletetoken }. */
-export async function createPaste(body) {
-  const res = await fetch('/api/paste', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+/** Delete with the delete token (header, never URL). */
+export const deleteShare = (kind, id, token) =>
+  request(`/api/${kind}/${enc(id)}`, { method: 'DELETE', headers: { 'x-delete-token': token } });
+
+// ── auth ─────────────────────────────────────────────────────────────────────
+export const session = () => request('/api/auth/session');
+export const setupStatus = () => request('/api/auth/setup');
+export const setup = (body) => request('/api/auth/setup', { method: 'POST', body });
+export const prelogin = (username) => request('/api/auth/prelogin', { method: 'POST', body: { username } });
+export const login = (username, proof) => request('/api/auth/login', { method: 'POST', body: { username, proof } });
+export const logout = () => request('/api/auth/logout', { method: 'POST', headers: INTENT });
+
+// ── signed-in ────────────────────────────────────────────────────────────────
+export const me = () => request('/api/private/me');
+export const changePassword = (body) => request('/api/private/me/password', { method: 'POST', body });
+export const myActivity = (before) => request(`/api/private/me/activity${before ? `?before=${enc(before)}` : ''}`);
+export const listKeys = () => request('/api/private/me/keys');
+export const createKey = (name, expiresInSec) => request('/api/private/me/keys', { method: 'POST', body: { name, expiresInSec } });
+export const revokeKey = (id) => request(`/api/private/me/keys/${enc(id)}`, { method: 'DELETE', headers: INTENT });
+
+export async function createNote(paste, label) {
+  const d = await request('/api/private/paste', { method: 'POST', body: { paste, label } });
+  if (typeof d.id !== 'string' || typeof d.deletetoken !== 'string') throw malformed();
+  return d;
+}
+
+export const initFileShare = (body) => request('/api/private/file', { method: 'POST', body });
+export const finalizeFileShare = (id, uploadToken, paste, label) =>
+  request(`/api/private/file/${enc(id)}/finalize`, { method: 'POST', headers: { 'x-upload-token': uploadToken }, body: { paste, label } });
+
+export const listShares = (qs = '') => request(`/api/private/shares${qs}`);
+export const updateShare = (id, body) => request(`/api/private/shares/${enc(id)}`, { method: 'PATCH', body });
+export const revokeShare = (id) => request(`/api/private/shares/${enc(id)}/revoke`, { method: 'POST', headers: INTENT });
+
+// ── admin ────────────────────────────────────────────────────────────────────
+const A = '/api/private/admin';
+export const admin = {
+  overview: () => request(`${A}/overview`),
+  settings: (patch) => request(`${A}/settings`, { method: 'PATCH', body: patch }),
+  limits: (scope, channel, patch) => request(`${A}/limits`, { method: 'PATCH', body: { scope, channel, patch } }),
+  quotas: (scope, list) => request(`${A}/quotas`, { method: 'PUT', body: { scope, list } }),
+  viewerRules: (scope, list) => request(`${A}/viewer-rules`, { method: 'PUT', body: { scope, list } }),
+  users: () => request(`${A}/users`),
+  user: (id) => request(`${A}/users/${enc(id)}`),
+  createUser: (body) => request(`${A}/users`, { method: 'POST', body }),
+  updateUser: (id, body) => request(`${A}/users/${enc(id)}`, { method: 'PATCH', body }),
+  deleteUser: (id, revokeShares) => request(`${A}/users/${enc(id)}${revokeShares ? '?revokeShares=1' : ''}`, { method: 'DELETE', headers: INTENT }),
+  setPassword: (id, body) => request(`${A}/users/${enc(id)}/password`, { method: 'POST', body }),
+  unlock: (id) => request(`${A}/users/${enc(id)}/unlock`, { method: 'POST', headers: INTENT }),
+  impersonate: (id) => request(`${A}/users/${enc(id)}/impersonate`, { method: 'POST', headers: INTENT }),
+  revokeUserKey: (id, keyId) => request(`${A}/users/${enc(id)}/keys/${enc(keyId)}`, { method: 'DELETE', headers: INTENT }),
+  unimpersonate: () => request(`${A}/unimpersonate`, { method: 'POST', headers: INTENT }),
+  audit: (before, user) => request(`${A}/audit?${new URLSearchParams({ ...(before ? { before } : {}), ...(user ? { user } : {}) })}`),
+  guard: () => request(`${A}/guard`),
+  unblock: (scope, key) => request(`${A}/guard/unblock`, { method: 'POST', body: { scope, key } }),
+  block: (scope, key, seconds) => request(`${A}/guard/block`, { method: 'POST', body: { scope, key, seconds } }),
+  ipRules: () => request(`${A}/ip-rules`),
+  addIpRule: (body) => request(`${A}/ip-rules`, { method: 'POST', body }),
+  removeIpRule: (id) => request(`${A}/ip-rules/${enc(id)}`, { method: 'DELETE', headers: INTENT }),
+};
+
+/** Binary chunk upload (kept separate: `request` is JSON-only). */
+export async function uploadChunk(id, i, bytes, uploadToken) {
+  const res = await fetch(`/api/private/file/${enc(id)}/chunk/${i}`, {
+    method: 'PUT', body: bytes, cache: 'no-store', credentials: 'same-origin', redirect: 'manual',
+    headers: { 'content-type': 'application/octet-stream', 'x-upload-token': uploadToken },
   });
-  if (!res.ok) await throwHttpError(res, 'Request failed.');
+  if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
   const data = await readJson(res);
-  if (!isPlainObject(data)
-      || typeof data.id !== 'string' || data.id.length === 0
-      || typeof data.deletetoken !== 'string' || data.deletetoken.length === 0) {
-    throw malformed();
-  }
-  return { id: data.id, deletetoken: data.deletetoken };
-}
-
-/** Fetch a paste (never consumes — burn ids answer with their head). */
-export async function fetchPaste(id) {
-  const res = await fetch(`/api/paste/${encodeURIComponent(id)}`, { cache: 'no-store' });
-  if (!res.ok) await throwHttpError(res, 'Not found.');
-  return requireObject(await readJson(res));
-}
-
-/**
- * Fetch a paste's head (adata + wrapped key, no ciphertext). For burn pastes
- * this is the non-consuming peek used to verify a password/key before the
- * single destructive read.
- */
-export async function fetchPasteMeta(id) {
-  const res = await fetch(`/api/paste/${encodeURIComponent(id)}?meta=1`, { cache: 'no-store' });
-  if (!res.ok) await throwHttpError(res, 'Not found.');
-  return requireObject(await readJson(res));
-}
-
-/**
- * The single destructive read of a burn paste. Deliberately a non-simple
- * request (POST + custom header, SPEC §10): consumption must never be
- * reachable by an ambient cross-origin GET.
- */
-export async function consumePaste(id) {
-  const res = await fetch(`/api/paste/${encodeURIComponent(id)}/consume`, {
-    method: 'POST',
-    headers: { 'x-burn-intent': 'consume' },
-    cache: 'no-store',
-  });
-  if (!res.ok) await throwHttpError(res, 'Not found.');
-  return requireObject(await readJson(res));
-}
-
-/**
- * Delete a paste with its delete token. The token is sent in a header — never
- * in the URL — so it cannot end up in server/proxy request-URL logs.
- */
-export async function deletePaste(id, token) {
-  const res = await fetch(`/api/paste/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers: { 'x-delete-token': token },
-  });
-  if (!res.ok) await throwHttpError(res, 'Delete failed.');
-  const data = await readJson(res);
-  if (!isPlainObject(data) || data.status !== 'deleted') throw malformed();
+  if (!res.ok) throw new ApiError((data && data.message) || `Upload failed (${res.status}).`, res.status, data && data.error);
   return data;
 }

@@ -2,7 +2,7 @@
   "name": "secbin",
   "version": "1.0.0",
   "private": true,
-  "description": "secbin — zero-knowledge, end-to-end encrypted pastebin with view limits and expiry (based on binthere). Content is encrypted/decrypted in the browser (AES-256-GCM); the server only ever stores ciphertext.",
+  "description": "secbin \u2014 zero-knowledge, end-to-end encrypted notes and file sharing with accounts, view limits and expiry. Content is encrypted/decrypted client-side (AES-256-GCM, Argon2id); the server only ever stores ciphertext.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -18,13 +18,15 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "vitest run && vitest run --config vitest.dom.config.js && vitest run --config cli/vitest.config.js",
+    "test": "vitest run && vitest run --config vitest.node.config.js && vitest run --config vitest.dom.config.js",
     "test:dom": "vitest run --config vitest.dom.config.js",
-    "test:cli": "vitest run --config cli/vitest.config.js",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
-    "kv:create": "wrangler kv namespace create PASTES && wrangler kv namespace create PASTES --preview"
+    "kv:create": "wrangler kv namespace create PASTES && wrangler kv namespace create PASTES --preview",
+    "test:node": "vitest run --config vitest.node.config.js",
+    "vendor": "node tools/vendor.mjs",
+    "r2:create": "wrangler r2 bucket create secbin-files"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.5",

@@ -1,13 +1,13 @@
-// ESLint flat config for binthere. Style is enforced lightly — the point is to
+// ESLint flat config for secbin. Style is enforced lightly — the point is to
 // catch real bugs (undeclared globals, unused vars, accidental debugger) across
 // the runtime surfaces: the browser client (public/js), the Worker (src), the
 // vitest suites (test), the CLI (cli), and build-time tooling (tools). The
-// vendored qrcode.js is exempt.
+// vendored qrcode.js, argon2 and pdf.js builds are exempt.
 import js from '@eslint/js';
 import globals from 'globals';
 
 export default [
-  { ignores: ['node_modules/**', 'public/js/qrcode.js', '.wrangler/**', 'coverage/**', 'cli/vendor/**'] },
+  { ignores: ['node_modules/**', 'public/js/qrcode.js', 'public/js/vendor/**', '.wrangler/**', 'coverage/**', 'cli/vendor/**'] },
 
   js.configs.recommended,
 
@@ -28,7 +28,7 @@ export default [
 
   // Browser client: DOM + Web Crypto + streams.
   {
-    files: ['public/js/**/*.js'],
+    files: ['public/js/**/*.js', 'public/dashboard/**/*.js'],
     languageOptions: { globals: { ...globals.browser } },
   },
 
@@ -41,7 +41,7 @@ export default [
   // Tests + the vector generator: vitest globals + Node. test-dom runs the
   // browser modules against happy-dom, so it gets DOM globals too.
   {
-    files: ['test/**/*.js', 'test/**/*.mjs', 'test-dom/**/*.js'],
+    files: ['test/**/*.js', 'test/**/*.mjs', 'test-dom/**/*.js', 'test-node/**/*.js'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
 

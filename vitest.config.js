@@ -1,4 +1,4 @@
-// Vitest configuration for binthere.
+// Vitest configuration for secbin (workerd pool: the Worker + Durable Objects).
 //
 // Tests run inside the real workerd runtime via @cloudflare/vitest-pool-workers so
 // that Web Crypto, CompressionStream, KV, and the BurnPaste Durable Object behave
@@ -14,6 +14,12 @@ export default defineConfig({
         // Rate limiting binding isn't emulated locally; the code fails open, so
         // tests exercise creation without it. Everything else comes from wrangler.toml.
         compatibilityDate: '2025-10-11',
+        // Test-only secrets (never real values): setup token + session keys.
+        bindings: {
+          AUTHN: 'test-setup-token-0123456789abcdef-XYZ',
+          SIG: '1111111111111111111111111111111111111111111111111111111111111111',
+          ENC: '2222222222222222222222222222222222222222222222222222222222222222',
+        },
         // workerd can fire unhandledrejection before a same-checkpoint .catch()
         // attaches (workerd#4042); DecompressionStream errors both stream sides
         // and trips this, which vitest 4 then reports as an unhandled error.
@@ -26,15 +32,15 @@ export default defineConfig({
     // The CLI's suites run in plain Node via their own project
     // (cli/vitest.config.js), and the DOM-mount suites run under happy-dom
     // (vitest.dom.config.js) — keep both out of the workerd pool.
-    exclude: ['**/node_modules/**', 'cli/**', 'test-dom/**'],
+    exclude: ['**/node_modules/**', 'cli/**', 'test-dom/**', 'test-node/**'],
     coverage: {
       // istanbul (source instrumentation), NOT v8: the v8 provider needs
       // node:inspector, which doesn't exist inside workerd.
       provider: 'istanbul',
-      include: ['src/**/*.js', 'public/js/**/*.js'],
+      include: ['src/**/*.js', 'public/js/format.js', 'public/js/bytes.js'],
       // Vendored library and browser-only glue with no DOM test harness
       // (see README roadmap: Playwright e2e would cover these).
-      exclude: ['public/js/qrcode.js', 'public/js/{api,ui,app,theme,theme-init,announce,stars}.js'],
+      exclude: ['public/js/qrcode.js', 'public/js/{api,ui,theme,theme-init}.js'],
       // Floors, not targets — catch a large untested addition, don't block
       // small refactors. Measured 2026-07: ~84% statements / ~79% branches.
       thresholds: { statements: 80, branches: 70 },

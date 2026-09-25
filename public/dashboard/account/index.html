@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en" class="dark">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="robots" content="noindex, nofollow" />
+        <meta name="referrer" content="no-referrer" />
+        <meta name="color-scheme" content="dark light" />
+        <meta name="theme-color" content="#0d1117" />
+        <title>Account · secbin</title>
+        <meta name="description" content="Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it." />
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="secbin" />
+        <meta property="og:title" content="secbin · zero-knowledge sharing" />
+        <meta property="og:description" content="Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it." />
+        <meta name="twitter:card" content="summary" />
+        <link rel="icon" type="image/svg+xml" href="/img/favicon.svg" />
+        <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
+        <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
+        <!-- Blocking, first-party (CSP-safe): sets the theme class before paint. -->
+        <script src="/js/theme-init.js"></script>
+        <link rel="stylesheet" href="/css/styles.css" />
+        <!-- CSP is a response header (public/_headers + the Worker). First-party only. -->
+        <script defer src="/js/theme.js"></script>
+        <script type="module" src="/dashboard/js/account.js"></script>
+    </head>
+    <body>
+        <!-- Guilloché watermark — security-print ambience; pure ornament. -->
+        <svg class="watermark" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <g stroke="currentColor" stroke-width="0.5">
+                <circle cx="32" cy="32" r="29" />
+                <circle cx="32" cy="32" r="24.5" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(30 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(60 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(90 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(120 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(150 32 32)" />
+                <circle cx="32" cy="32" r="4.2" />
+            </g>
+        </svg>
+        <div class="imp-banner" id="imp-banner" role="status" hidden>
+            <span id="imp-text">Viewing as another user</span>
+            <button type="button" class="btn" id="imp-return">Return to admin</button>
+        </div>
+        <header class="topbar reveal">
+            <a class="brand" href="/dashboard/" id="brand" aria-label="secbin — home">
+                <span class="wm-b">sec</span><span class="wm-a">bin</span>
+            </a>
+            <div class="topbar-right">
+                <nav class="dash-nav" id="dash-nav" aria-label="Dashboard" hidden>
+                    <a class="back" href="/dashboard/" data-nav="new"><span>new</span></a>
+                    <a class="back" href="/dashboard/shares/" data-nav="shares"><span>my shares</span></a>
+                    <a class="back" href="/dashboard/account/" data-nav="account"><span>account</span></a>
+                    <a class="back" href="/dashboard/admin/" data-nav="admin" id="nav-admin" hidden><span>admin</span></a>
+                    <button type="button" class="back" id="nav-logout"><span>log out</span></button>
+                </nav>
+                <button
+                    type="button"
+                    id="themeToggle"
+                    class="theme-toggle"
+                    aria-label="Toggle light/dark theme"
+                    aria-pressed="true"
+                >
+                    <svg
+                        class="ico-sun"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <circle cx="12" cy="12" r="4" />
+                        <path
+                            d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+                        />
+                    </svg>
+                    <svg
+                        class="ico-moon"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="wrap wrap-wide">
+            <section id="view-account" tabindex="-1">
+                <div class="head reveal d1">
+                    <p class="eyebrow">account</p>
+                    <h1 class="title" id="acct-title">Your <span class="title-em">account.</span></h1>
+                    <p class="subtitle" id="acct-sub"></p>
+                </div>
+
+                <div class="card stack reveal d2">
+                    <h2 class="section-title">Your limits</h2>
+                    <dl class="kv" id="acct-limits"></dl>
+                    <div id="acct-quotas"></div>
+                </div>
+
+                <form class="card stack reveal d2 form" id="pw-form">
+                    <h2 class="section-title">Change password</h2>
+                    <label class="field-label" for="pw-current">Current password</label>
+                    <div class="pw pw-wide">
+                        <input type="password" id="pw-current" class="input" placeholder="Current password" autocomplete="current-password" aria-label="Current password" />
+                        <button type="button" class="peek" id="pw-current-peek" aria-label="Show password" aria-pressed="false">
+                            <svg
+                                class="ico-eye"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"
+                                />
+                                <circle cx="12" cy="12" r="3" />
+                            </svg>
+                            <svg
+                                class="ico-eye-off"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M10.6 6.7A9.9 9.9 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18.3 18.3 0 0 1-3.3 4.2M6.2 8A18.4 18.4 0 0 0 2 12s3.6 6.5 10 6.5a10 10 0 0 0 3.9-.8"
+                                />
+                                <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                                <path d="M3 3l18 18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <label class="field-label" for="pw-new">New password (min. 12 characters)</label>
+                    <div class="pw pw-wide">
+                        <input type="password" id="pw-new" class="input" placeholder="New password" autocomplete="new-password" aria-label="New password" />
+                        <button type="button" class="peek" id="pw-new-peek" aria-label="Show password" aria-pressed="false">
+                            <svg
+                                class="ico-eye"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"
+                                />
+                                <circle cx="12" cy="12" r="3" />
+                            </svg>
+                            <svg
+                                class="ico-eye-off"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M10.6 6.7A9.9 9.9 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18.3 18.3 0 0 1-3.3 4.2M6.2 8A18.4 18.4 0 0 0 2 12s3.6 6.5 10 6.5a10 10 0 0 0 3.9-.8"
+                                />
+                                <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                                <path d="M3 3l18 18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="pw pw-wide">
+                        <input type="password" id="pw-new2" class="input" placeholder="Repeat new password" autocomplete="new-password" aria-label="Repeat new password" />
+                        <button type="button" class="peek" id="pw-new2-peek" aria-label="Show password" aria-pressed="false">
+                            <svg
+                                class="ico-eye"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"
+                                />
+                                <circle cx="12" cy="12" r="3" />
+                            </svg>
+                            <svg
+                                class="ico-eye-off"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M10.6 6.7A9.9 9.9 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18.3 18.3 0 0 1-3.3 4.2M6.2 8A18.4 18.4 0 0 0 2 12s3.6 6.5 10 6.5a10 10 0 0 0 3.9-.8"
+                                />
+                                <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                                <path d="M3 3l18 18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <button type="submit" class="cta" id="pw-btn">Change password</button>
+                    <p class="msg" id="pw-msg" role="alert" hidden></p>
+                </form>
+
+                <div class="card stack reveal d3" id="keys-card">
+                    <h2 class="section-title">API keys</h2>
+                    <p class="subtitle" id="keys-sub">Keys let API clients create shares for you (and nothing else). Send one as <code class="mono">Authorization: Bearer &lt;key&gt;</code>.</p>
+                    <form class="toolbar" id="key-form">
+                        <input class="input" id="key-name" placeholder="Key name, e.g. laptop" maxlength="100" aria-label="Key name" />
+                        <select class="input" id="key-life" aria-label="Key lifetime">
+                            <option value="">never expires</option>
+                            <option value="604800">7 days</option>
+                            <option value="2592000">30 days</option>
+                            <option value="31536000">365 days</option>
+                        </select>
+                        <button type="submit" class="btn" id="key-create">Create key</button>
+                    </form>
+                    <div class="linkrow" id="key-new" hidden><div class="url mono" id="key-new-val"></div><button type="button" class="copy-btn" id="key-copy">copy</button></div>
+                    <p class="mono key-warn" id="key-new-note" hidden>Copy this key now — it will not be shown again.</p>
+                    <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead><tbody id="keys-body"></tbody></table></div>
+                    <p class="msg" id="keys-msg" role="alert" hidden></p>
+                </div>
+
+                <div class="card stack reveal d3">
+                    <h2 class="section-title">My activity</h2>
+                    <div class="table-wrap"><table class="table"><thead><tr><th>When</th><th>Action</th><th>Details</th></tr></thead><tbody id="activity-body"></tbody></table></div>
+                    <div class="btn-row"><button type="button" class="btn" id="activity-more" hidden>Load more</button></div>
+                </div>
+            </section>
+            <footer class="foot reveal d4">
+                <nav class="foot-links" id="foot-links" aria-label="Project">
+                    <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
+                    <span class="foot-sep" aria-hidden="true">·</span>
+                    <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                </nav>
+                <p class="foot-crypto mono" aria-label="Cryptography">
+                    AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                    <span class="foot-frag">#fragment</span>
+                </p>
+            </footer>
+        </main>
+
+        <div id="toast" role="status" aria-live="polite"></div>
+    </body>
+</html>

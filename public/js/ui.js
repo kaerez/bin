@@ -2,22 +2,13 @@
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 
-const VIEWS = ['view-create', 'view-success', 'view-password', 'view-paste', 'view-status'];
-
-/** Show exactly one top-level view section, hide the rest. */
+/** Show exactly one top-level view section (`<section id="view-…">`), hide the rest. */
 export function showView(name) {
   let shown = null;
-  for (const id of VIEWS) {
-    const el = document.getElementById(id);
-    if (el) {
-      el.hidden = id !== `view-${name}`;
-      if (!el.hidden) shown = el;
-    }
+  for (const el of document.querySelectorAll('main section[id^="view-"]')) {
+    el.hidden = el.id !== `view-${name}`;
+    if (!el.hidden) shown = el;
   }
-  // Footer nav links belong to the landing page only; hide them elsewhere to
-  // reduce clutter on paste/success/password/status views.
-  const footLinks = document.getElementById('foot-links');
-  if (footLinks) footLinks.hidden = name !== 'create';
   // Keyboard/screen-reader users must not be left focused on a control that
   // just became hidden — move focus to the shown view (sections carry
   // tabindex="-1"). Repeated transitions to the same view (status updates)

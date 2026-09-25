@@ -118,7 +118,7 @@ a { color: var(--ink); text-decoration: none; transition: color .14s ease; }
 .reveal { opacity: 0; animation: rise .45s var(--ease) forwards; }
 .reveal.d2, .reveal.d3, .reveal.d4 { animation-delay: .08s; }
 /* The one exit: a view steps aside as the next takes over, used for the
-   create→success hand-off (see `.send.sending` and leaveCreateView in app.js).
+   create→success hand-off (see `.send.sending` and leaveCreate in dashboard/js/create.js).
    Views are re-shown by toggling [hidden], so `rise` restarts on its own. */
 @keyframes viewOut { to { opacity: 0; transform: translateX(-10px); } }
 .view-leaving { animation: viewOut .17s var(--ease) forwards; pointer-events: none; }
@@ -306,7 +306,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
 /* Send hand-off: the arrow exits, the composer follows it out, the next view
    takes over — so the arrow leads the navigation. A transition rather than a
    keyframe, so a failed create reverses it: dropping `.sending` glides the arrow
-   back in. app.js mirrors these durations — change both together. */
+   back in. dashboard/js/create.js mirrors these durations — change both together. */
 .send .send-ico { width: 15px; height: 15px; transition: transform .3s var(--ease); }
 .send.sending .send-ico { transform: translateX(32px); }
 
@@ -514,3 +514,100 @@ html.dark .theme-toggle .ico-moon { display: block; }
 }
 /* When the options wrap the editor bar, keep the primary action on the right. */
 .editor-bar > .send { margin-left: auto; }
+
+/* ── footer links ─────────────────────────────────────────────────────────── */
+.foot-links { display: inline-flex; align-items: center; gap: .6rem; font-family: var(--mono); font-size: .72rem; letter-spacing: .06em; margin-bottom: .35rem; }
+.foot-links a { color: var(--ink-2); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--rule-3); }
+.foot-links a:hover { color: var(--ink); text-decoration-color: var(--ink-2); }
+.foot-sep { color: var(--ink-4); }
+
+/* ── dashboard chrome ─────────────────────────────────────────────────────── */
+.wrap-wide { max-width: 1040px; }
+.dash-nav { display: inline-flex; flex-wrap: wrap; gap: .4rem; }
+.dash-nav .back[aria-current="page"] { color: var(--accent-fg); background: var(--accent-fill); border-color: var(--accent-fill); }
+button.back { cursor: pointer; }
+.imp-banner { position: relative; z-index: 20; display: flex; align-items: center; justify-content: center; gap: 1rem; flex-wrap: wrap;
+  padding: .55rem 1rem; background: color-mix(in oklab, var(--paper), var(--warn) 18%); border-bottom: 1px solid color-mix(in oklab, var(--rule-2), var(--warn) 45%);
+  font-size: .82rem; color: var(--ink); }
+.banner { border: 1px solid var(--rule-2); border-radius: 4px; padding: .7rem 1rem; margin-bottom: 1rem; font-size: .85rem; }
+.banner.warn { border-color: color-mix(in oklab, var(--rule-2), var(--warn) 55%); background: color-mix(in oklab, var(--paper), var(--warn) 8%); }
+.section-title { font-family: var(--serif); font-weight: 500; font-size: 1.25rem; letter-spacing: -.01em; }
+.field-label { font-family: var(--mono); font-size: .6875rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+.muted { color: var(--ink-3); font-size: .72rem; }
+.form { max-width: 460px; }
+.form .input { width: 100%; }
+.card.stack { margin-bottom: 1rem; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.inline, .inline-ctl { display: inline-flex; align-items: center; gap: .4rem; font-size: .82rem; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.2rem; font-size: .85rem; }
+.kv dt { color: var(--ink-3); }
+.limits-grid { display: flex; flex-direction: column; gap: .45rem; }
+.limit-row { display: grid; grid-template-columns: minmax(10rem, 15rem) auto auto 1fr; align-items: center; gap: .5rem; }
+@media (max-width: 640px) { .limit-row { grid-template-columns: 1fr; } }
+.table-wrap { width: 100%; overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+.table th { text-align: left; font-family: var(--mono); font-size: .65rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 400;
+  padding: .45rem .5rem; border-bottom: 1px solid var(--rule-2); }
+.table td { padding: .45rem .5rem; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+.table tr[data-status]:not([data-status="active"]) td { color: var(--ink-3); }
+.row-actions { gap: .35rem; flex-wrap: nowrap; }
+.row-actions .btn, .tree-btn { min-height: 30px; padding: .3rem .6rem; font-size: .75rem; }
+.label-in { width: 100%; min-width: 9rem; }
+.extend-box { display: flex; flex-direction: column; gap: .5rem; padding: .6rem 0; }
+.key-warn { color: var(--warn); font-size: .75rem; }
+.keygen-row { display: grid; grid-template-columns: 4rem 1fr auto; gap: .6rem; align-items: center; }
+.keygen-val { overflow-x: auto; white-space: nowrap; font-size: .75rem; color: var(--ink-2); }
+.keygen-name { font-size: .72rem; color: var(--ink-3); }
+.label-row { display: flex; flex-direction: column; gap: .35rem; margin-top: 1rem; }
+.label-row .input { width: 100%; }
+
+/* ── tabs ─────────────────────────────────────────────────────────────────── */
+.tabs { display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: .75rem; }
+.tab { font-family: var(--mono); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); background: transparent;
+  border: 1px solid var(--rule-2); border-radius: 3px; padding: .45rem .8rem; cursor: pointer; }
+.tab:hover { color: var(--ink); border-color: var(--rule-3); }
+.tab[aria-selected="true"] { color: var(--accent-fg); background: var(--accent-fill); border-color: var(--accent-fill); }
+.tab:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--ring); }
+
+/* ── composer: files ──────────────────────────────────────────────────────── */
+.dropzone { margin: 1rem 1.1rem .5rem; padding: 1.6rem 1rem; border: 1px dashed var(--rule-3); border-radius: 6px; text-align: center;
+  transition: border-color .14s ease, background-color .14s ease; }
+.dropzone.over, .dropzone:focus-visible { outline: none; border-color: var(--ring); background: color-mix(in oklab, var(--sheet), var(--accent) 6%); }
+.dropzone-title { font-family: var(--serif); font-size: 1.15rem; }
+.dropzone-hint { font-size: .7rem; color: var(--ink-3); margin: .3rem 0 .9rem; }
+.file-list { padding: 0 1.1rem; max-height: 340px; overflow: auto; }
+.file-total { padding: .3rem 1.1rem .8rem; font-size: .72rem; color: var(--ink-3); }
+.file-total.over { color: var(--seal); }
+.viewer-opt { display: flex; align-items: center; gap: .5rem; padding: 0 1.1rem .9rem; font-size: .82rem; color: var(--ink-2); }
+.mime-in { width: 12rem; padding: .3rem .5rem; font-size: .72rem; }
+.mime-in[aria-invalid="true"] { border-color: var(--seal); color: var(--seal); }
+
+/* ── trees (composer + viewer) ────────────────────────────────────────────── */
+.tree-list { list-style: none; margin: 0; padding: 0; }
+.tree-list .tree-list { padding-left: 1.15rem; border-left: 1px solid var(--rule); margin-left: .55rem; }
+.tree-row { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; min-height: 38px; flex-wrap: wrap; }
+.tree-name { font-family: var(--mono); font-size: .8rem; color: var(--ink); overflow-wrap: anywhere; }
+.tree-dir > .tree-row .tree-name { font-weight: 500; }
+.tree-sub { font-size: .7rem; color: var(--ink-3); }
+.tree-actions { display: inline-flex; gap: .35rem; margin-left: auto; }
+.tree-dir > .tree-row .tree-btn:last-child { margin-left: auto; }
+.tree-toggle { width: 22px; height: 22px; border: 1px solid var(--rule-2); border-radius: 3px; background: transparent; color: var(--ink-2); cursor: pointer; line-height: 1; }
+.tree-spacer { display: inline-block; width: 22px; }
+.files-tree { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; padding: .8rem 1rem; margin-top: .8rem; }
+.files-window { font-size: .72rem; color: var(--ink-3); margin-bottom: .6rem; }
+.file-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.file-meta { display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
+.file-name { font-family: var(--mono); font-size: .9rem; overflow-wrap: anywhere; }
+.file-sub { font-size: .72rem; color: var(--ink-3); }
+
+/* ── viewer ───────────────────────────────────────────────────────────────── */
+.preview { margin-top: 1rem; }
+.preview-head { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; margin-bottom: .8rem; }
+.preview-title { font-size: .78rem; color: var(--ink-2); overflow-wrap: anywhere; }
+.preview-body { max-height: 75vh; overflow: auto; }
+.viewer-frame { display: flex; justify-content: center; background: var(--sheet-2); border-radius: 4px; padding: .6rem; }
+.viewer-img, .viewer-pdf { max-width: 100%; height: auto; image-rendering: auto; background: #fff; }
+.viewer-media { width: 100%; max-height: 70vh; }
+.viewer-toolbar { display: flex; align-items: center; justify-content: center; gap: .8rem; margin-bottom: .6rem; }
+.viewer-page { font-size: .75rem; color: var(--ink-3); }
+.viewer-note { padding: .6rem 0; }

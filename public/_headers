@@ -1,9 +1,12 @@
 # Security headers applied to every static-asset response.
 # The CSP is the core XSS defense: in a zero-knowledge app an XSS equals key
 # exfiltration (JS can read location.hash), so the policy is strict — first-party
-# only, no inline, no eval, no third parties. See SECURITY.md §4.
+# only, no inline, no JavaScript eval, no third parties. 'wasm-unsafe-eval'
+# permits WebAssembly compilation only (Argon2id, pdf.js image decoders); blob:
+# images/media serve the safe file viewer. Keep in sync with src/lib/http.js CSP.
+# See SECURITY.md §4.
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer
@@ -15,3 +18,7 @@
 # Self-hosted fonts: long-lived immutable cache.
 /fonts/*
   Cache-Control: public, max-age=31536000, immutable
+
+# Vendored, versioned third-party builds: cache, never sniff.
+/js/vendor/*
+  Cache-Control: public, max-age=86400

@@ -1,7 +1,7 @@
-// format.test.js — adversarial, fail-closed validation of paste format v1
+// format.test.js — adversarial, fail-closed validation of paste format v2
 // (SPEC.md §5.3). Every malformed shape must be rejected with FormatError.
 import { describe, it, expect } from 'vitest';
-import { validatePaste, validateHead, buildAAD, FormatError, MAX_CT_B64 } from '../public/js/format.js';
+import { validatePaste, validateHead, validateCreate, buildAAD, expireSeconds, FormatError, MAX_CT_B64, MAX_TTL } from '../public/js/format.js';
 import { b64urlFromBytes } from '../public/js/bytes.js';
 
 const fill = (v, n) => new Uint8Array(n).fill(v);
@@ -10,19 +10,19 @@ const addOwn = (obj, key, val) =>
 
 // A canonical, valid no-password paste. Deep-cloned per test before mutation.
 const base = () => structuredClone({
-  v: 1,
+  v: 2,
   ct: b64urlFromBytes(fill(1, 40)),
   wk: b64urlFromBytes(fill(2, 48)),
   adata: {
     alg: 'A256GCM', kdf: 'hkdf', iter: 0, comp: 'none', fmt: 'plaintext', bar: false,
     ivc: b64urlFromBytes(fill(3, 12)), ivw: b64urlFromBytes(fill(4, 12)), skdf: '',
   },
-  meta: { expire: '1week' },
+  meta: { expire: '7d' },
 });
 const pwBase = () => {
   const p = base();
-  p.adata.kdf = 'pbkdf2-hkdf';
-  p.adata.iter = 310000;
+  p.adata.kdf = 'argon2id-hkdf';
+  p.adata.iter = 3;
   p.adata.skdf = b64urlFromBytes(fill(5, 16));
   return p;
 };
@@ -70,9 +70,10 @@ describe('structural rejection', () => {
 });
 
 describe('version / algorithm / kdf', () => {
-  it('rejects unsupported versions', () => { for (const v of [0, 2, '1', 1.5]) { const p = base(); p.v = v; reject(p); } });
+  it('rejects unsupported versions', () => { for (const v of [0, 1, 3, '2', 1.5]) { const p = base(); p.v = v; reject(p); } });
   it('rejects unsupported alg', () => { const p = base(); p.adata.alg = 'AES-CBC'; reject(p); });
   it('rejects unsupported kdf', () => { const p = base(); p.adata.kdf = 'scrypt'; reject(p); });
+  it('rejects the retired v1 PBKDF2 kdf', () => { const p = pwBase(); p.adata.kdf = 'pbkdf2-hkdf'; p.adata.iter = 310000; reject(p); });
   it('rejects unsupported comp', () => { const p = base(); p.adata.comp = 'brotli'; reject(p); });
   it('rejects unsupported fmt', () => { const p = base(); p.adata.fmt = 'html'; reject(p); });
 });
@@ -110,13 +111,13 @@ describe('base64url / length constraints', () => {
 });
 
 describe('iteration-count and salt coherence', () => {
-  it('rejects nonzero iter on hkdf', () => { const p = base(); p.adata.iter = 310000; reject(p); });
-  it('rejects zero/low/high iter on pbkdf2-hkdf', () => {
-    for (const iter of [0, 99999, 1000001]) { const p = pwBase(); p.adata.iter = iter; reject(p); }
+  it('rejects nonzero iter on hkdf', () => { const p = base(); p.adata.iter = 3; reject(p); });
+  it('rejects out-of-range Argon2id time cost', () => {
+    for (const iter of [0, 11, 310000, 1.5]) { const p = pwBase(); p.adata.iter = iter; reject(p); }
   });
   it('rejects nonempty skdf on hkdf', () => { const p = base(); p.adata.skdf = b64urlFromBytes(fill(5, 16)); reject(p); });
-  it('rejects empty skdf on pbkdf2-hkdf', () => { const p = pwBase(); p.adata.skdf = ''; reject(p); });
-  it('rejects wrong salt length on pbkdf2-hkdf', () => { const p = pwBase(); p.adata.skdf = b64urlFromBytes(fill(5, 15)); reject(p); });
+  it('rejects empty skdf on argon2id-hkdf', () => { const p = pwBase(); p.adata.skdf = ''; reject(p); });
+  it('rejects wrong salt length on argon2id-hkdf', () => { const p = pwBase(); p.adata.skdf = b64urlFromBytes(fill(5, 15)); reject(p); });
 });
 
 describe('meta', () => {
@@ -138,30 +139,56 @@ describe('prototype pollution safety', () => {
   });
   it('rejects a JSON.parse-shaped pollution payload without polluting Object', () => {
     const payload = JSON.parse(
-      '{"v":1,"ct":"AAAA","wk":"AAAA","adata":{},"meta":{},"__proto__":{"admin":true}}');
+      '{"v":2,"ct":"AAAA","wk":"AAAA","adata":{},"meta":{},"__proto__":{"admin":true}}');
     reject(payload);
     expect({}.admin).toBeUndefined();
   });
 });
 
 describe('burn-peek head validation (SPEC.md §8)', () => {
-  const head = (p = pwBase()) => { delete p.ct; p.meta.created = 1700000000; return p; };
+  const head = (p = pwBase()) => { delete p.ct; delete p.wk; p.meta.created = 1700000000; return p; };
   const rejectHead = (h) => expect(() => validateHead(h)).toThrow(FormatError);
 
-  it('accepts a canonical head (paste minus ct)', () => {
+  it('accepts a canonical head (paste minus ct and wk)', () => {
     const clean = validateHead(head());
-    expect(Object.keys(clean).sort()).toEqual(['adata', 'meta', 'v', 'wk']);
+    expect(Object.keys(clean).sort()).toEqual(['adata', 'meta', 'v']);
+  });
+  it('rejects a head that still carries the wrapped key', () => {
+    const h = head(); h.wk = b64urlFromBytes(fill(2, 48)); rejectHead(h);
   });
   it('rejects a head that still carries ciphertext', () => {
     const h = head(); h.ct = 'AAAA'; rejectHead(h);
   });
-  it('rejects an absurd PBKDF2 workload before any key derivation', () => {
-    const h = head(); h.adata.iter = 1e9; rejectHead(h);
+  it('rejects an absurd Argon2id workload before any key derivation', () => {
+    for (const t of [0, 11, 1e9]) { const h = head(); h.adata.iter = t; rejectHead(h); }
   });
-  it('rejects non-objects, bad wk, and pollution-shaped keys', () => {
+  it('rejects non-objects, v1, and pollution-shaped keys', () => {
     for (const v of [null, 42, 'str', []]) rejectHead(v);
-    let h = head(); h.wk = b64urlFromBytes(fill(2, 47)); rejectHead(h);
+    let h = head(); h.v = 1; rejectHead(h);
     h = head(); addOwn(h.adata, '__proto__', 1); rejectHead(h);
+  });
+});
+
+describe('create bodies (paste + access-proof hashes)', () => {
+  const create = () => ({ ...base(), acc: { lh: b64urlFromBytes(fill(7, 32)), kh: b64urlFromBytes(fill(8, 32)) } });
+  it('accepts a canonical create body and keeps acc', () => {
+    expect(validateCreate(create()).acc.lh).toBe(b64urlFromBytes(fill(7, 32)));
+  });
+  it('rejects missing/malformed acc and server-set meta fields', () => {
+    const r = (b) => expect(() => validateCreate(b)).toThrow(FormatError);
+    let b = create(); delete b.acc; r(b);
+    b = create(); b.acc.lh = 'short'; r(b);
+    b = create(); b.acc.extra = 'x'; r(b);
+    for (const k of ['created', 'expires', 'left']) { b = create(); b.meta[k] = 1; r(b); }
+  });
+});
+
+describe('expiry', () => {
+  it('accepts m/h/d within [1 minute, 365 days] and nothing else', () => {
+    expect(expireSeconds('1m')).toBe(60);
+    expect(expireSeconds('24h')).toBe(86400);
+    expect(expireSeconds('365d')).toBe(MAX_TTL);
+    for (const v of ['0m', '366d', '1week', 'never', '1day', '01h', '1H', ' 1h', '__proto__', null, 5]) expect(expireSeconds(v)).toBeNull();
   });
 });
 

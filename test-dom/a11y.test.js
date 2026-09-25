@@ -10,16 +10,18 @@ import { showView } from '../public/js/ui.js';
 
 // ── #16: view transitions move focus ────────────────────────────────────────
 
-const VIEW_IDS = ['view-create', 'view-success', 'view-password', 'view-paste', 'view-status'];
+const VIEW_IDS = ['view-create', 'view-success', 'view-password', 'view-paste', 'view-files', 'view-status'];
 
 function buildViews() {
   document.body.innerHTML = '';
+  const main = document.createElement('main');
+  document.body.appendChild(main);
   for (const id of VIEW_IDS) {
     const s = document.createElement('section');
     s.id = id;
     s.tabIndex = -1;
     s.hidden = true;
-    document.body.appendChild(s);
+    main.appendChild(s);
   }
   const btn = document.createElement('button');
   btn.id = 'inside-create';
@@ -106,11 +108,11 @@ describe('theme tokens — WCAG AA (4.5:1) for every non-decorative ink', () => 
   }
 
   it('--ink-4 styles no text: no color declaration uses it outside the watermark/separator', () => {
-    // The two sanctioned decorative uses; anything else must use --ink-3+.
+    // The sanctioned decorative uses (watermark, separator dots); anything else must use --ink-3+.
     const uses = [...css.matchAll(/^.*var\(--ink-4\).*$/gm)].map((m) => m[0].trim());
     for (const line of uses) {
       expect(
-        /\.watermark|\.feat \+ \.feat::before|--ink-4:/.test(line),
+        /\.watermark|\.feat \+ \.feat::before|\.foot-sep|--ink-4:/.test(line),
         `unexpected --ink-4 use: ${line}`,
       ).toBe(true);
     }
