@@ -47,17 +47,17 @@ export async function handlePrivate(request, env, url, ctx) {
   // ── share creation (session or API key) ────────────────────────────────────
   if (p === '/api/private/paste') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    const a = await authenticate(request, env, { allowApiKey: true });
+    const a = await authenticate(request, env, { allowApiKey: true, scope: 'notes' });
     return withAuth(a, await createNote(request, env, a));
   }
   if (p === '/api/private/file') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    const a = await authenticate(request, env, { allowApiKey: true });
+    const a = await authenticate(request, env, { allowApiKey: true, scope: 'files' });
     return withAuth(a, await initFile(request, env, a));
   }
   const fm = p.match(/^\/api\/private\/file\/([^/]+)\/(chunk|finalize)(?:\/(\d{1,6}))?$/);
   if (fm) {
-    const a = await authenticate(request, env, { allowApiKey: true });
+    const a = await authenticate(request, env, { allowApiKey: true, scope: 'files' });
     const id = decodePathSegment(fm[1]);
     const info = id && parseId(id);
     if (!info || !info.file) return err(404, 'not_found', 'Not found.');
@@ -75,7 +75,7 @@ export async function handlePrivate(request, env, url, ctx) {
   // What the client must check itself before creating (session or API key).
   if (p === '/api/private/policy') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
-    const a = await authenticate(request, env, { allowApiKey: true });
+    const a = await authenticate(request, env, { allowApiKey: true, scope: 'policy' });
     const r = await directory(env).sharePolicy(a.user.id, a.channel);
     if (!r.ok) return fromDir(r);
     return withAuth(a, json({ url: r.url, urlRules: r.urlRules }));
@@ -129,7 +129,7 @@ export async function handlePrivate(request, env, url, ctx) {
         ? null
         : Number.isSafeInteger(body.expiresInSec) && body.expiresInSec >= 3600 && body.expiresInSec <= MAX_TTL ? now() + body.expiresInSec : -1;
       if (expires === -1) return err(400, 'invalid_expiry', 'Key lifetime must be between 1 hour and 365 days.');
-      const r = await dir.createKey(a.user.id, { name: body.name, hash: await hashToken(key), expires });
+      const r = await dir.createKey(a.user.id, { name: body.name, hash: await hashToken(key), expires, scopes: body.scopes });
       if (!r.ok) return fromDir(r);
       return json({ ok: true, id: r.id, key }, 201);
     }

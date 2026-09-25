@@ -375,10 +375,11 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
     const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
     armConfirm(rv, 'Revoke?', async () => { await guard(() => admin.revokeUserKey(id, k.id), 'Key revoked.'); openUser(id); });
     keys.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
-      h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }), h('td.cell-actions', {}, rv)));
+      h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
+      h('td.mono', { dataset: { label: 'Scopes' }, text: (k.scopes || []).join(', ') }), h('td.cell-actions', {}, rv)));
   }
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'API keys' }),
-    h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', ''].map((t) => h('th', { text: t })))), keys))));
+    h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', 'Scopes', ''].map((t) => h('th', { text: t })))), keys))));
   if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 

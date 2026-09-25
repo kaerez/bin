@@ -60,7 +60,7 @@ export default [
 
   // Build-time asset tooling (tools/render-og.mjs): plain Node scripts, never shipped.
   {
-    files: ['tools/**/*.mjs'],
+    files: ['tools/**/*.mjs', 'examples/**/*.mjs'],
     languageOptions: { globals: { ...globals.node } },
   },
 ];

@@ -70,10 +70,10 @@ export async function readSession(request, env) {
 
 /**
  * Authenticate a /api/private request. Sessions work everywhere; API keys only
- * where `allowApiKey` is set (share creation). Returns
+ * where `allowApiKey` is set, and only when the key holds `scope`. Returns
  * { user, actor, channel: 'all'|'api', claims?, setCookie? } or throws HttpError.
  */
-export async function authenticate(request, env, { allowApiKey = false } = {}) {
+export async function authenticate(request, env, { allowApiKey = false, scope = null } = {}) {
   const authz = request.headers.get('authorization') || '';
   if (authz) {
     const m = /^Bearer (sbk_[A-Za-z0-9_-]{43})$/.exec(authz.trim());
@@ -82,7 +82,11 @@ export async function authenticate(request, env, { allowApiKey = false } = {}) {
     const res = await directory(env).authKey(await hashToken(m[1]));
     if (res?.disabled) throw accountDisabled();
     if (!res) throw new HttpError(401, 'invalid_api_key', 'Invalid, expired or disabled API key.');
-    return { user: res.user, actor: null, channel: 'api' };
+    // Each key does only what it was created for (least privilege).
+    if (scope && !(res.scopes || []).includes(scope)) {
+      throw new HttpError(403, 'scope_denied', `This API key does not have the "${scope}" scope.`);
+    }
+    return { user: res.user, actor: null, channel: 'api', scopes: res.scopes };
   }
   const s = await readSession(request, env);
   if (!s.ok) {

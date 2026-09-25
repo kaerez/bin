@@ -597,6 +597,11 @@ button.back { cursor: pointer; }
 .file-total { padding: .3rem 1.1rem .8rem; font-size: .72rem; color: var(--ink-3); }
 .file-total.over { color: var(--seal); }
 .file-policy { padding: 0 1.1rem .8rem; font-size: .72rem; color: var(--ink-2); }
+.key-scopes { display: inline-flex; flex-wrap: wrap; gap: .25rem .9rem; border: 0; padding: 0; margin: 0; }
+.api-help { margin-top: 1rem; font-size: .85rem; line-height: 1.55; color: var(--ink-2); }
+.api-help summary { cursor: pointer; font-weight: 500; color: var(--ink); }
+.api-help p { margin: .5rem 0; }
+.api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
 .receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
 .opens-box { padding: .5rem 0; }
 .opens-box .table { font-size: .75rem; }

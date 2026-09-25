@@ -165,7 +165,14 @@ export async function cmdCreate(args, io) {
     // Syntax and forbidden schemes first (no request for a link that can never
     // be shared), then the account's own rules.
     typedPayload('url-syntax', text);
-    urlRules = (await new Client(server, io.fetch, { apiKey }).policy())?.urlRules;
+    try {
+      urlRules = (await new Client(server, io.fetch, { apiKey }).policy())?.urlRules;
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'scope_denied') {
+        throw new UsageError('this API key may not read your account policy (scope "policy"), which link shares need to check the link — create a key with that scope');
+      }
+      throw e;
+    }
   }
   if (prompted === null) text = typedPayload(values.fmt, text, urlRules);
 

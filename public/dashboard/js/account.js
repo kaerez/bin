@@ -102,7 +102,9 @@ function wireKeys() {
     const msg = $('#keys-msg');
     try {
       const life = $('#key-life').value;
-      const r = await createKey($('#key-name').value.trim(), life ? Number(life) : null);
+      const scopes = [...document.querySelectorAll('input[name="key-scope"]:checked')].map((c) => c.value);
+      if (!scopes.length) { showMsg(msg, 'Choose at least one thing the key may do.'); return; }
+      const r = await createKey($('#key-name').value.trim(), life ? Number(life) : null, scopes);
       $('#key-new').hidden = false;
       $('#key-new-note').hidden = false;
       $('#key-new-val').textContent = r.key;
@@ -116,6 +118,8 @@ function wireKeys() {
       toast(friendlyError(err), { error: true });
     }
   });
+  // A copy-pasteable example with this server's address (no key in it).
+  $('#api-example-policy').textContent = `curl -H "Authorization: Bearer $SECBIN_API_KEY" ${location.origin}/api/private/policy`;
   void card;
   renderKeys();
 }
@@ -131,7 +135,8 @@ async function renderKeys() {
       });
       body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
         h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
-        h('td.mono', { dataset: { label: 'Expires' }, text: k.expires ? formatDate(k.expires) : 'never' }), h('td.cell-actions', {}, rv)));
+        h('td.mono', { dataset: { label: 'Expires' }, text: k.expires ? formatDate(k.expires) : 'never' }),
+        h('td.mono', { dataset: { label: 'Scopes' }, text: (k.scopes || []).join(', ') || '—' }), h('td.cell-actions', {}, rv)));
     }
   } catch (e) {
     showMsg($('#keys-msg'), friendlyError(e));
