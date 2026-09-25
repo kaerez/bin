@@ -196,6 +196,10 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
   browsers assemble the file in memory, which is why shares are capped at 2 GiB.
 - **Per-file size and file-count limits are enforced by the client** and declared to the server
   (it cannot verify them — the files are encrypted and packed). The total size is enforced exactly.
+- **The file policy (allowed/blocked types, folder depth) works the same way:** when the
+  administrator sets one for an account, that account's browser or CLI declares the file types
+  and folder depth it is uploading, and the server refuses what the policy forbids. It keeps
+  honest users within the rules; it is not a guarantee against a modified client.
 
 ## Security
 

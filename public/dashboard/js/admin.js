@@ -8,6 +8,7 @@ import { admin } from '../../js/api.js';
 import { newCredential, checkNewPassword } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
+import { normalizeRules } from '../../js/filepolicy.js';
 import { ready } from './nav.js';
 import { renderShares } from './admin-shares.js';
 
@@ -28,8 +29,12 @@ const LIMIT_UI = [
   ['viewerCustomRules', 'Use per-user viewer rules', 'bool'],
   ['apiEnabled', 'API keys allowed', 'bool'],
   ['apiMaxKeys', 'Max API keys', 'int', { nullable: false }],
+  ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
+  ['fileTypeRules', 'File type list', 'rules'],
+  ['maxFolderDepth', 'Max folder depth', 'int'],
 ];
-const API_KEYS = ['text', 'files', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes'];
+const API_KEYS = ['text', 'files', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
+const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
   'Any file as plain text': [{ match: 'any', value: '', renderer: 'text' }],
   'Text & Markdown': [
@@ -91,20 +96,28 @@ function numberInput(v, { step = 1, scale = 1 } = {}) {
 }
 
 /** Limits editor for one scope/channel; `rows` = current overrides, `defaults` = what applies otherwise. */
-function limitsEditor({ scope, channel, rows, effective }) {
+function limitsEditor({ scope, channel, rows, effective, onSaved }) {
   const box = h('div.limits-grid');
   const keys = channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI;
   const ctls = [];
   for (const [key, label, type, opt = {}] of keys) {
     const has = Object.prototype.hasOwnProperty.call(rows, key);
     const v = has ? rows[key] : undefined;
+    const choices = {
+      bool: () => [h('option', { value: 'true', text: 'yes', selected: has && v === true }), h('option', { value: 'false', text: 'no', selected: has && v === false })],
+      enum: () => opt.values.map(([k, t]) => h('option', { value: `enum:${k}`, text: t, selected: has && v === k })),
+      rules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
+    }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: 'no limit', selected: has && v === null })]),
+      h('option', { value: 'value', text: 'limit to', selected: has && v !== null })]);
     const mode = h('select.input', { 'aria-label': `${label} mode` },
       h('option', { value: 'inherit', text: scope === 'global' ? (channel === 'api' ? 'no extra restriction' : 'built-in default') : 'inherit', selected: !has }),
-      ...(type === 'bool'
-        ? [h('option', { value: 'true', text: 'yes', selected: has && v === true }), h('option', { value: 'false', text: 'no', selected: has && v === false })]
-        : [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: 'no limit', selected: has && v === null })]),
-          h('option', { value: 'value', text: 'limit to', selected: has && v !== null })]));
+      ...choices());
     let val = null;
+    if (type === 'rules') {
+      val = h('textarea.input.rules-in', { rows: '3', spellcheck: 'false', 'aria-label': label, placeholder: 'ext:pdf\nmime:image/*', title: RULES_HINT });
+      val.value = has && Array.isArray(v) ? v.join('\n') : '';
+      val.read = () => normalizeRules(val.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean));
+    }
     if (type === 'int') val = numberInput(has && v !== null ? v : null);
     if (type === 'bytes') val = h('span.inline-ctl', {}, numberInput(has && v !== null ? v : null, { step: 0.1, scale: MiB }), h('span.mono', { text: 'MiB' }));
     if (type === 'dur') val = durationInput(has && v !== null ? v : null, { allowNull: true });
@@ -112,7 +125,7 @@ function limitsEditor({ scope, channel, rows, effective }) {
     mode.onchange = sync;
     sync();
     const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
-    const effText = eff === undefined ? '' : eff === null ? 'effective: no limit' : type === 'bytes' ? `effective: ${formatBytes(eff)}` : type === 'dur' ? `effective: ${eff}s` : `effective: ${eff}`;
+    const effText = eff === undefined ? '' : type === 'rules' ? `effective: ${eff.length ? eff.join(', ') : 'none'}` : eff === null ? 'effective: no limit' : type === 'bytes' ? `effective: ${formatBytes(eff)}` : type === 'dur' ? `effective: ${eff}s` : `effective: ${eff}`;
     box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: effText })));
     ctls.push({ key, type, mode, val });
   }
@@ -123,14 +136,19 @@ function limitsEditor({ scope, channel, rows, effective }) {
       if (c.mode.value === 'inherit') patch[c.key] = 'inherit';
       else if (c.mode.value === 'true' || c.mode.value === 'false') patch[c.key] = c.mode.value === 'true';
       else if (c.mode.value === 'null') patch[c.key] = null;
-      else {
+      else if (c.mode.value.startsWith('enum:')) patch[c.key] = c.mode.value.slice(5);
+      else if (c.type === 'rules') {
+        try { patch[c.key] = c.val.read(); } catch (e) { return msg(`File type list: ${e.message}`, true); }
+      } else {
         const read = c.type === 'bytes' ? c.val.firstChild.read() : c.val.read();
         if (!Number.isFinite(read)) return msg(`Enter a value for ${c.key}.`, true);
         patch[c.key] = read;
       }
     }
-    await guard(() => admin.limits(scope, channel, patch), 'Limits saved.');
+    const ok = await guard(() => admin.limits(scope, channel, patch), 'Limits saved.');
+    if (ok && onSaved) onSaved(); // re-render so the "effective" column is current
   };
+  if (keys.some(([k]) => k === 'fileTypeRules')) box.appendChild(h('p.mono.muted', { text: RULES_HINT }));
   box.appendChild(h('div.btn-row', {}, save));
   return box;
 }
@@ -227,7 +245,7 @@ async function renderUsers() {
   p.appendChild(h('div', { id: 'user-detail' }));
 }
 
-async function openUser(id, passwordOnly = false) {
+async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   const box = clear($('#user-detail'));
   const d = await guard(() => admin.user(id));
   if (!d) return;
@@ -247,8 +265,8 @@ async function openUser(id, passwordOnly = false) {
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }), h('div.toolbar', {}, npw, npw2, setBtn)));
   if (passwordOnly) return;
 
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities & limits (GUI + API)' }), limitsEditor({ scope: id, channel: 'all', rows: d.limits.all, effective: d.effective.all })));
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Extra API restrictions (can only narrow, never widen)' }), limitsEditor({ scope: id, channel: 'api', rows: d.limits.api, effective: d.effective.api })));
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities & limits (GUI + API)' }), limitsEditor({ scope: id, channel: 'all', rows: d.limits.all, effective: d.effective.all, onSaved: () => openUser(id, false, { scroll: false }) })));
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Extra API restrictions (can only narrow, never widen)' }), limitsEditor({ scope: id, channel: 'api', rows: d.limits.api, effective: d.effective.api, onSaved: () => openUser(id, false, { scroll: false }) })));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas for this user (in addition to global quotas)' }), quotasEditor(id, d.quotas)));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Per-user viewer rules (used when "Use per-user viewer rules" is on)' }), rulesEditor(id, d.viewerRules)));
   const keys = h('tbody');
@@ -260,7 +278,7 @@ async function openUser(id, passwordOnly = false) {
   }
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'API keys' }),
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', ''].map((t) => h('th', { text: t })))), keys))));
-  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // ── defaults ─────────────────────────────────────────────────────────────────
@@ -384,7 +402,9 @@ async function renderAudit() {
     const r = await guard(() => admin.audit(before));
     if (!r) return;
     for (const a of r.rows) {
-      const who = a.imp ? `${a.actor} as ${a.subject}` : a.actor || 'system';
+      // imp: done while impersonating; adm: an admin's direct change to another
+      // user's share (in this log only, never in the user's own activity).
+      const who = a.imp ? `${a.actor} as ${a.subject}` : `${a.actor || 'system'}${a.adm ? ' (admin)' : ''}`;
       const on = !a.imp && a.subject && a.subject !== a.actor ? a.subject : '';
       body.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'When' }, text: formatDate(a.ts) }), h('td', { dataset: { label: 'Who' }, text: who }),
         h('td', { dataset: { label: 'On user' }, text: on }), h('td.mono', { dataset: { label: 'Action' }, text: a.action }), h('td', { dataset: { label: 'Details' }, text: a.detail })));

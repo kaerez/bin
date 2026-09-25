@@ -214,7 +214,7 @@ pulling the repository and re-running `npm install -g ./cli`.
 | --- | --- |
 | Ciphertext, the padded total size and chunk count | The `#fragment` key, passwords, the plaintext |
 | View limit, expiry, the declared format (`plaintext`/`code`/`markdown`/`files`), and your optional **label** (unencrypted) | Note content |
-| For `send`: the **number of files** and the **largest file size**, declared for your account's limit checks | File and folder names, the folder structure, MIME types, individual sizes, mtimes (all inside the encrypted manifest) |
+| For `send`: the **number of files** and the **largest file size**, declared for your account's limit checks; if the administrator set a file policy for your account, also the **set of file types** (extension + MIME) and the **deepest folder level** — checked, not stored | File and folder names, the folder structure, MIME types, individual sizes, mtimes (all inside the encrypted manifest) |
 | The SHA-256 of the two access proofs, and whether a password was used | Anything that would let it decrypt the share, or test password guesses offline, without the fragment |
 | Your account (via the API key) for shares you create | Who opens a link (beyond normal network metadata) |
 

@@ -11,6 +11,7 @@ import { detectMime, normalizeMime, COMMON_TYPES } from '../../js/mime.js';
 import { $, showView, toast, copyText, flashCopied } from '../../js/ui.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from '../../js/common.js';
 import { walkEntry } from '../../js/walk.js';
+import { declare, describeType, fileExt, refusedTypes } from '../../js/filepolicy.js';
 import { ready } from './nav.js';
 
 const UNIT_WORDS = { m: ['minute', 'minutes'], h: ['hour', 'hours'], d: ['day', 'days'] };
@@ -58,6 +59,8 @@ async function init() {
   };
   wireOptions();
   wireFiles();
+  const pol = policyText();
+  if (pol) { const el = $('#file-policy'); el.textContent = pol; el.hidden = false; }
 
   const createBtn = $('#create');
   const msg = $('#create-msg');
@@ -213,8 +216,45 @@ function filesProblem() {
   for (const f of files) {
     try { checkMime(f.type); } catch { return `"${f.path}" has an invalid type — use the form type/subtype.`; }
   }
+  const policy = policyProblem(files, dirs);
+  if (policy) return policy;
   try { layout(files, dirs); } catch (e) { return e.message; }
   return null;
+}
+
+// ── file policy (set by the administrator) ───────────────────────────────────
+const typePolicy = () => ['allow', 'block'].includes(profile.limits.fileTypeMode);
+const depthPolicy = () => Number.isInteger(profile.limits.maxFolderDepth);
+
+/** The administrator's file-type / folder-depth policy, checked before anything is encrypted. */
+function policyProblem(files, dirs) {
+  const L = profile.limits;
+  const { types, depth } = declare([...files, ...dirs.map((d) => ({ path: d, dir: true }))]);
+  if (depthPolicy() && depth > L.maxFolderDepth) {
+    return `Folders may nest at most ${L.maxFolderDepth} level${L.maxFolderDepth === 1 ? '' : 's'} deep for your account; this share has ${depth}.`;
+  }
+  if (typePolicy()) {
+    const refused = refusedTypes(L.fileTypeMode, L.fileTypeRules, types);
+    if (refused.length) {
+      const bad = files.filter((f) => refused.some((t) => t.ext === fileExt(f.path) && t.mime === String(f.type).toLowerCase()));
+      const names = bad.slice(0, 3).map((f) => `"${f.path}"`).join(', ') + (bad.length > 3 ? ` and ${bad.length - 3} more` : '');
+      return `Your administrator does not allow ${refused.map(describeType).join(', ')} files: ${names}. Remove ${bad.length === 1 ? 'it' : 'them'} or change the type.`;
+    }
+  }
+  return null;
+}
+
+/** A one-line description of the policy under the drop zone (empty when none applies). */
+function policyText() {
+  const L = profile.limits;
+  const parts = [];
+  if (typePolicy()) {
+    const rules = L.fileTypeRules.map((r) => r.replace(/^ext:/, '.').replace(/^mime:/, '')).join(', ');
+    parts.push(L.fileTypeMode === 'allow' ? `Allowed file types: ${rules || 'none'}.` : `Blocked file types: ${rules}.`);
+  }
+  if (depthPolicy()) parts.push(`Folders may nest at most ${L.maxFolderDepth} level${L.maxFolderDepth === 1 ? '' : 's'} deep.`);
+  if (parts.length) parts.push('File types are declared to the server for this check; names stay encrypted.');
+  return parts.join(' ');
 }
 
 function renderList() {
@@ -304,6 +344,12 @@ async function uploadFiles(password, opts, report) {
   // about how many files there are or how big any one of them is.
   if (L.maxFilesPerShare !== null) initBody.files = files.length;
   if (L.maxFileBytes !== null) initBody.maxFile = Math.max(0, ...files.map((f) => f.size));
+  // Likewise the file-type set and folder depth, only when a policy applies.
+  if (typePolicy() || depthPolicy()) {
+    const d = declare([...files, ...dirs.map((p) => ({ path: p, dir: true }))]);
+    if (typePolicy()) initBody.types = d.types;
+    if (depthPolicy()) initBody.depth = d.depth;
+  }
   const init = await initFileShare(initBody);
 
   const key = await importFileKey(manifest.fk);

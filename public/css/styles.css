@@ -427,6 +427,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
 .pill.warn { color: var(--warn); border-color: color-mix(in oklab, var(--rule-2), var(--warn) 45%); }
 /* the VOID stamp — this document has been destroyed */
 .pill.bad { color: var(--seal); border-color: color-mix(in oklab, var(--rule-2), var(--seal) 50%); }
+.pill + .pill { margin-left: .35rem; }
 
 /* ── paste content ───────────────────────────────────────────────────────── */
 .content { margin-top: .5rem; }
@@ -592,6 +593,8 @@ button.back { cursor: pointer; }
 .file-list { padding: 0 1.1rem; max-height: 340px; overflow: auto; }
 .file-total { padding: .3rem 1.1rem .8rem; font-size: .72rem; color: var(--ink-3); }
 .file-total.over { color: var(--seal); }
+.file-policy { padding: 0 1.1rem .8rem; font-size: .72rem; color: var(--ink-2); }
+.rules-in { min-width: 14rem; font-family: var(--mono, monospace); resize: vertical; }
 .viewer-opt { display: flex; align-items: center; gap: .5rem; padding: 0 1.1rem .9rem; font-size: .82rem; color: var(--ink-2); }
 .mime-in { width: 12rem; max-width: 100%; padding: .3rem .5rem; font-size: .72rem; }
 .mime-in[aria-invalid="true"] { border-color: var(--seal); color: var(--seal); }

@@ -72,6 +72,14 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
   declares the file count / largest file size at upload time so the server can check it. The
   values are not stored. They cannot be verified by the server (the stream is encrypted);
   only the total size is enforced exactly.
+- **File policy (allowed/blocked file types, maximum folder depth).** When — and only when —
+  the administrator has set such a policy for an account, the creating client declares the
+  de-duplicated set of `{extension, MIME type}` pairs and the deepest folder level at upload
+  init. The server checks them against the policy and does not store them. This is a
+  deliberate, bounded leak (which *kinds* of files, never their names, count per type, or
+  sizes) that exists only for accounts under a policy. Like the file-count limits, the
+  declaration is not verifiable: it stops honest mistakes and makes the rule auditable, not a
+  modified client. The owner is never subject to it.
 - Access-proof *hashes*, delete/upload/grant/API-key *hashes*, and password verifiers
   (`SHA-256("secbin-auth/v2" ‖ Argon2id(password))`).
 
