@@ -17,8 +17,9 @@ export const MAX_DECLARED_TYPES = 1000;
 export const MAX_FOLDER_DEPTH = 64;
 
 const EXT_RE = /^[a-z0-9][a-z0-9_+-]{0,31}$/;
-const MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$/;
-const MIME_GLOB_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/(\*|[a-z0-9][a-z0-9!#$&^_.+-]{0,62})$/;
+// Same bounds as files.js checkMime, so every type a manifest accepts can be declared.
+const MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
+const MIME_GLOB_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/(\*|[a-z0-9][a-z0-9!#$&^_.+-]{0,126})$/;
 
 /** "ext:pdf" | "mime:image/*" → { kind, value }, or null if malformed. */
 export function parseRule(rule) {
@@ -44,13 +45,31 @@ export function normalizeRules(list) {
   return out;
 }
 
+/**
+ * The extension as the recipient's OS will see it: trailing dots and spaces
+ * are dropped first (Windows strips them on save, so "tool.exe." is an .exe).
+ */
+function rawExt(path) {
+  const name = String(path).split('/').pop().replace(/[. ]+$/, '');
+  const i = name.lastIndexOf('.');
+  return i <= 0 ? '' : name.slice(i + 1).toLowerCase();
+}
+
 /** Lower-case extension of the last path segment ("" when there is none). */
 export function fileExt(path) {
-  const name = String(path).split('/').pop();
-  const i = name.lastIndexOf('.');
-  if (i <= 0 || i === name.length - 1) return '';
-  const ext = name.slice(i + 1).toLowerCase();
+  const ext = rawExt(path);
   return EXT_RE.test(ext) ? ext : '';
+}
+
+/**
+ * True when a file has an extension that cannot be expressed in a
+ * declaration (too long, unusual characters). Under a type policy such files
+ * are refused by the clients rather than declared as "no extension", which a
+ * block list would let through.
+ */
+export function uncheckableExt(path) {
+  const ext = rawExt(path);
+  return ext !== '' && !EXT_RE.test(ext);
 }
 
 /** Folder depth of a share path: "a.txt" → 0, "x/y/a.txt" → 2; a directory entry counts itself. */

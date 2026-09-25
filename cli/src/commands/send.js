@@ -27,7 +27,7 @@ import { newPassword } from '../secret.js';
 import { CLEAR_LINE } from '../tui/anim.js';
 import { buildShareUrl, isIdOfClass, requireServer } from '../url.js';
 import { collect, fileSource, showPath } from '../walk.js';
-import { declare, describeType, fileExt, normalizeRules, refusedTypes } from '../../vendor/filepolicy.js';
+import { declare, describeType, fileExt, normalizeRules, refusedTypes, uncheckableExt } from '../../vendor/filepolicy.js';
 
 const OPTIONS = {
   views: { type: 'string' },
@@ -189,6 +189,10 @@ export function policyDeclaration(policy, files, dirs) {
   if (p.mode === 'allow' || p.mode === 'block') {
     let rules = [];
     try { rules = normalizeRules(Array.isArray(p.rules) ? p.rules : []); } catch { rules = []; }
+    const odd = files.filter((f) => uncheckableExt(f.path));
+    if (odd.length) {
+      throw new UsageError(`cannot check the file type of ${odd.slice(0, 5).map((f) => showPath(f.path)).join(', ')} against your account's file policy (unusual extension) — rename or leave them out`);
+    }
     const refused = refusedTypes(p.mode, rules, types);
     if (refused.length) {
       const bad = files.filter((f) => refused.some((t) => t.ext === fileExt(f.path) && t.mime === String(f.type || 'application/octet-stream').toLowerCase()));

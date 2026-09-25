@@ -37,7 +37,7 @@ const LIMIT_UI = [
   ['maxFolderDepth', 'Max folder depth', 'int'],
 ];
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
-const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
+const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
   'Any file as plain text': [{ match: 'any', value: '', renderer: 'text' }],
   'Text & Markdown': [

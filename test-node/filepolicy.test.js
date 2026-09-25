@@ -1,6 +1,7 @@
 // filepolicy.test.js — the shared file-policy rules (browser, Worker, CLI).
 import { describe, it, expect } from 'vitest';
-import { parseRule, normalizeRules, fileExt, pathDepth, declare, refusedTypes, checkDeclaredTypes, describeType } from '../public/js/filepolicy.js';
+import { parseRule, normalizeRules, fileExt, pathDepth, declare, refusedTypes, checkDeclaredTypes, describeType, uncheckableExt } from '../public/js/filepolicy.js';
+import { resolveLimits } from '../src/lib/settings.js';
 
 describe('file policy rules', () => {
   it('parses ext and mime rules and refuses anything else', () => {
@@ -49,5 +50,25 @@ describe('file policy rules', () => {
     for (const bad of [null, 'x', [{}], [{ ext: 'a b', mime: 'text/plain' }], [{ ext: 'a', mime: 'text' }], Array(1001).fill({ ext: 'a', mime: 'text/plain' })]) {
       expect(checkDeclaredTypes(bad)).toBeNull();
     }
+  });
+
+  it('sees the extension the recipient’s OS will: trailing dots and spaces cannot hide it', () => {
+    for (const p of ['tool.exe.', 'tool.exe ', 'dir/tool.EXE. .']) expect(fileExt(p)).toBe('exe');
+    expect(refusedTypes('block', ['ext:exe'], declare([{ path: 'tool.exe.', type: 'application/octet-stream' }]).types)).toHaveLength(1);
+    expect(uncheckableExt(`a.${'x'.repeat(40)}`)).toBe(true);
+    expect(uncheckableExt('a.t@r')).toBe(true);
+    for (const p of ['a.pdf', 'README', '.bashrc', 'a.']) expect(uncheckableExt(p)).toBe(false);
+  });
+
+  it('accepts every MIME type a manifest accepts', () => {
+    const long = `application/${'x'.repeat(120)}`;
+    expect(checkDeclaredTypes([{ ext: 'bin', mime: long }])).toEqual([{ ext: 'bin', mime: long }]);
+  });
+
+  it('resolves the type mode and its rule list together, from the same level', () => {
+    const global = { fileTypeMode: 'block', fileTypeRules: ['ext:exe'] };
+    expect(resolveLimits(global, { fileTypeMode: 'allow' })).toMatchObject({ fileTypeMode: 'allow', fileTypeRules: [] });
+    expect(resolveLimits(global, { fileTypeRules: ['ext:pdf'] })).toMatchObject({ fileTypeMode: 'any', fileTypeRules: ['ext:pdf'] });
+    expect(resolveLimits(global, {})).toMatchObject({ fileTypeMode: 'block', fileTypeRules: ['ext:exe'] });
   });
 });
