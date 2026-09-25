@@ -64,7 +64,9 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
 - Share ids (they appear in request paths), storage class (note / view-limited / files).
 - Ciphertext size: for notes an upper bound on the plaintext size; for file shares only the
   **padded total** (64 KiB granularity) and the chunk count — never individual file sizes.
-- Expiry, view limit, remaining views, and lifecycle events.
+- Expiry, view limit, remaining views, and lifecycle events; the declared format (`plaintext`,
+  `code`, `markdown`, `url`, `secret`, `files`), so the server knows a share *is* a link or a
+  credential, never what it contains; and whether recipients may delete it.
 - **Account metadata:** usernames, which account created which share id, share **labels**
   (plain text by design — the UI warns not to put secrets in them), quota counters, API-key
   names and use times, the activity/audit log.
@@ -137,6 +139,20 @@ compromise. Defenses:
   - one preview at a time; object URLs are revoked on close; global disable takes effect for
     existing links immediately (the page intersects the sender's snapshot with the live
     policy).
+- **Link shares** (`fmt: "url"`) are never followed automatically. Only absolute `http(s)`
+  URLs without embedded credentials are accepted (on create and again after decryption). The
+  recipient sees the host as the browser resolves it (punycode) with a look-alike warning for
+  internationalized names and a warning for plain HTTP, and opens it with a confirmed second
+  click through `window.open(…, 'noopener,noreferrer')`, so the destination gets no
+  `Referer` and no handle to this page.
+- **Credential shares** (`fmt: "secret"`) are validated fail-closed and rendered field by field
+  with `textContent`; password and one-time-code seed stay masked until revealed. One-time codes
+  are computed in the page (WebCrypto HMAC), never by the server. The CLI never takes a
+  credential from its arguments (only a file, stdin or hidden prompts) and escapes control
+  characters before printing to a terminal.
+- **"Delete now"** by a recipient needs both access proofs (so only someone who can open the
+  share), the sender's opt-in *and* the admin's permission; it is refused while the admin has
+  the share locked and counts wrong proofs as invalid attempts. It spends no view.
 - **Downloads** are always `application/octet-stream` / `application/zip` with sanitized
   names; ZIP member names come from validated paths (no absolute or `../` entries).
 

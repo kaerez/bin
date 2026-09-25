@@ -92,7 +92,7 @@ alg=A256GCM\n
 kdf=<hkdf|argon2id-hkdf>\n
 iter=<adata.iter>\n
 comp=<gzip|none>\n
-fmt=<plaintext|code|markdown|files>\n
+fmt=<plaintext|code|markdown|url|secret|files>\n
 bar=<0|1>\n
 ivc=<b64url iv_content>\n
 ivw=<b64url iv_wrap>\n
@@ -111,7 +111,7 @@ skdf=<b64url salt_kdf, or empty>\n
 | `kdf` | string | `"hkdf"` (no password) or `"argon2id-hkdf"` |
 | `iter` | int | `0` for `hkdf`; Argon2id `t` ∈ [1, 10] for `argon2id-hkdf` |
 | `comp` | string | `"gzip"` or `"none"` |
-| `fmt` | string | `"plaintext"`, `"code"`, `"markdown"` (notes) or `"files"` (file-share manifest, §12) |
+| `fmt` | string | `"plaintext"`, `"code"`, `"markdown"`, `"url"`, `"secret"` (notes, §5.6) or `"files"` (file-share manifest, §12) |
 | `bar` | bool | `true` = view-limited, `false` = unlimited views |
 | `ivc`, `ivw` | b64url | 12 bytes each |
 | `skdf` | b64url | 16 bytes for `argon2id-hkdf`, empty string for `hkdf` |
@@ -124,6 +124,9 @@ skdf=<b64url salt_kdf, or empty>\n
 
 - `meta.expire`: `"<n>m" | "<n>h" | "<n>d"`, 60 s … 365 days. `meta.views` (1…100 000) only when
   `bar` is true (absent ⇒ 1). `created`, `expires`, `left` are server-set and rejected on create.
+- `meta.deletable`: optional, only ever `true` — the sender lets whoever opens the share delete
+  it at once (§10 `POST …/expire`). Allowed only when the account's `openerDelete` limit is on;
+  a file share's manifest must carry the same flag as its upload init.
 - `acc.lh`, `acc.kh`: 32-byte hashes (43 b64url chars).
 
 ### 5.3 Head (public, `GET`)
@@ -140,6 +143,24 @@ Unix seconds) and, for view-limited shares, `views` and `left` (`null` = raised 
 Every object is validated fail-closed: exact key sets, prototype-pollution-shaped keys
 rejected, types/ranges/lengths checked, `v` must be 2, `views`/`left` only with `bar`. Clients
 validate heads *before* any key derivation (bounded `iter` ⇒ bounded Argon2 work).
+
+### 5.6 Typed notes: links and credentials
+
+Both are ordinary notes whose plaintext has a fixed shape (`public/js/sharetypes.js`). The
+server sees only `fmt`; recipients validate the decrypted payload fail-closed and fall back to
+showing it as inert text.
+
+- **`url`** — exactly one absolute `http:` or `https:` URL, at most 2048 characters, no
+  whitespace or control characters, **no user name or password** (`https://user:pw@…` is refused:
+  use a credential share). Clients store the parsed `href`. Recipients are shown the host as the
+  browser resolves it (punycode, e.g. `xn--80ak6aa92e.com`) with a warning when it differs from
+  its Unicode form or is not HTTPS; opening needs an explicit second click and uses
+  `noopener,noreferrer`. There is **never** an automatic redirect.
+- **`secret`** — JSON `{ "v": 1, title?, username?, password?, url?, notes?, totp? }`, at least
+  one field, all strings (max lengths 200 / 500 / 4096 / 2048 / 20000 / 1024), no other keys.
+  `url` follows the `url` rules; `totp` is a base32 seed (≥ 80 bits) or an `otpauth://totp/…`
+  URI (SHA-1/256/512, 6–8 digits, period 1–300 s). One-time codes are computed locally per
+  RFC 6238. Recipients see the password and seed masked until revealed.
 
 ---
 
@@ -219,6 +240,7 @@ Common errors on any route:
 | `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes; at most 20 live grants per client (a reopen replaces its oldest); 429 `busy` (+ `Retry-After`) when 2000 are live |
 | `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
 | `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
+| `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable`; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 |
 | `POST /api/paste` | v1 anonymous create — removed | — | 410 |
 
 Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` counts as an
@@ -256,7 +278,13 @@ Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` count
 | `GET /api/private/admin/shares` `?users=id,id&kind=&status=&q=&locked=true\|false&createdFrom=&createdTo=&expiresFrom=&expiresTo=&limit=&offset=` | owner | every user's shares, filtered (times in unix seconds, each bound optional) → `{rows, total}` |
 | `GET/PATCH /api/private/admin/shares/:id`, `POST …/:id/revoke`, `POST …/:id/lock` `{locked}` | owner | inspect, change (increase-only, protocol maxima), revoke, lock/unlock — logged as admin actions |
 
-A **locked** share answers `423 share_locked` to its sender's `PATCH`/revoke and to delete-by-token.
+A **locked** share answers `423 share_locked` to its sender's `PATCH`/revoke, to delete-by-token
+and to a recipient's "delete now".
+
+Creation limits: `url` and `secret` notes need the account's `text` limit **and** `url` /
+`secret` respectively (`403 url_disabled` / `secret_disabled`); `meta.deletable` needs
+`openerDelete` (`403 opener_delete_disabled`). All three are off by default. They count as notes
+for quotas; the share index records `kind` `url` / `secret`.
 
 ---
 
