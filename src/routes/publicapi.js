@@ -21,6 +21,7 @@ import { directory, ipContext, isBlocked, recordFailure } from '../lib/guard.js'
 import { parseId } from '../lib/ids.js';
 import { createNote, initFile, putChunk, finalizeFile } from './private.js';
 import { PUBLIC_ID } from '../directory-do.js';
+import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 
 export const TRACKER_COOKIE = '__Host-secbin_aid';
 const TRACKER_RE = /^[A-Za-z0-9_-]{32}$/;
@@ -130,6 +131,8 @@ export async function handlePublicApi(request, env, url) {
   if (p === '/api/public/paste' || p === '/api/public/file') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
+    // Chunks and finalize ride on the upload token; only starting a share is checked.
+    await requireTurnstile(env, request, TURNSTILE_ACTIONS.public);
     const { a, error } = await asPublic();
     if (error) return error;
     const res = await (p.endsWith('paste') ? createNote(request, env, a) : initFile(request, env, a));

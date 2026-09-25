@@ -18,7 +18,7 @@ compatibility_date = "2025-10-11"
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = [ "/api/*", "/dashboard", "/dashboard/*" ]
+run_worker_first = [ "/", "/index.html", "/api/*", "/dashboard", "/dashboard/*" ]
 
 # ── KV: unlimited-view notes, immutable, native TTL expiry ───────────────────
 [[kv_namespaces]]
@@ -72,6 +72,10 @@ new_sqlite_classes = [ "FileShare", "Directory", "Guard" ]
 # Optional kill switches (plain vars, case-insensitive "true"):
 #   DISABLE_BFP        disable all brute-force protection and IP rules
 #   DISABLE_BFP_SETUP  disable it for /dashboard/setup only
+# Optional Cloudflare Turnstile (human check on login, password changes and
+# anonymous share creation) — only when BOTH are set:
+#   TURNSTILE_SITEKEY  the widget's site key (public; a plain var is fine)
+#   TURNSTILE_SECRET   its secret key — `wrangler secret put TURNSTILE_SECRET`
 # Everything else (limits, quotas, timeouts, rate limits, viewer policy) is
 # configured by the owner in the admin panel.
 

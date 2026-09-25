@@ -15,7 +15,8 @@
 
 import { err, HttpError, withSecurityHeaders, redirect } from './lib/http.js';
 import { readSession, logoutCookie } from './lib/auth.js';
-import { ipContext } from './lib/guard.js';
+import { ipContext, cachedSettings } from './lib/guard.js';
+import { turnstileConfig } from './lib/turnstile.js';
 import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
 import { handlePrivate } from './routes/private.js';
@@ -29,13 +30,32 @@ export { Guard } from './guard-do.js';
 
 const DASH_PUBLIC = /^\/dashboard\/(login|setup)(\/|\/index\.html)?$/;
 
-async function serveAsset(env, request) {
+// Pages with a Turnstile widget (see src/lib/turnstile.js): login, account
+// (password change) and the home page's public composer when it is enabled.
+const TURNSTILE_DASH = /^\/dashboard\/(login|account)(\/|\/index\.html)?$/;
+const HOME = /^\/(index\.html)?$/;
+
+async function showsTurnstile(env, pathname) {
+  if (!turnstileConfig(env)) return false;
+  if (TURNSTILE_DASH.test(pathname)) return true;
+  if (HOME.test(pathname)) {
+    // The landing page must render even if settings are unreachable (strict headers then).
+    try { return (await cachedSettings(env))['public.enabled'] === true; } catch { return false; }
+  }
+  return false;
+}
+
+// The signed-in app is never stored; the public landing page keeps the asset
+// server's own caching headers, as when it was served straight from static
+// assets (the service worker keeps it as the offline shell).
+async function serveAsset(env, request, url, { noStore = true } = {}) {
   if (!env.ASSETS) return new Response('Not found', { status: 404 });
-  return withSecurityHeaders(await env.ASSETS.fetch(request));
+  const turnstile = url ? await showsTurnstile(env, url.pathname) : false;
+  return withSecurityHeaders(await env.ASSETS.fetch(request), { turnstile, noStore });
 }
 
 async function handleDashboard(request, env, url) {
-  if (DASH_PUBLIC.test(url.pathname)) return serveAsset(env, request);
+  if (DASH_PUBLIC.test(url.pathname)) return serveAsset(env, request, url);
   const s = await readSession(request, env);
   if (!s.ok) {
     if (s.reason !== 'disabled') return redirect('/dashboard/login/');
@@ -44,7 +64,7 @@ async function handleDashboard(request, env, url) {
     return res;
   }
   if (/^\/dashboard\/admin(\/|$)/.test(url.pathname) && (s.user.role !== 'owner' || s.actor)) return redirect('/dashboard/');
-  const res = await serveAsset(env, request);
+  const res = await serveAsset(env, request, url);
   if (s.setCookie) res.headers.append('set-cookie', s.setCookie);
   return res;
 }
@@ -53,7 +73,7 @@ async function route(request, env, url, ctx) {
   const { pathname } = url;
   const isApi = pathname.startsWith('/api/');
   const isDash = pathname === '/dashboard' || pathname.startsWith('/dashboard/');
-  if (!isApi && !isDash) return serveAsset(env, request);
+  if (!isApi && !isDash) return serveAsset(env, request, url, { noStore: false });
 
   // Manual admin block rules apply to the whole API and app surface.
   const g = await ipContext(env, request);

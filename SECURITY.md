@@ -178,6 +178,50 @@ compromise. Defenses:
 - **Downloads** are always `application/octet-stream` / `application/zip` with sanitized
   names; ZIP member names come from validated paths (no absolute or `../` entries).
 
+### Cloudflare Turnstile (optional human check)
+
+Off unless both `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET` are set. When on, it protects the
+forms automated attacks target: login, a signed-in password change (Account) and starting an
+anonymous share. Setup, admin password resets, recipients opening links, file chunks and
+API keys are never challenged.
+
+- **Server-side verification** (`src/lib/turnstile.js`). Each protected call must carry
+  `X-Secbin-Turnstile`, which is redeemed with Cloudflare's siteverify. The call passes only
+  when the token:
+  - succeeded;
+  - was issued for the request's own hostname;
+  - was issued for that form's action (`login`, `password`, `public-share`), so a token from one
+    form cannot be replayed on another;
+  - has not been used before (siteverify refuses a reused token).
+
+  The login token is checked before the password, so a bot learns nothing about the password.
+  If siteverify cannot be reached the request is refused (`503`, fail closed). Cloudflare's
+  published testing keys return no hostname or action, so their results are accepted as they
+  come; never deploy with testing keys.
+- **The only third-party code, confined to those pages.** Login, Account and the home page
+  (the last only while anonymous sharing is on) get a CSP that adds
+  `https://challenges.cloudflare.com` to `script-src` and `frame-src` and drops
+  `Cross-Origin-Embedder-Policy` (the widget's cross-origin iframe cannot load in a
+  cross-origin-isolated page). Every other page keeps the strict policy above. That includes
+  every `/p/*` link, which is static and never loads the widget.
+  - Trusted Types stay enforced: the `secbin` policy (`public/js/tt.js`) mints exactly one
+    third-party URL, `https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit`.
+  - The Permissions-Policy is unchanged; the widget's requests for extra features are denied,
+    and it does not need them.
+- **Trust trade-off.** On those pages a compromise of Cloudflare's Turnstile script could read
+  the page:
+  - on login and Account, the password being typed;
+  - on the home page, what an anonymous sender types and the link, with its key, that it
+    produces.
+
+  Recipients' pages (`/p/*`) and signed-in composers never load it. secbin already runs on
+  Cloudflare, so this adds no new trusted party, but it is a second code origin. Leave Turnstile
+  off if that is unacceptable.
+- **Privacy.** Turnstile runs Cloudflare's client-side challenge and sends browser signals to
+  Cloudflare. For GDPR, treat Cloudflare as a processor for this purpose and describe it in
+  your privacy notice. Confirm the lawful basis and any consent requirement with your Legal /
+  Compliance team; this document is not legal advice.
+
 ### Service worker and install banner (PWA)
 
 secbin is installable. `public/sw.js` (scope `/`) is registered from `public/js/pwa.js`

@@ -16,6 +16,8 @@ export class ApiError extends Error {
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const malformed = () => new ApiError('Malformed response from the server.', 502, 'malformed');
 const INTENT = { 'x-secbin-intent': '1' };
+// A Turnstile token (public/js/turnstile.js), where the server asks for one.
+const human = (token) => (token ? { 'x-secbin-turnstile': token } : {});
 
 async function readJson(res) {
   try { return await res.json(); } catch { return null; }
@@ -71,12 +73,12 @@ export const session = () => request('/api/auth/session');
 export const setupStatus = () => request('/api/auth/setup');
 export const setup = (body) => request('/api/auth/setup', { method: 'POST', body });
 export const prelogin = (username) => request('/api/auth/prelogin', { method: 'POST', body: { username } });
-export const login = (username, proof) => request('/api/auth/login', { method: 'POST', body: { username, proof } });
+export const login = (username, proof, turnstile) => request('/api/auth/login', { method: 'POST', headers: human(turnstile), body: { username, proof } });
 export const logout = () => request('/api/auth/logout', { method: 'POST', headers: INTENT });
 
 // ── signed-in ────────────────────────────────────────────────────────────────
 export const me = () => request('/api/private/me');
-export const changePassword = (body) => request('/api/private/me/password', { method: 'POST', body });
+export const changePassword = (body, turnstile) => request('/api/private/me/password', { method: 'POST', headers: human(turnstile), body });
 export const myActivity = (before) => request(`/api/private/me/activity${before ? `?before=${enc(before)}` : ''}`);
 export const listKeys = () => request('/api/private/me/keys');
 export const createKey = (name, expiresInSec, scopes) => request('/api/private/me/keys', { method: 'POST', body: { name, expiresInSec, scopes } });
@@ -154,15 +156,19 @@ async function putChunkTo(path, bytes, uploadToken) {
 let publicAid = '';
 export const setPublicAid = (aid) => { publicAid = typeof aid === 'string' ? aid : ''; };
 const aidHeaders = () => (publicAid ? { 'x-secbin-aid': publicAid } : {});
+// Starting a public share needs a Turnstile token when the server has it on.
+let publicHuman = async () => null;
+export const setPublicHumanCheck = (take) => { publicHuman = typeof take === 'function' ? take : async () => null; };
+const publicHeaders = async () => ({ ...aidHeaders(), ...human(await publicHuman()) });
 const P = '/api/public';
 export const publicProfile = () => request(`${P}/profile`);
 export const publicApi = {
   async createNote(paste) {
-    const d = await request(`${P}/paste`, { method: 'POST', headers: aidHeaders(), body: { paste } });
+    const d = await request(`${P}/paste`, { method: 'POST', headers: await publicHeaders(), body: { paste } });
     if (typeof d.id !== 'string' || typeof d.deletetoken !== 'string') throw malformed();
     return d;
   },
-  initFileShare: (body) => request(`${P}/file`, { method: 'POST', headers: aidHeaders(), body }),
+  initFileShare: async (body) => request(`${P}/file`, { method: 'POST', headers: await publicHeaders(), body }),
   finalizeFileShare: (id, uploadToken, paste) =>
     request(`${P}/file/${enc(id)}/finalize`, { method: 'POST', headers: { 'x-upload-token': uploadToken }, body: { paste } }),
   uploadChunk: (id, i, bytes, uploadToken) => putChunkTo(`${P}/file/${enc(id)}/chunk/${i}`, bytes, uploadToken),

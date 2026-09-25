@@ -122,6 +122,12 @@ secbin is a single Cloudflare Worker: Static Assets, KV, R2 and four Durable Obj
 5. Disable the `workers.dev` route if you do not use it (optional — the Worker authenticates
    every restricted request itself).
 
+**Optional: Cloudflare Turnstile.** Create a widget in the Cloudflare dashboard (Turnstile →
+Add widget, with your hostname), then set `TURNSTILE_SITEKEY` (public; a plain variable is fine)
+and `TURNSTILE_SECRET` (a secret). With both set, login, password changes on the Account page
+and anonymous share creation need a passing human check (usually invisible). Setup, admin password
+resets, recipients and API keys never do. Unset either one to turn it off.
+
 Missing or malformed variables never crash the Worker: without `AUTHN`, setup is disabled;
 without valid `SIG`/`ENC`, login answers "server not configured" while existing links keep
 working.
@@ -174,6 +180,8 @@ working.
   500 000), with per-user limits; entries about the owner are kept until cleared. The owner can
   clear everything, one account's entries or entries older than a date (password required; no
   record is kept of the clearing — check retention duties with Legal / Compliance first).
+- **Human check (optional):** Cloudflare Turnstile on login, password changes and anonymous
+  share creation when `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET` are both set (see Deploying).
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup
   only). Default off.

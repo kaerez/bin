@@ -6,7 +6,7 @@
 // 'wasm-unsafe-eval' permits WebAssembly compilation (Argon2id, pdf.js image
 // decoders) but NOT JavaScript eval; blob: is allowed only for images/media in
 // the safe viewer; frames and plugins stay disabled.
-export const CSP = [
+const CSP_DIRECTIVES = [
   "default-src 'none'",
   "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self'",
@@ -28,7 +28,20 @@ export const CSP = [
   "require-trusted-types-for 'script'",
   "trusted-types secbin",
   "upgrade-insecure-requests",
-].join('; ');
+];
+export const CSP = CSP_DIRECTIVES.join('; ');
+
+// The pages that show Cloudflare Turnstile (login, account, the public
+// composer — only when it is configured) also allow its script and its
+// iframe, and drop COEP (the widget's cross-origin iframe cannot load in a
+// cross-origin-isolated page). Everything else, /p/* included, keeps the
+// strict policy above.
+const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
+export const TURNSTILE_CSP = CSP_DIRECTIVES.map((d) => {
+  if (d.startsWith('script-src ')) return `${d} ${TURNSTILE_ORIGIN}`;
+  if (d.startsWith('frame-src ')) return `frame-src ${TURNSTILE_ORIGIN}`;
+  return d;
+}).join('; ');
 
 // Every powerful browser feature is off; the few the app itself uses (copy
 // buttons, media preview fullscreen / picture-in-picture) are same-origin only.
@@ -77,10 +90,14 @@ export function err(status, code, message, extra) {
 export const notFound = () => err(404, 'not_found', 'Not found.');
 export const methodNotAllowed = (allow) => json({ error: 'method_not_allowed', message: 'Method not allowed' }, 405, { allow });
 
-/** Re-emit an asset response with the security headers and no-store. */
-export function withSecurityHeaders(res, { noStore = true } = {}) {
+/** Re-emit an asset response with the security headers and no-store (`turnstile`: see TURNSTILE_CSP). */
+export function withSecurityHeaders(res, { noStore = true, turnstile = false } = {}) {
   const out = new Response(res.body, res);
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
+  if (turnstile) {
+    out.headers.set('content-security-policy', TURNSTILE_CSP);
+    out.headers.delete('cross-origin-embedder-policy');
+  }
   if (noStore) out.headers.set('cache-control', 'no-store');
   return out;
 }

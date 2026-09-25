@@ -5,6 +5,7 @@ import './kdf-progress.js';
 import { login, session, ApiError } from './api.js';
 import { loginProof } from './pwauth.js';
 import { showMsg, wirePeek, friendlyError } from './common.js';
+import { humanCheck } from './turnstile.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -21,6 +22,7 @@ if (new URLSearchParams(location.search).get('disabled') === '1') {
 })();
 
 wirePeek(['#login-pass', '#login-pass-peek']);
+const check = humanCheck($('#login-turnstile'), 'login');
 
 $('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -33,7 +35,8 @@ $('#login-form').addEventListener('submit', async (e) => {
   btn.textContent = 'Signing in…';
   msg.hidden = true;
   try {
-    await login(username, await loginProof(username, password));
+    const token = await (await check).take();
+    await login(username, await loginProof(username, password), token);
     $('#login-pass').value = '';
     location.replace('/dashboard/');
   } catch (err) {
