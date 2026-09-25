@@ -123,6 +123,23 @@ describe('share locks', () => {
     expect(row.status).toBe('revoked');
   });
 
+  it('a refused revoke destroys nothing, re-recording keeps the lock, and only the owner may act as admin', async () => {
+    const u = await makeUser('lock-hardening');
+    const n = await createNote(u.cookie, {});
+    expect(n.res.status).toBe(201);
+    await lock(n.id, true);
+    expect((await fetchJson(`/api/private/shares/${n.id}/revoke`, { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(423);
+    expect(await env.PASTES.get(n.id)).not.toBeNull(); // content untouched
+    const dir = env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
+    await runInDurableObject(dir, async (instance) => {
+      const row = await instance.adminShare(n.id);
+      await instance.recordShare({ id: n.id, uid: row.user_id, kind: row.kind, label: row.label, created: row.created, expires: row.expires, views: row.views_total });
+      expect(await instance.isShareLocked(n.id)).toBe(true);
+      const forged = await instance.updateShare(null, n.id, { label: 'x' }, row.user_id, { admin: row.user_id });
+      expect(forged.status).toBe(403);
+    });
+  });
+
   it('validates the lock body and unknown ids', async () => {
     const u = await makeUser('lock-validation');
     const n = await createNote(u.cookie, {});

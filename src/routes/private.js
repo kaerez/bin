@@ -351,6 +351,11 @@ export async function changeShare(env, dir, row, info, body, { uid, actor, admin
       const ok = await dir.authorizeIncrease(uid, { views: change.views, expireAt: change.expires });
       if (!ok.ok) return fromDir(ok);
     }
+    // Re-check the lock right before touching the store (the admin may have
+    // locked it since `row` was read). A residual window of one RPC remains;
+    // it can only extend a share, never destroy one, and the index update
+    // below then refuses with 423.
+    if (!admin && await dir.isShareLocked(id)) return shareLocked();
     let r;
     if (info.file) r = await fileStub(env, id).extend(change);
     else if (info.burn) r = await burnStub(env, id).extend(change);
@@ -383,8 +388,15 @@ async function revokeShare(env, a, id, info) {
   const row = await dir.getShare(a.user.id, id);
   if (!row) return err(404, 'not_found', 'Share not found.');
   if (row.locked) return shareLocked();
+  if (info && info.file) binding(env, 'FILES'); // fail before marking anything revoked
+  // Mark revoked first: the Directory re-checks the lock atomically, so a
+  // share locked in the meantime is refused before any content is destroyed.
+  // A share already marked revoked (an earlier purge failed) is purged again.
+  if (row.status !== 'revoked') {
+    const u = await dir.updateShare(a.user.id, id, { status: 'revoked' }, actorId(a));
+    if (!u.ok) return fromDir(u);
+  }
   await purgeShare(env, id, info);
-  await dir.updateShare(a.user.id, id, { status: 'revoked' }, actorId(a));
   return json({ ok: true });
 }
 

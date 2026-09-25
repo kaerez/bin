@@ -130,8 +130,11 @@ export class Directory extends DurableObject {
     const from = Number(this.#meta('schema_version')) || 0;
     if (from >= SCHEMA_VERSION) return;
     const m = migrator(this.sql);
-    for (let v = from; v < SCHEMA_VERSION; v++) MIGRATIONS[v](m);
-    this.#setMeta('schema_version', String(SCHEMA_VERSION));
+    // All steps and the version bump commit together, or not at all.
+    this.ctx.storage.transactionSync(() => {
+      for (let v = from; v < SCHEMA_VERSION; v++) MIGRATIONS[v](m);
+      this.#setMeta('schema_version', String(SCHEMA_VERSION));
+    });
   }
 
   async schemaVersion() {
@@ -584,7 +587,11 @@ export class Directory extends DurableObject {
   // ── shares index ("My shares") ───────────────────────────────────────────
   async recordShare({ id, uid, kind, label, created, expires, views }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
-    this.sql.exec("INSERT OR REPLACE INTO shares (id, user_id, kind, label, created, expires, views_total, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+    // Upsert that never touches the lock columns: re-recording an id must not
+    // silently unlock it.
+    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+      ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, kind = excluded.kind, label = excluded.label, created = excluded.created,
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active'`,
       id, uid, kind, l, created, expires, views ?? null);
     this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
   }
@@ -626,6 +633,10 @@ export class Directory extends DurableObject {
    * logs the action as a direct admin action (hidden from the user's log).
    */
   async updateShare(uid, id, { label, expires, views, status }, actorId = uid, { admin = null } = {}) {
+    if (admin) {
+      const o = this.#user(admin);
+      if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can change other users’ shares.');
+    }
     const row = admin ? await this.adminShare(id) : await this.getShare(uid, id);
     if (!row) return fail(404, 'not_found', 'Share not found.');
     if (row.locked && !admin) return fail(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
