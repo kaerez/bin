@@ -5,7 +5,7 @@
 // copies of the protocol modules public/js/{bytes,format,crypto,kdf,files,zip,mime,filepolicy,sharetypes}.js,
 // the pinned hash-wasm Argon2id build (public/js/vendor/argon2.js → vendor/vendor/,
 // so kdf.js's relative "./vendor/argon2.js" import resolves unchanged) with its
-// license, the repo LICENSE, and qrcode.js renamed to qrcode.cjs so Node's
+// license, @noble/hashes' pure-JS Argon2id (vendor/noble/, kdf.js's fallback), the repo LICENSE, and qrcode.js renamed to qrcode.cjs so Node's
 // CommonJS loader takes the UMD module.exports branch. vendor/ is committed;
 // runtime imports always point at ./vendor/, so dev, tests, and the published
 // package resolve identically. public/js/ stays the single source of truth:
@@ -26,6 +26,9 @@ const SHARED = [
   ...['bytes.js', 'format.js', 'crypto.js', 'kdf.js', 'files.js', 'zip.js', 'mime.js', 'filepolicy.js', 'sharetypes.js'].map((f) => [f, `vendor/${f}`]),
   ['vendor/argon2.js', 'vendor/vendor/argon2.js'],
   ['vendor/argon2.LICENSE', 'vendor/vendor/argon2.LICENSE'],
+  // kdf.js's pure-JavaScript fallback (only when WebAssembly is unavailable,
+  // e.g. `node --jitless`), at the same relative path "./vendor/noble/".
+  ...['argon2.js', 'blake2.js', '_blake.js', '_md.js', '_u64.js', 'utils.js', 'LICENSE'].map((f) => [`vendor/noble/${f}`, `vendor/vendor/noble/${f}`]),
   ['qrcode.js', 'vendor/qrcode.cjs'],
 ];
 

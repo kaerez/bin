@@ -104,6 +104,13 @@ compromise. Defenses:
   ```
   - `'wasm-unsafe-eval'` allows **WebAssembly compilation only** (Argon2id; pdf.js image
     decoders). JavaScript `eval`/`new Function` remain blocked.
+  - Where WebAssembly is unavailable (iOS/macOS **Lockdown Mode**, or a policy that refuses it),
+    Argon2id falls back to @noble/hashes' audited pure-JavaScript implementation
+    (`public/js/kdf.js`). It computes the same function byte for byte (tested against the RFC
+    9106 vector and the frozen protocol vectors), so no parameter is weakened. Lockdown Mode
+    also turns the JIT off, so one derivation can take up to about a minute there; the page
+    shows its progress. Nothing else in the app needs WebAssembly (pdf.js has a JavaScript
+    fallback for its image decoders).
   - `blob:` for images/media is used only by the viewer for content it has sniffed itself.
   - `worker-src 'self'` is for pdf.js's parser worker and the service worker (`/sw.js`);
     `manifest-src 'self'` is for the web app manifest. Both are first-party only.
@@ -121,7 +128,7 @@ compromise. Defenses:
   - `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and a two-year
     HSTS with preload.
 - **First-party only.** No CDNs, analytics or third-party scripts. The vendored libraries
-  (hash-wasm, pdf.js, qrcode-generator) are pinned, SHA-256-verified and rebuilt reproducibly
+  (hash-wasm, @noble/hashes, pdf.js, qrcode-generator) are pinned, SHA-256-verified and rebuilt reproducibly
   by `tools/vendor.mjs` (`public/THIRD-PARTY-NOTICES.md`).
 - **DOM construction only.** Decrypted content, file names and server strings are rendered
   with `textContent`. The element helper refuses `innerHTML`, `outerHTML`, `on*`, `style`

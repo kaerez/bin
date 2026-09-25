@@ -93,7 +93,7 @@ account. KV, R2, the Durable Objects and everything else are emulated locally.
 | `npm test` | All suites: Worker in `workerd`, crypto/files in Node, DOM/a11y in happy-dom, and the CLI |
 | `npm run test:node` / `test:dom` / `test:cli` | One project only |
 | `npm run lint` | ESLint 9 |
-| `npm run vendor` | Re-fetch and verify the pinned Argon2id (hash-wasm) and pdf.js builds |
+| `npm run vendor` | Re-fetch and verify the pinned Argon2id (hash-wasm, @noble/hashes), pdf.js and QR builds |
 | `npm run kv:create` | Create the `PASTES` KV namespace (+ preview) |
 | `npm run r2:create` | Create the `secbin-files` R2 bucket |
 | `npm run deploy` | Deploy with Wrangler |
@@ -233,6 +233,11 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
 - **Lose the link, lose the share.** Keys are never stored server-side.
 - **A view limit is not copy protection.** Anyone who opens a share can keep what they saw or
   downloaded.
+- **Lockdown Mode (iOS/macOS) is slow.** It turns off WebAssembly and the JavaScript JIT, so
+  password stretching (Argon2id, 64 MiB) runs in plain JavaScript and can take up to about a
+  minute per login or password-protected share; a progress bar shows it. Excluding the site from
+  Lockdown Mode (Safari: *Settings → Apps → Safari → Lockdown Mode*; other browsers: the app's
+  entry under *Privacy & Security → Lockdown Mode*) makes it instant again.
 - **Browser memory.** Large downloads stream to disk in Chromium (File System Access API); other
   browsers assemble the file in memory, which is why shares are capped at 2 GiB.
 - **Per-file size and file-count limits are enforced by the client** and declared to the server
@@ -265,6 +270,8 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Hard rules:
 - [binthere](https://github.com/nxfu/binthere) by nxfu — the project secbin is based on
 - [PrivateBin](https://privatebin.info) — the zero-knowledge model binthere rebuilt
 - [hash-wasm](https://github.com/Daninet/hash-wasm) by Dani Biró (MIT) — Argon2id, vendored
+- [@noble/hashes](https://github.com/paulmillr/noble-hashes) by Paul Miller (MIT) — pure-JavaScript
+  Argon2id fallback when WebAssembly is unavailable, vendored
 - [pdf.js](https://github.com/mozilla/pdf.js) by Mozilla (Apache-2.0) — PDF preview, vendored
 - [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) by Kazuhiko Arase (MIT)
 - Newsreader, Geist and JetBrains Mono (SIL OFL 1.1) — self-hosted fonts

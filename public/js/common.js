@@ -70,7 +70,7 @@ export const UNENCRYPTED_HINT_TEXT = 'Not encrypted — visible to the server an
  * describes to wire `aria-describedby` (appended, so existing descriptions stay).
  */
 export function unencryptedHint(id, input = null) {
-  const icon = svg('svg', { class: 'hint-ico', viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true', focusable: 'false' },
+  const icon = svg('svg', { class: 'hint-ico', width: '14', height: '14', viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true', focusable: 'false' },
     svg('rect', { x: '5', y: '10.5', width: '14', height: '9.5', rx: '2.2', stroke: 'currentColor', 'stroke-width': '1.5' }),
     svg('path', { d: 'M8 10.5V7.5a4 4 0 0 1 7.6-1.7', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round' }),
     svg('circle', { cx: '12', cy: '15', r: '1.35', fill: 'currentColor' }));

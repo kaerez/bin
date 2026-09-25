@@ -1,6 +1,7 @@
 // login.js — /dashboard/login: look up the account's salt, stretch the password
 // with Argon2id locally, send only the result.
 
+import './kdf-progress.js';
 import { login, session, ApiError } from './api.js';
 import { loginProof } from './pwauth.js';
 import { showMsg, wirePeek, friendlyError } from './common.js';

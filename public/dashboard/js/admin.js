@@ -4,6 +4,7 @@
 // viewer policy, security (blocks, tracking, manual IP rules) and the audit log.
 // Every write is validated again by the server.
 
+import '../../js/kdf-progress.js';
 import { admin } from '../../js/api.js';
 import { newCredential, checkNewPassword } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';

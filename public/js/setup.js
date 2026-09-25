@@ -2,6 +2,7 @@
 // AUTHN token, plus a local secret generator for AUTHN / SIG / ENC. Generated
 // values never leave this page; the owner password is stretched locally.
 
+import './kdf-progress.js';
 import { setupStatus, setup } from './api.js';
 import { newCredential, checkNewPassword, randomHex } from './pwauth.js';
 import { showMsg, wirePeek, friendlyError } from './common.js';
