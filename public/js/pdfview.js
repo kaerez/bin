@@ -56,7 +56,7 @@ export async function renderPdf(container, bytes) {
     doc = await task.promise;
   } catch (e) {
     await task.destroy();
-    throw new Error(e && e.name === 'PasswordException' ? 'This PDF is password-protected — download it instead.' : 'This PDF could not be read.');
+    throw new Error(e && e.name === 'PasswordException' ? 'This PDF is password-protected — download it instead.' : 'This PDF could not be read.', { cause: e });
   }
   const pages = Math.min(doc.numPages, MAX_PAGES);
   const canvas = h('canvas.viewer-pdf');
