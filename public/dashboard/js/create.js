@@ -11,7 +11,7 @@ import { detectMime, normalizeMime, COMMON_TYPES } from '../../js/mime.js';
 import { $, showView, toast, copyText, flashCopied } from '../../js/ui.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from '../../js/common.js';
 import { walkEntry } from '../../js/walk.js';
-import { declare, describeType, fileExt, refusedTypes } from '../../js/filepolicy.js';
+import { declare, describeType, fileExt, refusedTypes, uncheckableExt } from '../../js/filepolicy.js';
 import { ready } from './nav.js';
 
 const UNIT_WORDS = { m: ['minute', 'minutes'], h: ['hour', 'hours'], d: ['day', 'days'] };
@@ -234,6 +234,8 @@ function policyProblem(files, dirs) {
     return `Folders may nest at most ${L.maxFolderDepth} level${L.maxFolderDepth === 1 ? '' : 's'} deep for your account; this share has ${depth}.`;
   }
   if (typePolicy()) {
+    const odd = files.filter((f) => uncheckableExt(f.path));
+    if (odd.length) return `"${odd[0].path}" has an unusual extension that cannot be checked against your administrator's file-type policy. Rename it or leave it out.`;
     const refused = refusedTypes(L.fileTypeMode, L.fileTypeRules, types);
     if (refused.length) {
       const bad = files.filter((f) => refused.some((t) => t.ext === fileExt(f.path) && t.mime === String(f.type).toLowerCase()));

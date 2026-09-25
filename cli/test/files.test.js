@@ -408,4 +408,18 @@ describe('file policy', () => {
     expect(r.code).toBe(2);
     expect(r.err).toMatch(/at most 1 levels deep/);
   });
+
+  it('a trailing dot cannot hide a blocked extension, and unusual extensions are refused', async () => {
+    const dir = join(tmp, 'odd');
+    await mkdir(dir);
+    await writeFile(join(dir, 'tool.exe.'), 'MZ');
+    const server = makeServer({ policy: { fileTypeMode: 'block', fileTypeRules: ['ext:exe'] } });
+    const s = await send(server, [join(dir, 'tool.exe.'), '--views', 'unlimited']);
+    expect(s.code).toBe(2);
+    expect(s.err).toMatch(/may not share these file types: \.exe/);
+    await writeFile(join(dir, `a.${'x'.repeat(40)}`), 'x');
+    const t = await send(server, [join(dir, `a.${'x'.repeat(40)}`), '--views', 'unlimited']);
+    expect(t.code).toBe(2);
+    expect(t.err).toMatch(/cannot check the file type/);
+  });
 });

@@ -114,6 +114,14 @@ export function resolveLimits(globalRows, userRows) {
     else if (Object.prototype.hasOwnProperty.call(globalRows, k)) out[k] = globalRows[k];
     else out[k] = s.def;
   }
+  // The file-type mode and its rule list mean something only together: take
+  // both from the most specific level that sets either, so a per-user
+  // "allow" never inherits the global *block* list (or vice versa).
+  const has = (r, k) => Object.prototype.hasOwnProperty.call(r, k);
+  const src = has(userRows, 'fileTypeMode') || has(userRows, 'fileTypeRules') ? userRows
+    : has(globalRows, 'fileTypeMode') || has(globalRows, 'fileTypeRules') ? globalRows : {};
+  out.fileTypeMode = has(src, 'fileTypeMode') ? src.fileTypeMode : LIMITS.fileTypeMode.def;
+  out.fileTypeRules = has(src, 'fileTypeRules') ? src.fileTypeRules : LIMITS.fileTypeRules.def;
   return out;
 }
 
