@@ -56,6 +56,36 @@ export function isIos(nav = globalThis.navigator) {
   return /\bMacintosh\b/.test(ua) && Number(nav?.maxTouchPoints || 0) > 1;
 }
 
+/** Which iOS browser: 'safari' | 'chrome' | 'edge' | 'firefox' | 'other' (all are WebKit). */
+export function iosBrowser(nav = globalThis.navigator) {
+  const ua = String(nav?.userAgent || '');
+  if (/\bCriOS\//.test(ua)) return 'chrome';
+  if (/\bEdgiOS\//.test(ua)) return 'edge';
+  if (/\bFxiOS\//.test(ua)) return 'firefox';
+  if (/\b(OPiOS|OPT|DuckDuckGo|GSA|YaBrowser)\//.test(ua)) return 'other';
+  return 'safari';
+}
+
+/** iPad (including iPadOS's desktop-class UA), as opposed to iPhone/iPod. */
+function isIpad(nav) {
+  const ua = String(nav?.userAgent || '');
+  return /\biPad\b/.test(ua) || (/\bMacintosh\b/.test(ua) && Number(nav?.maxTouchPoints || 0) > 1);
+}
+
+/**
+ * Where the floating banner sits: next to the control it talks about.
+ *   • iPad (every browser) and Chrome / Edge on iPhone keep Share at the top
+ *     of the window → 'top';
+ *   • Safari and Firefox on iPhone keep it in the bottom toolbar, and the
+ *     Chromium install prompt is a thumb-reach action → 'bottom'.
+ */
+export function bannerPlacement(nav = globalThis.navigator, mode = 'prompt') {
+  if (mode !== 'ios') return 'bottom';
+  if (isIpad(nav)) return 'top';
+  const b = iosBrowser(nav);
+  return b === 'chrome' || b === 'edge' ? 'top' : 'bottom';
+}
+
 function el(doc, tag, cls, text) {
   const e = doc.createElement(tag);
   if (cls) e.className = cls;
@@ -72,14 +102,14 @@ function svg(doc, tag, attrs, ...children) {
 
 /** iOS's Share glyph (a box with an up arrow), decorative. */
 function shareIcon(doc) {
-  return svg(doc, 'svg', { class: 'pwa-share-ico', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6',
+  return svg(doc, 'svg', { class: 'pwa-share-ico', width: '16', height: '16', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6',
     'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' },
   svg(doc, 'path', { d: 'M12 3v12M8 7l4-4 4 4' }),
   svg(doc, 'path', { d: 'M8 10H6.5A1.5 1.5 0 0 0 5 11.5v8A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17.5 10H16' }));
 }
 
 function closeIcon(doc) {
-  return svg(doc, 'svg', { class: 'pwa-close-ico', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6',
+  return svg(doc, 'svg', { class: 'pwa-close-ico', width: '18', height: '18', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6',
     'stroke-linecap': 'round', 'aria-hidden': 'true', focusable: 'false' },
   svg(doc, 'path', { d: 'M6 6l12 12M18 6L6 18' }));
 }
@@ -88,12 +118,13 @@ function closeIcon(doc) {
  * Build the banner element. mode: 'prompt' (Install + Not now) or 'ios'
  * (Add-to-Home-Screen instructions). Both have a close (dismiss) button.
  */
-export function buildBanner(doc, { mode, onInstall, onDismiss }) {
+export function buildBanner(doc, { mode, onInstall, onDismiss, nav = globalThis.navigator }) {
   const root = el(doc, 'div', 'pwa-banner');
   root.id = 'pwa-banner';
   root.setAttribute('role', 'region');
   root.setAttribute('aria-label', 'Install secbin');
   root.dataset.mode = mode;
+  root.dataset.pos = bannerPlacement(nav, mode);
 
   const icon = el(doc, 'img', 'pwa-banner-ico');
   icon.setAttribute('src', '/img/icon-192.png');
@@ -106,7 +137,19 @@ export function buildBanner(doc, { mode, onInstall, onDismiss }) {
   const text = el(doc, 'p', 'pwa-banner-text');
   text.id = 'pwa-banner-text';
   if (mode === 'ios') {
-    text.append('Tap ', el(doc, 'strong', '', 'Share'), shareIcon(doc), ', then ', el(doc, 'strong', '', 'Add to Home Screen'), '.');
+    const share = () => [el(doc, 'strong', '', 'Share'), shareIcon(doc)];
+    const add = el(doc, 'strong', '', 'Add to Home Screen');
+    const b = iosBrowser(nav);
+    if (b === 'chrome' || b === 'edge') {
+      text.append('Tap ', ...share(), ' in the address bar, then ', add, '.');
+    } else if (b === 'safari' && !isIpad(nav)) {
+      // iOS 26 moved Share into the "⋯" menu of the compact toolbar.
+      text.append('Tap ', ...share(), ' (or ', el(doc, 'strong', '', '⋯'), ' then Share), then ', add, '.');
+    } else if (b === 'safari') {
+      text.append('Tap ', ...share(), ' at the top, then ', add, '.');
+    } else {
+      text.append('Open the browser menu, tap ', ...share(), ', then ', add, '.');
+    }
   } else {
     text.textContent = 'Add it to your device for quick, full-screen access.';
   }
@@ -149,7 +192,7 @@ export function startInstallBanner({ window: win = globalThis.window, document: 
     if (!banner) return;
     banner.remove();
     banner = null;
-    doc.documentElement?.classList.remove('pwa-banner-open');
+    doc.documentElement?.classList.remove('pwa-banner-open', 'pwa-banner-top');
   };
 
   const dismiss = () => {
@@ -173,10 +216,11 @@ export function startInstallBanner({ window: win = globalThis.window, document: 
   const show = (mode) => {
     if (isDismissed(doc) || isStandalone(win)) return;
     hide();
-    banner = buildBanner(doc, { mode, onInstall: install, onDismiss: dismiss });
+    banner = buildBanner(doc, { mode, onInstall: install, onDismiss: dismiss, nav });
     doc.body.appendChild(banner);
-    // Room at the end of the page so the fixed banner never hides the last content.
+    // Room at the start or end of the page so the floating banner never hides content.
     doc.documentElement?.classList.add('pwa-banner-open');
+    doc.documentElement?.classList.toggle('pwa-banner-top', banner.dataset.pos === 'top');
   };
 
   const onBeforeInstall = (e) => {

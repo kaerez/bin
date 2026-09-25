@@ -15,6 +15,9 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 
 ### Added
 
+- **Works without WebAssembly** (iOS/macOS Lockdown Mode, including Chrome on iOS): Argon2id
+  falls back to a pure-JavaScript build (@noble/hashes, pinned) with the same output, and a
+  progress bar shows slow derivations.
 - **Encrypted admin import/export** (Admin → Import / export): system configuration and/or
   selected users (credentials and/or configuration), never the owner, sessions or API keys;
   encrypted in the browser with a passphrase; imports are decrypted locally, previewed, then
@@ -91,6 +94,16 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 - Footer links: **Source** and **Threat Model** (kaerez/bin).
 - Test projects for Node (`test-node/`) and new workerd suites (notes, files, auth, admin,
   shares); vectors cross-checked in Python.
+
+### Fixed
+
+- **iOS:** icons no longer blow up to full width when a stale stylesheet is served (intrinsic
+  SVG sizes), and the service worker now always revalidates static assets with the server
+  (cache version 2 drops the old cache).
+- **Install banner:** a floating, dismissable card placed where the browser's Share button is —
+  top on iPad and in Chrome/Edge on iPhone, bottom in Safari/Firefox on iPhone and for the
+  Chromium install prompt — with per-browser Add to Home Screen instructions (iOS 26 "⋯" menu
+  included).
 
 ### Changed
 

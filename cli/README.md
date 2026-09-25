@@ -266,7 +266,8 @@ This package lives in the [`cli/`](https://github.com/kaerez/bin/tree/main/cli)
 subdirectory. The modules in `vendor/` are byte-identical copies of the repository's
 `public/js/{bytes,format,crypto,kdf,files,zip,mime}.js`:
 
-- `public/js/vendor/argon2.js` (and its license) is copied to `vendor/vendor/`.
+- `public/js/vendor/argon2.js` (and its license) is copied to `vendor/vendor/`, and the
+  pure-JavaScript Argon2id fallback `public/js/vendor/noble/` to `vendor/vendor/noble/`.
 - `qrcode.js` is vendored as `qrcode.cjs` for Node's CommonJS loader.
 - `LICENSE` is synced from the repository root.
 
@@ -279,4 +280,5 @@ Tests: `npx vitest run --config cli/vitest.config.js` from the repository root.
 ## License
 
 [MIT](./LICENSE) © 2026 nxfu. The vendored hash-wasm Argon2 build is MIT-licensed; see
-`vendor/vendor/argon2.LICENSE`.
+`vendor/vendor/argon2.LICENSE`. The vendored @noble/hashes files are MIT-licensed; see
+`vendor/vendor/noble/LICENSE`.

@@ -27,7 +27,7 @@
 // service worker does; the CSP's worker-src 'self' and the Trusted Types policy
 // in public/js/tt.js (which mints the '/sw.js' script URL) govern registration.
 
-const VERSION = '1';
+const VERSION = '2';
 const CACHE_PREFIX = 'secbin-static-';
 const CACHE = CACHE_PREFIX + VERSION;
 
@@ -94,7 +94,9 @@ function cacheKey(request) {
 async function networkFirst(request) {
   const cache = await caches.open(CACHE);
   try {
-    const response = await fetch(request);
+    // Revalidate with the server every time: the browser's HTTP cache must
+    // never hand back an older asset than the one the page expects.
+    const response = await fetch(request, { cache: 'no-cache' });
     if (isCacheableResponse(response)) {
       await cache.put(cacheKey(request), response.clone()).catch(() => {});
     }

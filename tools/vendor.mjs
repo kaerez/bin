@@ -9,6 +9,9 @@
 //   public/js/vendor/argon2.js        hash-wasm's Argon2 UMD build, re-wrapped as
 //                                     an ES module (header/footer only; the
 //                                     library body is byte-for-byte upstream)
+//   public/js/vendor/noble/…          @noble/hashes' pure-JavaScript Argon2id and its
+//                                     dependencies, byte-for-byte (the fallback when
+//                                     WebAssembly is unavailable, e.g. iOS Lockdown Mode)
 //   public/js/vendor/pdfjs/…          pdf.js "legacy" display + worker builds (polyfilled
 //                                     for current browsers), its wasm
 //                                     image decoders, standard fonts and cmaps
@@ -29,10 +32,14 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const PINS = {
+  '@noble/hashes': { version: '2.4.0', sha256: 'e1946149b780017b2564fcc092cb01c04e1d7f20627d0296c17da8868f4436dc' },
   'hash-wasm': { version: '4.12.0', sha256: '1db32a125fb46177932ec8ac438d3cd8214ebdfaccb5d6611b657d88eb586f92' },
   'pdfjs-dist': { version: '6.3.289', sha256: '06f25e887adc6489f04c9fcb14198c77e4e5623a59a0bba5c4cea5838a4f1241' },
   'qrcode-generator': { version: '2.0.4', sha256: '02e2e18a99a90b02dad940851f59b7c3c5fd1ab79cbdece8595cb06328878159' },
 };
+
+// argon2.js and everything it imports (transitively).
+const NOBLE_FILES = ['argon2.js', 'blake2.js', '_blake.js', '_md.js', '_u64.js', 'utils.js'];
 
 async function fetchPackage(tmp, name) {
   const { version, sha256 } = PINS[name];
@@ -40,7 +47,7 @@ async function fetchPackage(tmp, name) {
   const tgz = path.join(tmp, out);
   const digest = createHash('sha256').update(await readFile(tgz)).digest('hex');
   if (digest !== sha256) throw new Error(`${name}@${version}: tarball sha256 ${digest} != pinned ${sha256}`);
-  const dir = path.join(tmp, name);
+  const dir = path.join(tmp, name.replace(/[@/]/g, '_'));
   await mkdir(dir, { recursive: true });
   execFileSync('tar', ['xzf', tgz, '-C', dir]);
   return path.join(dir, 'package');
@@ -69,6 +76,14 @@ try {
   await writeFile(path.join(vendorDir, 'argon2.js'), argon);
   await cp(path.join(hw, 'LICENSE'), path.join(vendorDir, 'argon2.LICENSE'));
 
+  // Only the Argon2 module graph; every file is ESM with relative ".js" imports.
+  const noble = await fetchPackage(tmp, '@noble/hashes');
+  const nobleDir = path.join(vendorDir, 'noble');
+  await rm(nobleDir, { recursive: true, force: true });
+  await mkdir(nobleDir, { recursive: true });
+  for (const f of NOBLE_FILES) await cp(path.join(noble, f), path.join(nobleDir, f));
+  await cp(path.join(noble, 'LICENSE'), path.join(nobleDir, 'LICENSE'));
+
   const pdf = await fetchPackage(tmp, 'pdfjs-dist');
   const pdfDir = path.join(vendorDir, 'pdfjs');
   await rm(pdfDir, { recursive: true, force: true });
@@ -83,6 +98,7 @@ try {
 
   const sha = async (p) => createHash('sha256').update(await readFile(p)).digest('hex');
   console.log('argon2.js           ', await sha(path.join(vendorDir, 'argon2.js')));
+  for (const f of NOBLE_FILES) console.log(`noble/${f}`.padEnd(21), await sha(path.join(nobleDir, f)));
   console.log('pdfjs/pdf.min.mjs   ', await sha(path.join(pdfDir, 'pdf.min.mjs')));
   console.log('pdfjs/pdf.worker.min.mjs', await sha(path.join(pdfDir, 'pdf.worker.min.mjs')));
   console.log('qrcode.js           ', await sha(path.join(root, 'public', 'js', 'qrcode.js')));

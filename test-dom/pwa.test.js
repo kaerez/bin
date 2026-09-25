@@ -13,7 +13,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  DISMISS_COOKIE, isStandalone, isDismissed, dismissCookie, isIos, startInstallBanner, buildBanner,
+  DISMISS_COOKIE, isStandalone, isDismissed, dismissCookie, isIos, iosBrowser, bannerPlacement, startInstallBanner, buildBanner,
 } from '../public/js/install-banner.js';
 
 const root = process.cwd();
@@ -21,6 +21,8 @@ const read = (p) => readFileSync(join(root, p), 'utf8');
 
 const CHROME_UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36';
 const IPHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+const IPHONE_CHROME_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0.0.0 Mobile/15E148 Safari/604.1';
+const IPHONE_FIREFOX_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/140.0 Mobile/15E148 Safari/605.1.15';
 const IPADOS_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15';
 
 /** A window stand-in: real events + document, controllable display-mode and navigator. */
@@ -205,12 +207,48 @@ describe('install banner — iOS instructions path', () => {
     const b = banner();
     expect(b).not.toBeNull();
     expect(b.dataset.mode).toBe('ios');
-    expect(b.querySelector('.pwa-banner-text').textContent).toBe('Tap Share, then Add to Home Screen.');
+    expect(b.dataset.pos).toBe('top'); // iPad: Share is in the top toolbar
+    expect(b.querySelector('.pwa-banner-text').textContent).toBe('Tap Share at the top, then Add to Home Screen.');
     expect(b.querySelector('.pwa-install')).toBeNull();
     expect([...b.querySelectorAll('button')].map((x) => x.getAttribute('aria-label'))).toEqual(['Dismiss install banner']);
     b.querySelector('.pwa-close').click();
     expect(banner()).toBeNull();
     expect(isDismissed(document)).toBe(true);
+  });
+
+  it('names the right control and sits next to it, per browser', () => {
+    const cases = [
+      [IPHONE_UA, 'safari', 'bottom', 'Tap Share (or ⋯ then Share), then Add to Home Screen.'],
+      [IPHONE_CHROME_UA, 'chrome', 'top', 'Tap Share in the address bar, then Add to Home Screen.'],
+      [IPHONE_FIREFOX_UA, 'firefox', 'bottom', 'Open the browser menu, tap Share, then Add to Home Screen.'],
+    ];
+    for (const [userAgent, browser, pos, text] of cases) {
+      const nav = { userAgent, maxTouchPoints: 5 };
+      expect(iosBrowser(nav)).toBe(browser);
+      expect(bannerPlacement(nav, 'ios')).toBe(pos);
+      const b = buildBanner(document, { mode: 'ios', nav, onInstall() {}, onDismiss() {} });
+      expect(b.dataset.pos, userAgent).toBe(pos);
+      expect(b.querySelector('.pwa-banner-text').textContent, userAgent).toBe(text);
+    }
+    // The Chromium install prompt is a bottom sheet everywhere.
+    expect(bannerPlacement({ userAgent: CHROME_UA, maxTouchPoints: 5 }, 'prompt')).toBe('bottom');
+  });
+
+  it('marks the page for top placement so content is padded at the top, and clears it on dismiss', () => {
+    ctl = startInstallBanner({ window: fakeWindow({ navigator: { userAgent: IPHONE_CHROME_UA, maxTouchPoints: 5 } }) });
+    expect(document.documentElement.classList.contains('pwa-banner-top')).toBe(true);
+    banner().querySelector('.pwa-close').click();
+    expect(document.documentElement.classList.contains('pwa-banner-top')).toBe(false);
+    expect(document.documentElement.classList.contains('pwa-banner-open')).toBe(false);
+  });
+
+  it('gives every icon an intrinsic size, so it stays small even without the stylesheet', () => {
+    const b = buildBanner(document, { mode: 'ios', nav: { userAgent: IPHONE_UA, maxTouchPoints: 5 }, onInstall() {}, onDismiss() {} });
+    for (const svg of b.querySelectorAll('svg')) {
+      expect(Number(svg.getAttribute('width'))).toBeLessThanOrEqual(24);
+      expect(Number(svg.getAttribute('height'))).toBeLessThanOrEqual(24);
+    }
+    expect(b.querySelector('img').getAttribute('width')).toBe('40');
   });
 
   it('respects a previous dismissal on iOS', () => {

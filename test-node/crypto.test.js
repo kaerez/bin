@@ -7,7 +7,8 @@ import {
   aesGcmEncrypt, aesGcmDecrypt, proofHash, gzip, gunzip,
   PasswordRequired, DecryptError, MAX_PLAINTEXT,
 } from '../public/js/crypto.js';
-import { argon2idRaw } from '../public/js/kdf.js';
+import { spawnSync } from 'node:child_process';
+import { argon2idRaw, onKdfProgress } from '../public/js/kdf.js';
 import { buildAAD, validateCreate, validatePaste, validateHead } from '../public/js/format.js';
 import { hex, b64urlFromBytes, bytesFromB64url, randomBytes, utf8, fromUtf8 } from '../public/js/bytes.js';
 
@@ -58,6 +59,43 @@ describe('Argon2id (RFC 9106) known answer', () => {
   it('matches the phc-winner-argon2 reference vector (password/somesalt, t=2, m=64 MiB, p=1)', async () => {
     const out = await argon2idRaw(utf8('password'), utf8('somesalt'), { t: 2, mKiB: 65536, p: 1 });
     expect(hex(out)).toBe('09316115d5cf24ed5a15a31a3ba326e5cf32edc24702987c02b6566f61913cf7');
+  });
+
+  it('the pure-JavaScript fallback (no WebAssembly) gives the same answer and reports progress', async () => {
+    const seen = [];
+    const off = onKdfProgress((e) => seen.push(e));
+    try {
+      const out = await argon2idRaw(utf8('password'), utf8('somesalt'), { t: 2, mKiB: 65536, p: 1, forceJs: true });
+      expect(hex(out)).toBe('09316115d5cf24ed5a15a31a3ba326e5cf32edc24702987c02b6566f61913cf7');
+    } finally { off(); }
+    expect(seen[0].phase).toBe('start');
+    expect(seen.at(-1).phase).toBe('end');
+    const fr = seen.filter((e) => e.phase === 'progress').map((e) => e.fraction);
+    expect(fr.length).toBeGreaterThan(10);
+    expect(fr.every((f, i) => f >= 0 && f <= 1 && (i === 0 || f >= fr[i - 1]))).toBe(true);
+    expect(fr.at(-1)).toBe(1);
+  }, 60_000);
+
+  it('falls back on its own in a runtime without WebAssembly (node --jitless, like Lockdown Mode)', () => {
+    const kdf = new URL('../public/js/kdf.js', import.meta.url).href;
+    const script = `const k = await import(${JSON.stringify(kdf)});
+      const e = new TextEncoder();
+      const out = await k.argon2idRaw(e.encode('password'), e.encode('somesalt'), { t: 1, mKiB: 1024, p: 1 });
+      console.log(JSON.stringify({ wasm: typeof WebAssembly, ok: k.wasmAvailable(), hex: Buffer.from(out).toString('hex') }));`;
+    const r = spawnSync(process.execPath, ['--jitless', '--input-type=module', '-e', script], { encoding: 'utf8' });
+    expect(r.status, r.stderr).toBe(0);
+    const res = JSON.parse(r.stdout.trim().split('\n').pop());
+    expect(res.wasm).toBe('undefined');
+    expect(res.ok).toBe(false);
+    // Same inputs through WebAssembly in this process must agree.
+    return argon2idRaw(utf8('password'), utf8('somesalt'), { t: 1, mKiB: 1024, p: 1 }).then((w) => expect(res.hex).toBe(hex(w)));
+  }, 60_000);
+
+  it('the WebAssembly path emits no progress events (it is fast)', async () => {
+    const seen = [];
+    const off = onKdfProgress((e) => seen.push(e));
+    try { await argon2idRaw(utf8('pw'), new Uint8Array(16), { t: 1, mKiB: 1024 }); } finally { off(); }
+    expect(seen).toEqual([]);
   });
 });
 
