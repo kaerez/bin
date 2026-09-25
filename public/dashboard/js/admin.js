@@ -9,6 +9,7 @@ import { newCredential, checkNewPassword } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { ready } from './nav.js';
+import { renderShares } from './admin-shares.js';
 
 const $ = (s) => document.querySelector(s);
 const panel = (name) => document.querySelector(`.admin-panel[data-panel="${name}"]`);
@@ -70,7 +71,7 @@ async function refreshOverview() {
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
-  ({ users: renderUsers, defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, audit: renderAudit })[name]();
+  ({ users: renderUsers, shares: () => renderShares(panel('shares')), defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, audit: renderAudit })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────

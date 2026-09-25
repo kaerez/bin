@@ -164,6 +164,10 @@ async function deleteByToken(request, env, g, id, info) {
   // The token travels in a header, never the URL (request URLs reach logs).
   const token = request.headers.get('x-delete-token');
   if (!token) return err(400, 'missing_token', 'Missing deletion token.');
+  // An admin lock freezes the share for everyone but the admin — including
+  // its delete token. (Only link holders know the 128-bit id, so saying
+  // "locked" before checking the token reveals nothing new.)
+  if (await directory(env).isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be deleted.');
   if (info.file || info.burn) {
     const r = await (info.file ? fileStub(env, id) : burnStub(env, id)).remove(token);
     if (r.status === 'ok') { await directory(env).markShareEnded(id, 'deleted'); return json({ status: 'deleted', id }); }
