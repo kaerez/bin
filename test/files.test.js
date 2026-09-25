@@ -2,7 +2,8 @@
 // R2): authorized chunked upload with exact sizes, finalize with the encrypted
 // manifest, proof-gated open with view counting, download grants, last-view
 // grace + purge, R2 cleanup on alarm / revoke / delete, and caps.
-import { env, SELF, runDurableObjectAlarm } from 'cloudflare:test';
+import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { MAX_ACTIVE_GRANTS, MAX_GRANTS_PER_CLIENT } from '../src/fileshare-do.js';
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
 import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent } from './helpers.js';
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
@@ -155,5 +156,53 @@ describe('upload validation and caps', () => {
     expect((await init({ files: 2, maxFile: 1001 })).status).toBe(413);
     expect((await init({ files: 2, maxFile: 1000 })).status).toBe(201);
     expect((await init({ padded: 1000 })).status).toBe(400); // not a 64 KiB multiple
+  });
+});
+
+describe('download grants', () => {
+  it('one client holds at most MAX_GRANTS_PER_CLIENT live grants; reopening replaces its oldest', async () => {
+    const s = await upload(oc, [{ path: 'b.txt', bytes: utf8('per client') }], { views: null });
+    const ip = freshIp();
+    const grants = [];
+    for (let i = 0; i < MAX_GRANTS_PER_CLIENT + 1; i++) {
+      const o = await openShare(s.id, s.fragment, '', ip);
+      expect(o.res.status).toBe(200);
+      grants.push((await o.res.json()).grant);
+    }
+    const stub = env.FILESHARE.get(env.FILESHARE.idFromName(s.id));
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get('grants')).toHaveLength(MAX_GRANTS_PER_CLIENT);
+    });
+    expect((await getChunk(s.id, 0, grants[0], ip)).status).toBe(403); // the oldest was replaced
+    expect((await getChunk(s.id, 0, grants.at(-1), ip)).status).toBe(200);
+  });
+
+  it('live outside the share record and are capped, so repeated opens cannot wedge a share', async () => {
+    const s = await upload(oc, [{ path: 'a.txt', bytes: utf8('grant cap') }], { views: null });
+    expect(s.fin.status).toBe(200);
+    const first = await openShare(s.id, s.fragment);
+    expect(first.res.status).toBe(200);
+    const stub = env.FILESHARE.get(env.FILESHARE.idFromName(s.id));
+    // Fill the grant table to the cap with live grants.
+    await runInDurableObject(stub, async (_instance, state) => {
+      const g = await state.storage.get('grants');
+      expect(g).toHaveLength(1);
+      expect((await state.storage.get('rec')).grants).toEqual([]); // kept empty for rollback safety
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      const fillers = Array.from({ length: MAX_ACTIVE_GRANTS - 1 }, (_, i) => ({ h: i.toString(16).padStart(64, '0'), exp }));
+      await state.storage.put('grants', [...g, ...fillers]);
+    });
+    const busy = await openShare(s.id, s.fragment);
+    expect(busy.res.status).toBe(429);
+    expect(busy.res.headers.get('retry-after')).toBe('300');
+    expect((await busy.res.json()).error).toBe('busy');
+    // The first grant still works for downloads.
+    const { grant } = await first.res.json();
+    expect((await getChunk(s.id, 0, grant)).status).toBe(200);
+    // Expired grants free their slots.
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put('grants', [{ h: '0'.repeat(64), exp: 1 }]);
+    });
+    expect((await openShare(s.id, s.fragment)).res.status).toBe(200);
   });
 });

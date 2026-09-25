@@ -9,7 +9,7 @@ their SHA-256, and writes the files below. Never edit them by hand.
 | --- | --- | --- | --- | --- |
 | [hash-wasm](https://github.com/Daninet/hash-wasm) (Argon2 build) © Dani Biró | 4.12.0 | MIT (`js/vendor/argon2.LICENSE`) | `js/vendor/argon2.js` — upstream `dist/argon2.umd.min.js`, UMD wrapper replaced by an ES-module export; library body unchanged | `1db32a125fb46177932ec8ac438d3cd8214ebdfaccb5d6611b657d88eb586f92` |
 | [pdf.js](https://github.com/mozilla/pdf.js) (`pdfjs-dist`) © Mozilla | 6.3.289 | Apache-2.0 (`js/vendor/pdfjs/LICENSE`) | `js/vendor/pdfjs/` — `legacy/build/pdf.min.mjs`, `pdf.worker.min.mjs`, `wasm/`, `standard_fonts/`, `cmaps/` | `06f25e887adc6489f04c9fcb14198c77e4e5623a59a0bba5c4cea5838a4f1241` |
-| [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) © Kazuhiko Arase | — | MIT | `js/qrcode.js` | — |
+| [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) © Kazuhiko Arase | 2.0.4 | MIT (notice in the file header) | `js/qrcode.js` — upstream `dist/qrcode.js`, byte-for-byte (the CLI's `cli/vendor/qrcode.cjs` is the same file) | `02e2e18a99a90b02dad940851f59b7c3c5fd1ab79cbdece8595cb06328878159` |
 
 ## Fonts
 

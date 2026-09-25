@@ -71,7 +71,19 @@ describe('h() — DOM construction only', () => {
     const el = h('div.a.b', { text: '<b>x</b>', title: 't' });
     expect(el.innerHTML).toBe('&lt;b&gt;x&lt;/b&gt;');
     expect(el.className).toBe('a b');
-    for (const bad of [{ onclick: 'alert(1)' }, { innerHTML: '<b>' }, { style: 'x' }, { srcdoc: 'x' }]) expect(() => h('div', bad)).toThrow(/unsafe/);
+    for (const bad of [{ onclick: 'alert(1)' }, { innerHTML: '<b>' }, { outerHTML: '<b>' }, { style: 'x' }, { srcdoc: 'x' }]) expect(() => h('div', bad)).toThrow(/unsafe/);
+  });
+  it('refuses dangerous URL schemes in URL-valued attributes', () => {
+    for (const bad of ['javascript:alert(1)', ' JaVaScRiPt:alert(1)', 'java\tscript:alert(1)', 'vbscript:x', 'data:text/html,<script>alert(1)</script>', 'file:///etc/passwd']) {
+      expect(() => h('a', { href: bad })).toThrow(/unsafe URL/);
+      expect(() => h('img', { src: bad })).toThrow(/unsafe URL/);
+    }
+    expect(() => h('a', { href: 'data:image/png;base64,AAAA' })).toThrow(/unsafe URL/); // data: only for image sources
+    expect(h('a', { href: 'https://example.com/x' }).getAttribute('href')).toBe('https://example.com/x');
+    expect(h('a', { href: '/dashboard/' }).getAttribute('href')).toBe('/dashboard/');
+    expect(h('a', { href: 'mailto:a@b.c' }).getAttribute('href')).toBe('mailto:a@b.c');
+    expect(h('img', { src: 'data:image/gif;base64,R0lGOD' }).getAttribute('src')).toBe('data:image/gif;base64,R0lGOD');
+    expect(h('video', { src: 'blob:https://secbin.test/1234' }).getAttribute('src')).toMatch(/^blob:/);
   });
 });
 

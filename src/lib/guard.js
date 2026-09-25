@@ -2,7 +2,7 @@
 // (cached per isolate), per-scope failure tracking in sharded Guard DOs, and
 // the DISABLE_BFP / DISABLE_BFP_SETUP kill switches.
 
-import { bfpDisabled } from './config.js';
+import { bfpDisabled, binding } from './config.js';
 import { parseIp, parseCidr, cidrContains, trackingKey } from './ip.js';
 import { clientIp } from './http.js';
 import { GUARD_SHARDS } from '../guard-do.js';
@@ -11,7 +11,10 @@ const CACHE_MS = 30 * 1000;
 let rulesCache = { at: 0, rules: [] };
 let settingsCache = { at: 0, settings: null };
 
-export const directory = (env) => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
+export const directory = (env) => {
+  const ns = binding(env, 'DIRECTORY');
+  return ns.get(ns.idFromName('directory'));
+};
 
 /** Drop the isolate caches (called after an admin changes rules/settings). */
 export function invalidateGuardCaches() {
@@ -38,11 +41,13 @@ async function manualRules(env) {
 function shard(env, key) {
   let h = 0x811c9dc5;
   for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
-  return env.GUARD.get(env.GUARD.idFromName(`shard-${h % GUARD_SHARDS}`));
+  const ns = binding(env, 'GUARD');
+  return ns.get(ns.idFromName(`shard-${h % GUARD_SHARDS}`));
 }
 
 export function guardShards(env) {
-  return Array.from({ length: GUARD_SHARDS }, (_, i) => env.GUARD.get(env.GUARD.idFromName(`shard-${i}`)));
+  const ns = binding(env, 'GUARD');
+  return Array.from({ length: GUARD_SHARDS }, (_, i) => ns.get(ns.idFromName(`shard-${i}`)));
 }
 
 /**

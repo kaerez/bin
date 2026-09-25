@@ -5,6 +5,7 @@
 // the paste and never returned to a reader. See SPEC.md §7–§9.
 
 import { expireSeconds } from '../../public/js/format.js';
+import { binding } from './config.js';
 
 export const MAX_BODY = 4 * 1024 * 1024; // 4 MiB request-body cap
 
@@ -22,17 +23,17 @@ export function ttlSeconds(expire) {
 // Best-effort only: KV is eventually consistent; the 128-bit CSPRNG id is what
 // guarantees uniqueness.
 export async function kvExists(env, id) {
-  return (await env.PASTES.get(id)) !== null;
+  return (await binding(env, 'PASTES').get(id)) !== null;
 }
 
 /** record = { paste, dth, acc }; ttl in seconds (≥ 60). */
 export async function kvPut(env, id, record, ttl) {
-  await env.PASTES.put(id, JSON.stringify(record), ttl > 0 ? { expirationTtl: ttl } : {});
+  await binding(env, 'PASTES').put(id, JSON.stringify(record), ttl > 0 ? { expirationTtl: ttl } : {});
 }
 
 /** Returns { paste, dth, acc } or null. Corrupt and pre-v2 records are treated as missing. */
 export async function kvGet(env, id) {
-  const raw = await env.PASTES.get(id);
+  const raw = await binding(env, 'PASTES').get(id);
   if (raw === null) return null;
   try {
     const rec = JSON.parse(raw);
@@ -42,15 +43,17 @@ export async function kvGet(env, id) {
 }
 
 export async function kvDelete(env, id) {
-  await env.PASTES.delete(id);
+  await binding(env, 'PASTES').delete(id);
 }
 
 // ── Durable Objects ───────────────────────────────────────────────────────────
 
 export function burnStub(env, id) {
-  return env.BURN.get(env.BURN.idFromName(id));
+  const ns = binding(env, 'BURN');
+  return ns.get(ns.idFromName(id));
 }
 
 export function fileStub(env, id) {
-  return env.FILESHARE.get(env.FILESHARE.idFromName(id));
+  const ns = binding(env, 'FILESHARE');
+  return ns.get(ns.idFromName(id));
 }

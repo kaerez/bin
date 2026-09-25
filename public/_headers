@@ -3,16 +3,21 @@
 # exfiltration (JS can read location.hash), so the policy is strict — first-party
 # only, no inline, no JavaScript eval, no third parties. 'wasm-unsafe-eval'
 # permits WebAssembly compilation only (Argon2id, pdf.js image decoders); blob:
-# images/media serve the safe file viewer. Keep in sync with src/lib/http.js CSP.
+# images/media serve the safe file viewer. Trusted Types allow only the "secbin"
+# policy (public/js/tt.js). GENERATED from src/lib/http.js SECURITY_HEADERS —
+# keep identical (test-node/headers.test.js enforces it).
 # See SECURITY.md §4.
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types secbin; upgrade-insecure-requests
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer
-  Permissions-Policy: browsing-topics=(), interest-cohort=()
+  Permissions-Policy: accelerometer=(), autoplay=(), bluetooth=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(self), display-capture=(), encrypted-media=(), fullscreen=(self), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), interest-cohort=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(self), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), storage-access=(), sync-xhr=(), usb=(), web-share=(self), window-management=(), xr-spatial-tracking=()
   Cross-Origin-Resource-Policy: same-origin
   Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Origin-Agent-Cluster: ?1
+  X-Permitted-Cross-Domain-Policies: none
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
 
 # Self-hosted fonts: long-lived immutable cache.

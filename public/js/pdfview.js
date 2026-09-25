@@ -7,15 +7,36 @@
 
 import * as pdfjs from './vendor/pdfjs/pdf.min.mjs';
 import { h } from './common.js';
+import { scriptURL } from './tt.js';
 
 const BASE = '/js/vendor/pdfjs/';
-pdfjs.GlobalWorkerOptions.workerSrc = `${BASE}pdf.worker.min.mjs`;
+// The CSP enforces Trusted Types, so pdf.js must not construct its worker from
+// a plain string: create it here through our policy and hand pdf.js the port.
+// One worker is shared by every preview on the page.
+let workerPort = null;
+// The previous preview's teardown: pdf.js refuses a new document on the shared
+// worker while an old one is still being destroyed, so wait for it.
+let teardown = Promise.resolve();
+function pdfWorker() {
+  if (!workerPort) {
+    const w = new Worker(scriptURL(`${BASE}pdf.worker.min.mjs`), { type: 'module' });
+    // A worker that failed to load is dropped, so the next preview retries.
+    w.addEventListener('error', () => {
+      if (workerPort === w) { workerPort = null; pdfjs.GlobalWorkerOptions.workerPort = null; }
+    });
+    workerPort = w;
+    pdfjs.GlobalWorkerOptions.workerPort = w;
+  }
+  return workerPort;
+}
 
 export const MAX_PAGES = 500;
 export const MAX_CANVAS_PIXELS = 16_000_000;
 
 /** Render `bytes` into `container`; returns a cleanup function. */
 export async function renderPdf(container, bytes) {
+  await teardown.catch(() => {});
+  pdfWorker();
   const task = pdfjs.getDocument({
     data: bytes.slice(), // pdf.js transfers the buffer to its worker
     enableXfa: false,
@@ -78,6 +99,6 @@ export async function renderPdf(container, bytes) {
   return () => {
     destroyed = true;
     if (renderTask) renderTask.cancel();
-    task.destroy();
+    teardown = task.destroy();
   };
 }

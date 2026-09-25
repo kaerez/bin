@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { lstat, realpath } from 'node:fs/promises';
+import { lstat, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -36,12 +37,19 @@ export function runProcess(command, args) {
 
 // The npm name must actually be this project's: the registry name "secbin" is
 // not reserved by this repository, and `update` runs a global install of
-// whatever it points at. Only a release whose package metadata names this
-// repository is trusted — anything else is refused, never installed.
+// whatever it points at. A self-declared repository URL alone proves nothing
+// (anyone can write one), so a release is trusted only when it ALSO carries an
+// npm provenance attestation — npm accepts one only when the package was built
+// by CI in the repository its metadata names. Anything else is refused, never
+// installed. The exact version checked here is the one installed, with its
+// lifecycle scripts disabled.
 const REPOSITORY = 'github.com/kaerez/bin';
 const REPOSITORY_RE = /^(?:git\+)?(?:https|ssh|git):\/\/(?:git@)?github\.com[/:]kaerez\/bin(?:\.git)?\/?$/i;
+const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const PROVENANCE_RE = /^https:\/\/slsa\.dev\/provenance\/v\d+$/;
+const VIEW_FIELDS = ['version', 'repository.url', 'dist.integrity', 'dist.attestations.provenance.predicateType'];
 
-/** Parse `npm view <pkg>@latest version repository.url --json` → the verified version. */
+/** Parse `npm view <pkg>@latest <VIEW_FIELDS> --json` → { version, integrity } (verified). */
 function parseLatest(value, source) {
   let data;
   try {
@@ -57,7 +65,24 @@ function parseLatest(value, source) {
   if (typeof repo !== 'string' || !REPOSITORY_RE.test(repo)) {
     throw new Error(`the npm package "${PACKAGE_NAME}" is not published from ${REPOSITORY} — refusing to use it for updates (install or update from a clone of the repository: npm install -g ./cli)`);
   }
-  return version;
+  if (typeof data['dist.integrity'] !== 'string' || !INTEGRITY_RE.test(data['dist.integrity'])) {
+    throw new Error(`the npm release ${version} has no sha512 integrity — refusing to use it for updates`);
+  }
+  const provenance = data['dist.attestations.provenance.predicateType'];
+  if (typeof provenance !== 'string' || !PROVENANCE_RE.test(provenance)) {
+    throw new Error(`the npm release ${version} has no provenance attestation linking it to ${REPOSITORY} — refusing to use it for updates (install or update from a clone of the repository: npm install -g ./cli)`);
+  }
+  return { version, integrity: data['dist.integrity'] };
+}
+
+/** Parse `npm pack --json` output → the tarball's { filename, integrity }. */
+function parsePack(value) {
+  let data;
+  try { data = JSON.parse(value); } catch { data = null; }
+  const entry = Array.isArray(data) ? data[0] : null;
+  const filename = entry && typeof entry.filename === 'string' ? entry.filename : '';
+  if (!/^secbin-[0-9A-Za-z.+-]+\.tgz$/.test(filename)) throw new Error('npm pack returned an unexpected file name');
+  return { filename, integrity: entry.integrity };
 }
 
 function compareVersions(a, b) {
@@ -114,8 +139,8 @@ function npmRunner(io) {
   };
 }
 
-async function latestVersion(invoke) {
-  const view = await invoke(['view', `${PACKAGE_NAME}@latest`, 'version', 'repository.url', '--json']);
+async function latestRelease(invoke) {
+  const view = await invoke(['view', `${PACKAGE_NAME}@latest`, ...VIEW_FIELDS, '--json']);
   failure(view, 'checking for updates');
   return parseLatest(view.stdout, 'npm');
 }
@@ -137,7 +162,16 @@ function reportVersion(latest, io) {
 
 export async function cmdVersion(args, io) {
   if (args.length > 0) throw new UsageError(`unknown version option "${args[0]}"`);
-  const latest = await latestVersion(npmRunner(io));
+  let latest;
+  try {
+    ({ version: latest } = await latestRelease(npmRunner(io)));
+  } catch (e) {
+    // Informational: the installed version is always known, even when no
+    // verified release can be found or the registry is unreachable.
+    io.stdout(`${PACKAGE_NAME} ${VERSION}\n`);
+    io.stderr(`secbin: could not check for updates: ${e.message}\n`);
+    return 0;
+  }
   return reportVersion(latest, io);
 }
 
@@ -145,7 +179,7 @@ export async function cmdUpdate(args, io) {
   if (args.length > 0) throw new UsageError(`unknown update option "${args[0]}"`);
 
   const invoke = npmRunner(io);
-  const latest = await latestVersion(invoke);
+  const { version: latest, integrity } = await latestRelease(invoke);
   const comparison = compareVersions(VERSION, latest);
 
   if (comparison >= 0) return reportVersion(latest, io);
@@ -158,14 +192,27 @@ export async function cmdUpdate(args, io) {
     ? await io.isGlobalInstall(globalRoot, PACKAGE_ROOT)
     : await isGlobalInstall(globalRoot);
   if (!global) {
-    throw new Error(`automatic update requires a global npm installation; run: npm install -g ${PACKAGE_NAME}@latest`);
+    throw new Error('automatic update requires a global npm installation of this project; update from a clone of the repository instead: npm install -g ./cli');
   }
 
   io.stderr(`updating ${PACKAGE_NAME} ${VERSION} → ${latest}…\n`);
-  const install = await invoke([
-    'install', '--global', '--no-audit', '--no-fund', `${PACKAGE_NAME}@latest`,
-  ]);
-  failure(install, `updating ${PACKAGE_NAME}`);
+  // Download exactly the version verified above, check the tarball against the
+  // integrity hash from the same verified metadata, and install that file — so
+  // what is installed is byte-for-byte what was checked. No install scripts:
+  // the CLI has none, so any would be unexpected.
+  const dir = await (io.mkdtemp ?? mkdtemp)(join(tmpdir(), 'secbin-update-'));
+  try {
+    const pack = await invoke(['pack', `${PACKAGE_NAME}@${latest}`, '--json', '--pack-destination', dir]);
+    failure(pack, 'downloading the update');
+    const tarball = parsePack(pack.stdout);
+    if (tarball.integrity !== integrity) throw new Error('the downloaded package does not match the verified release — refusing to install it');
+    const install = await invoke([
+      'install', '--global', '--no-audit', '--no-fund', '--ignore-scripts', join(dir, tarball.filename),
+    ]);
+    failure(install, `updating ${PACKAGE_NAME}`);
+  } finally {
+    await (io.rmdir ?? ((d) => rm(d, { recursive: true, force: true })))(dir);
+  }
   io.stdout(`updated ${PACKAGE_NAME} ${VERSION} → ${latest}\n`);
   return 0;
 }

@@ -874,13 +874,21 @@ describe('update', () => {
     if (options.global !== undefined) {
       a.io.isGlobalInstall = async () => options.global;
     }
+    a.io.mkdtemp = async () => '/tmp/secbin-update-test';
+    a.io.rmdir = async () => {};
     return { ...a, calls };
   }
 
   const ok = (stdout = '', stderr = '') => ({ code: 0, stdout, stderr });
-  // `npm view secbin@latest version repository.url --json` for a release of this repo.
-  const release = (version) => ok(JSON.stringify({ version, 'repository.url': 'git+https://github.com/kaerez/bin.git' }) + '\n');
-  const VIEW = ['view', 'secbin@latest', 'version', 'repository.url', '--json'];
+  // `npm view secbin@latest <fields> --json` for a provenance-attested release of this repo.
+  const INTEGRITY = `sha512-${'A'.repeat(86)}==`;
+  const meta = (version, extra = {}) => ({
+    version, 'repository.url': 'git+https://github.com/kaerez/bin.git', 'dist.integrity': INTEGRITY,
+    'dist.attestations.provenance.predicateType': 'https://slsa.dev/provenance/v1', ...extra,
+  });
+  const release = (version, extra) => ok(JSON.stringify(meta(version, extra)) + '\n');
+  const packed = (version, integrity = INTEGRITY) => ok(JSON.stringify([{ filename: `secbin-${version}.tgz`, integrity }]) + '\n');
+  const VIEW = ['view', 'secbin@latest', 'version', 'repository.url', 'dist.integrity', 'dist.attestations.provenance.predicateType', '--json'];
 
   it('reports when the installed version is current', async () => {
     const a = updateIo([release('0.1.0')]);
@@ -903,18 +911,32 @@ describe('update', () => {
     expect(a.calls).toHaveLength(1);
   });
 
-  it('updates a global installation without invoking a shell', async () => {
+  it('updates a global installation from the integrity-checked tarball, without a shell', async () => {
     const a = updateIo([
       release('0.2.0'),
       ok('/usr/local/lib/node_modules\n'),
+      packed('0.2.0'),
       ok('changed 1 package\n'),
     ], { global: true });
     expect(await run(['update'], a.io)).toBe(0);
     expect(a.text.err()).toBe('updating secbin 0.1.0 → 0.2.0…\n');
     expect(a.text.out()).toBe('updated secbin 0.1.0 → 0.2.0\n');
-    expect(a.calls[2]).toEqual(['npm', [
-      'install', '--global', '--no-audit', '--no-fund', 'secbin@latest',
+    expect(a.calls[2]).toEqual(['npm', ['pack', 'secbin@0.2.0', '--json', '--pack-destination', '/tmp/secbin-update-test']]);
+    expect(a.calls[3]).toEqual(['npm', [
+      'install', '--global', '--no-audit', '--no-fund', '--ignore-scripts', '/tmp/secbin-update-test/secbin-0.2.0.tgz',
     ]]);
+  });
+
+  it('refuses to install a downloaded tarball whose integrity differs from the verified release', async () => {
+    const a = updateIo([
+      release('0.2.0'),
+      ok('/usr/local/lib/node_modules\n'),
+      packed('0.2.0', `sha512-${'B'.repeat(86)}==`),
+      ok(''),
+    ], { global: true });
+    expect(await run(['update'], a.io)).toBe(1);
+    expect(a.text.err()).toMatch(/does not match the verified release/);
+    expect(a.calls).toHaveLength(3); // never reached `npm install`
   });
 
   it('uses npm.cmd on Windows', async () => {
@@ -933,17 +955,22 @@ describe('update', () => {
       ok('/usr/local/lib/node_modules\n'),
     ], { global: false });
     expect(await run(['update'], a.io)).toBe(1);
-    expect(a.text.err()).toContain('npm install -g secbin@latest');
+    expect(a.text.err()).toContain('npm install -g ./cli');
+    expect(a.text.err()).not.toContain('secbin@latest'); // never suggest an unverified registry install
     expect(a.calls).toHaveLength(2);
   });
 
-  it('rejects malformed registry versions and npm failures', async () => {
-    const malformed = updateIo([ok(JSON.stringify({ version: 'latest; rm -rf /', 'repository.url': 'git+https://github.com/kaerez/bin.git' }))]);
-    expect(await run(['version'], malformed.io)).toBe(1);
+  it('rejects malformed registry versions and npm failures (version still reports the installed one)', async () => {
+    const malformed = updateIo([ok(JSON.stringify(meta('latest; rm -rf /')))]);
+    expect(await run(['update'], malformed.io)).toBe(1);
     expect(malformed.text.err()).toContain('invalid version');
+    const mv = updateIo([ok(JSON.stringify(meta('latest; rm -rf /')))]);
+    expect(await run(['version'], mv.io)).toBe(0);
+    expect(mv.text.out()).toBe('secbin 0.1.0\n');
+    expect(mv.text.err()).toContain('invalid version');
 
     const failed = updateIo([{ code: 1, stdout: '', stderr: 'network error' }]);
-    expect(await run(['version'], failed.io)).toBe(1);
+    expect(await run(['version'], failed.io)).toBe(0);
     expect(failed.text.err()).toContain('checking for updates failed');
     expect(failed.text.err()).not.toContain('network error');
   });
@@ -957,7 +984,24 @@ describe('update', () => {
       expect(a.text.err()).toMatch(/not published from github\.com\/kaerez\/bin/);
       expect(a.calls).toHaveLength(1); // never reached `npm install`
       const b = updateIo([ok(stdout)]);
-      expect(await run(['version'], b.io)).toBe(1);
+      expect(await run(['version'], b.io)).toBe(0);
+      expect(b.text.err()).toMatch(/not published from github\.com\/kaerez\/bin/);
+    }
+  });
+
+  it('refuses a release without provenance or integrity, even with the right repository URL', async () => {
+    // A look-alike package can claim this repository in its package.json; only
+    // an npm provenance attestation proves where it was built.
+    for (const [extra, reason] of [
+      [{ 'dist.attestations.provenance.predicateType': undefined }, /no provenance attestation/],
+      [{ 'dist.attestations.provenance.predicateType': 'https://evil.example/provenance' }, /no provenance attestation/],
+      [{ 'dist.integrity': undefined }, /no sha512 integrity/],
+      [{ 'dist.integrity': 'sha1-abc' }, /no sha512 integrity/],
+    ]) {
+      const a = updateIo([release('0.2.0', extra), ok('/usr/local/lib/node_modules\n'), ok('')], { global: true });
+      expect(await run(['update'], a.io)).toBe(1);
+      expect(a.text.err()).toMatch(reason);
+      expect(a.calls).toHaveLength(1); // never reached `npm install`
     }
   });
 

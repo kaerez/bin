@@ -20,16 +20,38 @@ export const CSP = [
   "frame-ancestors 'none'",
   "frame-src 'none'",
   "object-src 'none'",
+  // Trusted Types: DOM XSS sinks (innerHTML, script URLs, eval-like APIs)
+  // refuse plain strings; the single "secbin" policy (public/js/tt.js) only
+  // mints same-origin script URLs.
+  "require-trusted-types-for 'script'",
+  "trusted-types secbin",
+  "upgrade-insecure-requests",
 ].join('; ');
+
+// Every powerful browser feature is off; the few the app itself uses (copy
+// buttons, media preview fullscreen / picture-in-picture) are same-origin only.
+export const PERMISSIONS_POLICY = [
+  'accelerometer=()', 'autoplay=()', 'bluetooth=()', 'browsing-topics=()', 'camera=()',
+  'clipboard-read=()', 'clipboard-write=(self)', 'display-capture=()', 'encrypted-media=()',
+  'fullscreen=(self)', 'gamepad=()', 'geolocation=()', 'gyroscope=()', 'hid=()',
+  'identity-credentials-get=()', 'idle-detection=()', 'interest-cohort=()', 'local-fonts=()',
+  'magnetometer=()', 'microphone=()', 'midi=()', 'otp-credentials=()', 'payment=()',
+  'picture-in-picture=(self)', 'publickey-credentials-create=(self)', 'publickey-credentials-get=(self)',
+  'screen-wake-lock=()', 'serial=()', 'storage-access=()', 'sync-xhr=()', 'usb=()',
+  'web-share=(self)', 'window-management=()', 'xr-spatial-tracking=()',
+].join(', ');
 
 export const SECURITY_HEADERS = {
   'content-security-policy': CSP,
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'no-referrer',
-  'permissions-policy': 'browsing-topics=(), interest-cohort=()',
+  'permissions-policy': PERMISSIONS_POLICY,
   'cross-origin-resource-policy': 'same-origin',
   'cross-origin-opener-policy': 'same-origin',
+  'cross-origin-embedder-policy': 'require-corp',
+  'origin-agent-cluster': '?1',
+  'x-permitted-cross-domain-policies': 'none',
   'strict-transport-security': 'max-age=63072000; includeSubDomains; preload',
 };
 
@@ -95,13 +117,18 @@ export async function readCappedBody(stream, max) {
 }
 
 export class HttpError extends Error {
-  constructor(status, code, message, extra) {
+  constructor(status, code, message, extra, headers) {
     super(message || code);
     this.status = status;
     this.code = code;
     this.extra = extra;
+    this.headers = headers;
   }
-  toResponse() { return err(this.status, this.code, this.message, this.extra); }
+  toResponse() {
+    const res = err(this.status, this.code, this.message, this.extra);
+    if (this.headers) for (const [k, v] of Object.entries(this.headers)) res.headers.append(k, v);
+    return res;
+  }
 }
 
 /**
@@ -127,8 +154,16 @@ export async function readJsonBody(request, max = 64 * 1024) {
   }
 }
 
+/**
+ * Browsers label every request with Sec-Fetch-Site. Only our own pages
+ * ("same-origin") and user-initiated navigations ("none") may change state;
+ * a sibling subdomain ("same-site") is as untrusted as any other site. Non-
+ * browser clients (the CLI) send no header and are covered by the JSON /
+ * custom-header requirement instead.
+ */
 export function assertNotCrossSite(request) {
-  if ((request.headers.get('sec-fetch-site') || '').toLowerCase() === 'cross-site') {
+  const site = (request.headers.get('sec-fetch-site') || '').toLowerCase();
+  if (site === 'cross-site' || site === 'same-site') {
     throw new HttpError(403, 'cross_site', 'Cross-site requests are not allowed.');
   }
 }

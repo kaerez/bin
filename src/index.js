@@ -13,8 +13,9 @@
 // a file name or a file type. See SPEC.md §10 and SECURITY.md.
 
 import { err, HttpError, withSecurityHeaders, redirect } from './lib/http.js';
-import { readSession } from './lib/auth.js';
+import { readSession, logoutCookie } from './lib/auth.js';
 import { ipContext } from './lib/guard.js';
+import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
 import { handlePrivate } from './routes/private.js';
 import { handlePublic } from './routes/public.js';
@@ -34,7 +35,12 @@ async function serveAsset(env, request) {
 async function handleDashboard(request, env, url) {
   if (DASH_PUBLIC.test(url.pathname)) return serveAsset(env, request);
   const s = await readSession(request, env);
-  if (!s.ok) return redirect('/dashboard/login/');
+  if (!s.ok) {
+    if (s.reason !== 'disabled') return redirect('/dashboard/login/');
+    const res = redirect('/dashboard/login/?disabled=1');
+    res.headers.append('set-cookie', logoutCookie());
+    return res;
+  }
   if (/^\/dashboard\/admin(\/|$)/.test(url.pathname) && (s.user.role !== 'owner' || s.actor)) return redirect('/dashboard/');
   const res = await serveAsset(env, request);
   if (s.setCookie) res.headers.append('set-cookie', s.setCookie);
@@ -64,6 +70,11 @@ export default {
       return await route(request, env, url, ctx);
     } catch (e) {
       if (e instanceof HttpError) return e.toResponse();
+      if (e instanceof BindingMissing) {
+        console.error(`deployment error: the ${e.binding} binding is missing or invalid`);
+        // The binding's name goes to the logs, not to the (possibly anonymous) caller.
+        return err(503, 'not_configured', 'The server is not fully configured. Please contact the administrator.');
+      }
       console.error('unhandled error', e && e.stack ? e.stack : e);
       return err(500, 'server_error', 'Something went wrong. Please try again.');
     }

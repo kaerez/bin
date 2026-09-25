@@ -27,9 +27,11 @@ describe('users', () => {
     expect((await fetchJson(`/api/private/admin/users/${u.id}/password`, { method: 'POST', cookie: oc, body: { salt: salt16(), t: 3, proof: proofFor('new-alice-pw') } })).status).toBe(200);
     expect((await fetchJson('/api/private/me', { cookie: u.cookie })).status).toBe(401);
     const c2 = await login('alice', 'new-alice-pw');
-    // Disable → sessions die and login is refused.
+    // Disable → the still-valid session is refused with a clear reason, and login is refused.
     await fetchJson(`/api/private/admin/users/${u.id}`, { method: 'PATCH', cookie: oc, body: { disabled: true } });
-    expect((await fetchJson('/api/private/me', { cookie: c2 })).status).toBe(401);
+    const dis = await fetchJson('/api/private/me', { cookie: c2 });
+    expect(dis.status).toBe(403);
+    expect((await dis.json()).error).toBe('account_disabled');
     expect((await fetchJson('/api/auth/login', { method: 'POST', body: { username: 'alice', proof: proofFor('new-alice-pw') } })).status).toBe(403);
     // The owner cannot be disabled or deleted.
     const me = await (await fetchJson('/api/private/me', { cookie: oc })).json();
