@@ -48,6 +48,38 @@ export function h(spec, props = {}, ...children) {
   return el;
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** Minimal SVG builder (createElementNS + setAttribute; no markup parsing). */
+function svg(tag, attrs = {}, ...children) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+  for (const c of children) el.appendChild(c);
+  return el;
+}
+
+/** The one wording for "this field is stored in plaintext" — keep it in one place. */
+export const UNENCRYPTED_HINT_TEXT = 'Not encrypted — visible to the server and admins. Don’t put secrets here.';
+
+/**
+ * A reusable "this field is not encrypted" hint (open padlock + text), for every
+ * place a plaintext value such as a share label can be typed. Pass the input it
+ * describes to wire `aria-describedby` (appended, so existing descriptions stay).
+ */
+export function unencryptedHint(id, input = null) {
+  const icon = svg('svg', { class: 'hint-ico', viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true', focusable: 'false' },
+    svg('rect', { x: '5', y: '10.5', width: '14', height: '9.5', rx: '2.2', stroke: 'currentColor', 'stroke-width': '1.5' }),
+    svg('path', { d: 'M8 10.5V7.5a4 4 0 0 1 7.6-1.7', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round' }),
+    svg('circle', { cx: '12', cy: '15', r: '1.35', fill: 'currentColor' }));
+  const el = h('p.hint-unencrypted', { id }, icon, h('span.hint-txt', { text: UNENCRYPTED_HINT_TEXT }));
+  if (input) {
+    const ids = (input.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
+    if (!ids.includes(id)) ids.push(id);
+    input.setAttribute('aria-describedby', ids.join(' '));
+  }
+  return el;
+}
+
 export function clear(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
   return el;

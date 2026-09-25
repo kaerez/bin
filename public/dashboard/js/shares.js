@@ -2,7 +2,7 @@
 // raise views / extend expiry within my limits, rename labels, revoke now.
 
 import { listShares, updateShare, revokeShare } from '../../js/api.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { ready } from './nav.js';
 
@@ -45,13 +45,16 @@ const now = () => Math.floor(Date.now() / 1000);
 
 function render() {
   const body = clear($('#shares-body'));
-  for (const r of rows) {
+  for (const [i, r] of rows.entries()) {
     const active = r.status === 'active';
     const views = r.views_total === null || r.views_total === undefined
       ? 'unlimited'
       : `${r.left ?? '—'} left of ${r.views_total}`;
     const expires = r.expires ? (active && r.expires > now() ? `in ${formatCoarse(r.expires - now())}` : formatDate(r.expires)) : '—';
     const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': 'Label', placeholder: '(no label)' });
+    // Shown under the field while it is being edited (see .label-cell in styles.css);
+    // aria-describedby announces it on focus either way.
+    const labelHint = unencryptedHint(`share-label-hint-${i}`, labelIn);
     labelIn.addEventListener('change', async () => {
       try { await updateShare(r.id, { label: labelIn.value }); r.label = labelIn.value; toast('label saved'); } catch (e) { toast(friendlyError(e)); labelIn.value = r.label || ''; }
     });
@@ -65,14 +68,15 @@ function render() {
       });
       actions.appendChild(rv);
     }
+    // data-label = the column name, shown per cell in the stacked (<640px) layout.
     const tr = h('tr', { dataset: { status: r.status } },
-      h('td', {}, labelIn),
-      h('td.mono', { text: r.kind === 'files' ? 'files' : 'note' }),
-      h('td.mono', { text: formatDate(r.created) }),
-      h('td.mono', { text: expires }),
-      h('td.mono', { text: views }),
-      h('td', {}, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status })),
-      h('td', {}, actions));
+      h('td', { dataset: { label: 'Label' } }, h('div.label-cell', {}, labelIn, labelHint)),
+      h('td.mono', { dataset: { label: 'Type' }, text: r.kind === 'files' ? 'files' : 'note' }),
+      h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
+      h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
+      h('td.mono', { dataset: { label: 'Views' }, text: views }),
+      h('td', { dataset: { label: 'Status' } }, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status })),
+      h('td.cell-actions', {}, actions));
     body.appendChild(tr);
   }
 }
@@ -106,7 +110,7 @@ function openExtend(r, tr) {
   };
   const limitsText = `Your limits: ${L.maxViews === null ? 'any number of views' : `up to ${L.maxViews} views`}, `
     + `${L.maxExpireSec === null ? 'expiry up to 365 days' : `expiry up to ${formatCoarse(L.maxExpireSec)} from now`}.`;
-  const row = h('tr.extend-row', {}, h('td', { colspan: '7' },
+  const row = h('tr.extend-row', {}, h('td.cell-full', { colspan: '7' },
     h('div.extend-box', {},
       r.kind === 'text' && (r.views_total === null) ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
       h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),
