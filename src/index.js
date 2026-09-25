@@ -45,10 +45,13 @@ async function showsTurnstile(env, pathname) {
   return false;
 }
 
-async function serveAsset(env, request, url) {
+// The signed-in app is never stored; the public landing page keeps the asset
+// server's own caching headers, as when it was served straight from static
+// assets (the service worker keeps it as the offline shell).
+async function serveAsset(env, request, url, { noStore = true } = {}) {
   if (!env.ASSETS) return new Response('Not found', { status: 404 });
   const turnstile = url ? await showsTurnstile(env, url.pathname) : false;
-  return withSecurityHeaders(await env.ASSETS.fetch(request), { turnstile });
+  return withSecurityHeaders(await env.ASSETS.fetch(request), { turnstile, noStore });
 }
 
 async function handleDashboard(request, env, url) {
@@ -70,7 +73,7 @@ async function route(request, env, url, ctx) {
   const { pathname } = url;
   const isApi = pathname.startsWith('/api/');
   const isDash = pathname === '/dashboard' || pathname.startsWith('/dashboard/');
-  if (!isApi && !isDash) return serveAsset(env, request, url);
+  if (!isApi && !isDash) return serveAsset(env, request, url, { noStore: false });
 
   // Manual admin block rules apply to the whole API and app surface.
   const g = await ipContext(env, request);

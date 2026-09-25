@@ -181,6 +181,14 @@ describe('headers', () => {
     expect(plain.headers.get('cross-origin-embedder-policy')).toBe('require-corp');
   });
 
+  it('the home page stays cacheable (the offline shell), the app does not', async () => {
+    const home = await tsFetch('/');
+    expect(home.status).toBe(200);
+    expect(home.headers.get('cache-control') || '').not.toContain('no-store');
+    const login = await tsFetch('/dashboard/login/');
+    expect(login.headers.get('cache-control')).toBe('no-store');
+  });
+
   it('the home page allows it only while anonymous sharing is on', async () => {
     const oc = await owner();
     invalidateGuardCaches();
