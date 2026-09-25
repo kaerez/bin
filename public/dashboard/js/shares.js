@@ -3,7 +3,7 @@
 // A share the administrator has locked is shown frozen: no control changes it.
 
 import { listShares, updateShare, revokeShare } from '../../js/api.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { ready } from './nav.js';
 
@@ -75,7 +75,7 @@ function render() {
     // data-label = the column name, shown per cell in the stacked (<640px) layout.
     const tr = h('tr', { dataset: { status: r.status } },
       h('td', { dataset: { label: 'Label' } }, h('div.label-cell', {}, labelIn, labelHint)),
-      h('td.mono', { dataset: { label: 'Type' }, text: r.kind === 'files' ? 'files' : 'note' }),
+      h('td.mono', { dataset: { label: 'Type' }, text: KIND_NAMES[r.kind] || 'note' }),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
       h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
       h('td.mono', { dataset: { label: 'Views' }, text: views }),
@@ -117,7 +117,7 @@ function openExtend(r, tr) {
     + `${L.maxExpireSec === null ? 'expiry up to 365 days' : `expiry up to ${formatCoarse(L.maxExpireSec)} from now`}.`;
   const row = h('tr.extend-row', {}, h('td.cell-full', { colspan: '7' },
     h('div.extend-box', {},
-      r.kind === 'text' && (r.views_total === null) ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
+      r.kind !== 'files' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
       h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),
       h('p.mono.muted', { text: limitsText }),
       h('div.btn-row', {}, save), msg)));

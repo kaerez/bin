@@ -723,3 +723,21 @@ button.back { cursor: pointer; }
   .modal { max-width: none; align-self: center; padding: 1.25rem 1rem; }
   .modal-actions > * { flex: 1 1 auto; justify-content: center; }
 }
+
+/* ── link & credential shares (composer + viewer) ───────────────────────── */
+.type-panel { padding: 1rem 1.1rem .6rem; display: grid; gap: .5rem; }
+.type-hint { font-size: .72rem; color: var(--ink-3); margin: 0; }
+.type-hint.warn { color: var(--warn); }
+.secret-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .5rem .9rem; align-items: center; }
+.secret-grid .inline-ctl { display: flex; gap: .4rem; min-width: 0; }
+.secret-grid .inline-ctl .input { flex: 1; min-width: 0; }
+@media (max-width: 480px) { .secret-grid { grid-template-columns: minmax(0, 1fr); } }
+.link-card, .secret-card { display: grid; gap: .75rem; padding: 1.1rem; border: 1px solid var(--rule-2); border-radius: 4px; }
+.link-host { font-family: var(--mono); font-size: 1.05rem; word-break: break-all; }
+.link-full { font-family: var(--mono); font-size: .8rem; color: var(--ink-2); word-break: break-all; }
+.secret-row { display: grid; grid-template-columns: 9rem minmax(0, 1fr) auto; gap: .6rem; align-items: center; }
+.secret-val { font-family: var(--mono); font-size: .85rem; word-break: break-all; white-space: pre-wrap; min-width: 0; }
+.secret-val.masked { letter-spacing: .15em; color: var(--ink-3); }
+.secret-row .btn-row { flex-wrap: nowrap; }
+.totp-code { font-family: var(--mono); font-size: 1.4rem; letter-spacing: .2em; }
+@media (max-width: 640px) { .secret-row { grid-template-columns: minmax(0, 1fr); } }

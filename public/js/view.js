@@ -7,15 +7,17 @@
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
 import { validateManifest, buildTree, basename } from './files.js';
-import { fetchHead, openShare, fetchConfig, session, ApiError } from './api.js';
+import { fetchHead, openShare, expireShare, fetchConfig, session, ApiError } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill } from './ui.js';
-import { h, clear, showMsg, wirePeek, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
+import { h, clear, showMsg, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
+import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
 import { ShareReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
 import { allowedRenderer, renderPreview } from './viewer.js';
 
 let timer = null;
+let totpTimer = null;
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 const route = location.pathname.match(/^\/p\/([^/]+)\/?$/);
@@ -68,11 +70,11 @@ async function initView(id) {
   if (limited) {
     const left = head.meta.left ?? 1;
     const total = head.meta.views ?? 1;
-    const what = kind === 'file' ? 'These files' : 'This note';
+    const what = kind === 'file' ? 'These files' : ({ url: 'This link', secret: 'This credential' })[head.adata.fmt] || 'This note';
     status(total === 1
       ? `${what} can only be opened once.`
       : left === 1 ? `This is the last remaining view (${total} in total). Opening it deletes the share.` : `${left} views left. Opening uses one.`,
-    false, { reveal: true, revealLabel: kind === 'file' ? 'Open files' : 'Reveal note' });
+    false, { reveal: true, revealLabel: kind === 'file' ? 'Open files' : ({ url: 'Reveal link', secret: 'Reveal credential' })[head.adata.fmt] || 'Reveal note' });
     const btn = $('#reveal-burn');
     btn.disabled = false;
     startExpiryTimer(head.meta, () => { btn.disabled = true; status('This share has expired — it can no longer be opened.', true); });
@@ -92,9 +94,11 @@ async function doOpen({ id, kind, head, fragment, password }) {
   const access = await deriveAccess({ adata: head.adata, fragment, password });
   const res = await openShare(kind, id, access);
   if (head.adata.bar && location.hash) history.replaceState(null, '', location.pathname + location.search);
+  const del = { kind, id, access };
   if (kind === 'paste') {
     const paste = validatePaste(res);
     renderNote(paste, await openPaste({ paste, access }));
+    wireDeleteNow($('#paste-delete'), paste.meta, del, $('#paste-msg'));
     return;
   }
   const paste = validatePaste(res.paste);
@@ -105,6 +109,30 @@ async function doOpen({ id, kind, head, fragment, password }) {
   try { viewerCfg = (await fetchConfig()).viewer; } catch { /* viewing just stays off */ }
   const reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
   renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires);
+  $('#files-delete-row').hidden = !canDeleteNow(paste.meta);
+  wireDeleteNow($('#files-delete'), paste.meta, del, $('#files-msg'));
+}
+
+// ── "delete now" (the sender allowed recipients to delete) ───────────────────
+const canDeleteNow = (meta) => meta.deletable === true && meta.left !== 0;
+
+function wireDeleteNow(btn, meta, { kind, id, access }, msgEl) {
+  btn.hidden = !canDeleteNow(meta);
+  if (btn.hidden) return;
+  btn.disabled = false;
+  btn.textContent = 'Delete now';
+  armConfirm(btn, 'Delete for everyone — irreversible?', async () => {
+    btn.disabled = true;
+    try {
+      await expireShare(kind, id, access);
+      stopTotp();
+      clearInterval(timer);
+      status('Deleted. This link no longer works for anyone.');
+    } catch (e) {
+      btn.disabled = false;
+      showMsg(msgEl, e instanceof ApiError && e.status === 423 ? 'The administrator has locked this share; it cannot be deleted.' : friendlyError(e));
+    }
+  });
 }
 
 function openError(e) {
@@ -175,6 +203,29 @@ function lifetimePills(pills, meta, bar) {
 
 function renderNote(paste, result) {
   showView('paste');
+  stopTotp();
+  $('#paste-msg').hidden = true;
+  if (result.fmt === 'url' || result.fmt === 'secret') {
+    const pills = clear($('#paste-pills'));
+    pills.appendChild(pill(result.fmt === 'url' ? 'link' : 'credential'));
+    lifetimePills(pills, paste.meta, result.bar);
+    $('#toggle-raw').hidden = true;
+    const container = clear($('#paste-content'));
+    try {
+      container.appendChild(result.fmt === 'url' ? linkCard(result.text) : secretCard(result.text));
+      $('#copy-content').hidden = true;
+      return;
+    } catch (e) {
+      if (!(e instanceof ShareTypeError)) throw e;
+      // Malformed typed payload: show it inertly as plain text, never as a link.
+      container.appendChild(h('p.msg.error', { text: `${e.message} It is shown as plain text below.` }));
+      container.appendChild(h('pre.code', { text: result.text }));
+      $('#copy-content').hidden = false;
+      $('#copy-content').onclick = async () => { toast((await copyText(result.text)) ? 'copied to clipboard' : 'copy failed'); };
+      return;
+    }
+  }
+  $('#copy-content').hidden = false;
   const isMarkdown = result.fmt === 'markdown';
   const isCode = result.fmt === 'code' || (result.fmt === 'plaintext' && looksLikeCode(result.text));
   const pills = clear($('#paste-pills'));
@@ -202,6 +253,81 @@ function renderNote(paste, result) {
   rawBtn.textContent = 'Raw';
   rawBtn.onclick = () => { raw = !raw; rawBtn.textContent = raw ? 'Rendered' : 'Raw'; draw(); };
   $('#copy-content').onclick = async () => { toast((await copyText(result.text)) ? 'copied to clipboard' : 'copy failed'); };
+}
+
+// ── link & credential cards ─────────────────────────────────────────────────
+function stopTotp() { clearInterval(totpTimer); totpTimer = null; }
+
+/**
+ * A shared link: never followed automatically. The real destination (the host
+ * as the browser resolves it) is shown first; opening needs a second, explicit
+ * click and uses noopener/noreferrer so the destination learns nothing of this
+ * page, the share id or its key.
+ */
+function linkCard(text) {
+  const u = parseShareUrl(text);
+  const d = describeHost(u);
+  const warn = [];
+  if (d.idn) warn.push(`This address uses international characters and is displayed as “${d.unicode}”. Such names can imitate a well-known site — check the real address above.`);
+  if (d.insecure) warn.push('This link is not HTTPS: the connection to it is not encrypted.');
+  const open = h('button.send', { type: 'button' }, h('span.send-txt', { text: 'Open link' }));
+  armConfirm(open, `Open ${d.ascii}?`, () => window.open(u.href, '_blank', 'noopener,noreferrer'));
+  const copy = h('button.btn', { type: 'button', text: 'Copy link', on: { click: async () => toast((await copyText(u.href)) ? 'link copied' : 'copy failed') } });
+  return h('div.link-card', {},
+    h('p.field-label', { text: 'This share is a link to' }),
+    h('p.link-host', { text: d.ascii }),
+    h('p.link-full', { text: u.href }),
+    ...warn.map((w) => h('p.type-hint.warn', { role: 'note', text: w })),
+    h('div.btn-row', {}, open, copy));
+}
+
+const SECRET_LABELS = [['title', 'Title', false], ['username', 'User name', false], ['password', 'Password', true], ['url', 'Sign-in URL', false], ['totp', 'One-time-code seed', true], ['notes', 'Notes', false]];
+
+/** A credential: each field with copy; the password and seed masked until revealed; a live one-time code. */
+function secretCard(text) {
+  const sec = parseSecret(text);
+  const card = h('div.secret-card');
+  for (const [key, label, masked] of SECRET_LABELS) {
+    if (sec[key] === undefined) continue;
+    const val = h('span.secret-val', { text: masked ? '••••••••' : sec[key] });
+    if (masked) val.classList.add('masked');
+    const btns = h('div.btn-row');
+    if (masked) {
+      const reveal = h('button.btn', { type: 'button', text: 'Reveal', 'aria-pressed': 'false', 'aria-label': `Reveal ${label.toLowerCase()}` });
+      reveal.onclick = () => {
+        const show = reveal.getAttribute('aria-pressed') !== 'true';
+        val.textContent = show ? sec[key] : '••••••••';
+        val.classList.toggle('masked', !show);
+        reveal.textContent = show ? 'Hide' : 'Reveal';
+        reveal.setAttribute('aria-pressed', String(show));
+      };
+      btns.appendChild(reveal);
+    }
+    btns.appendChild(h('button.btn', { type: 'button', text: 'Copy', 'aria-label': `Copy ${label.toLowerCase()}`, on: { click: async () => toast((await copyText(sec[key])) ? `${label.toLowerCase()} copied` : 'copy failed') } }));
+    card.appendChild(h('div.secret-row', {}, h('span.field-label', { text: label }), val, btns));
+  }
+  if (sec.totp !== undefined) {
+    const code = h('span.totp-code', { text: '······' });
+    const left = h('span.mono.muted', { 'aria-live': 'off' });
+    let current = '';
+    const copy = h('button.btn', { type: 'button', text: 'Copy code', on: { click: async () => { if (current) toast((await copyText(current)) ? 'code copied' : 'copy failed'); } } });
+    const tick = async () => {
+      try {
+        const r = await totpCode(sec.totp);
+        current = r.code;
+        code.textContent = r.code;
+        left.textContent = `changes in ${r.remaining}s`;
+      } catch (e) {
+        stopTotp();
+        code.textContent = '—';
+        left.textContent = e instanceof ShareTypeError ? e.message : 'The one-time code could not be computed.';
+      }
+    };
+    tick();
+    totpTimer = setInterval(tick, 1000);
+    card.appendChild(h('div.secret-row', {}, h('span.field-label', { text: 'One-time code' }), h('span', {}, code, ' ', left), h('div.btn-row', {}, copy)));
+  }
+  return card;
 }
 
 // ── file rendering ───────────────────────────────────────────────────────────

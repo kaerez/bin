@@ -108,6 +108,8 @@
 
                 <div class="tabs reveal d2" role="tablist" aria-label="What to share">
                     <button type="button" role="tab" class="tab" id="tab-note" aria-selected="true" aria-controls="panel-note">Note</button>
+                    <button type="button" role="tab" class="tab" id="tab-url" aria-selected="false" aria-controls="panel-url" hidden>Link</button>
+                    <button type="button" role="tab" class="tab" id="tab-secret" aria-selected="false" aria-controls="panel-secret" hidden>Credential</button>
                     <button type="button" role="tab" class="tab" id="tab-files" aria-selected="false" aria-controls="panel-files">Files</button>
                 </div>
                 <div class="editor-box reveal d2" id="editor-box">
@@ -119,6 +121,28 @@
                         aria-label="Note content"
                         spellcheck="false"
                     ></textarea>
+                    </div>
+                    <div id="panel-url" class="type-panel" role="tabpanel" aria-labelledby="tab-url" hidden>
+                        <label class="field-label" for="link-in">Link to share (http:// or https://)</label>
+                        <input class="input" id="link-in" type="url" inputmode="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="https://example.com/document" aria-describedby="link-host" />
+                        <p class="mono type-hint" id="link-host" aria-live="polite">The recipient sees the real destination and must confirm before it opens — never an automatic redirect.</p>
+                    </div>
+                    <div id="panel-secret" class="type-panel" role="tabpanel" aria-labelledby="tab-secret" hidden>
+                        <p class="mono type-hint">A credential card: the recipient sees each field masked, with reveal and copy. Fill in any fields you need.</p>
+                        <div class="secret-grid">
+                            <label class="field-label" for="sec-title">Title</label>
+                            <input class="input" id="sec-title" maxlength="200" autocomplete="off" placeholder="e.g. Staging database" />
+                            <label class="field-label" for="sec-username">User name</label>
+                            <input class="input" id="sec-username" maxlength="500" autocomplete="off" spellcheck="false" />
+                            <label class="field-label" for="sec-password">Password</label>
+                            <span class="inline-ctl"><input class="input" id="sec-password" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" /><button type="button" class="btn sec-show" data-for="sec-password" aria-pressed="false" aria-label="Show password">Show</button></span>
+                            <label class="field-label" for="sec-url">Sign-in URL</label>
+                            <input class="input" id="sec-url" type="url" inputmode="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="https://" />
+                            <label class="field-label" for="sec-totp">One-time-code seed</label>
+                            <span class="inline-ctl"><input class="input" id="sec-totp" type="password" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="base32 seed or otpauth://totp/…" /><button type="button" class="btn sec-show" data-for="sec-totp" aria-pressed="false" aria-label="Show one-time-code seed">Show</button></span>
+                            <label class="field-label" for="sec-notes">Notes</label>
+                            <textarea class="input" id="sec-notes" rows="3" maxlength="20000" spellcheck="false"></textarea>
+                        </div>
                     </div>
                     <div id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden>
                         <div class="dropzone" id="dropzone" tabindex="0" aria-describedby="drop-hint">
@@ -139,6 +163,9 @@
                         </label>
                     </div>
 
+                    <label class="viewer-opt" id="deletable-opt" hidden>
+                        <input type="checkbox" id="deletable" /> Let the recipient delete it at once (“Delete now”)
+                    </label>
                     <div class="editor-bar">
                         <div class="editor-bar-left">
                             <button

@@ -2,6 +2,8 @@
 // shares. Everything is encrypted here before any byte leaves the browser —
 // note text, file contents, and the manifest (names, folders, MIME types,
 // sizes). The key goes into the link's #fragment; the server gets ciphertext.
+// Link ("url") and credential ("secret") shares are notes with a typed,
+// validated payload (public/js/sharetypes.js); the server sees only the type.
 
 import { encryptPaste } from '../../js/crypto.js';
 import { createNote, initFileShare, uploadChunk, finalizeFileShare, deleteShare, ApiError } from '../../js/api.js';
@@ -11,6 +13,7 @@ import { detectMime, normalizeMime, COMMON_TYPES } from '../../js/mime.js';
 import { $, showView, toast, copyText, flashCopied } from '../../js/ui.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from '../../js/common.js';
 import { walkEntry } from '../../js/walk.js';
+import { buildSecret, describeHost, parseShareUrl, ShareTypeError } from '../../js/sharetypes.js';
 import { declare, describeType, fileExt, refusedTypes } from '../../js/filepolicy.js';
 import { ready } from './nav.js';
 
@@ -20,6 +23,8 @@ const VIEW_EXIT_MS = 170;
 
 let profile = null;
 let mode = 'note';
+const MODES = ['note', 'url', 'secret', 'files'];
+const SECRET_INPUTS = { title: '#sec-title', username: '#sec-username', password: '#sec-password', url: '#sec-url', totp: '#sec-totp', notes: '#sec-notes' };
 const items = new Map(); // path → { path, file, size, type, mtime } | { path, dir: true }
 
 init();
@@ -31,18 +36,23 @@ async function init() {
   const labelIn = $('#share-label');
   labelIn.after(unencryptedHint('share-label-hint', labelIn));
   showView('create');
-  const noteTab = $('#tab-note');
-  const filesTab = $('#tab-files');
-  noteTab.hidden = !L.text;
-  filesTab.hidden = !L.files;
-  if (!L.text && !L.files) {
+  // Which kinds this account may create (the server enforces the same limits).
+  // Links and credentials are notes with a typed payload: they need both.
+  const allowed = { note: !!L.text, url: !!(L.text && L.url), secret: !!(L.text && L.secret), files: !!L.files };
+  for (const m of MODES) {
+    const tab = $(`#tab-${m}`);
+    tab.hidden = !allowed[m];
+    tab.onclick = () => setMode(m);
+  }
+  const first = MODES.find((m) => allowed[m]);
+  if (!first) {
     showMsg($('#create-msg'), 'Your account is not allowed to create shares. Ask the administrator.');
     $('#editor-box').hidden = true;
     return;
   }
-  noteTab.onclick = () => setMode('note');
-  filesTab.onclick = () => setMode('files');
-  setMode(L.text ? 'note' : 'files');
+  setMode(first);
+  $('#deletable-opt').hidden = !L.openerDelete;
+  wireTypedPanels();
 
   // Limits → control bounds (the server remains authoritative).
   const views = $('#views');
@@ -69,6 +79,11 @@ async function init() {
     const opts = readOptions();
     if (opts.error) { showMsg(msg, opts.error); return; }
     if (mode === 'note' && !$('#editor').value.trim()) { showMsg(msg, 'Type something first.'); $('#editor').focus(); return; }
+    if (mode === 'url' || mode === 'secret') {
+      const t = typedPayload();
+      if (t.error) { showMsg(msg, t.error); if (t.focus) $(t.focus).focus(); return; }
+      opts.typed = t;
+    }
     if (mode === 'files') {
       const err = filesProblem();
       if (err) { showMsg(msg, err); return; }
@@ -85,11 +100,69 @@ async function init() {
 
 function setMode(m) {
   mode = m;
-  $('#tab-note').setAttribute('aria-selected', String(m === 'note'));
-  $('#tab-files').setAttribute('aria-selected', String(m === 'files'));
-  $('#panel-note').hidden = m !== 'note';
-  $('#panel-files').hidden = m !== 'files';
-  $('#create').setAttribute('aria-label', m === 'note' ? 'Encrypt and create link' : 'Encrypt, upload and create link');
+  for (const k of MODES) {
+    $(`#tab-${k}`).setAttribute('aria-selected', String(k === m));
+    $(`#panel-${k}`).hidden = k !== m;
+  }
+  $('#create').setAttribute('aria-label', m === 'files' ? 'Encrypt, upload and create link' : 'Encrypt and create link');
+}
+
+// ── link & credential payloads ──────────────────────────────────────────────
+function wireTypedPanels() {
+  const link = $('#link-in');
+  const hostHint = $('#link-host');
+  const defaultHint = hostHint.textContent;
+  link.addEventListener('input', () => {
+    hostHint.classList.remove('warn');
+    if (!link.value.trim()) { hostHint.textContent = defaultHint; link.removeAttribute('aria-invalid'); return; }
+    try {
+      const d = describeHost(parseShareUrl(link.value));
+      link.removeAttribute('aria-invalid');
+      const notes = [];
+      if (d.idn) notes.push(`shown to the recipient as ${d.ascii} — international characters can imitate another site`);
+      if (d.insecure) notes.push('not HTTPS');
+      hostHint.textContent = `Destination: ${d.unicode}${notes.length ? ` (${notes.join('; ')})` : ''}`;
+      if (notes.length) hostHint.classList.add('warn');
+    } catch (e) {
+      link.setAttribute('aria-invalid', 'true');
+      hostHint.textContent = e.message;
+      hostHint.classList.add('warn');
+    }
+  });
+  for (const btn of document.querySelectorAll('.sec-show')) {
+    const input = $(`#${btn.dataset.for}`);
+    btn.onclick = () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.textContent = show ? 'Hide' : 'Show';
+      btn.setAttribute('aria-pressed', String(show));
+    };
+  }
+}
+
+/** The validated plaintext + format for a link or credential share, or { error, focus }. */
+function typedPayload() {
+  try {
+    if (mode === 'url') {
+      if (!$('#link-in').value.trim()) return { error: 'Enter the link to share.', focus: '#link-in' };
+      return { text: parseShareUrl($('#link-in').value).href, fmt: 'url' };
+    }
+    const fields = {};
+    for (const [k, sel] of Object.entries(SECRET_INPUTS)) fields[k] = $(sel).value;
+    fields.title = fields.title.trim();
+    fields.url = fields.url.trim();
+    fields.totp = fields.totp.trim();
+    return { text: buildSecret(fields), fmt: 'secret' };
+  } catch (e) {
+    if (e instanceof ShareTypeError) return { error: e.message };
+    throw e;
+  }
+}
+
+function clearTyped() {
+  $('#link-in').value = '';
+  for (const sel of Object.values(SECRET_INPUTS)) { const el = $(sel); el.value = ''; if (el.type === 'text' && el.id !== 'sec-title' && el.id !== 'sec-username') el.type = 'password'; }
+  for (const btn of document.querySelectorAll('.sec-show')) { btn.textContent = 'Show'; btn.setAttribute('aria-pressed', 'false'); }
 }
 
 // ── options ──────────────────────────────────────────────────────────────────
@@ -112,7 +185,8 @@ function readOptions() {
   if (sec === null) return { error: 'Expiry must be a whole number between 1 minute and 365 days.' };
   if (L.maxExpireSec !== null && sec > L.maxExpireSec) return { error: `Your account allows an expiry of at most ${Math.floor(L.maxExpireSec / 60)} minutes.` };
   const n = Number(nRaw);
-  return { views, expire, expiryText: `${n} ${UNIT_WORDS[unit][n === 1 ? 0 : 1]}`, label: $('#share-label').value.trim() };
+  const deletable = !!L.openerDelete && $('#deletable').checked;
+  return { views, expire, expiryText: `${n} ${UNIT_WORDS[unit][n === 1 ? 0 : 1]}`, label: $('#share-label').value.trim(), deletable };
 }
 
 function wireOptions() {
@@ -310,8 +384,9 @@ async function submit(password, opts) {
   const progress = $('#upload-progress');
   try {
     let result;
-    if (mode === 'note') {
-      const { body, fragment } = await encryptPaste({ text: $('#editor').value, password, bar: opts.views !== null, expire: opts.expire, views: opts.views ?? undefined });
+    if (mode !== 'files') {
+      const { text, fmt } = mode === 'note' ? { text: $('#editor').value, fmt: 'plaintext' } : opts.typed;
+      const { body, fragment } = await encryptPaste({ text, fmt, password, bar: opts.views !== null, expire: opts.expire, views: opts.views ?? undefined, deletable: opts.deletable });
       const r = await createNote(body, opts.label || undefined);
       result = { kind: 'paste', id: r.id, deletetoken: r.deletetoken, fragment };
     } else {
@@ -320,6 +395,8 @@ async function submit(password, opts) {
     if (animate) await wait(ARROW_LEAD_MS);
     await leaveCreate();
     $('#editor').value = '';
+    clearTyped();
+    $('#deletable').checked = false;
     items.clear();
     progress.hidden = true;
     showSuccess({ ...result, url: `${location.origin}/p/${result.id}#${result.fragment}`, views: opts.views, expiryText: opts.expiryText });
@@ -340,6 +417,7 @@ async function uploadFiles(password, opts, report) {
   const manifest = buildManifest({ entries: l.entries, total: l.total, view: allowView ? { rules: profile.viewer.rules, maxBytes: profile.viewer.maxBytes } : null });
 
   const initBody = { views: opts.views, expire: opts.expire, padded: l.padded };
+  if (opts.deletable) initBody.deletable = true;
   // Only declared when a limit needs it — the server otherwise learns nothing
   // about how many files there are or how big any one of them is.
   if (L.maxFilesPerShare !== null) initBody.files = files.length;
@@ -369,7 +447,7 @@ async function uploadFiles(password, opts, report) {
     }
   }
   report('Sealing the manifest…');
-  const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', password, bar: opts.views !== null, views: opts.views ?? undefined, expire: opts.expire });
+  const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', password, bar: opts.views !== null, views: opts.views ?? undefined, expire: opts.expire, deletable: opts.deletable });
   await finalizeFileShare(init.id, init.uploadtoken, body, opts.label || undefined);
   return { kind: 'file', id: init.id, deletetoken: init.deletetoken, fragment };
 }
@@ -430,7 +508,7 @@ function openPasswordModal(onSubmit) {
 function showSuccess({ kind, id, deletetoken, url, views, expiryText }) {
   showView('success');
   $('#paste-url').textContent = url;
-  const what = kind === 'file' ? 'the files' : 'the note';
+  const what = kind === 'file' ? 'the files' : mode === 'url' ? 'the link' : mode === 'secret' ? 'the credential' : 'the note';
   $('#success-note').textContent = (views === null
     ? `Anyone with this link can open ${what} any number of times until it self-destructs in ${expiryText}.`
     : views === 1
