@@ -10,6 +10,7 @@ import { newCredential, checkNewPassword, describePolicy } from '../../js/pwauth
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
+import { normalizeUrlRules, parseShareUrl } from '../../js/sharetypes.js';
 import { ready } from './nav.js';
 import { renderShares } from './admin-shares.js';
 import { renderPortable } from './admin-portable.js';
@@ -22,6 +23,7 @@ const LIMIT_UI = [
   ['text', 'Notes allowed', 'bool'],
   ['files', 'File sharing allowed', 'bool'],
   ['url', 'Link shares allowed (needs notes)', 'bool'],
+  ['urlRules', 'Links that may be shared', 'urlrules'],
   ['secret', 'Credential shares allowed (needs notes)', 'bool'],
   ['openerDelete', 'Recipients may “delete now” (sender opts in)', 'bool'],
   ['maxViews', 'Max views per share', 'int'],
@@ -44,6 +46,7 @@ const LIMIT_UI = [
   ['pwSymbol', 'Password: needs a symbol', 'bool'],
 ];
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
+const URL_RULES_HINT = 'One rule per line. scheme:https allows every https link; scheme:tel, scheme:mailto, scheme:sms… allow those schemes; re:<regular expression> allows links it matches (case-insensitive, against the whole link — anchor with ^, e.g. re:^https://([a-z0-9-]+\\.)*example\\.com/). javascript:, data:, file: and similar can never be allowed. The sender\'s browser or CLI checks the rules: the server never sees the link.';
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
   'Any file as plain text': [{ match: 'any', value: '', renderer: 'text' }],
@@ -116,10 +119,44 @@ function numberInput(v, { step = 1, scale = 1 } = {}) {
   return i;
 }
 
+/**
+ * URL rules: a textarea plus a tester — type a link and see, live, whether
+ * the rules in the box (not yet saved) would allow it.
+ */
+function urlRulesInput(initial, label) {
+  const area = h('textarea.input.rules-in', { rows: '3', spellcheck: 'false', 'aria-label': label, placeholder: 'scheme:https\nscheme:tel\nre:^https://([a-z0-9-]+\\.)*example\\.com/', title: URL_RULES_HINT });
+  area.value = initial.join('\n');
+  const probe = h('input.input', { type: 'text', spellcheck: 'false', placeholder: 'test a link, e.g. tel:+15551234', 'aria-label': `${label}: test a link` });
+  const result = h('span.mono.muted', { role: 'status', 'aria-live': 'polite' });
+  const test = () => {
+    result.classList.remove('ok-text', 'warn');
+    if (!probe.value.trim()) { result.textContent = ''; return; }
+    let rules;
+    try { rules = normalizeUrlRules(area.value.split('\n')); } catch (e) { result.textContent = `rules: ${e.message}`; result.classList.add('warn'); return; }
+    try {
+      parseShareUrl(probe.value, { rules });
+      result.textContent = 'allowed';
+      result.classList.add('ok-text');
+    } catch (e) {
+      result.textContent = /not allowed for your account/.test(e.message) ? 'refused — no rule matches this link' : `refused — ${e.message}`;
+      result.classList.add('warn');
+    }
+  };
+  probe.addEventListener('input', test);
+  area.addEventListener('input', test);
+  const wrap = h('span.url-rules', {}, area, h('span.inline-ctl', {}, probe, result));
+  wrap.read = () => {
+    const rules = normalizeUrlRules(area.value.split('\n'));
+    if (!rules.length) throw new Error('add at least one rule (or turn link shares off)');
+    return rules;
+  };
+  return wrap;
+}
+
 /** One limit value for display ("no limit", "100 MiB", "7 days", "yes"…). */
 function limitText(type, v) {
   if (v === undefined) return '';
-  if (type === 'rules') return v.length ? v.join(', ') : 'none';
+  if (type === 'rules' || type === 'urlrules') return v.length ? v.join(', ') : 'none';
   if (v === null) return 'no limit';
   if (type === 'bool') return v ? 'yes' : 'no';
   if (type === 'bytes') return formatBytes(v);
@@ -149,6 +186,7 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
       bool: () => [h('option', { value: 'true', text: 'yes', selected: has && v === true }), h('option', { value: 'false', text: 'no', selected: has && v === false })],
       enum: () => opt.values.map(([k, t]) => h('option', { value: `enum:${k}`, text: t, selected: has && v === k })),
       rules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
+      urlrules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
     }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: 'no limit', selected: has && v === null })]),
       h('option', { value: 'value', text: 'limit to', selected: has && v !== null })]);
     const inh = channel !== 'api' && inherited && Object.prototype.hasOwnProperty.call(inherited, key) ? ` (${limitText(type, inherited[key])})` : '';
@@ -162,6 +200,7 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
       val.value = has && Array.isArray(v) ? v.join('\n') : '';
       val.read = () => normalizeRules(val.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean));
     }
+    if (type === 'urlrules') val = urlRulesInput(has && Array.isArray(v) ? v : (effective?.[key] ?? inherited?.[key] ?? []), label);
     if (type === 'int') val = numberInput(has && v !== null ? v : null);
     if (type === 'bytes') val = h('span.inline-ctl', {}, numberInput(has && v !== null ? v : null, { step: 0.1, scale: MiB }), h('span.mono', { text: 'MiB' }));
     if (type === 'dur') val = durationInput(has && v !== null ? v : null, { allowNull: true });
@@ -183,6 +222,8 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
       else if (c.mode.value.startsWith('enum:')) patch[c.key] = c.mode.value.slice(5);
       else if (c.type === 'rules') {
         try { patch[c.key] = c.val.read(); } catch (e) { return msg(`File type list: ${e.message}`, true); }
+      } else if (c.type === 'urlrules') {
+        try { patch[c.key] = c.val.read(); } catch (e) { return msg(`Links that may be shared: ${e.message}`, true); }
       } else {
         const read = c.type === 'bytes' ? c.val.firstChild.read() : c.val.read();
         if (!Number.isFinite(read)) return msg(`Enter a value for ${c.key}.`, true);
@@ -193,6 +234,7 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
     if (ok && onSaved) onSaved(); // re-render so the "effective" column is current
   };
   if (keys.some(([k]) => k === 'fileTypeRules')) box.appendChild(h('p.mono.muted', { text: RULES_HINT }));
+  if (keys.some(([k]) => k === 'urlRules')) box.appendChild(h('p.mono.muted', { text: URL_RULES_HINT }));
   box.appendChild(h('div.btn-row', {}, save));
   return box;
 }

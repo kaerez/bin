@@ -55,7 +55,7 @@ flowchart TD
 | --- | --- |
 | Zero-knowledge | Content, file names, folder structure and MIME types are encrypted client-side. The server stores ciphertext and non-secret settings only. |
 | Notes & files | Notes, or any number of files and folders (drag-and-drop, file picker, folder picker). MIME types are auto-detected and editable. |
-| Links & credentials | If the admin allows them: a **link** share (the recipient sees the real destination host, punycode included, and confirms before it opens — never an automatic redirect) and a **credential** card (title, user name, password, sign-in URL, notes, and a one-time-code seed with live RFC 6238 codes; secrets masked until revealed). |
+| Links & credentials | If the admin allows them: a **link** share — http(s) by default; the admin may allow other schemes such as `tel:` or restrict links with regular expressions, with a live tester (the recipient sees the real destination, punycode included, and confirms before it opens — never an automatic redirect; `javascript:`, `data:`, `file:` and similar are never allowed) and a **credential** card (title, user name, password, sign-in URL, notes, and a one-time-code seed with live RFC 6238 codes; secrets masked until revealed). |
 | "Delete now" | If the admin allows it and the sender opts in, whoever opens a share can delete it for everyone at once (it needs the full link and password, and spends no view). |
 | View limits & expiry | 1–100 000 views or unlimited; expiry from 1 minute to 365 days. View counting is atomic (Durable Objects). |
 | Optional password | Argon2id (64 MiB, t=3). Checked by the server via a proof before any view is spent. |

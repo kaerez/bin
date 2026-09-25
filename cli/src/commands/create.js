@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { encryptPaste, MAX_PLAINTEXT } from '../../vendor/crypto.js';
 import { FORMATS } from '../../vendor/format.js';
-import { buildSecret, parseShareUrl as parseLinkUrl, SECRET_FIELDS, ShareTypeError } from '../../vendor/sharetypes.js';
+import { buildSecret, parseShareUrl as parseLinkUrl, SECRET_FIELDS, ShareTypeError, urlRulesOf } from '../../vendor/sharetypes.js';
 import { refuseInlineApiKey, resolveApiKey } from '../apikey.js';
 import { ApiError, Client } from '../client.js';
 import { UsageError } from '../errors.js';
@@ -67,10 +67,14 @@ async function secretFromPrompts(io) {
   return buildSecret(fields);
 }
 
-/** Validate and normalize a typed payload ("url" / "secret"); other formats pass through. */
-function typedPayload(fmt, text) {
+/**
+ * Validate and normalize a typed payload ("url" / "secret"); other formats
+ * pass through. `urlRules` are the account's (the server cannot check links).
+ */
+function typedPayload(fmt, text, urlRules) {
   try {
-    if (fmt === 'url') return parseLinkUrl(text).href;
+    if (fmt === 'url-syntax') return parseLinkUrl(text, { recipient: true }).href;
+    if (fmt === 'url') return parseLinkUrl(text, { rules: urlRulesOf(urlRules) }).href;
     if (fmt === 'secret') return secretFromJson(text);
   } catch (e) {
     if (e instanceof ShareTypeError) throw new UsageError(e.message);
@@ -156,7 +160,14 @@ export async function cmdCreate(args, io) {
   } catch {
     throw new UsageError('input is not valid UTF-8 (notes are text — use `secbin send` for binary files)');
   }
-  if (prompted === null) text = typedPayload(values.fmt, text);
+  let urlRules;
+  if (values.fmt === 'url' && prompted === null) {
+    // Syntax and forbidden schemes first (no request for a link that can never
+    // be shared), then the account's own rules.
+    typedPayload('url-syntax', text);
+    urlRules = (await new Client(server, io.fetch, { apiKey }).policy())?.urlRules;
+  }
+  if (prompted === null) text = typedPayload(values.fmt, text, urlRules);
 
   const password = await newPassword({ envVar: values['password-env'], promptWanted: values.password, io });
 

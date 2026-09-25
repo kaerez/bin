@@ -842,6 +842,19 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
+  /**
+   * What a sender's client must check before creating (for the CLI, which has
+   * only an API key): the URL rules for link shares. Only the account's own
+   * effective values, for the channel it uses.
+   */
+  async sharePolicy(uid, channel = 'all') {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    const eff = this.#effective(u);
+    const L = channel === 'api' ? eff.api : eff.all;
+    return { ok: true, url: L.url, urlRules: L.urlRules };
+  }
+
   /** Limits check for raising views/expiry on an existing share (no quota use). */
   async authorizeIncrease(uid, { views, expireAt }) {
     const u = this.#user(uid);

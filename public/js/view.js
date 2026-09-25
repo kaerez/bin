@@ -293,9 +293,12 @@ function stopTotp() { clearInterval(totpTimer); totpTimer = null; }
  * page, the share id or its key.
  */
 function linkCard(text) {
-  const u = parseShareUrl(text);
+  // The sender's URL rules are not known here: any scheme that is not
+  // forbidden (javascript:, data:, file:, …) is accepted and shown as it is.
+  const u = parseShareUrl(text, { recipient: true });
   const d = describeHost(u);
   const warn = [];
+  if (d.external) warn.push([`This is a ${d.scheme}: link: opening it hands it to another app on your device.`]);
   // <bdi> isolates the Unicode form so right-to-left labels cannot reorder the sentence.
   if (d.idn) warn.push(['This address uses international characters and is displayed as “', h('bdi', { dir: 'ltr', text: d.unicode }), '”. Such names can imitate a well-known site — check the real address above.']);
   if (d.insecure) warn.push(['This link is not HTTPS: the connection to it is not encrypted.']);
@@ -303,9 +306,9 @@ function linkCard(text) {
   armConfirm(open, `Open ${d.ascii}?`, () => window.open(u.href, '_blank', 'noopener,noreferrer'));
   const copy = h('button.btn', { type: 'button', text: 'Copy link', on: { click: async () => toast((await copyText(u.href)) ? 'link copied' : 'copy failed') } });
   return h('div.link-card', {},
-    h('p.field-label', { text: 'This share is a link to' }),
+    h('p.field-label', { text: d.external ? 'This share is a link' : 'This share is a link to' }),
     h('p.link-host', { text: d.ascii }),
-    h('p.link-full', { text: u.href }),
+    ...(d.external ? [] : [h('p.link-full', { text: u.href })]),
     ...warn.map((w) => h('p.type-hint.warn', { role: 'note' }, ...w)),
     h('div.btn-row', {}, open, copy));
 }

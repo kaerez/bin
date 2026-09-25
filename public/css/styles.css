@@ -597,6 +597,8 @@ button.back { cursor: pointer; }
 .file-total { padding: .3rem 1.1rem .8rem; font-size: .72rem; color: var(--ink-3); }
 .file-total.over { color: var(--seal); }
 .file-policy { padding: 0 1.1rem .8rem; font-size: .72rem; color: var(--ink-2); }
+.url-rules { display: flex; flex-direction: column; gap: .4rem; min-width: 0; }
+.ok-text { color: var(--ok, #2f7d4f); }
 .rules-in { min-width: 14rem; font-family: var(--mono, monospace); resize: vertical; }
 .viewer-opt { display: flex; align-items: center; gap: .5rem; padding: 0 1.1rem .9rem; font-size: .82rem; color: var(--ink-2); }
 .mime-in { width: 12rem; max-width: 100%; padding: .3rem .5rem; font-size: .72rem; }

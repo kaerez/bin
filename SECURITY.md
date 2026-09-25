@@ -147,9 +147,20 @@ compromise. Defenses:
   - one preview at a time; object URLs are revoked on close; global disable takes effect for
     existing links immediately (the page intersects the sender's snapshot with the live
     policy).
-- **Link shares** (`fmt: "url"`) are never followed automatically. Only absolute `http(s)`
-  URLs without embedded credentials are accepted (on create and again after decryption). The
-  recipient sees the host as the browser resolves it (punycode) with a look-alike warning for
+- **Link shares** (`fmt: "url"`) are never followed automatically. Only absolute URLs without
+  embedded credentials are accepted (on create and again after decryption).
+  - **Which links** a sender may share is the admin's *URL rules* (global and per user):
+    `scheme:https`, `scheme:tel`, … and `re:<regular expression>` against the whole link;
+    default `http` and `https`; the owner may share any safe link. The link is encrypted, so the
+    rules are checked by the sender's browser or CLI (the CLI reads them from
+    `GET /api/private/policy`) — they keep honest senders within policy, not a modified client.
+    Admin-written regular expressions run in senders' browsers (the admin is trusted; a costly
+    pattern slows only the composer).
+  - **Never allowed**, on either side and whatever the rules say: `javascript:`, `data:`,
+    `vbscript:`, `file:`, `blob:`, `about:`, browser-internal and extension schemes. The recipient
+    does not know the sender's rules, so it accepts any other scheme, shows a host-less link
+    (`tel:`, `mailto:`, …) in full and says it opens another app.
+  - The recipient sees the host as the browser resolves it (punycode) with a look-alike warning for
   internationalized names and a warning for plain HTTP, and opens it with a confirmed second
   click through `window.open(…, 'noopener,noreferrer')`, so the destination gets no
   `Referer` and no handle to this page.

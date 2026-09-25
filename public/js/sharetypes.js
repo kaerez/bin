@@ -3,8 +3,13 @@
 // validating them, fail closed, on the recipient's side. Shared by the browser
 // and the CLI (vendored copy). The server never sees these payloads.
 //
-//   url    — the plaintext is one absolute http(s) URL. Recipients see it with
-//            its host spelled out and open it only through an explicit,
+//   url    — the plaintext is one absolute URL. Which URLs a sender may share
+//            is the admin's "URL rules" (default: http and https; other
+//            schemes such as tel: and regular expressions may be allowed),
+//            checked here by the sender's browser or CLI — the server cannot
+//            see the URL. Dangerous schemes (javascript:, data:, file:, …) are
+//            refused on both sides whatever the rules say. Recipients see the
+//            destination spelled out and open it only through an explicit,
 //            confirmed click: never an automatic redirect.
 //   secret — the plaintext is JSON { v: 1, title?, username?, password?, url?,
 //            notes?, totp? }, shown masked with reveal/copy. `totp` is a
@@ -24,15 +29,99 @@ export class ShareTypeError extends Error {
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
-/** Parse and validate a shareable URL: absolute http(s), no credentials, no controls. */
-export function parseShareUrl(text) {
+// ── URL rules ────────────────────────────────────────────────────────────────
+// A rule is "scheme:<name>" (e.g. scheme:https, scheme:tel), "scheme:*" (any
+// scheme that is not forbidden) or "re:<regular expression>", matched
+// case-insensitively against the whole normalized URL (e.g.
+// re:^https://([a-z0-9-]+\.)*example\.com/). A URL is allowed when any rule
+// matches it. The owner's rules are ["scheme:*"].
+
+export const DEFAULT_URL_RULES = Object.freeze(['scheme:http', 'scheme:https']);
+export const MAX_URL_RULES = 50;
+export const MAX_URL_RULE_LENGTH = 300;
+
+/** Never shareable or openable, whatever the rules: they run code or read local data. */
+export const FORBIDDEN_SCHEMES = Object.freeze(new Set([
+  'javascript', 'data', 'vbscript', 'file', 'blob', 'about', 'filesystem', 'view-source', 'jar',
+  'chrome', 'chrome-extension', 'chrome-search', 'edge', 'moz-extension', 'ms-browser-extension',
+  'resource', 'intent', 'wyciwyg', 'livescript', 'mocha', 'res', 'ms-appx', 'ms-appx-web',
+]));
+
+const SCHEME_RE = /^[a-z][a-z0-9+.-]{0,31}$/;
+
+/** Validate and canonicalize a rule list (throws Error with a readable message). */
+export function normalizeUrlRules(list) {
+  if (!Array.isArray(list)) throw new Error('URL rules must be a list');
+  if (list.length > MAX_URL_RULES) throw new Error(`at most ${MAX_URL_RULES} URL rules`);
+  const out = [];
+  for (const item of list) {
+    const r = String(item ?? '').trim();
+    if (!r) continue;
+    if (r.length > MAX_URL_RULE_LENGTH) throw new Error(`a URL rule is at most ${MAX_URL_RULE_LENGTH} characters`);
+    const m = /^(scheme|re):(.*)$/s.exec(r);
+    if (!m) throw new Error(`"${r.slice(0, 40)}": start a rule with scheme: or re:`);
+    if (m[1] === 'scheme') {
+      const name = m[2].trim().toLowerCase().replace(/:$/, '');
+      if (name !== '*' && !SCHEME_RE.test(name)) throw new Error(`"${r.slice(0, 40)}": not a URL scheme`);
+      if (FORBIDDEN_SCHEMES.has(name)) throw new Error(`the ${name}: scheme can never be allowed`);
+      out.push(`scheme:${name}`);
+    } else {
+      const pattern = m[2];
+      if (!pattern) throw new Error('empty regular expression');
+      try { new RegExp(pattern, 'iu'); } catch (e) { throw new Error(`"${pattern.slice(0, 40)}": ${e.message}`, { cause: e }); }
+      out.push(`re:${pattern}`);
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** Rules from untrusted input (a server response): invalid lists fall back to the default. */
+export function urlRulesOf(value) {
+  try { return value === undefined ? [...DEFAULT_URL_RULES] : normalizeUrlRules(value); } catch { return [...DEFAULT_URL_RULES]; }
+}
+
+const schemeOf = (u) => u.protocol.slice(0, -1).toLowerCase();
+
+/** True when a parsed URL is allowed by `rules` (forbidden schemes never are). */
+export function urlAllowed(u, rules = DEFAULT_URL_RULES) {
+  const scheme = schemeOf(u);
+  if (FORBIDDEN_SCHEMES.has(scheme)) return false;
+  for (const r of rules) {
+    if (r === 'scheme:*' || r === `scheme:${scheme}`) return true;
+    if (r.startsWith('re:')) {
+      try { if (new RegExp(r.slice(3), 'iu').test(u.href)) return true; } catch { /* invalid rule: ignore */ }
+    }
+  }
+  return false;
+}
+
+/** A short description of what the rules allow ("http, https and tel links"). */
+export function describeUrlRules(rules = DEFAULT_URL_RULES) {
+  if (rules.includes('scheme:*')) return 'links of any safe kind';
+  const schemes = rules.filter((r) => r.startsWith('scheme:')).map((r) => r.slice(7));
+  const re = rules.filter((r) => r.startsWith('re:')).length;
+  const parts = [];
+  if (schemes.length) parts.push(`${schemes.length > 1 ? `${schemes.slice(0, -1).join(', ')} and ${schemes.at(-1)}` : schemes[0]} links`);
+  if (re) parts.push(`links matching ${re} pattern${re > 1 ? 's' : ''} set by the administrator`);
+  return parts.length ? parts.join(', or ') : 'no links';
+}
+
+/**
+ * Parse and validate a URL share: absolute, no credentials, no controls, and
+ * allowed. The sender passes the account's `rules`; a recipient passes
+ * `{ recipient: true }` (the sender's rules are not known there, so any
+ * scheme that is not forbidden is accepted — and shown for what it is).
+ */
+export function parseShareUrl(text, { rules = DEFAULT_URL_RULES, recipient = false } = {}) {
   const raw = String(text ?? '').trim();
-  if (!raw || raw.length > MAX_URL_LENGTH || CONTROL.test(raw) || /\s/.test(raw)) throw new ShareTypeError('Enter a single http:// or https:// link.');
+  if (!raw || raw.length > MAX_URL_LENGTH || CONTROL.test(raw) || /\s/.test(raw)) throw new ShareTypeError('Enter a single link, with no spaces.');
   let u;
   try { u = new URL(raw); } catch { throw new ShareTypeError('That is not a valid link.'); }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new ShareTypeError('Only http:// and https:// links can be shared.');
+  const scheme = schemeOf(u);
+  if (FORBIDDEN_SCHEMES.has(scheme)) throw new ShareTypeError(`${scheme}: links can never be shared.`);
+  if (!recipient && !urlAllowed(u, rules)) throw new ShareTypeError(`This link is not allowed for your account: you may share ${describeUrlRules(rules)}.`);
   if (u.username || u.password) throw new ShareTypeError('Links with a user name or password in them cannot be shared — use a secret share instead.');
-  if (!u.hostname) throw new ShareTypeError('That link has no host.');
+  if ((scheme === 'http' || scheme === 'https') && !u.hostname) throw new ShareTypeError('That link has no host.');
   // The stored form is the normalized href (percent-encoded), which can be
   // longer than what was typed: bound that, so the recipient accepts it too.
   if (u.href.length > MAX_URL_LENGTH) throw new ShareTypeError(`That link is too long once encoded (max ${MAX_URL_LENGTH} characters).`);
@@ -45,10 +134,14 @@ export function parseShareUrl(text) {
  * Unicode form, flagged — look-alike characters are a classic phishing trick.
  */
 export function describeHost(u) {
+  const scheme = schemeOf(u);
+  // Links without a host (tel:, mailto:, sms:, geo:, …) open another app: show
+  // the whole address instead of a host.
+  if (!u.hostname) return { ascii: u.href, unicode: u.href, idn: false, insecure: false, scheme, external: true };
   const ascii = u.hostname;
   let unicode;
   try { unicode = ascii.split('.').map((l) => (l.startsWith('xn--') ? decodePunycode(l.slice(4)) : l)).join('.'); } catch { unicode = ascii; }
-  return { ascii, unicode, idn: unicode !== ascii, insecure: u.protocol === 'http:' };
+  return { ascii, unicode, idn: unicode !== ascii, insecure: u.protocol === 'http:', scheme, external: scheme !== 'http' && scheme !== 'https' };
 }
 
 // RFC 3492 punycode decoder (display only).

@@ -45,6 +45,23 @@ describe('link shares (--fmt url)', () => {
     expect(server.calls).toHaveLength(0);
   });
 
+  it('applies the account\'s URL rules from the server (tel: needs scheme:tel)', async () => {
+    const plain = makeServer();
+    const refused = await make(plain, ['--fmt', 'url', '--text', 'tel:+15551234']);
+    expect(refused.code).toBe(2); // an older server without /policy: the default rules apply
+    expect(refused.err).toMatch(/not allowed for your account: you may share http and https links/);
+    expect(plain.calls.filter((c) => c.path === '/api/private/paste')).toHaveLength(0);
+    const server = makeServer({ policy: { urlRules: ['scheme:https', 'scheme:tel'] } });
+    const c = await make(server, ['--fmt', 'url', '--text', 'tel:+15551234']);
+    expect(c.code).toBe(0);
+    const g = await get(server, c.url);
+    expect(g.out).toBe('tel:+15551234\n');
+    expect(g.err).toMatch(/tel: link \(opens another app\)/);
+    const regex = makeServer({ policy: { urlRules: ['re:^https://([a-z0-9-]+\\.)*example\\.com/'] } });
+    expect((await make(regex, ['--fmt', 'url', '--text', 'https://docs.example.com/a'])).code).toBe(0);
+    expect((await make(regex, ['--fmt', 'url', '--text', 'https://example.org/'])).code).toBe(2);
+  });
+
   it('flags plain-http links', async () => {
     const server = makeServer();
     const c = await make(server, ['--fmt', 'url', '--text', 'http://example.com/']);

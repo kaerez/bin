@@ -1,7 +1,7 @@
 // sharetypes.test.js — URL and secret share payloads (browser + CLI), and the
 // TOTP generator against the RFC 6238 Appendix B test vectors.
 import { describe, it, expect } from 'vitest';
-import { parseShareUrl, describeHost, buildSecret, parseSecret, parseTotp, totpCode, base32Decode, ShareTypeError } from '../public/js/sharetypes.js';
+import { parseShareUrl, describeHost, buildSecret, parseSecret, parseTotp, totpCode, base32Decode, ShareTypeError, normalizeUrlRules, urlAllowed, urlRulesOf, describeUrlRules } from '../public/js/sharetypes.js';
 
 const b32 = (ascii) => {
   const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -18,7 +18,7 @@ describe('url shares', () => {
     }
   });
   it('spell out the real host, flagging IDN look-alikes and plain http', () => {
-    expect(describeHost(parseShareUrl('https://xn--mnchen-3ya.de/'))).toEqual({ ascii: 'xn--mnchen-3ya.de', unicode: 'münchen.de', idn: true, insecure: false });
+    expect(describeHost(parseShareUrl('https://xn--mnchen-3ya.de/'))).toEqual({ ascii: 'xn--mnchen-3ya.de', unicode: 'münchen.de', idn: true, insecure: false, scheme: 'https', external: false });
     expect(describeHost(parseShareUrl('https://münchen.de/')).ascii).toBe('xn--mnchen-3ya.de');
     expect(describeHost(parseShareUrl('http://example.com/'))).toMatchObject({ idn: false, insecure: true });
   });
@@ -86,5 +86,39 @@ describe('review hardening', () => {
     for (const alg of ['__proto__', 'constructor', 'toString']) {
       expect(() => parseTotp(`otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=${alg}`)).toThrow(/Unsupported/);
     }
+  });
+});
+
+describe('URL rules (the admin\'s "links that may be shared")', () => {
+  it('defaults to http and https, and never allows dangerous schemes', () => {
+    expect(() => parseShareUrl('tel:+15551234')).toThrow(/not allowed for your account/);
+    for (const bad of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'data:text/html,x', 'file:///etc/passwd', 'vbscript:x', 'blob:https://a/b']) {
+      expect(() => parseShareUrl(bad, { rules: ['scheme:*'] })).toThrow(ShareTypeError);
+      expect(() => parseShareUrl(bad, { recipient: true })).toThrow(ShareTypeError);
+    }
+  });
+
+  it('allows extra schemes and anchored regular expressions', () => {
+    expect(parseShareUrl('tel:+15551234', { rules: ['scheme:tel'] }).href).toBe('tel:+15551234');
+    const rules = ['re:^https://([a-z0-9-]+\\.)*example\\.com/'];
+    expect(parseShareUrl('https://docs.EXAMPLE.com/x', { rules }).href).toBe('https://docs.example.com/x');
+    expect(() => parseShareUrl('https://evil.test/?example.com/', { rules })).toThrow(/not allowed/);
+    expect(urlAllowed(new URL('mailto:a@b.test'), ['scheme:*'])).toBe(true);
+  });
+
+  it('validates rule lists (scheme names, forbidden schemes, regex syntax, size)', () => {
+    expect(normalizeUrlRules([' scheme:HTTPS: ', 'scheme:tel', 'scheme:tel', ''])).toEqual(['scheme:https', 'scheme:tel']);
+    expect(() => normalizeUrlRules(['scheme:data'])).toThrow(/never be allowed/);
+    expect(() => normalizeUrlRules(['https'])).toThrow(/start a rule with/);
+    expect(() => normalizeUrlRules(['re:(['])).toThrow();
+    expect(() => normalizeUrlRules(Array.from({ length: 51 }, (_, i) => `scheme:s${i}`))).toThrow(/at most 50/);
+    expect(urlRulesOf(['scheme:data'])).toEqual(['scheme:http', 'scheme:https']); // untrusted input falls back
+    expect(describeUrlRules(['scheme:http', 'scheme:https', 'scheme:tel'])).toBe('http, https and tel links');
+  });
+
+  it('recipients accept any safe scheme and see host-less links for what they are', () => {
+    const u = parseShareUrl('sms:+15551234', { recipient: true });
+    expect(describeHost(u)).toMatchObject({ external: true, scheme: 'sms', ascii: 'sms:+15551234' });
+    expect(describeHost(new URL('https://example.com/'))).toMatchObject({ external: false, scheme: 'https' });
   });
 });

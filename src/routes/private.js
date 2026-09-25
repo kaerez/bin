@@ -72,6 +72,15 @@ export async function handlePrivate(request, env, url, ctx) {
     return err(404, 'not_found', 'Not found.');
   }
 
+  // What the client must check itself before creating (session or API key).
+  if (p === '/api/private/policy') {
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    const a = await authenticate(request, env, { allowApiKey: true });
+    const r = await directory(env).sharePolicy(a.user.id, a.channel);
+    if (!r.ok) return fromDir(r);
+    return withAuth(a, json({ url: r.url, urlRules: r.urlRules }));
+  }
+
   // ── session-only surfaces ─────────────────────────────────────────────────
   const a = await authenticate(request, env);
   const dir = directory(env);

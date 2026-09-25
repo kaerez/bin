@@ -27,7 +27,8 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 /**
  * `policy` lets a test play the account's limits: { text: false, files: false,
  * quota: true, maxViews, maxFilesPerShare, maxFileBytes, fileTypeMode,
- * fileTypeRules, maxFolderDepth, openerDelete }.
+ * fileTypeRules, maxFolderDepth, openerDelete, urlRules } — urlRules makes the
+ * server answer GET /api/private/policy (otherwise it 404s, like an old server).
  */
 export function makeServer({ keys = [KEY], policy = {} } = {}) {
   const notes = new Map(); // id → { paste, acc, dth, views, left, label }
@@ -63,6 +64,12 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
     const readBody = () => {
       try { return JSON.parse(init.body); } catch { return null; }
     };
+
+    if (u.pathname === '/api/private/policy' && policy.urlRules !== undefined) {
+      const denied = auth();
+      if (denied) return denied;
+      return json(200, { url: true, urlRules: policy.urlRules });
+    }
 
     // ── creation (API key) ──────────────────────────────────────────────────
     if (u.pathname === '/api/private/paste') {
