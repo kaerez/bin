@@ -268,8 +268,9 @@ function linkCard(text) {
   const u = parseShareUrl(text);
   const d = describeHost(u);
   const warn = [];
-  if (d.idn) warn.push(`This address uses international characters and is displayed as “${d.unicode}”. Such names can imitate a well-known site — check the real address above.`);
-  if (d.insecure) warn.push('This link is not HTTPS: the connection to it is not encrypted.');
+  // <bdi> isolates the Unicode form so right-to-left labels cannot reorder the sentence.
+  if (d.idn) warn.push(['This address uses international characters and is displayed as “', h('bdi', { dir: 'ltr', text: d.unicode }), '”. Such names can imitate a well-known site — check the real address above.']);
+  if (d.insecure) warn.push(['This link is not HTTPS: the connection to it is not encrypted.']);
   const open = h('button.send', { type: 'button' }, h('span.send-txt', { text: 'Open link' }));
   armConfirm(open, `Open ${d.ascii}?`, () => window.open(u.href, '_blank', 'noopener,noreferrer'));
   const copy = h('button.btn', { type: 'button', text: 'Copy link', on: { click: async () => toast((await copyText(u.href)) ? 'link copied' : 'copy failed') } });
@@ -277,7 +278,7 @@ function linkCard(text) {
     h('p.field-label', { text: 'This share is a link to' }),
     h('p.link-host', { text: d.ascii }),
     h('p.link-full', { text: u.href }),
-    ...warn.map((w) => h('p.type-hint.warn', { role: 'note', text: w })),
+    ...warn.map((w) => h('p.type-hint.warn', { role: 'note' }, ...w)),
     h('div.btn-row', {}, open, copy));
 }
 

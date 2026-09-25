@@ -47,6 +47,9 @@ const FIELD_NAMES = [...Object.keys(SECRET_FIELDS), 'code'];
 // as a status line cannot inject terminal escape sequences.
 // eslint-disable-next-line no-control-regex
 const safeLine = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+// For multi-line values shown on a terminal: like safeLine, but keeps newlines and tabs.
+// eslint-disable-next-line no-control-regex
+const safeText = (s) => String(s).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /**
  * The text `get` prints for a decrypted note. Typed shares are validated
@@ -55,14 +58,13 @@ const safeLine = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) =
  * This runs after the view is spent, so it never throws: anything unexpected
  * is reported on stderr and the content is still printed.
  */
-async function renderNote(fmt, text, field, io) {
-  const tty = io.stdoutIsTTY === true;
+async function renderNote(fmt, text, field, io, tty) {
   if (fmt === 'url') {
     let u;
     try { u = parseLinkUrl(text); } catch (e) {
       if (!(e instanceof ShareTypeError)) throw e;
       io.stderr(`warning: this link share does not hold a valid link (${e.message}); printing it as text\n`);
-      return tty ? `${safeLine(text)}\n` : text;
+      return tty ? `${safeText(text)}\n` : text;
     }
     const h = describeHost(u);
     io.stderr(`link to ${h.ascii}${h.idn ? ` (displayed as ${safeLine(h.unicode)} — international characters can imitate another site)` : ''}${h.insecure ? ' — not HTTPS' : ''}\n`);
@@ -73,7 +75,7 @@ async function renderNote(fmt, text, field, io) {
   try { sec = parseSecret(text); } catch (e) {
     if (!(e instanceof ShareTypeError)) throw e;
     io.stderr(`warning: ${e.message} Printing it as text.\n`);
-    return tty ? `${safeLine(text)}\n` : text;
+    return tty ? `${safeText(text)}\n` : text;
   }
   // JSON.stringify escapes C0 controls; also escape DEL and C1 (e.g. CSI).
   const json = `${JSON.stringify(sec, null, 2).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}\n`;
@@ -99,7 +101,7 @@ async function renderNote(fmt, text, field, io) {
     io.stderr(`warning: this credential has no "${field}" field; printing the whole credential instead\n`);
     return json;
   }
-  return tty ? `${safeLine(sec[field])}\n` : `${sec[field]}\n`;
+  return tty ? `${safeText(sec[field])}\n` : `${sec[field]}\n`;
 }
 
 const GRANT_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -228,8 +230,10 @@ export async function cmdGet(args, io) {
   const code = kind === 'paste'
     ? await getNote({ io, values, openShare, access: () => access })
     : await getFiles({ io, values, client, id, sub, limited, openShare, access: () => access });
-  if (head.meta.deletable === true) {
-    io.stderr('the sender lets you delete this share now: echo <url> | secbin delete --now -\n');
+  // Only while the share still exists (not after its last view). Reading the
+  // link from stdin keeps its #key out of shell history.
+  if (head.meta.deletable === true && !(limited && head.meta.left <= 1)) {
+    io.stderr('the sender lets you delete this share now: run  secbin delete --now -  and paste the link (then Ctrl-D)\n');
   }
   return code;
 }
@@ -252,7 +256,8 @@ async function getNote({ io, values, openShare, access }) {
   try {
     const paste = validatePaste(await openShare());
     const out = await openPaste({ paste, access: access() });
-    out.text = await renderNote(paste.adata.fmt, out.text, values.field, io);
+    // Escaping is for a terminal only; --out files get the exact value.
+    out.text = await renderNote(paste.adata.fmt, out.text, values.field, io, !outFile && io.stdoutIsTTY === true);
     if (outFile) {
       try {
         await outFile.writeFile(out.text);

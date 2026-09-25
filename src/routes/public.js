@@ -154,7 +154,11 @@ async function openFile(env, g, id, { lh, kh }) {
 async function expireByOpener(env, g, id, info, { lh, kh }) {
   const dir = directory(env);
   if (info.file) binding(env, 'FILES');
-  if (await dir.isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be deleted.');
+  // Checked now, not only at creation: a lock, or the admin withdrawing the
+  // sender's permission, stops "delete now" on existing shares too.
+  const allowed = await dir.recipientDeleteStatus(id);
+  if (allowed === 'locked') return err(423, 'share_locked', 'The administrator has locked this share; it cannot be deleted.');
+  if (allowed !== 'ok') return err(403, 'not_allowed', 'Recipients may not delete this share.');
   let status;
   if (info.file || info.burn) {
     status = (await (info.file ? fileStub(env, id) : burnStub(env, id)).expireByOpener(lh, kh)).status;

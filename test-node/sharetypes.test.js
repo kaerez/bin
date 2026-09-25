@@ -70,3 +70,21 @@ describe('TOTP (RFC 6238 Appendix B)', () => {
     expect(Array.from(base32Decode('mzxw6==='))).toEqual([102, 111, 111]);
   });
 });
+
+describe('review hardening', () => {
+  it('bounds the normalized href, not just the typed text', () => {
+    const typed = `https://example.com/${'é'.repeat(1000)}`;
+    expect(typed.length).toBeLessThan(2048);
+    expect(() => parseShareUrl(typed)).toThrow(/too long once encoded/);
+  });
+
+  it('an empty credential is not a credential', () => {
+    expect(() => parseSecret('{"v":1}')).toThrow(ShareTypeError);
+  });
+
+  it('otpauth algorithm names are looked up safely', () => {
+    for (const alg of ['__proto__', 'constructor', 'toString']) {
+      expect(() => parseTotp(`otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=${alg}`)).toThrow(/Unsupported/);
+    }
+  });
+});

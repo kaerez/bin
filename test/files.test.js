@@ -240,3 +240,17 @@ describe('recipient "delete now" on file shares', () => {
     expect(mine.rows.find((r) => r.id === s.id).status).toBe('deleted');
   });
 });
+
+describe('"delete now" after a file share\'s last view', () => {
+  it('is refused: downloads already granted run out on their own', async () => {
+    const u = await makeUser('files-deletable-closed');
+    await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { openerDelete: true } } });
+    const s = await upload(u.cookie, [{ path: 'a.txt', bytes: utf8('last view') }], { views: 1, deletable: true });
+    expect(s.fin.status).toBe(200);
+    const o = await openShare(s.id, s.fragment);
+    expect(o.res.status).toBe(200);
+    const { headers } = await proofHeaders(o.head.adata, s.fragment, '');
+    expect((await fetchJson(`/api/file/${s.id}/expire`, { method: 'POST', headers })).status).toBe(410);
+    expect(await env.FILES.get(`f/${s.id}/0`)).not.toBeNull();
+  });
+});

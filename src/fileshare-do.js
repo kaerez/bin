@@ -204,8 +204,10 @@ export class FileShare extends DurableObject {
   /** "Delete now" by someone holding both proofs, when the sender allowed it. */
   async expireByOpener(lh, kh) {
     return this.ctx.blockConcurrencyWhile(async () => {
+      // Only an active share: after its last view, downloads already granted
+      // run out on their own and are not cut short by a recipient.
       const rec = await this.#live();
-      if (!rec || rec.state === 'pending') return { status: 'gone' };
+      if (!rec || rec.state !== 'active') return { status: 'gone' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
       if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
       if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };
