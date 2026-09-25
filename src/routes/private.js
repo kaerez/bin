@@ -13,6 +13,7 @@ import { r2Key } from '../fileshare-do.js';
 import { verifierFrom } from './auth.js';
 import { handleAdmin } from './admin.js';
 import { binding } from '../lib/config.js';
+import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const EXTRA_KEYS = ['max', 'quota', 'until', 'policy', 'refused'];
@@ -94,6 +95,7 @@ export async function handlePrivate(request, env, url, ctx) {
   if (p === '/api/private/me/password') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     if (a.actor) return err(403, 'impersonating', 'Use the admin panel to reset this user’s password.');
+    await requireTurnstile(env, request, TURNSTILE_ACTIONS.password);
     const g = await ipContext(env, request);
     const body = await readJsonBody(request);
     const current = await verifierFrom(body.current);

@@ -8,6 +8,7 @@ import { authnToken, sessionKeys } from '../lib/config.js';
 import { readSession, issueSession, logoutCookie, unconfigured } from '../lib/auth.js';
 import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
+import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 
 const AUTH_LABEL = utf8('secbin-auth/v2');
 
@@ -84,6 +85,8 @@ export async function handleAuth(request, env, url) {
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
+    // The human check comes before the password is looked at.
+    await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
     const body = await readJsonBody(request);
     const verifier = await verifierFrom(body.proof);
     const res = await directory(env).login({ username: body.username, verifier: verifier ?? '', lockoutOff: g.off.all });

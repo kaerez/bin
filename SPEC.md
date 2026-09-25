@@ -231,6 +231,13 @@ Common errors on any route:
 - `503 server_not_configured`: `SIG`/`ENC` are missing or invalid (auth and private routes only).
 - `403 account_disabled`: a disabled account's session or API key. The session cookie is also
   cleared.
+- **Human check (Cloudflare Turnstile)**, only when `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`
+  are both set: `POST /api/auth/login`, `POST /api/private/me/password` and
+  `POST /api/public/paste` / `POST /api/public/file` need `X-Secbin-Turnstile: <token>`, issued
+  for the action `login`, `password` or `public-share` respectively on this hostname. Each token
+  is accepted once. Errors: `403 turnstile_required` (no token), `403 turnstile_failed` (rejected,
+  expired, reused, or for another action or hostname), `503 turnstile_unavailable` (siteverify
+  unreachable; fails closed). Setup, admin resets, file chunks/finalize and API keys are exempt.
 - `403 scope_denied`: an API key without the scope the route needs (`notes` for
   `POST /api/private/paste`, `files` for the file routes, `policy` for `GET /api/private/policy`).
 
@@ -238,7 +245,7 @@ Common errors on any route:
 
 | Method & path | Notes | Success | Errors |
 |---|---|---|---|
-| `GET /api/config` | public viewer policy | 200 | |
+| `GET /api/config` | public viewer policy; `turnstile`: the Turnstile site key, or `null` when the human check is off | 200 | |
 | `GET /api/paste/:id` | head (§5.3) | 200 | 404, 410, 429 |
 | `POST /api/paste/:id/open` | `X-Link-Proof`, `X-Key-Proof`; spends a view if limited | 200 opened note | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `cross_site`, 404, 410, 429 |
 | `DELETE /api/paste/:id` | `X-Delete-Token` | 200 | 400, 403 `bad_token`, 404 |
@@ -280,7 +287,7 @@ blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|
 | `GET /api/auth/setup` | — | `{enabled, ownerExists?, configured}` |
 | `POST /api/auth/setup` | `{token, username, salt, t, proof}` | owner created or recovered; 404 if `AUTHN` unset; 403 wrong token; 410 token already used |
 | `POST /api/auth/prelogin` | `{username}` | `{salt, t}` (a stable fake salt for unknown users; `t` is always the default, 3) |
-| `POST /api/auth/login` | `{username, proof}` | session cookie; 401, 423 locked, 403 disabled, 429, 503 not configured |
+| `POST /api/auth/login` | `{username, proof}` (+ `X-Secbin-Turnstile` when on) | session cookie; 401, 423 locked, 403 disabled, 403 `turnstile_*`, 429, 503 not configured |
 | `POST /api/auth/logout` | `X-Secbin-Intent: 1` | session revoked |
 
 `proof = b64url(Argon2id(UTF8(NFC(password)), salt, m=64 MiB, t, p=1, 32 B))`. The server stores

@@ -8,6 +8,7 @@ import { prelogin } from '../../js/api.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
 import { copyText, flashCopied, toast } from '../../js/ui.js';
 import { ready } from './nav.js';
+import { humanCheck } from '../../js/turnstile.js';
 
 const $ = (s) => document.querySelector(s);
 let profile;
@@ -61,6 +62,7 @@ function wirePassword() {
     form.hidden = true;
     return;
   }
+  const check = humanCheck($('#pw-turnstile'), 'password');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const msg = $('#pw-msg');
@@ -71,10 +73,11 @@ function wirePassword() {
     btn.disabled = true;
     btn.textContent = 'Changing…';
     try {
+      const token = await (await check).take();
       const { salt, t } = await prelogin(profile.user.username);
       const current = await stretch($('#pw-current').value, salt, t);
       const cred = await newCredential($('#pw-new').value);
-      await changePassword({ current, ...cred });
+      await changePassword({ current, ...cred }, token);
       form.reset();
       showMsg(msg, 'Password changed. Your other sessions were signed out.', false);
       toast('Password changed. Your other sessions were signed out.');

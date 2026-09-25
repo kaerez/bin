@@ -601,6 +601,9 @@ button.back { cursor: pointer; }
 .api-help { margin-top: 1rem; font-size: .85rem; line-height: 1.55; color: var(--ink-2); }
 .api-help summary { cursor: pointer; font-weight: 500; color: var(--ink); }
 .api-help p { margin: .5rem 0; }
+/* Cloudflare Turnstile: usually invisible; shows itself only when it needs the visitor. */
+.turnstile { display: flex; justify-content: center; max-width: 100%; }
+.turnstile[hidden] { display: none; }
 .api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
 .receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
 .opens-box { padding: .5rem 0; }
