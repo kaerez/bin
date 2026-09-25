@@ -18,6 +18,7 @@ import { h, clear, showMsg, wirePeek, armConfirm, formatCoarse, formatDuration, 
 import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
 import { ShareReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
 import { allowedRenderer, renderPreview } from './viewer.js';
+import { progressBar } from './progress.js';
 
 let timer = null;
 let totpTimer = null;
@@ -385,22 +386,25 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   clearInterval(timer);
   timer = setInterval(tick, 1000);
 
-  const progress = $('#files-progress');
+  const filesBar = progressBar();
+  clear($('#files-progress')).appendChild(filesBar.el);
+  const previewBar = progressBar();
+  clear($('#preview-progress')).appendChild(previewBar.el);
   const errMsg = $('#files-msg');
   let busy = false;
-  async function run(label, total, fn) {
+  /** Run a download or preview with a progress bar (bytes fetched and decrypted, in %). */
+  async function run(label, total, fn, bar = filesBar) {
     if (busy) return;
     busy = true;
     errMsg.hidden = true;
     let done = 0;
-    progress.hidden = false;
-    progress.textContent = `${label}… 0%`;
+    bar.set(`${label}…`, 0);
     try {
       if (total > MEMORY_WARN && typeof window.showSaveFilePicker !== 'function') toast('Large download: this browser assembles it in memory.');
-      await fn((n) => { done += n; progress.textContent = `${label}… ${total ? Math.floor((done / total) * 100) : 100}%`; });
-      progress.textContent = `${label} — done`;
+      await fn((n) => { done += n; bar.set(`${label}…`, total ? done / total : 1); });
+      if (bar === filesBar) bar.done(`${label}: done`);
     } catch (e) {
-      progress.hidden = true;
+      bar.hide();
       if (e && e.name === 'AbortError') return;
       showMsg(errMsg, e instanceof ApiError && e.code === 'bad_grant' ? 'The download window has expired — open the link again.' : friendlyError(e));
     } finally {
@@ -411,7 +415,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   const preview = $('#files-preview');
   const previewBody = $('#preview-body');
   let previewCleanup = null;
-  const closePreview = () => { if (previewCleanup) previewCleanup(); previewCleanup = null; preview.hidden = true; };
+  const closePreview = () => { if (previewCleanup) previewCleanup(); previewCleanup = null; previewBar.hide(); preview.hidden = true; };
   $('#preview-close').onclick = closePreview;
 
   const fileButtons = (entry) => {
@@ -421,19 +425,26 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
       out.unshift(h('button.btn', {
         type: 'button', text: 'View',
         on: {
-          click: () => run(`Loading ${basename(entry.path)}`, entry.size, async (p) => {
+          click: () => {
+            // The preview opens at once with its own bar: bytes (fetch +
+            // decrypt) as a percentage, then a busy bar while it renders.
             closePreview();
-            const bytes = await reader.bytes(entry, p);
             $('#preview-title').textContent = entry.path;
+            clear(previewBody);
             preview.hidden = false;
-            try {
-              previewCleanup = await renderPreview(previewBody, entry, bytes, renderer);
-            } catch (e) {
-              clear(previewBody).appendChild(h('p.msg.error', { text: e.message || 'This file cannot be previewed.' }));
-            }
-            $('#preview-download').onclick = () => run(`Downloading ${basename(entry.path)}`, entry.size, (q) => saveFile(reader, entry, q));
             preview.scrollIntoView({ block: 'nearest' });
-          }),
+            return run(`Loading ${basename(entry.path)}`, entry.size, async (p) => {
+              const bytes = await reader.bytes(entry, p);
+              previewBar.set('Preparing the preview…', null);
+              try {
+                previewCleanup = await renderPreview(previewBody, entry, bytes, renderer);
+              } catch (e) {
+                clear(previewBody).appendChild(h('p.msg.error', { text: e.message || 'This file cannot be previewed.' }));
+              }
+              previewBar.hide();
+              $('#preview-download').onclick = () => run(`Downloading ${basename(entry.path)}`, entry.size, (q) => saveFile(reader, entry, q));
+            }, previewBar);
+          },
         },
       }));
     }
