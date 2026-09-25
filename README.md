@@ -4,7 +4,7 @@
   <img src="public/img/wordmark-dark.svg" width="275" alt="binthere wordmark">
 </p>
 
-<h1 align="center"><strong>Say it once. <em>Sealed.</em></strong></h1>
+<h1 align="center"><strong> Say it once. <em>Sealed.</em></strong></h1>
 
 <p align="center">Zero-knowledge, end-to-end encrypted notes that disappear after one read.</p>
 
