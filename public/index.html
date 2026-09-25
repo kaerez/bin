@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en" class="dark">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="robots" content="noindex, nofollow" />
+        <meta name="referrer" content="no-referrer" />
+        <meta name="color-scheme" content="dark light" />
+        <!-- Kept in sync with the class-based theme by theme-init.js / theme.js. -->
+        <meta name="theme-color" content="#0d1117" />
+        <title>binthere · zero-knowledge paste</title>
+        <meta
+            name="description"
+            content="Encrypted, zero-knowledge pastebin. Your text is encrypted in your browser; the server never sees it."
+        />
+        <!-- Link previews (chat apps / social scrapers). Fragment keys are never sent
+       to servers, so a shared paste link only ever exposes this generic card. -->
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="binthere" />
+        <meta property="og:title" content="binthere · zero-knowledge paste" />
+        <meta
+            property="og:description"
+            content="Encrypted, zero-knowledge pastebin. Your text is encrypted in your browser; the server never sees it."
+        />
+        <meta property="og:url" content="https://binthere.gaury.dev/" />
+        <meta property="og:image" content="https://binthere.gaury.dev/opengraph.png" />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <link rel="icon" type="image/svg+xml" href="/img/favicon.svg" />
+        <!-- PNG fallbacks: Safari ignores SVG favicons; iOS wants a full-bleed square.
+       A real /favicon.ico (16+32+48) also exists for agents that probe by convention. -->
+        <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
+        <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
+        <!-- Blocking, first-party (CSP-safe): sets the theme class before paint so
+       there's no light/dark flash. Must precede the stylesheet. -->
+        <script src="/js/theme-init.js"></script>
+        <link rel="stylesheet" href="/css/styles.css" />
+        <!-- No <link rel="manifest">: the specified CSP has no manifest-src, so a
+       manifest would be blocked by default-src 'none'. PWA install is out of scope. -->
+        <!-- CSP is set as a response header (public/_headers). Scripts/styles/fonts are first-party only. -->
+        <script defer src="/js/qrcode.js"></script>
+        <script defer src="/js/theme.js"></script>
+        <script defer src="/js/announce.js"></script>
+        <script defer src="/js/stars.js"></script>
+        <script type="module" src="/js/app.js"></script>
+    </head>
+    <body>
+        <!-- Slim announcement bar. Hidden by default so returning/dismissed
+       visitors never see a flash; announce.js reveals it only when the
+       dismissal flag is absent (mirrors theme-init's localStorage pattern). -->
+        <aside class="announce" id="announce" aria-label="Announcement" hidden>
+            <a
+                class="announce-link"
+                href="https://gaury.dev/blog/because-i-dont-trust-pastebins-either"
+                rel="noopener"
+                target="_blank"
+            >
+                <span class="announce-tag">New</span>
+                <span class="announce-txt"
+                    >Why I don’t trust pastebins either</span
+                >
+                <span class="announce-arrow" aria-hidden="true">→</span>
+            </a>
+            <button
+                type="button"
+                class="announce-close"
+                id="announce-close"
+                aria-label="Dismiss announcement"
+            >
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path
+                        d="M6 6l12 12M18 6L6 18"
+                        stroke="currentColor"
+                        stroke-width="1.75"
+                        stroke-linecap="round"
+                    />
+                </svg>
+            </button>
+        </aside>
+        <!-- Guilloché watermark — security-print ambience; pure ornament. -->
+        <svg class="watermark" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <g stroke="currentColor" stroke-width="0.5">
+                <circle cx="32" cy="32" r="29" />
+                <circle cx="32" cy="32" r="24.5" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(30 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(60 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(90 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(120 32 32)" />
+                <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(150 32 32)" />
+                <circle cx="32" cy="32" r="4.2" />
+            </g>
+        </svg>
+        <header class="topbar reveal">
+            <a class="brand" href="/" id="brand" aria-label="binthere — home">
+                <span class="wm-a">bin</span><span class="wm-b">there</span>
+            </a>
+            <div class="topbar-right">
+                <!-- Star count is filled in by /js/stars.js from /api/stars; the
+                     page can't reach api.github.com itself (connect-src 'self'). -->
+                <a
+                    class="gh"
+                    id="gh-link"
+                    href="https://github.com/nxfu/binthere"
+                    rel="noopener"
+                    target="_blank"
+                    aria-label="binthere on GitHub"
+                >
+                    <!-- Octicons "mark-github" (MIT). -->
+                    <svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true">
+                        <path
+                            fill="currentColor"
+                            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+                        />
+                    </svg>
+                    <!-- Ships hidden: with no count the badge is just a link to
+                         the repository, rather than an empty pair of glyphs. -->
+                    <span class="gh-stars" id="gh-stars" hidden>
+                        <svg class="gh-star" viewBox="0 0 24 24" aria-hidden="true">
+                            <path
+                                fill="currentColor"
+                                d="M12 2.8l2.72 5.51 6.08.89-4.4 4.29 1.04 6.06L12 16.69l-5.44 2.86 1.04-6.06-4.4-4.29 6.08-.89L12 2.8Z"
+                            />
+                        </svg>
+                        <span class="gh-count mono" id="gh-count"></span>
+                    </span>
+                </a>
+                <a class="back" id="newlink" href="/" hidden
+                    ><span class="arrow">＋</span><span>new paste</span></a
+                >
+                <button
+                    type="button"
+                    id="themeToggle"
+                    class="theme-toggle"
+                    aria-label="Toggle light/dark theme"
+                    aria-pressed="true"
+                >
+                    <svg
+                        class="ico-sun"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <circle cx="12" cy="12" r="4" />
+                        <path
+                            d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+                        />
+                    </svg>
+                    <svg
+                        class="ico-moon"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="wrap">
+            <!-- ── CREATE ─────────────────────────────────────────────────────────── -->
+            <section id="view-create" tabindex="-1" hidden>
+                <div class="head reveal d1">
+                    <p class="eyebrow">private by design</p>
+                    <h1 class="title">Say it once. <span class="title-em">Sealed.</span></h1>
+                    <p class="subtitle">
+                        Your note stays yours. Read once, then self-destructs.
+                    </p>
+                </div>
+
+                <div class="editor-box reveal d2" id="editor-box">
+                    <textarea
+                        id="editor"
+                        class="editor"
+                        placeholder="Write or paste your note… Only the recipient with the link can decrypt it."
+                        aria-label="Note content"
+                        spellcheck="false"
+                    ></textarea>
+
+                    <div class="editor-bar">
+                        <div class="editor-bar-left">
+                            <button
+                                type="button"
+                                class="lock"
+                                id="lock"
+                                aria-pressed="false"
+                                aria-label="Protect with a password"
+                            >
+                                <svg
+                                    class="lock-ico"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    aria-hidden="true"
+                                >
+                                    <rect
+                                        x="5"
+                                        y="10.5"
+                                        width="14"
+                                        height="9.5"
+                                        rx="2.2"
+                                        stroke="currentColor"
+                                        stroke-width="1.5"
+                                    />
+                                    <!-- pathLength="1" normalizes the shackle so the
+                                         unlocked state can hide its closing leg with a
+                                         dash gap, and locking draws it shut (see .lock
+                                         in styles.css). Same trick as .seal-glyph. -->
+                                    <path
+                                        class="lock-shackle"
+                                        d="M8 10.5V7.5a4 4 0 0 1 8 0v3"
+                                        pathLength="1"
+                                        stroke="currentColor"
+                                        stroke-width="1.5"
+                                        stroke-linecap="round"
+                                    />
+                                    <circle
+                                        cx="12"
+                                        cy="15"
+                                        r="1.35"
+                                        fill="currentColor"
+                                    />
+                                </svg>
+                                <span class="lock-txt">Password</span>
+                            </button>
+                        </div>
+                        <button
+                            type="button"
+                            id="create"
+                            class="send"
+                            aria-label="Encrypt and create link"
+                        >
+                            <span class="send-txt">Create link</span>
+                            <svg
+                                class="send-ico"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M5 12h13M13 6l6 6-6 6"
+                                    stroke="currentColor"
+                                    stroke-width="1.75"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div
+                    class="features reveal d3"
+                    role="list"
+                    aria-label="How binthere protects your note"
+                >
+                    <span class="feat" role="listitem">Private</span>
+                    <span class="feat" role="listitem"
+                        >End-to-end encrypted</span
+                    >
+                    <span class="feat" role="listitem">One-time view</span>
+                    <span class="feat" role="listitem"
+                        >Auto-deletes in 24 hours</span
+                    >
+                </div>
+
+                <p id="create-msg" class="msg error" role="alert" hidden></p>
+            </section>
+
+            <!-- ── PASSWORD MODAL (optional) ──────────────────────────────────────── -->
+            <div class="modal-scrim" id="pw-modal" hidden>
+                <div
+                    class="modal"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="pw-modal-title"
+                    tabindex="-1"
+                    id="pw-modal-dialog"
+                >
+                    <h2 class="modal-title" id="pw-modal-title">
+                        Paste password
+                    </h2>
+                    <p class="modal-sub">
+                        This password will be required to unlock this paste.
+                    </p>
+                    <div class="pw modal-pw">
+                        <input
+                            type="password"
+                            id="modal-password"
+                            class="input"
+                            placeholder="Enter a password"
+                            autocomplete="off"
+                            data-bwignore
+                            data-lpignore="true"
+                            data-1p-ignore
+                            data-form-type="other"
+                            aria-label="Password"
+                        />
+                        <button
+                            type="button"
+                            class="peek"
+                            id="modal-peek"
+                            aria-label="Show password"
+                            aria-pressed="false"
+                        >
+                            <svg
+                                class="ico-eye"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"
+                                />
+                                <circle cx="12" cy="12" r="3" />
+                            </svg>
+                            <svg
+                                class="ico-eye-off"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M10.6 6.7A9.9 9.9 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18.3 18.3 0 0 1-3.3 4.2M6.2 8A18.4 18.4 0 0 0 2 12s3.6 6.5 10 6.5a10 10 0 0 0 3.9-.8"
+                                />
+                                <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                                <path d="M3 3l18 18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <!-- A typo'd password permanently locks a one-time note, so the
+                         creator must type it twice. Paste is allowed in both fields. -->
+                    <div class="pw modal-pw">
+                        <input
+                            type="password"
+                            id="modal-password-confirm"
+                            class="input"
+                            placeholder="Repeat the password"
+                            autocomplete="off"
+                            data-bwignore
+                            data-lpignore="true"
+                            data-1p-ignore
+                            data-form-type="other"
+                            aria-label="Repeat password"
+                        />
+                        <button
+                            type="button"
+                            class="peek"
+                            id="modal-peek-confirm"
+                            aria-label="Show password"
+                            aria-pressed="false"
+                        >
+                            <svg
+                                class="ico-eye"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"
+                                />
+                                <circle cx="12" cy="12" r="3" />
+                            </svg>
+                            <svg
+                                class="ico-eye-off"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M10.6 6.7A9.9 9.9 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18.3 18.3 0 0 1-3.3 4.2M6.2 8A18.4 18.4 0 0 0 2 12s3.6 6.5 10 6.5a10 10 0 0 0 3.9-.8"
+                                />
+                                <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                                <path d="M3 3l18 18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <p class="msg error modal-msg" id="pw-modal-msg" role="alert" hidden></p>
+                    <div class="modal-actions">
+                        <button
+                            type="button"
+                            class="btn modal-btn"
+                            id="pw-cancel"
+                        >
+                            Cancel
+                        </button>
+                        <button type="button" class="send" id="pw-create">
+                            <span class="send-txt">Create</span>
+                            <svg
+                                class="send-ico"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M5 12h13M13 6l6 6-6 6"
+                                    stroke="currentColor"
+                                    stroke-width="1.75"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── SUCCESS ────────────────────────────────────────────────────────── -->
+            <section id="view-success" tabindex="-1" hidden>
+                <div class="head reveal d1">
+                    <p class="eyebrow">sealed</p>
+                    <h1 class="title">Share your link</h1>
+                    <p class="subtitle" id="success-note">
+                        Send this to the one person who should read it — it
+                        self-destructs the moment it's opened. The key that
+                        unlocks it lives inside the link itself, so keep the
+                        whole link private and never send it back to us.
+                    </p>
+                </div>
+                <div class="stack reveal d2">
+                    <!-- The sealed artifact: a guilloché rosette — the security-print
+             seal — draws itself above the QR, pressing the note shut. -->
+                    <div class="seal">
+                        <div class="seal-row">
+                            <svg
+                                class="seal-glyph"
+                                viewBox="0 0 64 64"
+                                fill="none"
+                                aria-hidden="true"
+                            >
+                                <g stroke="currentColor" stroke-width="0.9">
+                                    <circle cx="32" cy="32" r="29" pathLength="1" />
+                                    <circle cx="32" cy="32" r="24.5" pathLength="1" />
+                                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" pathLength="1" />
+                                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(30 32 32)" pathLength="1" />
+                                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(60 32 32)" pathLength="1" />
+                                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(90 32 32)" pathLength="1" />
+                                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(120 32 32)" pathLength="1" />
+                                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(150 32 32)" pathLength="1" />
+                                    <circle cx="32" cy="32" r="4.2" pathLength="1" />
+                                </g>
+                            </svg>
+                            <span class="seal-label mono"
+                                >scan to open · one-time read</span
+                            >
+                        </div>
+                        <div class="card qr">
+                            <img id="qr" alt="QR code for the paste link" />
+                        </div>
+                    </div>
+                    <div class="linkrow">
+                        <div class="url mono" id="paste-url"></div>
+                        <button type="button" class="copy-btn" id="copy-url">
+                            copy link
+                        </button>
+                    </div>
+                    <div class="btn-row">
+                        <button type="button" class="btn" id="open-link">
+                            Open link
+                        </button>
+                        <a class="btn" href="/" id="another">Create another</a>
+                        <button
+                            type="button"
+                            class="btn danger btn-end"
+                            id="delete-btn"
+                        >
+                            Delete now
+                        </button>
+                    </div>
+                    <p class="msg" id="success-msg" role="status" hidden></p>
+                </div>
+            </section>
+
+            <!-- ── PASSWORD PROMPT ────────────────────────────────────────────────── -->
+            <section id="view-password" tabindex="-1" hidden>
+                <div class="head reveal d1">
+                    <p class="eyebrow">locked</p>
+                    <h1 class="title">Enter the password</h1>
+                    <p class="subtitle" id="password-subtitle">
+                        This note has a password. Ask whoever sent it to you,
+                        then type it in to open the note.
+                    </p>
+                </div>
+                <div class="stack reveal d2">
+                    <div class="pw pw-wide">
+                        <input
+                            type="password"
+                            id="decrypt-password"
+                            class="input"
+                            placeholder="Enter password"
+                            autocomplete="off"
+                            data-bwignore
+                            data-lpignore="true"
+                            data-1p-ignore
+                            data-form-type="other"
+                            aria-label="Password"
+                        />
+                        <button
+                            type="button"
+                            class="peek"
+                            id="peek2"
+                            aria-label="Show password"
+                            aria-pressed="false"
+                        >
+                            <svg
+                                class="ico-eye"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"
+                                />
+                                <circle cx="12" cy="12" r="3" />
+                            </svg>
+                            <svg
+                                class="ico-eye-off"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M10.6 6.7A9.9 9.9 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18.3 18.3 0 0 1-3.3 4.2M6.2 8A18.4 18.4 0 0 0 2 12s3.6 6.5 10 6.5a10 10 0 0 0 3.9-.8"
+                                />
+                                <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                                <path d="M3 3l18 18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <button type="button" class="cta" id="decrypt-btn">
+                        Decrypt
+                    </button>
+                    <p class="msg error" id="password-msg" role="alert" hidden></p>
+                </div>
+            </section>
+
+            <!-- ── PASTE VIEW ─────────────────────────────────────────────────────── -->
+            <section id="view-paste" tabindex="-1" hidden>
+                <div class="pills reveal d1" id="paste-pills"></div>
+                <div class="content reveal d2" id="paste-content"></div>
+                <div class="btn-row reveal d3 mt1">
+                    <button
+                        type="button"
+                        class="btn btn-grow"
+                        id="copy-content"
+                    >
+                        Copy text
+                    </button>
+                    <button type="button" class="btn" id="toggle-raw">
+                        Raw
+                    </button>
+                </div>
+            </section>
+
+            <!-- ── STATUS (loading / error / burn confirm) ────────────────────────── -->
+            <section id="view-status" tabindex="-1" hidden>
+                <div class="status-panel reveal d1">
+                    <svg
+                        class="status-ico"
+                        id="status-ico"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        aria-hidden="true"
+                        hidden
+                    >
+                        <path
+                            d="M12 3.5 1.8 21h20.4L12 3.5Z"
+                            stroke="currentColor"
+                            stroke-width="1.5"
+                            stroke-linejoin="round"
+                        />
+                        <path
+                            d="M12 10v5"
+                            stroke="currentColor"
+                            stroke-width="1.5"
+                            stroke-linecap="round"
+                        />
+                        <circle cx="12" cy="17.6" r="1" fill="currentColor" />
+                    </svg>
+                    <p class="msg" id="status-msg" role="status">loading…</p>
+                    <div class="btn-row center" id="status-actions" hidden>
+                        <button type="button" class="cta" id="reveal-burn">
+                            Reveal note
+                        </button>
+                    </div>
+                    <p
+                        class="status-timer mono"
+                        id="status-timer"
+                        role="timer"
+                        aria-live="off"
+                        hidden
+                    >
+                        <span class="status-timer-label"
+                            >Deletes in</span
+                        >
+                        <span
+                            class="status-timer-clock"
+                            id="status-timer-clock"
+                            >--:--:--</span
+                        >
+                    </p>
+                    <div class="btn-row center" id="status-new" hidden>
+                        <a class="cta cta-inline" href="/" id="status-new-link"
+                            >Create new paste</a
+                        >
+                    </div>
+                </div>
+            </section>
+
+            <footer class="foot reveal d4">
+                <p class="foot-crypto mono" aria-label="Cryptography">
+                    AES-256-GCM · HKDF-SHA256 · Key stays in the URL
+                    <span class="foot-frag">#fragment</span>
+                </p>
+                <p class="foot-links" id="foot-links">
+                    <a
+                        href="https://github.com/nxfu/binthere"
+                        rel="noopener"
+                        target="_blank"
+                        >Source</a
+                    >
+                    <a
+                        href="https://github.com/nxfu/binthere/blob/main/SECURITY.md"
+                        rel="noopener"
+                        target="_blank"
+                        >Threat Model</a
+                    >
+                    <a href="/.well-known/security.txt" rel="noopener"
+                        >Security</a
+                    >
+                    <a href="https://gaury.dev" rel="noopener"
+                        >Developer</a
+                    >
+                </p>
+            </footer>
+        </main>
+
+        <div id="toast" role="status" aria-live="polite"></div>
+    </body>
+</html>

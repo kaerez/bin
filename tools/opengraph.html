@@ -1,0 +1,110 @@
+<!doctype html>
+<!--
+  Source of truth for public/opengraph.png (1200×630 link-preview card).
+
+  Not shipped — a build input. Render it with:
+
+      node tools/render-og.mjs
+
+  Design notes: this is the same "Iron Gall" system as the app (DESIGN.md), with
+  the dark "Plate" preset hardcoded — tokens are copied rather than imported so
+  the card renders standalone and never drifts with a stylesheet refactor that
+  was only meant to affect the UI. Deliberately omitted from the site's ambience:
+  the 1px engraved grain, which turns into moiré once a chat client downscales
+  the card to a thumbnail.
+-->
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>binthere — opengraph card</title>
+        <style>
+            @font-face { font-family: 'Newsreader'; font-style: normal; font-weight: 500; src: url('/public/fonts/newsreader-500.woff2') format('woff2'); }
+            @font-face { font-family: 'Newsreader'; font-style: italic; font-weight: 400; src: url('/public/fonts/newsreader-400i.woff2') format('woff2'); }
+            @font-face { font-family: 'Geist'; font-style: normal; font-weight: 400; src: url('/public/fonts/geist-400.woff2') format('woff2'); }
+            @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; src: url('/public/fonts/jbmono-400.woff2') format('woff2'); }
+
+            :root {
+                --paper: #0d1117;
+                --rule: #242f39;
+                --ink: #e8ecef;
+                --ink-2: #97a5b0;
+                --ink-3: #8b96a2;
+                --ink-4: #49535d;
+                --accent: #8fb3cc;
+                --serif: 'Newsreader', Georgia, serif;
+                --sans: 'Geist', -apple-system, sans-serif;
+                --mono: 'JetBrains Mono', ui-monospace, monospace;
+            }
+
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html, body { width: 1200px; height: 630px; overflow: hidden; }
+            body { background: var(--paper); color: var(--ink);
+                -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; }
+
+            .card { position: relative; width: 1200px; height: 630px; padding: 68px 76px 60px;
+                display: flex; flex-direction: column; overflow: hidden; }
+
+            /* Guilloché rosette — the site's watermark, bled off the right edge so the
+               left-aligned text column keeps the whole card's weight. */
+            .rosette { position: absolute; top: 50%; right: -236px; width: 700px; height: 700px;
+                transform: translateY(-50%); color: var(--ink); opacity: .07; }
+
+            .brand { font-family: var(--serif); font-size: 44px; line-height: 1; letter-spacing: -.01em; }
+            .brand i { font-style: italic; font-weight: 400; color: var(--accent); }
+
+            .body { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+
+            .eyebrow { display: inline-flex; align-items: center; gap: 14px; font-family: var(--mono);
+                font-size: 17px; letter-spacing: .18em; text-transform: uppercase; color: var(--ink-3); }
+            .eyebrow::before { content: ''; width: 38px; height: 1px; background: #4a5a68; }
+
+            .title { margin-top: 22px; font-family: var(--serif); font-weight: 500; font-size: 92px;
+                line-height: 1.04; letter-spacing: -.015em; }
+            .title em { font-style: italic; font-weight: 400; color: var(--accent); }
+
+            .sub { margin-top: 24px; max-width: 30ch; font-family: var(--sans); font-size: 26px;
+                line-height: 1.55; color: var(--ink-2); }
+
+            .foot { display: flex; align-items: baseline; justify-content: space-between; gap: 24px;
+                padding-top: 26px; border-top: 1px solid var(--rule);
+                font-family: var(--mono); font-size: 16px; letter-spacing: .14em; text-transform: uppercase; }
+            .ledger { color: var(--ink-3); }
+            .ledger span { margin: 0 12px; color: var(--ink-4); }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <svg class="rosette" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                <g stroke="currentColor" stroke-width="0.5">
+                    <circle cx="32" cy="32" r="29" />
+                    <circle cx="32" cy="32" r="24.5" />
+                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" />
+                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(30 32 32)" />
+                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(60 32 32)" />
+                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(90 32 32)" />
+                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(120 32 32)" />
+                    <ellipse cx="32" cy="32" rx="24.5" ry="9.5" transform="rotate(150 32 32)" />
+                    <circle cx="32" cy="32" r="4.2" />
+                </g>
+            </svg>
+
+            <div class="brand">bin<i>there</i></div>
+
+            <div class="body">
+                <p class="eyebrow">zero-knowledge paste</p>
+                <h1 class="title">Say it once. <em>Sealed.</em></h1>
+                <p class="sub">
+                    Encrypted in your browser. The server never sees your note —
+                    or the key.
+                </p>
+            </div>
+
+            <div class="foot">
+                <p class="ledger">
+                    Private<span>·</span>One-time view<span>·</span>Auto-deletes
+                    in 24 hours
+                </p>
+            </div>
+        </div>
+    </body>
+</html>
