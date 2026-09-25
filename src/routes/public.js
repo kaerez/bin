@@ -127,7 +127,8 @@ async function openPaste(env, g, id, info, { lh, kh }) {
 async function openFile(env, g, id, { lh, kh }) {
   const settings = g.settings;
   const grant = genToken();
-  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), settings['files.grantSec']);
+  const client = (await hashToken(`grant-client:${g.key}`)).slice(0, 16);
+  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), settings['files.grantSec'], client);
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
     return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded });
@@ -164,6 +165,7 @@ async function deleteByToken(request, env, g, id, info) {
   // The token travels in a header, never the URL (request URLs reach logs).
   const token = request.headers.get('x-delete-token');
   if (!token) return err(400, 'missing_token', 'Missing deletion token.');
+  if (info.file) binding(env, 'FILES'); // never report a delete that left ciphertext in R2
   if (info.file || info.burn) {
     const r = await (info.file ? fileStub(env, id) : burnStub(env, id)).remove(token);
     if (r.status === 'ok') { await directory(env).markShareEnded(id, 'deleted'); return json({ status: 'deleted', id }); }

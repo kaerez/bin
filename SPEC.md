@@ -202,7 +202,7 @@ type, or a custom header), and `Sec-Fetch-Site` values `cross-site` and `same-si
 (`403 cross_site`).
 
 Common errors on any route:
-- `503 not_configured` (with `binding`): a required Cloudflare binding is missing.
+- `503 not_configured`: a required Cloudflare binding is missing. The name is logged, not returned.
 - `503 server_not_configured`: `SIG`/`ENC` are missing or invalid (auth and private routes only).
 - `403 account_disabled`: a disabled account's session or API key. The session cookie is also
   cleared.
@@ -216,7 +216,7 @@ Common errors on any route:
 | `POST /api/paste/:id/open` | `X-Link-Proof`, `X-Key-Proof`; spends a view if limited | 200 opened note | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `cross_site`, 404, 410, 429 |
 | `DELETE /api/paste/:id` | `X-Delete-Token` | 200 | 400, 403 `bad_token`, 404 |
 | `GET /api/file/:id` | head | 200 | 410, 429 |
-| `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes; 429 `busy` (+ `Retry-After`) when 2000 grants are live |
+| `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes; at most 20 live grants per client (a reopen replaces its oldest); 429 `busy` (+ `Retry-After`) when 2000 are live |
 | `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
 | `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
 | `POST /api/paste` | v1 anonymous create — removed | — | 410 |
@@ -248,7 +248,7 @@ Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` count
 | `PUT /api/private/file/:id/chunk/:i` (octet-stream, `X-Upload-Token`) | session / key | upload chunk `i` (exact size, §12) |
 | `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
 | `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy |
-| `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions). A wrong `current` → 403 `wrong_password` and counts toward account lockout (423) and the per-IP login guard (429) |
+| `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions). Never blocked by a login lockout. A wrong `current` → 403 `wrong_password`, also counted against the IP's login guard. The 10th wrong attempt in the window (default) → 401 `session_revoked`, which ends every session of the account |
 | `GET /api/private/me/activity` | session | own activity (never shows the actor) |
 | `GET/POST /api/private/me/keys`, `DELETE …/keys/:id` | session | API keys |
 | `GET /api/private/shares`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session | My shares |

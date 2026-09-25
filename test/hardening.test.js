@@ -77,7 +77,8 @@ describe('missing bindings', () => {
         const r = await call(path, { [name]: value }, init ? { ...init } : {});
         expect([name, value, r.status]).toEqual([name, value, 503]);
         const j = await r.json();
-        expect(j).toMatchObject({ error: 'not_configured', binding: name });
+        expect(j.error).toBe('not_configured');
+        expect(JSON.stringify(j)).not.toContain(name); // the binding name stays in the logs
       }
     }
   });
@@ -108,19 +109,49 @@ describe('CSRF', () => {
 });
 
 describe('password change', () => {
-  it('counts a wrong current password toward lockout', async () => {
+  it('ends every session after repeated wrong current passwords, without locking the account', async () => {
     const u = await makeUser('pw-guesser', 'right-password-123');
-    // A fresh IP per attempt isolates the per-account lockout from the per-IP guard.
-    const attempt = (ip = freshIp()) => fetchJson('/api/private/me/password', {
-      method: 'POST', cookie: u.cookie, ip, body: { current: proofFor('wrong-guess-xyz'), salt: salt16(), t: 3, proof: proofFor('new-password-123') },
+    // A fresh IP per attempt isolates the per-account rule from the per-IP guard.
+    const attempt = (cookie) => fetchJson('/api/private/me/password', {
+      method: 'POST', cookie, ip: freshIp(), body: { current: proofFor('wrong-guess-xyz'), salt: salt16(), t: 3, proof: proofFor('new-password-123') },
     });
     const statuses = [];
-    for (let i = 0; i < 11; i++) statuses.push((await attempt()).status);
-    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(403));
-    expect(statuses[10]).toBe(423); // default lockout: 10 failures in 10 minutes
-    // Login is locked too — the same counter.
-    const r = await fetchJson('/api/auth/login', { method: 'POST', ip: freshIp(), body: { username: 'pw-guesser', proof: proofFor('right-password-123') } });
-    expect(r.status).toBe(423);
+    let last;
+    for (let i = 0; i < 10; i++) { last = await attempt(u.cookie); statuses.push(last.status); }
+    expect(statuses.slice(0, 9)).toEqual(Array(9).fill(403));
+    expect(statuses[9]).toBe(401); // default: 10 wrong attempts in 10 minutes
+    expect((await last.json()).error).toBe('session_revoked');
+    expect(last.headers.get('set-cookie')).toMatch(/Max-Age=0/);
+    // The stolen session is dead…
+    expect((await fetchJson('/api/private/me', { cookie: u.cookie })).status).toBe(401);
+    // …but the account is not locked: the real owner can log in and change the password.
+    const again = await login('pw-guesser', 'right-password-123', freshIp());
+    const ok = await fetchJson('/api/private/me/password', {
+      method: 'POST', cookie: again, ip: freshIp(), body: { current: proofFor('right-password-123'), salt: salt16(), t: 3, proof: proofFor('new-password-123') },
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it('a login lockout never blocks a password change', async () => {
+    const u = await makeUser('locked-changer', 'right-password-456');
+    for (let i = 0; i < 10; i++) {
+      await fetchJson('/api/auth/login', { method: 'POST', ip: freshIp(), body: { username: 'locked-changer', proof: proofFor('attacker-guess') } });
+    }
+    expect((await fetchJson('/api/auth/login', { method: 'POST', ip: freshIp(), body: { username: 'locked-changer', proof: proofFor('right-password-456') } })).status).toBe(423);
+    const r = await fetchJson('/api/private/me/password', {
+      method: 'POST', cookie: u.cookie, ip: freshIp(), body: { current: proofFor('right-password-456'), salt: salt16(), t: 3, proof: proofFor('new-password-456') },
+    });
+    expect(r.status).toBe(200);
+  });
+
+  it('impersonating a user who is then disabled ends the session without "account disabled"', async () => {
+    const u = await makeUser('imp-then-disabled');
+    const imp = await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent });
+    const cookie = imp.headers.get('set-cookie').split(';')[0];
+    await patchUser(u.id, { disabled: true });
+    const r = await fetchJson('/api/private/me', { cookie });
+    expect(r.status).toBe(401);
+    expect((await r.json()).error).toBe('unauthenticated');
   });
 
   it('requires the default Argon2id time cost for every account password', async () => {

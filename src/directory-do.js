@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, id TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS revoked_sessions (sid TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS failures (user_id TEXT PRIMARY KEY, count INTEGER NOT NULL, start INTEGER NOT NULL,
   locked_until INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS pwchange_failures (user_id TEXT PRIMARY KEY, count INTEGER NOT NULL, start INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor_id TEXT,
   subject_id TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', imp INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
@@ -260,7 +261,9 @@ export class Directory extends DurableObject {
     if (this.sql.exec('SELECT 1 FROM revoked_sessions WHERE sid = ?', sid).toArray().length) return null;
     const u = this.#user(uid);
     if (!u) return null;
-    if (u.disabled) return { disabled: true };
+    // While impersonating, a disabled target simply ends the impersonated
+    // session — it must not tell the owner that *their* account is disabled.
+    if (u.disabled) return act ? null : { disabled: true };
     let actor = null;
     if (act) {
       // Impersonation: the actor must still be the (enabled) owner, and `ver`
@@ -335,17 +338,36 @@ export class Directory extends DurableObject {
     });
   }
 
+  /**
+   * Change the signed-in user's password. The account lockout never blocks
+   * this (a stranger failing logins must not stop a user from changing a
+   * password they fear is compromised). Instead, a stolen session cannot guess
+   * the current password without limit: after `lockout.max` wrong attempts
+   * within `lockout.windowSec`, every session of the account is ended —
+   * owner included — and the holder must log in again.
+   */
   async changePassword(uid, { current, salt, t, verifier, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     const ts = now();
-    const locked = this.#lockedUntil(u, ts, lockoutOff);
-    if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed password attempts.', { until: locked });
     if (typeof current !== 'string' || !timingSafeEqualHex(current, u.pw_verifier)) {
-      // A stolen session must not become an unlimited password-guessing oracle.
-      this.#passwordFailure(u, ts, this.#settings(), lockoutOff);
+      if (!lockoutOff) {
+        const st = this.#settings();
+        const f = this.sql.exec('SELECT * FROM pwchange_failures WHERE user_id = ?', u.id).toArray()[0];
+        const fresh = !f || ts - f.start > st['lockout.windowSec'];
+        const count = fresh ? 1 : f.count + 1;
+        if (count >= st['lockout.max']) {
+          this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
+          this.sql.exec('UPDATE users SET sess_ver = sess_ver + 1, updated = ? WHERE id = ?', ts, u.id);
+          this.#log(null, u.id, 'sessions.revoked', 'too many wrong current passwords');
+          return fail(401, 'session_revoked', 'Too many wrong passwords: you have been signed out everywhere. Log in again.');
+        }
+        this.sql.exec('INSERT INTO pwchange_failures (user_id, count, start) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start',
+          u.id, count, fresh ? ts : f.start);
+      }
       return fail(403, 'wrong_password', 'The current password is incorrect.');
     }
+    this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
     this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), uid);

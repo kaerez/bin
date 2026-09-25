@@ -3,7 +3,7 @@
 // manifest, proof-gated open with view counting, download grants, last-view
 // grace + purge, R2 cleanup on alarm / revoke / delete, and caps.
 import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { MAX_ACTIVE_GRANTS } from '../src/fileshare-do.js';
+import { MAX_ACTIVE_GRANTS, MAX_GRANTS_PER_CLIENT } from '../src/fileshare-do.js';
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
 import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent } from './helpers.js';
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
@@ -160,6 +160,23 @@ describe('upload validation and caps', () => {
 });
 
 describe('download grants', () => {
+  it('one client holds at most MAX_GRANTS_PER_CLIENT live grants; reopening replaces its oldest', async () => {
+    const s = await upload(oc, [{ path: 'b.txt', bytes: utf8('per client') }], { views: null });
+    const ip = freshIp();
+    const grants = [];
+    for (let i = 0; i < MAX_GRANTS_PER_CLIENT + 1; i++) {
+      const o = await openShare(s.id, s.fragment, '', ip);
+      expect(o.res.status).toBe(200);
+      grants.push((await o.res.json()).grant);
+    }
+    const stub = env.FILESHARE.get(env.FILESHARE.idFromName(s.id));
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get('grants')).toHaveLength(MAX_GRANTS_PER_CLIENT);
+    });
+    expect((await getChunk(s.id, 0, grants[0], ip)).status).toBe(403); // the oldest was replaced
+    expect((await getChunk(s.id, 0, grants.at(-1), ip)).status).toBe(200);
+  });
+
   it('live outside the share record and are capped, so repeated opens cannot wedge a share', async () => {
     const s = await upload(oc, [{ path: 'a.txt', bytes: utf8('grant cap') }], { views: null });
     expect(s.fin.status).toBe(200);
@@ -170,7 +187,7 @@ describe('download grants', () => {
     await runInDurableObject(stub, async (_instance, state) => {
       const g = await state.storage.get('grants');
       expect(g).toHaveLength(1);
-      expect((await state.storage.get('rec')).grants).toBeUndefined();
+      expect((await state.storage.get('rec')).grants).toEqual([]); // kept empty for rollback safety
       const exp = Math.floor(Date.now() / 1000) + 3600;
       const fillers = Array.from({ length: MAX_ACTIVE_GRANTS - 1 }, (_, i) => ({ h: i.toString(16).padStart(64, '0'), exp }));
       await state.storage.put('grants', [...g, ...fillers]);

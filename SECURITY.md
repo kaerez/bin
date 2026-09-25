@@ -197,9 +197,13 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     and tracking;
   - manual allow/block rules for IPv4/IPv6 addresses and CIDR ranges (allow wins; blocks deny
     the whole API and dashboard);
-  - account lockout after X wrong passwords, counting both login and the "current password"
-    check when changing a password, so a stolen session cannot guess the password without
-    limit (owner exempt — recover via setup if needed).
+  - account lockout after X failed logins (owner exempt — recover via setup if needed);
+  - **password change** is never blocked by a lockout, so a stranger failing logins cannot stop
+    a user from changing a password they fear is compromised. It still cannot become a guessing
+    oracle for a stolen session:
+    - after X wrong "current password" attempts within the window, every session of that
+      account is ended, the owner's included;
+    - each wrong attempt also counts against the caller's IP in the `login` scope.
   - Kill switches: `DISABLE_BFP=true` (everything, including IP rules) and
     `DISABLE_BFP_SETUP=true` (setup only).
 
@@ -209,12 +213,19 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   file chunks, with the exact expected size enforced).
 - Every value is re-validated server-side (formats, views, expiry, limits, quotas, settings).
 - Reads that spend views need custom headers (non-simple): ambient GETs never consume anything.
-- Download grants are stored apart from the share record, and at most 2000 may be live per
-  file share. Beyond that, opens get `429 busy` with `Retry-After`, so repeated opens of an
-  unlimited share cannot grow its record until it breaks.
-- A missing or invalid binding (KV, R2, a Durable Object namespace) answers
-  `503 not_configured` naming the binding. Missing or garbage environment variables never
-  throw; the feature that needs them reports that it is unavailable.
+- Download grants are stored apart from the share record.
+  - One client (an IP, or an IPv6 /64) holds at most 20 live grants per file share; opening
+    again replaces its oldest.
+  - At most 2000 grants may be live per share; beyond that, opens get `429 busy` with
+    `Retry-After`.
+  - So repeated opens cannot break a share. Keeping one busy takes at least 100 distinct
+    networks, a residual risk for unlimited-view shares shared very widely.
+- A missing or invalid binding (KV, R2, a Durable Object namespace) answers a generic
+  `503 not_configured`. The binding's name goes to the Worker logs, not to the caller.
+  - Uploads, revokes and deletes of file shares check the R2 binding first.
+  - A purge never forgets a share whose chunks it could not delete; the alarm retries.
+- Missing or garbage environment variables never throw; the feature that needs them reports
+  that it is unavailable.
 
 ## 7. Cryptographic summary
 
