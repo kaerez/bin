@@ -122,6 +122,14 @@ export const LIMITS = {
   // re:… rules, checked by the sender's browser / CLI (the server cannot see
   // the URL). The owner may share any safe link.
   urlRules:            { type: 'urlrules', def: [...DEFAULT_URL_RULES], owner: ['scheme:*'] },
+  // Read receipts: senders always see when each open happened; these let the
+  // account also see what the opener's request revealed (the admin always
+  // sees everything).
+  receiptIp:           { type: 'bool', def: false },
+  receiptLocation:     { type: 'bool', def: false },
+  receiptBrowser:      { type: 'bool', def: false },
+  receiptOs:           { type: 'bool', def: false },
+  receiptLanguages:    { type: 'bool', def: false },
   // Activity-log retention for entries about this account (null: only the
   // global log.* settings apply).
   logMaxAgeSec:        { type: 'int', min: DAY, max: 3650 * DAY, nullable: true, def: null },

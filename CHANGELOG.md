@@ -15,6 +15,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Read receipts:** every open of a share is recorded; My shares shows each open's time, plus
+  the address, location, browser, system and languages where the admin allows it per account
+  (the admin always sees all). Kept as long as the activity log; recipients are told before
+  opening.
 - **Activity-log retention and clearing:** global maximum age and size (Settings) and per-user
   limits; entries about the owner are exempt. The owner can clear all entries, one account's or
   those older than a date (password required; leaves no record).

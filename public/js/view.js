@@ -109,6 +109,7 @@ async function initView(id) {
     btn.onclick = async () => {
       btn.disabled = true;
       $('#status-actions').hidden = true;
+      $('#receipt-note-reveal').hidden = true;
       try { await open(''); } catch (e) { openError(e); }
     };
     return;
@@ -486,6 +487,7 @@ function status(message, isError = false, { reveal = false, revealLabel = 'Revea
   el.classList.toggle('error', isError);
   $('#status-ico').hidden = !isError;
   $('#status-actions').hidden = !reveal;
+  $('#receipt-note-reveal').hidden = !reveal;
   if (reveal) $('#reveal-burn').textContent = revealLabel;
   $('#status-new').hidden = !isError;
 }

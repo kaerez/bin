@@ -2,7 +2,8 @@
 // raise views / extend expiry within my limits, rename labels, revoke now.
 // A share the administrator has locked is shown frozen: no control changes it.
 
-import { listShares, updateShare, revokeShare } from '../../js/api.js';
+import { listShares, updateShare, revokeShare, shareOpens } from '../../js/api.js';
+import { opensButton } from './receipts.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { ready } from './nav.js';
@@ -79,9 +80,11 @@ function render() {
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
       h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
       h('td.mono', { dataset: { label: 'Views' }, text: views }),
+      h('td', { dataset: { label: 'Opened' } }),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status }),
         locked ? h('span.pill.warn', { text: 'locked', title: 'Locked by the administrator' }) : null),
       h('td.cell-actions', {}, actions));
+    tr.querySelector('td[data-label="Opened"]').appendChild(opensButton(r, () => shareOpens(r.id), 8, tr));
     body.appendChild(tr);
   }
 }
@@ -116,7 +119,7 @@ function openExtend(r, tr) {
   };
   const limitsText = `Your limits: ${L.maxViews === null ? 'any number of views' : `up to ${L.maxViews} views`}, `
     + `${L.maxExpireSec === null ? 'expiry up to 365 days' : `expiry up to ${formatCoarse(L.maxExpireSec)} from now`}.`;
-  const row = h('tr.extend-row', {}, h('td.cell-full', { colspan: '7' },
+  const row = h('tr.extend-row', {}, h('td.cell-full', { colspan: '8' },
     h('div.extend-box', {},
       r.kind !== 'files' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
       h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),
