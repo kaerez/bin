@@ -27,6 +27,7 @@ import { newPassword } from '../secret.js';
 import { CLEAR_LINE } from '../tui/anim.js';
 import { buildShareUrl, isIdOfClass, requireServer } from '../url.js';
 import { collect, fileSource, showPath } from '../walk.js';
+import { declare, describeType, fileExt, normalizeRules, refusedTypes, uncheckableExt } from '../../vendor/filepolicy.js';
 
 const OPTIONS = {
   views: { type: 'string' },
@@ -115,9 +116,16 @@ export async function cmdSend(args, io) {
   const client = new Client(server, io.fetch, { apiKey });
   // files/maxFile are declared so the server can apply per-account limits;
   // names, types and individual sizes stay inside the encrypted manifest.
-  const init = await client.initFile({
-    views, expire, padded: l.padded, files: files.length, maxFile: Math.max(0, ...files.map((f) => f.size)),
-  });
+  const initBody = { views, expire, padded: l.padded, files: files.length, maxFile: Math.max(0, ...files.map((f) => f.size)) };
+  let init;
+  try {
+    init = await client.initFile(initBody);
+  } catch (e) {
+    // The account has a file policy: check locally (naming the offending
+    // paths), then declare only what the policy needs — never more.
+    if (!(e instanceof ApiError && e.code === 'declaration_required')) throw e;
+    init = await client.initFile({ ...initBody, ...policyDeclaration(e.details?.policy, files, dirs) });
+  }
   if (!isIdOfClass(init.id, 'f')) throw new ApiError('Malformed response from the server.', 502, 'malformed');
 
   const progress = io.stderrIsTTY === true;
@@ -162,4 +170,37 @@ export async function cmdSend(args, io) {
     if (qr) io.stderr(qr);
   }
   return 0;
+}
+
+/**
+ * The declaration a file policy asks for, after checking the files against it
+ * locally so the user learns which paths are refused before anything uploads.
+ * `policy` comes from the server (untrusted): malformed rules are ignored
+ * here — the server still enforces its own copy.
+ */
+export function policyDeclaration(policy, files, dirs) {
+  const p = policy && typeof policy === 'object' ? policy : {};
+  const entries = [...files.map((f) => ({ path: f.path, type: f.type })), ...dirs.map((d) => ({ path: d, dir: true }))];
+  const { types, depth } = declare(entries);
+  const out = {};
+  if (p.mode === 'allow' || p.mode === 'block') {
+    let rules = [];
+    try { rules = normalizeRules(Array.isArray(p.rules) ? p.rules : []); } catch { rules = []; }
+    const odd = files.filter((f) => uncheckableExt(f.path));
+    if (odd.length) {
+      throw new UsageError(`cannot check the file type of ${odd.slice(0, 5).map((f) => showPath(f.path)).join(', ')} against your account's file policy (unusual extension) — rename or leave them out`);
+    }
+    const refused = refusedTypes(p.mode, rules, types);
+    if (refused.length) {
+      const bad = files.filter((f) => refused.some((t) => t.ext === fileExt(f.path) && t.mime === String(f.type || 'application/octet-stream').toLowerCase()));
+      const shown = bad.slice(0, 5).map((f) => showPath(f.path)).join(', ') + (bad.length > 5 ? `, … (${bad.length} files)` : '');
+      throw new UsageError(`your account may not share these file types: ${refused.slice(0, 5).map(describeType).join(', ')} — ${shown} (use --mime to correct a wrong type, or leave the files out)`);
+    }
+    out.types = types;
+  }
+  if (Number.isSafeInteger(p.maxFolderDepth)) {
+    if (depth > p.maxFolderDepth) throw new UsageError(`folders may be nested at most ${p.maxFolderDepth} levels deep for your account (this share has ${depth})`);
+    out.depth = depth;
+  }
+  return out;
 }

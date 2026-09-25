@@ -15,8 +15,12 @@ import { handleAdmin } from './admin.js';
 import { binding } from '../lib/config.js';
 
 const now = () => Math.floor(Date.now() / 1000);
-const fromDir = (r) => err(r.status, r.error, r.message,
-  r.max !== undefined ? { max: r.max } : r.quota ? { quota: r.quota } : r.until ? { until: r.until } : undefined);
+const EXTRA_KEYS = ['max', 'quota', 'until', 'policy', 'refused'];
+const fromDir = (r) => {
+  const extra = {};
+  for (const k of EXTRA_KEYS) if (r[k] !== undefined) extra[k] = r[k];
+  return err(r.status, r.error, r.message, Object.keys(extra).length ? extra : undefined);
+};
 
 /** Attach a sliding-session cookie refresh to any JSON response. */
 function withAuth(a, res) {
@@ -215,7 +219,7 @@ async function initFile(request, env, a) {
   const dir = directory(env);
   const auth = await dir.authorizeCreate(a.user.id, a.channel, {
     kind: 'files', views, expireSec: ttl, bytes: padded,
-    files: body.files, maxFile: body.maxFile,
+    files: body.files, maxFile: body.maxFile, types: body.types, depth: body.depth,
   });
   if (!auth.ok) return fromDir(auth);
   const uploadToken = genToken();

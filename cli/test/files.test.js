@@ -365,3 +365,61 @@ describe('download safety', () => {
     expect(() => selectEntries(entries, 'a/x', true)).toThrow(UsageError);
   });
 });
+
+describe('file policy', () => {
+  it('declares nothing without a policy', async () => {
+    const server = makeServer();
+    const s = await send(server, [await makeTree(), '--views', 'unlimited']);
+    expect(s.code).toBe(0);
+    const init = server.calls.filter((c) => c.path === '/api/private/file').map((c) => JSON.parse(c.body));
+    expect(init).toHaveLength(1);
+    expect(init[0].types).toBeUndefined();
+    expect(init[0].depth).toBeUndefined();
+  });
+
+  it('retries with only what the policy needs: types for a type policy, depth for a depth limit', async () => {
+    const src = await makeTree();
+    const server = makeServer({ policy: { fileTypeMode: 'block', fileTypeRules: ['ext:exe'] } });
+    const s = await send(server, [src, '--views', 'unlimited']);
+    expect(s.code).toBe(0);
+    const init = server.calls.filter((c) => c.path === '/api/private/file').map((c) => JSON.parse(c.body));
+    expect(init).toHaveLength(2);
+    expect(init[1].types.map((t) => t.ext).sort()).toEqual(['bin', 'dat', 'txt']);
+    expect(init[1].depth).toBeUndefined();
+
+    const d = makeServer({ policy: { maxFolderDepth: 5 } });
+    expect((await send(d, [src, '--views', 'unlimited'])).code).toBe(0);
+    const di = d.calls.filter((c) => c.path === '/api/private/file').map((c) => JSON.parse(c.body));
+    expect(di[1].depth).toBe(3); // tree/nested/deep/big.bin
+    expect(di[1].types).toBeUndefined();
+  });
+
+  it('refuses locally, naming the offending paths, before anything is uploaded', async () => {
+    const src = await makeTree();
+    const server = makeServer({ policy: { fileTypeMode: 'allow', fileTypeRules: ['ext:txt'] } });
+    const s = await send(server, [src, '--views', 'unlimited']);
+    expect(s.code).toBe(2);
+    expect(s.err).toMatch(/may not share these file types: .*\.bin/);
+    expect(s.err).toMatch(/tree\/nested\/deep\/big\.bin/);
+    expect(server.calls.some((c) => c.path.includes('/chunk/'))).toBe(false);
+
+    const deep = makeServer({ policy: { maxFolderDepth: 1 } });
+    const r = await send(deep, [src, '--views', 'unlimited']);
+    expect(r.code).toBe(2);
+    expect(r.err).toMatch(/at most 1 levels deep/);
+  });
+
+  it('a trailing dot cannot hide a blocked extension, and unusual extensions are refused', async () => {
+    const dir = join(tmp, 'odd');
+    await mkdir(dir);
+    await writeFile(join(dir, 'tool.exe.'), 'MZ');
+    const server = makeServer({ policy: { fileTypeMode: 'block', fileTypeRules: ['ext:exe'] } });
+    const s = await send(server, [join(dir, 'tool.exe.'), '--views', 'unlimited']);
+    expect(s.code).toBe(2);
+    expect(s.err).toMatch(/may not share these file types: \.exe/);
+    await writeFile(join(dir, `a.${'x'.repeat(40)}`), 'x');
+    const t = await send(server, [join(dir, `a.${'x'.repeat(40)}`), '--views', 'unlimited']);
+    expect(t.code).toBe(2);
+    expect(t.err).toMatch(/cannot check the file type/);
+  });
+});

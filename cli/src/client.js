@@ -11,11 +11,13 @@
 import { MAX_CHUNK_CT } from '../vendor/files.js';
 
 export class ApiError extends Error {
-  constructor(message, status, code = null) {
+  constructor(message, status, code = null, details = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    // The parsed error body — untrusted server data, never printed raw.
+    this.details = details;
   }
 }
 
@@ -39,7 +41,7 @@ function toApiError(data, status, fallback) {
   const message = typeof d.message === 'string' && clean(d.message) ? clean(d.message)
     : typeof d.error === 'string' && clean(d.error) ? clean(d.error)
       : fallback;
-  return new ApiError(message, status, code);
+  return new ApiError(message, status, code, isPlainObject(data) ? data : null);
 }
 
 const malformed = () => new ApiError('Malformed response from the server.', 502, 'malformed');
