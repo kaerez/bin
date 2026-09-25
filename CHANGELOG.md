@@ -15,6 +15,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Progress bars for previews and downloads:** viewing a file opens the preview at once, with a
+  bar and percentage while it is fetched and decrypted, then a busy "Preparing the preview…"
+  step until it shows. Downloads use the same bar and finish at 100%. Screen readers hear it
+  once per quarter, not on every change.
 - **Accessibility (WCAG 2.2 AA):**
   - Skip links and a focusable main landmark on every page.
   - Fixes from an axe-core audit: labels for the admin number fields, keyboard-focusable
