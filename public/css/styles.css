@@ -427,6 +427,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
 .pill.warn { color: var(--warn); border-color: color-mix(in oklab, var(--rule-2), var(--warn) 45%); }
 /* the VOID stamp — this document has been destroyed */
 .pill.bad { color: var(--seal); border-color: color-mix(in oklab, var(--rule-2), var(--seal) 50%); }
+.pill + .pill { margin-left: .35rem; }
 
 /* ── paste content ───────────────────────────────────────────────────────── */
 .content { margin-top: .5rem; }

@@ -1,5 +1,5 @@
 # Dependencies & build output
-node_modules/
+node_modules
 .wrangler/
 dist/
 coverage/
