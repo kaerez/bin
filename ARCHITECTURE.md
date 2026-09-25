@@ -56,6 +56,7 @@ need atomic, immediately consistent read-modify-write.
 | `public/js/{bytes,format,crypto,kdf,files,zip,mime}.js` | Shared protocol modules (browser + CLI, vendored and drift-tested) |
 | `public/js/{view,viewer,pdfview,downloads}.js` | Public viewer, safe renderers, downloads |
 | `public/dashboard/js/*.js` | Composer, My shares, account, admin, chrome |
+| `public/sw.js`, `public/js/{pwa,install-banner}.js`, `public/manifest.webmanifest` | PWA: service worker (network-first, static assets only; never `/api/*` or `/p/*`), registration, install banner |
 | `public/js/vendor/` | Pinned hash-wasm Argon2 and pdf.js builds (`tools/vendor.mjs`) |
 
 ## Zero-knowledge boundary

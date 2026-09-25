@@ -8,7 +8,7 @@
 # keep identical (test-node/headers.test.js enforces it).
 # See SECURITY.md §4.
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types secbin; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types secbin; upgrade-insecure-requests
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer
@@ -27,3 +27,14 @@
 # Vendored, versioned third-party builds: cache, never sniff.
 /js/vendor/*
   Cache-Control: public, max-age=86400
+
+# Web app manifest: the registered type (browsers accept application/json too,
+# but nosniff + the spec type keeps it unambiguous). Revalidate on every load.
+/manifest.webmanifest
+  Content-Type: application/manifest+json
+  Cache-Control: no-cache
+
+# Service worker: always revalidated so a new version is picked up promptly
+# (browsers already bypass the HTTP cache for it; this also covers proxies).
+/sw.js
+  Cache-Control: no-cache
