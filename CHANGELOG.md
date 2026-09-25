@@ -15,6 +15,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **URL rules for link shares** (Defaults & quotas, or per user): allow schemes such as `tel:`,
+  `mailto:` or `sms:` besides http(s), or only links matching regular expressions, with a live
+  tester in the editor. Checked by the sender's browser and the CLI (new
+  `GET /api/private/policy`); dangerous schemes (`javascript:`, `data:`, `file:`…) are refused on
+  both sides whatever the rules say.
 - **Password policy** (Defaults & quotas, or per user): minimum length and required character
   classes (upper-case, lower-case, digit, symbol), shown next to every password field and
   enforced in the browser (the server never sees passwords). The owner keeps the built-in policy.

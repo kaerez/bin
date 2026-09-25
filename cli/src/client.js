@@ -153,6 +153,20 @@ export class Client {
 
   // ── creation (API key) ─────────────────────────────────────────────────────
 
+  /**
+   * What this account must check before creating: `{ url, urlRules }` (the
+   * URL rules for link shares — the server cannot see the link). null from a
+   * server that predates the endpoint (the default rules then apply).
+   */
+  async policy() {
+    try {
+      return await this.request('/api/private/policy', { auth: true, fallback: 'Could not read the account policy.' });
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
   /** Create a note. `paste` is encryptPaste().body. Returns { id, deletetoken, expires }. */
   async createNote(paste, label) {
     const d = await this.request('/api/private/paste', { method: 'POST', auth: true, body: { paste, label } });

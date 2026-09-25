@@ -129,7 +129,8 @@ request beyond them is refused with the server's reason; it is never silently sh
 **Links and credentials** (if your administrator allows them):
 
 ```sh
-secbin create --fmt url --text https://example.com/report     # one http(s) link
+secbin create --fmt url --text https://example.com/report     # one link, checked against your
+                                                              # account's URL rules (http(s) by default)
 secbin create --fmt secret --file cred.json                   # {"title","username","password","url","totp","notes"}
 secbin create --fmt secret                                    # on a terminal: asks for each field, hiding the password and seed
 ```

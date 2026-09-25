@@ -150,9 +150,13 @@ Both are ordinary notes whose plaintext has a fixed shape (`public/js/sharetypes
 server sees only `fmt`; recipients validate the decrypted payload fail-closed and fall back to
 showing it as inert text.
 
-- **`url`** — exactly one absolute `http:` or `https:` URL, at most 2048 characters, no
-  whitespace or control characters, **no user name or password** (`https://user:pw@…` is refused:
-  use a credential share). Clients store the parsed `href`. Recipients are shown the host as the
+- **`url`** — exactly one absolute URL, at most 2048 characters, no whitespace or control
+  characters, **no user name or password** (`https://user:pw@…` is refused: use a credential
+  share). The sender's client checks it against the account's `urlRules` (`scheme:<name>`,
+  `scheme:*`, `re:<pattern>` matched case-insensitively against the `href`; default
+  `["scheme:http", "scheme:https"]`); `javascript:`, `data:`, `vbscript:`, `file:`, `blob:`,
+  `about:` and browser-internal schemes are refused by senders and recipients alike. `http:` /
+  `https:` links need a host. Clients store the parsed `href`. Recipients are shown the host as the
   browser resolves it (punycode, e.g. `xn--80ak6aa92e.com`) with a warning when it differs from
   its Unicode form or is not HTTPS; opening needs an explicit second click and uses
   `noopener,noreferrer`. There is **never** an automatic redirect.
@@ -289,6 +293,7 @@ blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|
 | `POST /api/private/file` `{views, expire, padded, files?, maxFile?, types?, depth?}` | session / key | start a file share → 201 `{id, uploadtoken, deletetoken, chunks}` |
 | `PUT /api/private/file/:id/chunk/:i` (octet-stream, `X-Upload-Token`) | session / key | upload chunk `i` (exact size, §12) |
 | `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
+| `GET /api/private/policy` | session / key | what the client must check itself before creating: `{url, urlRules}` for the channel used |
 | `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy, `passwordPolicy` `{pwMinLength, pwUpper, pwLower, pwDigit, pwSymbol}` (the browser enforces it; the server cannot) |
 | `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions). Never blocked by a login lockout. A wrong `current` → 403 `wrong_password`, also counted against the IP's login guard. The 10th wrong attempt in the window (default) → 401 `session_revoked`, which ends every session of the account |
 | `GET /api/private/me/activity` | session | own activity (never shows the actor) |

@@ -14,7 +14,7 @@ import { detectMime, normalizeMime, COMMON_TYPES } from './mime.js';
 import { $, showView, toast, copyText, flashCopied } from './ui.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from './common.js';
 import { walkEntry } from './walk.js';
-import { buildSecret, describeHost, parseShareUrl, ShareTypeError } from './sharetypes.js';
+import { buildSecret, describeHost, describeUrlRules, parseShareUrl, urlRulesOf, ShareTypeError } from './sharetypes.js';
 import { declare, describeType, fileExt, refusedTypes, uncheckableExt } from './filepolicy.js';
 
 const UNIT_WORDS = { m: ['minute', 'minutes'], h: ['hour', 'hours'], d: ['day', 'days'] };
@@ -123,17 +123,22 @@ function setMode(m) {
 }
 
 // ── link & credential payloads ──────────────────────────────────────────────
+/** The account's URL rules (the admin's; checked here — the server cannot see the link). */
+const urlRules = () => urlRulesOf(profile.limits.urlRules);
+
 function wireTypedPanels() {
   const link = $('#link-in');
   const hostHint = $('#link-host');
   const defaultHint = hostHint.textContent;
+  $('#link-label').textContent = `Link to share (${describeUrlRules(urlRules())})`;
   link.addEventListener('input', () => {
     hostHint.classList.remove('warn');
     if (!link.value.trim()) { hostHint.textContent = defaultHint; link.removeAttribute('aria-invalid'); return; }
     try {
-      const d = describeHost(parseShareUrl(link.value));
+      const d = describeHost(parseShareUrl(link.value, { rules: urlRules() }));
       link.removeAttribute('aria-invalid');
       const notes = [];
+      if (d.external) notes.push(`opens another app (${d.scheme}:)`);
       if (d.idn) notes.push(`shown to the recipient as ${d.ascii} — international characters can imitate another site`);
       if (d.insecure) notes.push('not HTTPS');
       clear(hostHint).append('Destination: ', h('bdi', { dir: 'ltr', text: d.unicode }), notes.length ? ` (${notes.join('; ')})` : '');
@@ -160,7 +165,7 @@ function typedPayload() {
   try {
     if (mode === 'url') {
       if (!$('#link-in').value.trim()) return { error: 'Enter the link to share.', focus: '#link-in' };
-      return { text: parseShareUrl($('#link-in').value).href, fmt: 'url' };
+      return { text: parseShareUrl($('#link-in').value, { rules: urlRules() }).href, fmt: 'url' };
     }
     const fields = {};
     for (const [k, sel] of Object.entries(SECRET_INPUTS)) fields[k] = $(sel).value;

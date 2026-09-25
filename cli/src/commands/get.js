@@ -61,13 +61,14 @@ const safeText = (s) => String(s).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u0
 async function renderNote(fmt, text, field, io, tty) {
   if (fmt === 'url') {
     let u;
-    try { u = parseLinkUrl(text); } catch (e) {
+    // Any scheme that is not forbidden: the sender's rules are not known here.
+    try { u = parseLinkUrl(text, { recipient: true }); } catch (e) {
       if (!(e instanceof ShareTypeError)) throw e;
       io.stderr(`warning: this link share does not hold a valid link (${e.message}); printing it as text\n`);
       return tty ? `${safeText(text)}\n` : text;
     }
     const h = describeHost(u);
-    io.stderr(`link to ${h.ascii}${h.idn ? ` (displayed as ${safeLine(h.unicode)} — international characters can imitate another site)` : ''}${h.insecure ? ' — not HTTPS' : ''}\n`);
+    io.stderr(`${h.external ? `${h.scheme}: link (opens another app)` : `link to ${h.ascii}`}${h.idn ? ` (displayed as ${safeLine(h.unicode)} — international characters can imitate another site)` : ''}${h.insecure ? ' — not HTTPS' : ''}\n`);
     return `${u.href}\n`;
   }
   if (fmt !== 'secret') return text;

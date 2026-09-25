@@ -5,6 +5,7 @@
 import { MAX_TTL, MAX_VIEWS } from '../../public/js/format.js';
 import { HARD_MAX_SHARE_BYTES, RENDERERS } from '../../public/js/files.js';
 import { FILE_TYPE_MODES, MAX_FOLDER_DEPTH, normalizeRules } from '../../public/js/filepolicy.js';
+import { DEFAULT_URL_RULES, normalizeUrlRules } from '../../public/js/sharetypes.js';
 
 const MIN = 60;
 const HOUR = 3600;
@@ -114,6 +115,10 @@ export const LIMITS = {
   fileTypeMode:        { type: 'enum', values: FILE_TYPE_MODES, def: 'any' },
   fileTypeRules:       { type: 'rules', def: [] },
   maxFolderDepth:      { type: 'int', min: 0, max: MAX_FOLDER_DEPTH, nullable: true, def: null },
+  // Which links a URL share may carry (public/js/sharetypes.js): scheme:… and
+  // re:… rules, checked by the sender's browser / CLI (the server cannot see
+  // the URL). The owner may share any safe link.
+  urlRules:            { type: 'urlrules', def: [...DEFAULT_URL_RULES], owner: ['scheme:*'] },
   // Password policy (public/js/pwauth.js). Enforced by the browser only: the
   // server receives an Argon2id proof, never the password. `owner` is what
   // applies to the owner (global settings never do): the built-in minimum.
@@ -143,6 +148,11 @@ export function checkLimit(key, value, channel = 'all') {
     return value;
   }
   if (s.type === 'rules') return normalizeRules(value);
+  if (s.type === 'urlrules') {
+    const rules = normalizeUrlRules(value);
+    if (!rules.length) throw new Error('urlRules needs at least one rule (turn link shares off instead)');
+    return rules;
+  }
   if (value === null) {
     if (s.type === 'bool' || !s.nullable) throw new Error(`${key} cannot be empty`);
     return null;
