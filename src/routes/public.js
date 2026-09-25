@@ -127,7 +127,8 @@ async function openPaste(env, g, id, info, { lh, kh }) {
 async function openFile(env, g, id, { lh, kh }) {
   const settings = g.settings;
   const grant = genToken();
-  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), settings['files.grantSec']);
+  const client = (await hashToken(`grant-client:${g.key}`)).slice(0, 16);
+  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), settings['files.grantSec'], client);
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
     return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded });
@@ -168,6 +169,7 @@ async function deleteByToken(request, env, g, id, info) {
   // its delete token. (Only link holders know the 128-bit id, so saying
   // "locked" before checking the token reveals nothing new.)
   if (await directory(env).isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be deleted.');
+  if (info.file) binding(env, 'FILES'); // never report a delete that left ciphertext in R2
   if (info.file || info.burn) {
     const r = await (info.file ? fileStub(env, id) : burnStub(env, id)).remove(token);
     if (r.status === 'ok') { await directory(env).markShareEnded(id, 'deleted'); return json({ status: 'deleted', id }); }
