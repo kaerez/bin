@@ -8,7 +8,7 @@
         <meta name="color-scheme" content="dark light" />
         <!-- Kept in sync with the class-based theme by theme-init.js / theme.js. -->
         <meta name="theme-color" content="#0d1117" />
-        <title>binthere · zero-knowledge paste</title>
+        <title>secbin · zero-knowledge paste</title>
         <meta
             name="description"
             content="Encrypted, zero-knowledge pastebin. Your text is encrypted in your browser; the server never sees it."
@@ -16,17 +16,13 @@
         <!-- Link previews (chat apps / social scrapers). Fragment keys are never sent
        to servers, so a shared paste link only ever exposes this generic card. -->
         <meta property="og:type" content="website" />
-        <meta property="og:site_name" content="binthere" />
-        <meta property="og:title" content="binthere · zero-knowledge paste" />
+        <meta property="og:site_name" content="secbin" />
+        <meta property="og:title" content="secbin · zero-knowledge paste" />
         <meta
             property="og:description"
             content="Encrypted, zero-knowledge pastebin. Your text is encrypted in your browser; the server never sees it."
         />
-        <meta property="og:url" content="https://binthere.gaury.dev/" />
-        <meta property="og:image" content="https://binthere.gaury.dev/opengraph.png" />
-        <meta property="og:image:width" content="1200" />
-        <meta property="og:image:height" content="630" />
-        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:card" content="summary" />
         <link rel="icon" type="image/svg+xml" href="/img/favicon.svg" />
         <!-- PNG fallbacks: Safari ignores SVG favicons; iOS wants a full-bleed square.
        A real /favicon.ico (16+32+48) also exists for agents that probe by convention. -->
@@ -42,43 +38,9 @@
         <!-- CSP is set as a response header (public/_headers). Scripts/styles/fonts are first-party only. -->
         <script defer src="/js/qrcode.js"></script>
         <script defer src="/js/theme.js"></script>
-        <script defer src="/js/announce.js"></script>
-        <script defer src="/js/stars.js"></script>
         <script type="module" src="/js/app.js"></script>
     </head>
     <body>
-        <!-- Slim announcement bar. Hidden by default so returning/dismissed
-       visitors never see a flash; announce.js reveals it only when the
-       dismissal flag is absent (mirrors theme-init's localStorage pattern). -->
-        <aside class="announce" id="announce" aria-label="Announcement" hidden>
-            <a
-                class="announce-link"
-                href="https://gaury.dev/blog/because-i-dont-trust-pastebins-either"
-                rel="noopener"
-                target="_blank"
-            >
-                <span class="announce-tag">New</span>
-                <span class="announce-txt"
-                    >Why I don’t trust pastebins either</span
-                >
-                <span class="announce-arrow" aria-hidden="true">→</span>
-            </a>
-            <button
-                type="button"
-                class="announce-close"
-                id="announce-close"
-                aria-label="Dismiss announcement"
-            >
-                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path
-                        d="M6 6l12 12M18 6L6 18"
-                        stroke="currentColor"
-                        stroke-width="1.75"
-                        stroke-linecap="round"
-                    />
-                </svg>
-            </button>
-        </aside>
         <!-- Guilloché watermark — security-print ambience; pure ornament. -->
         <svg class="watermark" viewBox="0 0 64 64" fill="none" aria-hidden="true">
             <g stroke="currentColor" stroke-width="0.5">
@@ -94,39 +56,10 @@
             </g>
         </svg>
         <header class="topbar reveal">
-            <a class="brand" href="/" id="brand" aria-label="binthere — home">
-                <span class="wm-a">bin</span><span class="wm-b">there</span>
+            <a class="brand" href="/" id="brand" aria-label="secbin — home">
+                <span class="wm-b">sec</span><span class="wm-a">bin</span>
             </a>
             <div class="topbar-right">
-                <!-- Star count is filled in by /js/stars.js from /api/stars; the
-                     page can't reach api.github.com itself (connect-src 'self'). -->
-                <a
-                    class="gh"
-                    id="gh-link"
-                    href="https://github.com/nxfu/binthere"
-                    rel="noopener"
-                    target="_blank"
-                    aria-label="binthere on GitHub"
-                >
-                    <!-- Octicons "mark-github" (MIT). -->
-                    <svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true">
-                        <path
-                            fill="currentColor"
-                            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
-                        />
-                    </svg>
-                    <!-- Ships hidden: with no count the badge is just a link to
-                         the repository, rather than an empty pair of glyphs. -->
-                    <span class="gh-stars" id="gh-stars" hidden>
-                        <svg class="gh-star" viewBox="0 0 24 24" aria-hidden="true">
-                            <path
-                                fill="currentColor"
-                                d="M12 2.8l2.72 5.51 6.08.89-4.4 4.29 1.04 6.06L12 16.69l-5.44 2.86 1.04-6.06-4.4-4.29 6.08-.89L12 2.8Z"
-                            />
-                        </svg>
-                        <span class="gh-count mono" id="gh-count"></span>
-                    </span>
-                </a>
                 <a class="back" id="newlink" href="/" hidden
                     ><span class="arrow">＋</span><span>new paste</span></a
                 >
@@ -175,7 +108,7 @@
                     <p class="eyebrow">private by design</p>
                     <h1 class="title">Say it once. <span class="title-em">Sealed.</span></h1>
                     <p class="subtitle">
-                        Your note stays yours. Read once, then self-destructs.
+                        Your note stays yours. It self-destructs when its views or time run out.
                     </p>
                 </div>
 
@@ -233,6 +166,48 @@
                                 </svg>
                                 <span class="lock-txt">Password</span>
                             </button>
+                            <!-- View limit: a count (default 1) or unlimited (∞). -->
+                            <div class="opt" role="group" aria-labelledby="views-label">
+                                <label class="opt-label" id="views-label" for="views">Views</label>
+                                <input
+                                    type="number"
+                                    id="views"
+                                    class="input opt-num"
+                                    min="1"
+                                    max="100000"
+                                    step="1"
+                                    value="1"
+                                    inputmode="numeric"
+                                    aria-describedby="feat-views"
+                                />
+                                <button
+                                    type="button"
+                                    class="opt-toggle"
+                                    id="views-unlimited"
+                                    aria-pressed="false"
+                                    aria-label="Unlimited views"
+                                    title="Unlimited views"
+                                >∞</button>
+                            </div>
+                            <!-- Expiry: any number of minutes / hours / days (default 24 hours). -->
+                            <div class="opt" role="group" aria-labelledby="expire-label">
+                                <label class="opt-label" id="expire-label" for="expire-n">Expires in</label>
+                                <input
+                                    type="number"
+                                    id="expire-n"
+                                    class="input opt-num"
+                                    min="1"
+                                    step="1"
+                                    value="24"
+                                    inputmode="numeric"
+                                    aria-describedby="feat-expire"
+                                />
+                                <select id="expire-unit" class="input opt-sel" aria-label="Expiry unit">
+                                    <option value="m">minutes</option>
+                                    <option value="h" selected>hours</option>
+                                    <option value="d">days</option>
+                                </select>
+                            </div>
                         </div>
                         <button
                             type="button"
@@ -262,14 +237,14 @@
                 <div
                     class="features reveal d3"
                     role="list"
-                    aria-label="How binthere protects your note"
+                    aria-label="How secbin protects your note"
                 >
                     <span class="feat" role="listitem">Private</span>
                     <span class="feat" role="listitem"
                         >End-to-end encrypted</span
                     >
-                    <span class="feat" role="listitem">One-time view</span>
-                    <span class="feat" role="listitem"
+                    <span class="feat" role="listitem" id="feat-views">One-time view</span>
+                    <span class="feat" role="listitem" id="feat-expire"
                         >Auto-deletes in 24 hours</span
                     >
                 </div>
@@ -466,7 +441,7 @@
                                     <circle cx="32" cy="32" r="4.2" pathLength="1" />
                                 </g>
                             </svg>
-                            <span class="seal-label mono"
+                            <span class="seal-label mono" id="seal-label"
                                 >scan to open · one-time read</span
                             >
                         </div>
@@ -645,26 +620,6 @@
                 <p class="foot-crypto mono" aria-label="Cryptography">
                     AES-256-GCM · HKDF-SHA256 · Key stays in the URL
                     <span class="foot-frag">#fragment</span>
-                </p>
-                <p class="foot-links" id="foot-links">
-                    <a
-                        href="https://github.com/nxfu/binthere"
-                        rel="noopener"
-                        target="_blank"
-                        >Source</a
-                    >
-                    <a
-                        href="https://github.com/nxfu/binthere/blob/main/SECURITY.md"
-                        rel="noopener"
-                        target="_blank"
-                        >Threat Model</a
-                    >
-                    <a href="/.well-known/security.txt" rel="noopener"
-                        >Security</a
-                    >
-                    <a href="https://gaury.dev" rel="noopener"
-                        >Developer</a
-                    >
                 </p>
             </footer>
         </main>
