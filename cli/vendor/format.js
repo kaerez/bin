@@ -1,4 +1,4 @@
-// format.js — binthere paste format v1: canonical AAD construction and strict,
+// format.js — secbin paste format v1 (wire labels keep the original "binthere/v1"): canonical AAD construction and strict,
 // fail-closed, prototype-pollution-safe validation. Single source of truth for
 // the frozen wire/storage format (SPEC.md §4, §5). Shared by the browser client
 // (validates on read) and the Worker (validates on create).
@@ -7,12 +7,40 @@ import { bytesFromB64url } from './bytes.js';
 
 export const FORMAT_VERSION = 1;
 
-/** Expiry option → TTL seconds (0 = never). Single source of truth (SPEC.md §9). */
+/** Preset expiry option → TTL seconds (0 = never). See expireSeconds() for custom values. */
 export const EXPIRE_SECONDS = {
   '5min': 300, '10min': 600, '1hour': 3600, '1day': 86400,
   '1week': 604800, '1month': 2592000, '1year': 31536000, 'never': 0,
 };
 export const EXPIRE_OPTIONS = Object.keys(EXPIRE_SECONDS);
+
+// Custom expiry: "<n><unit>" with unit m (minutes), h (hours) or d (days),
+// e.g. "90m", "36h", "7d". Bounded to [MIN_TTL, MAX_TTL]: KV's expirationTtl
+// minimum is 60 s, and the upper bound matches the longest preset ('1year').
+export const MIN_TTL = 60;
+export const MAX_TTL = 31536000;
+export const DEFAULT_EXPIRE = '24h';
+const CUSTOM_EXPIRE_RE = /^([1-9][0-9]{0,6})([mhd])$/;
+const UNIT_SECONDS = { m: 60, h: 3600, d: 86400 };
+
+/**
+ * Expiry value → TTL seconds (0 = never), or null if invalid. Accepts a preset
+ * key (EXPIRE_OPTIONS) or a custom "<n>m|h|d" duration within bounds.
+ * Own-property lookup only, so "__proto__"/"constructor" never resolve.
+ */
+export function expireSeconds(expire) {
+  if (typeof expire !== 'string') return null;
+  if (Object.prototype.hasOwnProperty.call(EXPIRE_SECONDS, expire)) return EXPIRE_SECONDS[expire];
+  const m = CUSTOM_EXPIRE_RE.exec(expire);
+  if (!m) return null;
+  const s = Number(m[1]) * UNIT_SECONDS[m[2]];
+  return s >= MIN_TTL && s <= MAX_TTL ? s : null;
+}
+
+// View limit for view-limited pastes (adata.bar === true). Absent ⇒ 1 (the
+// original burn-after-read). Unlimited views are ordinary pastes (bar: false),
+// which carry no `views`. `left` is server-set on reads: views remaining.
+export const MAX_VIEWS = 100000;
 export const FORMATS = ['plaintext', 'code', 'markdown'];
 export const COMP = ['gzip', 'none'];
 export const KDFS = ['hkdf', 'pbkdf2-hkdf'];
@@ -140,14 +168,33 @@ function validateMeta(m) {
   if (!isPlainObject(m)) throw new FormatError('meta must be an object');
   assertNoDangerousKeys(m, 'meta');
   for (const k of Object.keys(m)) {
-    if (k !== 'expire' && k !== 'created') throw new FormatError(`unknown field "${k}" in meta`);
+    if (k !== 'expire' && k !== 'created' && k !== 'views' && k !== 'left') {
+      throw new FormatError(`unknown field "${k}" in meta`);
+    }
   }
-  if (!EXPIRE_OPTIONS.includes(m.expire)) throw new FormatError('invalid expire');
-  if (Object.prototype.hasOwnProperty.call(m, 'created')) {
+  if (expireSeconds(m.expire) === null) throw new FormatError('invalid expire');
+  const out = { expire: m.expire };
+  const has = (k) => Object.prototype.hasOwnProperty.call(m, k);
+  if (has('created')) {
     if (!Number.isInteger(m.created) || m.created < 0) throw new FormatError('invalid created');
-    return { expire: m.expire, created: m.created };
+    out.created = m.created;
   }
-  return { expire: m.expire };
+  if (has('views')) {
+    if (!Number.isInteger(m.views) || m.views < 1 || m.views > MAX_VIEWS) throw new FormatError('invalid views');
+    out.views = m.views;
+  }
+  if (has('left')) {
+    if (!Number.isInteger(m.left) || m.left < 0 || m.left > (out.views ?? 1)) throw new FormatError('invalid left');
+    out.left = m.left;
+  }
+  return out;
+}
+
+/** A view limit only makes sense on a view-limited (bar) paste. */
+function assertViewsConsistent(adata, meta) {
+  if (!adata.bar && (meta.views !== undefined || meta.left !== undefined)) {
+    throw new FormatError('views requires a view-limited paste');
+  }
 }
 
 /**
@@ -168,10 +215,10 @@ export function validatePaste(input) {
   b64urlByteLength(input.ct, 'ct');
   validateWk(input.wk);
 
-  return {
-    v: FORMAT_VERSION, ct: input.ct, wk: input.wk,
-    adata: validateAdata(input.adata), meta: validateMeta(input.meta),
-  };
+  const adata = validateAdata(input.adata);
+  const meta = validateMeta(input.meta);
+  assertViewsConsistent(adata, meta);
+  return { v: FORMAT_VERSION, ct: input.ct, wk: input.wk, adata, meta };
 }
 
 /**
@@ -187,8 +234,8 @@ export function validateHead(input) {
   if (input.v !== FORMAT_VERSION) throw new FormatError('unsupported version');
   validateWk(input.wk);
 
-  return {
-    v: FORMAT_VERSION, wk: input.wk,
-    adata: validateAdata(input.adata), meta: validateMeta(input.meta),
-  };
+  const adata = validateAdata(input.adata);
+  const meta = validateMeta(input.meta);
+  assertViewsConsistent(adata, meta);
+  return { v: FORMAT_VERSION, wk: input.wk, adata, meta };
 }

@@ -1,4 +1,6 @@
-// crypto.js — binthere zero-knowledge crypto protocol (Web Crypto only).
+// crypto.js — secbin zero-knowledge crypto protocol (Web Crypto only).
+// NOTE: the protocol labels "binthere/v1 …" below are part of the frozen wire
+// format (HKDF info / AAD). Renaming them would make existing pastes undecryptable.
 //
 // Implements SPEC.md exactly: per-paste random 256-bit CEK encrypts the paste
 // with AES-256-GCM; the CEK is wrapped by a KEK derived from the URL fragment
@@ -146,7 +148,7 @@ export async function gunzip(bytes, maxOut = MAX_PLAINTEXT) {
  * object to POST (server adds meta.created + delete-token hash) and `fragment`
  * is the base64url URL-fragment secret F — which MUST stay client-side.
  */
-export async function encryptPaste({ text, password = '', fmt = 'plaintext', bar = false, expire = '1week' }) {
+export async function encryptPaste({ text, password = '', fmt = 'plaintext', bar = false, expire = '1week', views }) {
   const data = utf8(text);
   if (data.length > MAX_PLAINTEXT) throw new Error('paste too large');
 
@@ -191,7 +193,8 @@ export async function encryptPaste({ text, password = '', fmt = 'plaintext', bar
     ct: b64urlFromBytes(ct),
     wk: b64urlFromBytes(wk),
     adata,
-    meta: { expire },
+    // `views` (view limit) is only meaningful for bar pastes; format.js rejects it otherwise.
+    meta: views === undefined ? { expire } : { expire, views },
   };
   return { body, fragment: b64urlFromBytes(F) };
 }
