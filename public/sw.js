@@ -27,7 +27,7 @@
 // service worker does; the CSP's worker-src 'self' and the Trusted Types policy
 // in public/js/tt.js (which mints the '/sw.js' script URL) govern registration.
 
-const VERSION = '2';
+const VERSION = '3';
 const CACHE_PREFIX = 'secbin-static-';
 const CACHE = CACHE_PREFIX + VERSION;
 
@@ -44,6 +44,8 @@ const PRECACHE = [
   '/',
   '/css/styles.css',
   '/js/theme-init.js',
+  '/js/a11y-init.js',
+  '/js/a11y.js',
   '/js/theme.js',
   '/js/tt.js',
   '/js/pwa.js',

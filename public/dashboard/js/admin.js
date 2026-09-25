@@ -121,8 +121,8 @@ function durationInput(sec, { allowNull = false } = {}) {
   return wrap;
 }
 
-function numberInput(v, { step = 1, scale = 1 } = {}) {
-  const i = h('input.input.opt-num', { type: 'number', min: '0', step: String(step), value: v === null || v === undefined ? '' : String(v / scale) });
+function numberInput(v, { step = 1, scale = 1, label } = {}) {
+  const i = h('input.input.opt-num', { type: 'number', min: '0', step: String(step), value: v === null || v === undefined ? '' : String(v / scale), 'aria-label': label });
   i.read = () => (i.value === '' ? NaN : Math.round(Number(i.value) * scale));
   return i;
 }
@@ -209,8 +209,8 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
       val.read = () => normalizeRules(val.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean));
     }
     if (type === 'urlrules') val = urlRulesInput(has && Array.isArray(v) ? v : (effective?.[key] ?? inherited?.[key] ?? []), label);
-    if (type === 'int') val = numberInput(has && v !== null ? v : null);
-    if (type === 'bytes') val = h('span.inline-ctl', {}, numberInput(has && v !== null ? v : null, { step: 0.1, scale: MiB }), h('span.mono', { text: 'MiB' }));
+    if (type === 'int') val = numberInput(has && v !== null ? v : null, { label });
+    if (type === 'bytes') val = h('span.inline-ctl', {}, numberInput(has && v !== null ? v : null, { step: 0.1, scale: MiB, label: `${label} (MiB)` }), h('span.mono', { text: 'MiB' }));
     if (type === 'dur') val = durationInput(has && v !== null ? v : null, { allowNull: true });
     const sync = () => { if (val) val.hidden = mode.value !== 'value'; };
     mode.onchange = sync;
@@ -414,8 +414,8 @@ async function renderSettings() {
   const defs = overview.defaults.settings;
   const dflt = (text) => h('span.mono.muted', { text: `default: ${text}` });
   const dur = (key, label) => { const c = durationInput(s[key]); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(limitText('dur', defs[key]))); };
-  const int = (key, label) => { const c = numberInput(s[key]); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(String(defs[key]))); };
-  const mib = (key, label, max) => { const c = numberInput(s[key], { step: 1, scale: MiB }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono', { text: `MiB (max ${max})` }), dflt(formatBytes(defs[key]))); };
+  const int = (key, label) => { const c = numberInput(s[key], { label }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(String(defs[key]))); };
+  const mib = (key, label, max) => { const c = numberInput(s[key], { step: 1, scale: MiB, label: `${label} (MiB)` }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono', { text: `MiB (max ${max})` }), dflt(formatBytes(defs[key]))); };
   const scopeRule = (scope, label) => h('div.card.stack', {}, h('h3.field-label', { text: label }),
     int(`guard.${scope}.max`, 'Failures allowed'), dur(`guard.${scope}.windowSec`, 'Within'), dur(`guard.${scope}.blockSec`, 'Then block the IP for'));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Sessions' }), dur('session.idleSec', 'Idle timeout'), dur('session.absSec', 'Absolute timeout')));
@@ -432,6 +432,16 @@ async function renderSettings() {
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
     int('lockout.max', 'Failed logins allowed'), dur('lockout.windowSec', 'Within'), dur('lockout.lockSec', 'Then lock the account for')));
+  const contact = h('textarea.input', { rows: '2', maxlength: '500', 'aria-label': 'How to report an accessibility problem', placeholder: 'e.g. accessibility@example.com or +972-3-000-0000' });
+  contact.value = s['a11y.contact'] || '';
+  const coord = h('textarea.input', { rows: '2', maxlength: '500', 'aria-label': 'Accessibility coordinator (name and contact)', placeholder: 'Name, phone, email: only if you must appoint one' });
+  coord.value = s['a11y.coordinator'] || '';
+  const saveStatement = h('button.btn', { type: 'button', text: 'Save statement details' });
+  saveStatement.onclick = () => guard(() => admin.settings({ 'a11y.contact': contact.value.trim(), 'a11y.coordinator': coord.value.trim() }), 'Accessibility statement saved.');
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Accessibility statement' }),
+    h('p.mono.muted', {}, 'Shown on the public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), ' page (English and Hebrew). A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees). Have the statement reviewed by an accessibility professional or Legal before relying on it.'),
+    h('label.field-label', { text: 'How to report a problem' }), contact,
+    h('label.field-label', { text: 'Accessibility coordinator (optional)' }), coord, h('div.btn-row', {}, saveStatement)));
   const save = h('button.cta', { type: 'button', text: 'Save settings' });
   save.onclick = async () => {
     const patch = {};
@@ -471,7 +481,7 @@ async function renderPublic() {
   const notice = h('input', { type: 'checkbox', checked: s['public.notice'] });
   const noticeText = h('textarea.input', { rows: '3', maxlength: '1000', 'aria-label': 'Notice text' });
   noticeText.value = s['public.noticeText'];
-  const perIp = numberInput(s['public.newTrackersPerIp']);
+  const perIp = numberInput(s['public.newTrackersPerIp'], { label: 'New anonymous identifiers per network' });
   const perWin = durationInput(s['public.newTrackersWindowSec']);
   const idle = durationInput(s['public.trackerIdleSec']);
   const save = h('button.cta', { type: 'button', text: 'Save public access' });
@@ -528,7 +538,7 @@ async function renderViewer() {
   if (!overview) return;
   const s = overview.settings;
   const on = h('input', { type: 'checkbox', checked: s['viewer.enabled'], id: 'viewer-enabled' });
-  const max = numberInput(s['viewer.maxBytes'], { step: 1, scale: MiB });
+  const max = numberInput(s['viewer.maxBytes'], { step: 1, scale: MiB, label: 'Largest file the viewer opens (MiB)' });
   const save = h('button.btn', { type: 'button', text: 'Save' });
   save.onclick = () => guard(() => admin.settings({ 'viewer.enabled': on.checked, 'viewer.maxBytes': max.read() }), 'Viewer settings saved.');
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'In-browser viewer' }),

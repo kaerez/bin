@@ -15,6 +15,14 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Accessibility (WCAG 2.2 AA):**
+  - Skip links and a focusable main landmark on every page.
+  - Fixes from an axe-core audit: labels for the admin number fields, keyboard-focusable
+    secret boxes on setup, 24 px checkboxes, a darker "ok" colour, and underlined links in text.
+  - A **Hebrew/English accessibility preferences widget**: high contrast, text size, readable
+    font, stop animations, focus highlight, and mark headings or links.
+  - A bilingual **accessibility statement** at `/accessibility/`, with the reporting contact and
+    coordinator set by the admin.
 - **Passkeys:** sign in with a passkey instead of a password (no username needed), or require one
   after the password; up to 10 per account. The first passkey comes with 20 one-time recovery
   codes that work wherever a passkey does. The admin decides per user or globally whether passkeys

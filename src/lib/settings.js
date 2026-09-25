@@ -42,6 +42,10 @@ export const SETTINGS = {
   // Activity log retention (everything except entries about the owner).
   'log.maxAgeSec':       { type: 'int', min: DAY, max: 3650 * DAY, def: 365 * DAY },
   'log.maxEntries':      { type: 'int', min: 1000, max: 5000000, def: 500000 },
+  // The accessibility statement (/accessibility/): how to report a problem,
+  // and the coordinator (only where the law requires one). Plain text.
+  'a11y.contact':        { type: 'text', max: 500, def: '' },
+  'a11y.coordinator':    { type: 'text', max: 500, def: '' },
   'public.enabled':      { type: 'bool', def: false },
   // How anonymous creators are counted against the public quotas:
   //   tracker          — a random ID the browser keeps (cookie, ETag cache,

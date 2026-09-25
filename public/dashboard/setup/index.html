@@ -22,14 +22,17 @@
         <meta name="apple-mobile-web-app-title" content="secbin" />
         <!-- Blocking, first-party (CSP-safe): sets the theme class before paint. -->
         <script src="/js/theme-init.js"></script>
+        <script src="/js/a11y-init.js"></script>
         <link rel="stylesheet" href="/css/styles.css" />
         <!-- CSP is a response header (public/_headers + the Worker). First-party only. -->
         <script defer src="/js/theme.js"></script>
         <script type="module" src="/js/setup.js"></script>
         <!-- Service worker + install banner (public/js/pwa.js). -->
         <script type="module" src="/js/pwa.js"></script>
+        <script type="module" src="/js/a11y.js"></script>
     </head>
     <body>
+        <a class="skip-link" href="#main">Skip to main content</a>
         <!-- Guilloché watermark — security-print ambience; pure ornament. -->
         <svg class="watermark" width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true">
             <g stroke="currentColor" stroke-width="0.5">
@@ -88,7 +91,7 @@
             </div>
         </header>
 
-        <main class="wrap">
+        <main class="wrap" id="main" tabindex="-1">
             <section id="view-setup" tabindex="-1">
                 <div class="head reveal d1">
                     <p class="eyebrow">owner setup &amp; recovery</p>
@@ -231,9 +234,9 @@
                         yourself with <code class="mono">openssl rand -hex 32</code>. After setup, delete
                         <code>AUTHN</code>.
                     </p>
-                    <div class="keygen-row"><span class="mono keygen-name">AUTHN</span><code class="mono keygen-val" id="gen-authn"></code><button type="button" class="copy-btn" data-copy="gen-authn">copy</button></div>
-                    <div class="keygen-row"><span class="mono keygen-name">SIG</span><code class="mono keygen-val" id="gen-sig"></code><button type="button" class="copy-btn" data-copy="gen-sig">copy</button></div>
-                    <div class="keygen-row"><span class="mono keygen-name">ENC</span><code class="mono keygen-val" id="gen-enc"></code><button type="button" class="copy-btn" data-copy="gen-enc">copy</button></div>
+                    <div class="keygen-row"><span class="mono keygen-name">AUTHN</span><code class="mono keygen-val" id="gen-authn" tabindex="0" role="region" aria-label="Generated AUTHN value"></code><button type="button" class="copy-btn" data-copy="gen-authn">copy</button></div>
+                    <div class="keygen-row"><span class="mono keygen-name">SIG</span><code class="mono keygen-val" id="gen-sig" tabindex="0" role="region" aria-label="Generated SIG value"></code><button type="button" class="copy-btn" data-copy="gen-sig">copy</button></div>
+                    <div class="keygen-row"><span class="mono keygen-name">ENC</span><code class="mono keygen-val" id="gen-enc" tabindex="0" role="region" aria-label="Generated ENC value"></code><button type="button" class="copy-btn" data-copy="gen-enc">copy</button></div>
                     <div class="btn-row"><button type="button" class="btn" id="gen-again">Generate new values</button></div>
                 </div>
             </section>
@@ -242,6 +245,8 @@
                     <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
                     <span class="foot-sep" aria-hidden="true">·</span>
                     <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                    <span class="foot-sep" aria-hidden="true">·</span>
+                    <a href="/accessibility/">Accessibility</a>
                 </nav>
                 <p class="foot-crypto mono" aria-label="Cryptography">
                     AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL

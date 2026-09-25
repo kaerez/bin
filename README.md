@@ -193,6 +193,25 @@ working.
 Cloudflare Access is no longer needed. You may still layer it in front of `/dashboard*` and
 `/api/private/*` as defense in depth.
 
+## Accessibility
+
+The pages are built to **WCAG 2.2 level AA**, which covers the WCAG 2.0 AA base of the Israeli
+standard IS 5568. They have skip links, landmarks, full keyboard operation with visible focus,
+labelled fields, AA contrast in both themes, reduced-motion support, reflow down to 320 px and
+24 px touch targets. Every page and state is checked with axe-core.
+
+- **Preferences button** (bottom corner of every page, in English and Hebrew): high contrast,
+  text size, readable font, stop animations, keyboard-focus highlight, and marking of headings
+  and links. The choices are saved in the browser and applied before the page paints. It is a
+  convenience; the pages do not rely on it.
+- **Statement.** `/accessibility/` is a bilingual accessibility statement, defaulting to
+  **partial conformance** with the known limitations listed. Set the contact for reporting
+  problems, and a coordinator if you must appoint one, under Admin → Settings → Accessibility
+  statement.
+- **Before publishing.** Have the statement reviewed by an accessibility professional (in
+  Israel, a מורשה לנגישות השירות) or by Legal. This project does not decide whether a
+  deployment is obliged, exempt or conformant.
+
 ## Installing as an app (PWA)
 
 secbin is a Progressive Web App: every page links `/manifest.webmanifest` and registers the

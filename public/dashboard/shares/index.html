@@ -22,14 +22,17 @@
         <meta name="apple-mobile-web-app-title" content="secbin" />
         <!-- Blocking, first-party (CSP-safe): sets the theme class before paint. -->
         <script src="/js/theme-init.js"></script>
+        <script src="/js/a11y-init.js"></script>
         <link rel="stylesheet" href="/css/styles.css" />
         <!-- CSP is a response header (public/_headers + the Worker). First-party only. -->
         <script defer src="/js/theme.js"></script>
         <script type="module" src="/dashboard/js/shares.js"></script>
         <!-- Service worker + install banner (public/js/pwa.js). -->
         <script type="module" src="/js/pwa.js"></script>
+        <script type="module" src="/js/a11y.js"></script>
     </head>
     <body>
+        <a class="skip-link" href="#main">Skip to main content</a>
         <!-- Guilloché watermark — security-print ambience; pure ornament. -->
         <svg class="watermark" width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true">
             <g stroke="currentColor" stroke-width="0.5">
@@ -98,7 +101,7 @@
             </div>
         </header>
 
-        <main class="wrap wrap-wide">
+        <main class="wrap wrap-wide" id="main" tabindex="-1">
             <section id="view-shares" tabindex="-1">
                 <div class="head reveal d1">
                     <p class="eyebrow">my shares</p>
@@ -129,6 +132,8 @@
                     <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
                     <span class="foot-sep" aria-hidden="true">·</span>
                     <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                    <span class="foot-sep" aria-hidden="true">·</span>
+                    <a href="/accessibility/">Accessibility</a>
                 </nav>
                 <p class="foot-crypto mono" aria-label="Cryptography">
                     AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
