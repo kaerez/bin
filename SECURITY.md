@@ -222,6 +222,17 @@ API keys are never challenged.
   your privacy notice. Confirm the lawful basis and any consent requirement with your Legal /
   Compliance team; this document is not legal advice.
 
+### Accessibility widget and statement
+
+- **First-party code under the same rules as the rest of the site.** The preferences widget
+  (`public/js/a11y.js`) and its head script (`public/js/a11y-init.js`) are CSP-safe
+  (`script-src 'self'`) and follow the Trusted Types discipline: DOM calls only, no markup
+  strings, no third party.
+- **What is stored.** Only the viewer's display choices, kept in `localStorage`
+  (`secbin:a11y`); malformed values are ignored. Nothing is sent to the server.
+- **The statement page.** `/accessibility/` is static and uses the strict policy. It inserts
+  the admin's contact text with `textContent`, never as markup.
+
 ### Service worker and install banner (PWA)
 
 secbin is installable. `public/sw.js` (scope `/`) is registered from `public/js/pwa.js`

@@ -46,7 +46,7 @@
   --ring: #2e5472;           /* focus ring */
 
   --seal: #a03f34;           /* wax-seal red — destruction only */
-  --ok: #3f7a58;             /* verdigris */
+  --ok: #3a7453;             /* verdigris (≥4.5:1 on the paper and sheet surfaces) */
   --warn: #906318;           /* ochre */
 
   --shadow-overlay: 0 18px 50px rgba(28, 39, 51, .18);
@@ -621,6 +621,8 @@ button.back { cursor: pointer; }
 .ok-text { color: var(--ok, #2f7d4f); }
 .rules-in { min-width: 14rem; font-family: var(--mono, monospace); resize: vertical; }
 .viewer-opt { display: flex; align-items: center; gap: .5rem; padding: 0 1.1rem .9rem; font-size: .82rem; color: var(--ink-2); }
+/* WCAG 2.2 target size (2.5.8): checkboxes and radios are at least 24px across. */
+input[type="checkbox"], input[type="radio"] { width: 1.125rem; height: 1.125rem; margin: 3px; flex: none; }
 .mime-in { width: 12rem; max-width: 100%; padding: .3rem .5rem; font-size: .72rem; }
 .mime-in[aria-invalid="true"] { border-color: var(--seal); color: var(--seal); }
 
@@ -838,3 +840,82 @@ html.pwa-banner-open.pwa-banner-top body { padding-bottom: 0; padding-top: calc(
 .token-box { display: grid; gap: .4rem; margin-top: 1rem; }
 .radio-opt { display: flex; gap: .6rem; align-items: flex-start; padding: .4rem 0; min-height: 44px; }
 .radio-opt .block { display: block; font-size: .72rem; margin-top: .15rem; }
+
+/* ── skip link ─────────────────────────────────────────────────────────────── */
+.skip-link { position: absolute; z-index: 9999; left: .75rem; top: .75rem; padding: .6rem .9rem; background: var(--accent-fill); color: var(--accent-fg);
+  border-radius: 3px; font-family: var(--sans); font-size: .875rem; font-weight: 500; transform: translateY(-200%); }
+.skip-link:focus, .skip-link:focus-visible { transform: none; outline: 2px solid var(--ring); outline-offset: 2px; }
+main[tabindex="-1"]:focus { outline: none; }
+
+/* ── accessibility widget (public/js/a11y.js) ─────────────────────────────── */
+:root { --a11y-mark: #c00000; }
+html.dark { --a11y-mark: #ff6b6b; }
+.a11y-btn { position: fixed; z-index: 200; inset-inline-start: max(1rem, env(safe-area-inset-left, 0px)); bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+  width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border-radius: 50%; cursor: pointer;
+  background: var(--accent-fill); color: var(--accent-fg); border: 2px solid var(--paper); box-shadow: var(--shadow-overlay); }
+.a11y-btn:focus-visible { outline: 3px solid var(--ring); outline-offset: 3px; }
+/* Above the install banner when that sits at the bottom (it spans narrow screens). */
+@media (max-width: 40rem) { html.pwa-banner-open:not(.pwa-banner-top) .a11y-btn { bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); } }
+.a11y-panel { position: fixed; z-index: 200; inset-inline-start: max(1rem, env(safe-area-inset-left, 0px)); bottom: calc(max(1rem, env(safe-area-inset-bottom, 0px)) + 56px);
+  width: min(21rem, calc(100vw - 2rem)); max-height: calc(100dvh - 6rem); overflow-y: auto; padding: .9rem 1rem 1rem;
+  background: var(--sheet); color: var(--ink); border: 1px solid var(--rule-2); border-radius: 6px; box-shadow: var(--shadow-overlay);
+  font-family: var(--sans); font-size: .875rem; display: flex; flex-direction: column; gap: .2rem; }
+.a11y-panel[hidden] { display: none; }
+@media (max-width: 40rem) { html.pwa-banner-open:not(.pwa-banner-top) .a11y-panel { bottom: calc(11rem + 56px + env(safe-area-inset-bottom, 0px)); } }
+.a11y-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .35rem; }
+.a11y-title { margin: 0; font-size: 1rem; font-weight: 600; }
+.a11y-close { width: 32px; height: 32px; border: 1px solid var(--rule-2); border-radius: 3px; background: transparent; color: var(--ink); font-size: 1.1rem; line-height: 1; cursor: pointer; }
+.a11y-panel button:focus-visible, .a11y-panel a:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.a11y-switch { display: flex; width: 100%; min-height: 40px; align-items: center; justify-content: space-between; gap: .75rem; padding: .35rem .1rem;
+  background: none; border: 0; border-bottom: 1px solid var(--rule); color: var(--ink); font: inherit; text-align: start; cursor: pointer; }
+/* px, not rem: the text-size modes change the root size, and the thumb offsets are fixed. */
+.a11y-track { position: relative; flex: none; width: 44px; height: 24px; border-radius: 12px; background: var(--ink-3); }
+.a11y-thumb { position: absolute; left: 0; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transform: translateX(3px); transition: transform .2s var(--ease); }
+.a11y-switch[aria-checked="true"] .a11y-track { background: var(--accent-fill); }
+.a11y-switch[aria-checked="true"] .a11y-thumb { transform: translateX(23px); }
+.a11y-seg { display: flex; gap: .35rem; margin: .45rem 0; }
+.a11y-seg button { flex: 1; min-height: 36px; padding: .3rem .5rem; border: 1px solid var(--rule-2); border-radius: 3px; background: transparent; color: var(--ink); font: inherit; cursor: pointer; }
+/* Pressed state is not carried by colour alone: a check mark and a heavier weight. */
+.a11y-seg button[aria-pressed="true"] { border-color: var(--ink); font-weight: 600; background: var(--sheet-2); }
+.a11y-seg button[aria-pressed="true"]::before { content: '✓ '; }
+.a11y-label { margin: .6rem 0 0; font-size: .8125rem; color: var(--ink-2); }
+.a11y-foot { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: .6rem; }
+.a11y-foot a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.a11y-note { margin: .5rem 0 0; font-size: .75rem; color: var(--ink-3); }
+
+/* Keyboard focus highlight */
+html.a11y-keyboard *:focus, html.a11y-keyboard *:focus-visible { outline: 3px solid var(--a11y-mark) !important; outline-offset: 3px !important; }
+/* Stop animations (the OS setting already does this, see prefers-reduced-motion above) */
+html.a11y-no-anim *, html.a11y-no-anim *::before, html.a11y-no-anim *::after {
+  animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; animation-delay: 0s !important;
+  transition-duration: 0.001ms !important; transition-delay: 0s !important; }
+html.a11y-no-anim { scroll-behavior: auto !important; }
+html.a11y-no-anim .reveal { opacity: 1; }
+/* High contrast: recolour (never `filter`, which would re-anchor every fixed element). */
+html.a11y-contrast { --a11y-mark: #ff5252; background-color: #000 !important; }
+html.a11y-contrast body, html.a11y-contrast body *:not(img):not(video):not(picture):not(svg):not(canvas) {
+  background-color: #000 !important; color: #fff !important; border-color: #fff !important; box-shadow: none !important; }
+html.a11y-contrast a { color: #ff0 !important; }
+html.a11y-contrast input, html.a11y-contrast textarea, html.a11y-contrast select, html.a11y-contrast button { border: 1px solid #fff !important; }
+html.a11y-contrast ::placeholder { color: #d9d9d9 !important; opacity: 1; }
+html.a11y-contrast .a11y-track { background-color: #000 !important; box-shadow: 0 0 0 1px #fff !important; }
+html.a11y-contrast .a11y-thumb { background-color: #fff !important; }
+html.a11y-contrast .a11y-switch { border: 0 !important; border-bottom: 1px solid #fff !important; }
+/* Text size: scale the root so rem-based sizes follow */
+html.a11y-font-lg { font-size: 115%; }
+html.a11y-font-sm { font-size: 88%; }
+/* Readable font (simple selectors only inside :not(), so older engines keep the rule) */
+html.a11y-readable body *:not(i):not(svg):not(code):not(pre):not(.mono) { font-family: Arial, Helvetica, sans-serif !important; letter-spacing: 0.015em; }
+/* Mark headings / links and buttons (not the widget's own controls) */
+html.a11y-headings h1, html.a11y-headings h2, html.a11y-headings h3, html.a11y-headings h4 { outline: 2px dashed var(--a11y-mark) !important; outline-offset: 6px; }
+html.a11y-links a, html.a11y-links button:not([role="switch"]):not(#a11y-btn) { outline: 2px solid #3b82f6 !important; text-decoration: underline !important; }
+/* ── accessibility statement ──────────────────────────────────────────────── */
+.statement { max-width: 44rem; margin: 0 auto 2.5rem; line-height: 1.6; }
+.statement section { margin-top: 1.1rem; }
+.statement .section-title { margin-bottom: .4rem; }
+.statement-list { margin: .3rem 0; padding-inline-start: 1.25rem; }
+.statement-list li { margin: .3rem 0; }
+.statement-contact { white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 500; }
+.statement a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+/* Links inside running text are underlined (never distinguished by colour alone, WCAG 1.4.1). */
+p a:not(.btn):not(.cta):not(.skip-link), li a:not(.btn):not(.cta) { text-decoration: underline; text-underline-offset: 3px; }

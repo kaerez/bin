@@ -1634,6 +1634,7 @@ export class Directory extends DurableObject {
     const s = this.#settings();
     return {
       viewer: { enabled: s['viewer.enabled'], maxBytes: s['viewer.maxBytes'], rules: s['viewer.enabled'] ? this.sql.exec("SELECT match, value, renderer FROM viewer_rules WHERE user_id = '' ORDER BY id").toArray() : [] },
+      accessibility: { contact: s['a11y.contact'], coordinator: s['a11y.coordinator'] },
     };
   }
 

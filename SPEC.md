@@ -245,7 +245,7 @@ Common errors on any route:
 
 | Method & path | Notes | Success | Errors |
 |---|---|---|---|
-| `GET /api/config` | public viewer policy; `turnstile`: the Turnstile site key, or `null` when the human check is off | 200 | |
+| `GET /api/config` | public viewer policy; `turnstile`: the Turnstile site key, or `null` when the human check is off; `accessibility`: `{contact, coordinator}` for the statement page (plain text, may be empty) | 200 | |
 | `GET /api/paste/:id` | head (§5.3) | 200 | 404, 410, 429 |
 | `POST /api/paste/:id/open` | `X-Link-Proof`, `X-Key-Proof`; spends a view if limited | 200 opened note | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `cross_site`, 404, 410, 429 |
 | `DELETE /api/paste/:id` | `X-Delete-Token` | 200 | 400, 403 `bad_token`, 404 |
