@@ -473,10 +473,13 @@ html.dark .theme-toggle .ico-moon { display: block; }
 .msg { font-family: var(--mono); font-size: .8125rem; color: var(--ink-2); letter-spacing: .01em; padding: 1.25rem 0; text-align: center; }
 .msg.error { color: var(--seal); }
 #toast { position: fixed; left: 50%; bottom: calc(2rem + env(safe-area-inset-bottom, 0px)); z-index: 50; transform: translateX(-50%) translateY(12px);
-  background: var(--accent-fill); color: var(--accent-fg); font-family: var(--mono); font-size: .75rem; font-weight: 500; letter-spacing: .02em;
+  background: var(--accent-fill); color: var(--accent-fg); font-family: var(--sans); font-size: .875rem; font-weight: 500; letter-spacing: .01em;
   padding: .7rem 1.1rem; border-radius: 3px; max-width: calc(100vw - 2rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)); text-align: center; overflow-wrap: anywhere; box-shadow: var(--shadow-overlay);
   opacity: 0; pointer-events: none; transition: opacity .3s var(--ease), transform .3s var(--ease); }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.error { background: var(--seal); color: #fff; }
+/* Above the install banner when that sits at the bottom. */
+html.pwa-banner-open:not(.pwa-banner-top) #toast { bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); }
 
 .foot { margin-top: auto; padding-top: 3rem; text-align: center; }
 .foot p { font-family: var(--sans); font-size: .78rem; color: var(--ink-3); letter-spacing: .01em; }

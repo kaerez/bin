@@ -243,8 +243,10 @@ Common errors on any route:
 | `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable` and the sender's account still has `openerDelete`; not after a file share's last view; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 |
 | `POST /api/paste` | v1 anonymous create — removed | — | 410 |
 
-Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` counts as an
-**invalid** failure for the caller's IP (§13).
+Every `404`/`410` for an id that was never a share, `bad_link`, `bad_password`, `bad_grant` and
+`bad_token` counts as an **invalid** failure for the caller's IP (§13). A `404`/`410` for a share
+that existed (still in the share index: expired, used up, revoked or deleted within the last 30
+days) is not counted.
 
 ### Public creation (anonymous, off by default)
 
@@ -394,5 +396,9 @@ exact ciphertext size of every chunk: `min(CHUNK, padded − i·CHUNK) + 16`.
   API quotas.
 - **Guard**: per-IP (IPv6 aggregated to a configurable prefix, default /64) failure counters for
   `login`, `setup` and `invalid`; *X failures within n seconds ⇒ block for n seconds*. Manual
-  IP/CIDR allow/block rules (allow wins). Account lockout after X failed logins (owner exempt).
+  IP allow/block rules as an address, a CIDR block or an inclusive range `a-b` (same family;
+  stored as CIDR when the range is exactly one aligned block; allow wins). Account lockout after
+  X failed logins (owner exempt). Limits, quotas and the global caps never apply to the owner;
+  `apiMaxKeys` `null` means no limit (at most 1000 keys). `POST /api/private/admin/users/:id/password`
+  on the owner is `403 use_account_page`.
   `DISABLE_BFP=true` disables all of it; `DISABLE_BFP_SETUP=true` only for setup.

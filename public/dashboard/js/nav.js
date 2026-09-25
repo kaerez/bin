@@ -44,7 +44,7 @@ export const ready = (async () => {
         await admin.unimpersonate();
         location.href = '/dashboard/admin/';
       } catch (e) {
-        toast(friendlyError(e));
+        toast(friendlyError(e), { error: true });
       }
     };
   }

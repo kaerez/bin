@@ -272,13 +272,23 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     token, until the owner unlocks it. Natural expiry and view exhaustion still apply. Locked
     rows are kept in the share index; they are not pruned.
 - **Brute-force protection** (admin-configurable, per IP; IPv6 aggregated to /64 by default):
-  - `login`, `setup`, and `invalid` — unknown/expired share ids, **wrong `#` keys, wrong share
-    passwords**, bad download grants and bad delete/upload tokens;
+  - `login`, `setup`, and `invalid` — share ids that never existed, **wrong `#` keys, wrong share
+    passwords**, bad download grants and bad delete/upload tokens. Fetching a share that did
+    exist but has expired, been used up, revoked or deleted (it is still in the share index,
+    which keeps ended shares for 30 days) is a recipient arriving late and is **not** counted;
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking;
-  - manual allow/block rules for IPv4/IPv6 addresses and CIDR ranges (allow wins; blocks deny
-    the whole API and dashboard);
-  - account lockout after X failed logins (owner exempt — recover via setup if needed);
+  - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges
+    (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard);
+  - account lockout after X failed logins (owner exempt — recover via setup if needed). Per-IP
+    protection and account lockout are complementary: the first stops one source guessing
+    (any account), the second stops many sources guessing one account;
+  - **the owner and global settings:** limits, quotas, the global share-size cap, the viewer
+    switch and size, and lockout never apply to the owner. Security controls that protect the
+    owner do: session timeouts, per-IP brute-force protection and IP rules (so an owner with no
+    lockout still cannot be guessed at without limit). The owner's own password cannot be reset
+    from the admin UI or API (`403 use_account_page`); it changes on Account, with the current
+    password, or through setup recovery;
   - **password change** is never blocked by a lockout, so a stranger failing logins cannot stop
     a user from changing a password they fear is compromised. It still cannot become a guessing
     oracle for a stolen session:

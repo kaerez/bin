@@ -108,12 +108,16 @@ export const LIMITS = {
   viewer:              { type: 'bool', def: false },
   viewerCustomRules:   { type: 'bool', def: false },
   apiEnabled:          { type: 'bool', def: false },
-  apiMaxKeys:          { type: 'int', min: 0, max: 100, nullable: false, def: 5 },
+  // null = no limit (still bounded by MAX_API_KEYS).
+  apiMaxKeys:          { type: 'int', min: 0, max: 100, nullable: true, def: 5 },
   // File policy (public/js/filepolicy.js): allow/block list of types, folder depth.
   fileTypeMode:        { type: 'enum', values: FILE_TYPE_MODES, def: 'any' },
   fileTypeRules:       { type: 'rules', def: [] },
   maxFolderDepth:      { type: 'int', min: 0, max: MAX_FOLDER_DEPTH, nullable: true, def: null },
 };
+
+/** Hard ceiling on API keys per account, whatever the limit says. */
+export const MAX_API_KEYS = 1000;
 
 // Keys the API channel may restrict further (never widen).
 export const API_LIMIT_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec',

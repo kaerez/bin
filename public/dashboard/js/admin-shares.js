@@ -128,13 +128,13 @@ export async function renderShares(p) {
     const hintId = `adm-label-hint-${r.id}`;
     const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': `Label of ${r.id}`, placeholder: '(no label)', 'aria-describedby': hintId });
     labelIn.addEventListener('change', async () => {
-      try { await admin.updateShare(r.id, { label: labelIn.value }); r.label = labelIn.value; toast('label saved'); } catch (e) { toast(friendlyError(e)); labelIn.value = r.label || ''; }
+      try { await admin.updateShare(r.id, { label: labelIn.value }); r.label = labelIn.value; toast('Label saved.'); } catch (e) { toast(friendlyError(e), { error: true }); labelIn.value = r.label || ''; }
     });
     const actions = h('div.btn-row.row-actions');
     const lockBtn = h('button.btn', { type: 'button', text: r.locked ? 'Unlock' : 'Lock' });
     lockBtn.onclick = async () => {
       lockBtn.disabled = true;
-      try { const res = await admin.lockShare(r.id, !r.locked); r.locked = res.locked ? 1 : 0; toast(r.locked ? 'locked' : 'unlocked'); render(); } catch (e) { lockBtn.disabled = false; toast(friendlyError(e)); }
+      try { const res = await admin.lockShare(r.id, !r.locked); r.locked = res.locked ? 1 : 0; toast(r.locked ? 'Share locked.' : 'Share unlocked.'); render(); } catch (e) { lockBtn.disabled = false; toast(friendlyError(e), { error: true }); }
     };
     actions.appendChild(lockBtn);
     const tr = h('tr', { dataset: { status: r.status } });
@@ -143,7 +143,7 @@ export async function renderShares(p) {
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
       armConfirm(rv, 'Revoke now — irreversible', async () => {
         rv.disabled = true;
-        try { await admin.revokeShare(r.id); r.status = 'revoked'; render(); toast('revoked'); } catch (e) { rv.disabled = false; toast(friendlyError(e)); }
+        try { await admin.revokeShare(r.id); r.status = 'revoked'; render(); toast('Share revoked.'); } catch (e) { rv.disabled = false; toast(friendlyError(e), { error: true }); }
       });
       actions.appendChild(rv);
     }
@@ -178,7 +178,7 @@ export async function renderShares(p) {
       if (add > 0) patch.expires = Math.max(r.expires || now(), now()) + add;
       if (!Object.keys(patch).length) return showMsg(emsg, 'Nothing to change.');
       save.disabled = true;
-      try { await admin.updateShare(r.id, patch); toast('updated'); load(true); } catch (e) { save.disabled = false; showMsg(emsg, friendlyError(e)); }
+      try { await admin.updateShare(r.id, patch); toast('Share updated.'); load(true); } catch (e) { save.disabled = false; showMsg(emsg, friendlyError(e)); toast(friendlyError(e), { error: true }); }
     };
     const row = h('tr.extend-row', {}, h('td', { colspan: '8' },
       h('div.extend-box', {},

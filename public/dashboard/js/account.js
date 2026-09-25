@@ -6,7 +6,7 @@ import { changePassword, listKeys, createKey, revokeKey, myActivity, ApiError } 
 import { stretch, newCredential, checkNewPassword } from '../../js/pwauth.js';
 import { prelogin } from '../../js/api.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
-import { copyText, flashCopied } from '../../js/ui.js';
+import { copyText, flashCopied, toast } from '../../js/ui.js';
 import { ready } from './nav.js';
 
 const $ = (s) => document.querySelector(s);
@@ -72,8 +72,11 @@ function wirePassword() {
       await changePassword({ current, ...cred });
       form.reset();
       showMsg(msg, 'Password changed. Your other sessions were signed out.', false);
+      toast('Password changed. Your other sessions were signed out.');
     } catch (err) {
-      showMsg(msg, err instanceof ApiError && err.code === 'wrong_password' ? 'The current password is incorrect.' : friendlyError(err));
+      const text = err instanceof ApiError && err.code === 'wrong_password' ? 'The current password is incorrect.' : friendlyError(err);
+      showMsg(msg, text);
+      toast(text, { error: true });
     } finally {
       btn.disabled = false;
       btn.textContent = 'Change password';
@@ -101,9 +104,11 @@ function wireKeys() {
       $('#key-copy').onclick = async () => flashCopied($('#key-copy'), (await copyText(r.key)) ? 'copied' : 'failed');
       $('#key-name').value = '';
       msg.hidden = true;
+      toast('API key created. Copy it now: it is shown only once.');
       renderKeys();
     } catch (err) {
       showMsg(msg, friendlyError(err));
+      toast(friendlyError(err), { error: true });
     }
   });
   void card;
@@ -117,7 +122,7 @@ async function renderKeys() {
     for (const k of keys) {
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
       armConfirm(rv, 'Revoke?', async () => {
-        try { await revokeKey(k.id); renderKeys(); } catch (e) { showMsg($('#keys-msg'), friendlyError(e)); }
+        try { await revokeKey(k.id); toast('API key revoked.'); renderKeys(); } catch (e) { showMsg($('#keys-msg'), friendlyError(e)); toast(friendlyError(e), { error: true }); }
       });
       body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
         h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),

@@ -3,7 +3,7 @@
 // the DISABLE_BFP / DISABLE_BFP_SETUP kill switches.
 
 import { bfpDisabled, binding } from './config.js';
-import { parseIp, parseCidr, cidrContains, trackingKey } from './ip.js';
+import { parseIp, parseRule, ruleContains, trackingKey } from './ip.js';
 import { clientIp } from './http.js';
 import { GUARD_SHARDS } from '../guard-do.js';
 
@@ -32,7 +32,7 @@ export async function cachedSettings(env) {
 async function manualRules(env) {
   if (Date.now() - rulesCache.at > CACHE_MS) {
     const rows = await directory(env).ipRules();
-    rulesCache = { at: Date.now(), rules: rows.map((r) => ({ ...r, c: parseCidr(r.cidr) })).filter((r) => r.c) };
+    rulesCache = { at: Date.now(), rules: rows.map((r) => ({ ...r, c: parseRule(r.cidr) })).filter((r) => r.c) };
   }
   const t = Math.floor(Date.now() / 1000);
   return rulesCache.rules.filter((r) => !r.expires || r.expires > t);
@@ -64,8 +64,8 @@ export async function ipContext(env, request) {
     const parsed = parseIp(ip);
     const rules = await manualRules(env);
     // Allow beats block.
-    if (rules.some((r) => r.action === 'allow' && cidrContains(r.c, parsed))) manual = 'allow';
-    else if (rules.some((r) => r.action === 'block' && cidrContains(r.c, parsed))) manual = 'block';
+    if (rules.some((r) => r.action === 'allow' && ruleContains(r.c, parsed))) manual = 'allow';
+    else if (rules.some((r) => r.action === 'block' && ruleContains(r.c, parsed))) manual = 'block';
   }
   return { ip, key, manual, off, settings };
 }

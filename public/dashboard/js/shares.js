@@ -58,7 +58,7 @@ function render() {
     // aria-describedby announces it on focus either way.
     const labelHint = unencryptedHint(`share-label-hint-${i}`, labelIn);
     labelIn.addEventListener('change', async () => {
-      try { await updateShare(r.id, { label: labelIn.value }); r.label = labelIn.value; toast('label saved'); } catch (e) { toast(friendlyError(e)); labelIn.value = r.label || ''; }
+      try { await updateShare(r.id, { label: labelIn.value }); r.label = labelIn.value; toast('Label saved.'); } catch (e) { toast(friendlyError(e), { error: true }); labelIn.value = r.label || ''; }
     });
     const actions = h('div.btn-row.row-actions');
     if (active && locked) {
@@ -68,7 +68,7 @@ function render() {
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
       armConfirm(rv, 'Revoke now — irreversible', async () => {
         rv.disabled = true;
-        try { await revokeShare(r.id); r.status = 'revoked'; render(); toast('revoked'); } catch (e) { rv.disabled = false; toast(friendlyError(e)); }
+        try { await revokeShare(r.id); r.status = 'revoked'; render(); toast('Share revoked.'); } catch (e) { rv.disabled = false; toast(friendlyError(e), { error: true }); }
       });
       actions.appendChild(rv);
     }
@@ -106,11 +106,12 @@ function openExtend(r, tr) {
     save.disabled = true;
     try {
       await updateShare(r.id, patch);
-      toast('updated');
+      toast('Share updated.');
       reload();
     } catch (e) {
       save.disabled = false;
       showMsg(msg, friendlyError(e));
+      toast(friendlyError(e), { error: true });
     }
   };
   const limitsText = `Your limits: ${L.maxViews === null ? 'any number of views' : `up to ${L.maxViews} views`}, `

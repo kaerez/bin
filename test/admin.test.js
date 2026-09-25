@@ -96,7 +96,7 @@ describe('capability limits and quotas', () => {
 
   it('rejects invalid limit values', async () => {
     const u = await makeUser('erin');
-    for (const patch of [{ maxViews: 0 }, { text: 'yes' }, { nope: 1 }, { apiMaxKeys: null }]) {
+    for (const patch of [{ maxViews: 0 }, { text: 'yes' }, { nope: 1 }, { apiMaxKeys: -1 }, { apiMaxKeys: 101 }]) {
       expect((await limits(u.id, 'all', patch)).status).toBe(400);
     }
     expect((await limits(u.id, 'api', { apiEnabled: true })).status).toBe(400); // not an API-channel key

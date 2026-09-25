@@ -58,10 +58,11 @@ function exportCard(users, profile) {
       const text = await sealExport(document, pass1.value);
       download(text, `secbin-export-${location.hostname}-${new Date().toISOString().slice(0, 10)}.json`);
       showMsg(msg, `Exported ${document.system ? 'the system configuration and ' : ''}${document.users.length} user${document.users.length === 1 ? '' : 's'}. Keep the file and its passphrase apart.`, false);
-      toast('export saved');
+      toast('Export saved.');
       pass1.value = pass2.value = mine.value = '';
     } catch (e) {
       showMsg(msg, e instanceof ExportCryptError ? e.message : friendlyError(e));
+      toast(e instanceof ExportCryptError ? e.message : friendlyError(e), { error: true });
     } finally {
       go.disabled = false;
     }
@@ -191,13 +192,14 @@ function renderReview(box, doc, users, profile) {
         showMsg(msg, r.plan.errors.length ? 'Fix the problems below, then preview again.' : 'Preview ready — nothing has changed yet. Review it, then import.', r.plan.errors.length > 0);
       } else {
         showMsg(msg, 'Imported.', false);
-        toast('import applied');
+        toast('Import applied.');
         mine.value = '';
         previewed = null;
       }
     } catch (e) {
       if (e instanceof ApiError && e.extra && e.extra.plan) renderPlan(planBox, e.extra.plan);
       showMsg(msg, friendlyError(e));
+      if (!dryRun) toast(friendlyError(e), { error: true });
     } finally {
       preview.disabled = false;
       if (!dryRun || !previewed) apply.disabled = true;

@@ -33,7 +33,7 @@ const LIMIT_UI = [
   ['viewer', 'In-browser viewer', 'bool'],
   ['viewerCustomRules', 'Use per-user viewer rules', 'bool'],
   ['apiEnabled', 'API keys allowed', 'bool'],
-  ['apiMaxKeys', 'Max API keys', 'int', { nullable: false }],
+  ['apiMaxKeys', 'Max API keys', 'int'],
   ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
   ['fileTypeRules', 'File type list', 'rules'],
   ['maxFolderDepth', 'Max folder depth', 'int'],
@@ -56,8 +56,18 @@ const RENDERERS = ['text', 'markdown', 'code', 'image', 'pdf', 'media'];
 let overview = null;
 let profile = null;
 const msg = (text, isError = false) => { showMsg($('#admin-msg'), text, isError); if (text && !isError) setTimeout(() => { $('#admin-msg').hidden = true; }, 3000); };
+// Every save confirms with a toast (and failures with an error toast), so the
+// result is visible wherever the page is scrolled.
 const guard = async (fn, okText) => {
-  try { const r = await fn(); if (okText) msg(okText); return r; } catch (e) { msg(friendlyError(e), true); return null; }
+  try {
+    const r = await fn();
+    if (okText) { msg(okText); toast(okText); }
+    return r;
+  } catch (e) {
+    msg(friendlyError(e), true);
+    toast(friendlyError(e), { error: true });
+    return null;
+  }
 };
 
 (async () => {
@@ -101,8 +111,29 @@ function numberInput(v, { step = 1, scale = 1 } = {}) {
   return i;
 }
 
-/** Limits editor for one scope/channel; `rows` = current overrides, `defaults` = what applies otherwise. */
-function limitsEditor({ scope, channel, rows, effective, onSaved }) {
+/** One limit value for display ("no limit", "100 MiB", "7 days", "yes"…). */
+function limitText(type, v) {
+  if (v === undefined) return '';
+  if (type === 'rules') return v.length ? v.join(', ') : 'none';
+  if (v === null) return 'no limit';
+  if (type === 'bool') return v ? 'yes' : 'no';
+  if (type === 'bytes') return formatBytes(v);
+  if (type === 'dur') {
+    const d = splitDuration(v);
+    const unit = DURATION_UNITS.find(([k]) => k === d.unit);
+    const word = unit ? unit[1] : d.unit;
+    return `${d.n} ${d.n === 1 ? word.replace(/s$/, '') : word}`;
+  }
+  return String(v);
+}
+
+/**
+ * Limits editor for one scope/channel. `rows` = the overrides set at this
+ * level; `inherited` = what applies when a row is left on inherit (the
+ * built-in defaults for the global level, the global values for a user),
+ * shown next to the choice so every default is visible.
+ */
+function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
   const box = h('div.limits-grid');
   const keys = channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI;
   const ctls = [];
@@ -115,8 +146,10 @@ function limitsEditor({ scope, channel, rows, effective, onSaved }) {
       rules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
     }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: 'no limit', selected: has && v === null })]),
       h('option', { value: 'value', text: 'limit to', selected: has && v !== null })]);
+    const inh = channel !== 'api' && inherited && Object.prototype.hasOwnProperty.call(inherited, key) ? ` (${limitText(type, inherited[key])})` : '';
+    const inheritText = channel === 'api' ? 'no extra restriction' : scope === 'global' ? `built-in default${inh}` : `inherit${inh}`;
     const mode = h('select.input', { 'aria-label': `${label} mode` },
-      h('option', { value: 'inherit', text: scope === 'global' ? (channel === 'api' ? 'no extra restriction' : 'built-in default') : 'inherit', selected: !has }),
+      h('option', { value: 'inherit', text: inheritText, selected: !has }),
       ...choices());
     let val = null;
     if (type === 'rules') {
@@ -131,7 +164,7 @@ function limitsEditor({ scope, channel, rows, effective, onSaved }) {
     mode.onchange = sync;
     sync();
     const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
-    const effText = eff === undefined ? '' : type === 'rules' ? `effective: ${eff.length ? eff.join(', ') : 'none'}` : eff === null ? 'effective: no limit' : type === 'bytes' ? `effective: ${formatBytes(eff)}` : type === 'dur' ? `effective: ${eff}s` : `effective: ${eff}`;
+    const effText = eff === undefined ? '' : `effective: ${limitText(type, eff)}`;
     box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: effText })));
     ctls.push({ key, type, mode, val });
   }
@@ -236,13 +269,14 @@ async function renderUsers() {
     if (u.role !== 'owner') {
       actions.appendChild(h('button.btn', { type: 'button', text: 'Manage', on: { click: () => openUser(u.id) } }));
       actions.appendChild(h('button.btn', { type: 'button', text: 'Log in as', on: { click: async () => { if (await guard(() => admin.impersonate(u.id))) location.href = '/dashboard/'; } } }));
-      actions.appendChild(h('button.btn', { type: 'button', text: u.disabled ? 'Enable' : 'Disable', on: { click: async () => { await guard(() => admin.updateUser(u.id, { disabled: !u.disabled }), 'Saved.'); renderUsers(); } } }));
+      actions.appendChild(h('button.btn', { type: 'button', text: u.disabled ? 'Enable' : 'Disable', on: { click: async () => { await guard(() => admin.updateUser(u.id, { disabled: !u.disabled }), u.disabled ? 'User enabled.' : 'User disabled.'); renderUsers(); } } }));
       if (u.locked) actions.appendChild(h('button.btn', { type: 'button', text: 'Unlock', on: { click: async () => { await guard(() => admin.unlock(u.id), 'Unlocked.'); renderUsers(); } } }));
       const del = h('button.btn.danger', { type: 'button', text: 'Delete' });
       armConfirm(del, 'Delete user + revoke shares?', async () => { await guard(() => admin.deleteUser(u.id, true), 'User deleted.'); renderUsers(); });
       actions.appendChild(del);
     } else {
-      actions.appendChild(h('button.btn', { type: 'button', text: 'Reset my password', on: { click: () => openUser(u.id, true) } }));
+      // The owner's own password changes on Account, with the current password.
+      actions.appendChild(h('a.btn', { href: '/dashboard/account/', text: 'Change my password (Account)' }));
     }
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td.mono', { dataset: { label: 'Role' }, text: u.role }),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
@@ -272,7 +306,7 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }), h('div.toolbar', {}, npw, npw2, setBtn)));
   if (passwordOnly) return;
 
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities & limits (GUI + API)' }), limitsEditor({ scope: id, channel: 'all', rows: d.limits.all, effective: d.effective.all, onSaved: () => openUser(id, false, { scroll: false }) })));
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities & limits (GUI + API)' }), limitsEditor({ scope: id, channel: 'all', rows: d.limits.all, effective: d.effective.all, inherited: overview?.defaults.inherited, onSaved: () => openUser(id, false, { scroll: false }) })));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Extra API restrictions (can only narrow, never widen)' }), limitsEditor({ scope: id, channel: 'api', rows: d.limits.api, effective: d.effective.api, onSaved: () => openUser(id, false, { scroll: false }) })));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas for this user (in addition to global quotas)' }), quotasEditor(id, d.quotas)));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Per-user viewer rules (used when "Use per-user viewer rules" is on)' }), rulesEditor(id, d.viewerRules)));
@@ -294,8 +328,8 @@ async function renderDefaults() {
   await refreshOverview();
   if (!overview) return;
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Default limits for every user' }),
-    h('p.mono.muted', { text: 'Per-user settings override these. The owner is never limited.' }),
-    limitsEditor({ scope: 'global', channel: 'all', rows: overview.limits.all })));
+    h('p.mono.muted', { text: 'Per-user settings override these; the built-in default is shown in brackets. Global settings never apply to the owner.' }),
+    limitsEditor({ scope: 'global', channel: 'all', rows: overview.limits.all, inherited: overview.defaults.limits })));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Default extra API restrictions' }),
     limitsEditor({ scope: 'global', channel: 'api', rows: overview.limits.api })));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Global quotas (apply to every user separately)' }), quotasEditor('global', overview.quotas)));
@@ -308,18 +342,23 @@ async function renderSettings() {
   if (!overview) return;
   const s = overview.settings;
   const fields = [];
-  const dur = (key, label) => { const c = durationInput(s[key]); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c); };
-  const int = (key, label) => { const c = numberInput(s[key]); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c); };
-  const mib = (key, label, max) => { const c = numberInput(s[key], { step: 1, scale: MiB }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono', { text: `MiB (max ${max})` })); };
+  const defs = overview.defaults.settings;
+  const dflt = (text) => h('span.mono.muted', { text: `default: ${text}` });
+  const dur = (key, label) => { const c = durationInput(s[key]); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(limitText('dur', defs[key]))); };
+  const int = (key, label) => { const c = numberInput(s[key]); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(String(defs[key]))); };
+  const mib = (key, label, max) => { const c = numberInput(s[key], { step: 1, scale: MiB }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono', { text: `MiB (max ${max})` }), dflt(formatBytes(defs[key]))); };
   const scopeRule = (scope, label) => h('div.card.stack', {}, h('h3.field-label', { text: label }),
     int(`guard.${scope}.max`, 'Failures allowed'), dur(`guard.${scope}.windowSec`, 'Within'), dur(`guard.${scope}.blockSec`, 'Then block the IP for'));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Sessions' }), dur('session.idleSec', 'Idle timeout'), dur('session.absSec', 'Absolute timeout')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'File shares' }),
     mib('files.maxShareBytes', 'Max share size (all files)', '2048'), dur('files.grantSec', 'Download window after opening'), dur('files.pendingSec', 'Unfinished upload deadline')));
   p.appendChild(h('div.stack', {}, h('h2.section-title', { text: 'Brute-force protection (per IP)' }),
-    scopeRule('login', 'Login'), scopeRule('setup', 'Setup'), scopeRule('invalid', 'Invalid fetches (unknown links, wrong #key, wrong password, bad tokens)'),
+    h('p.mono.muted', { text: 'Counts failures per network address (IPv6 per the tracking prefix below) and blocks that address for a while, whoever it is and whichever account it tries: it stops one source from guessing. Account lockout (below) is the other half: it counts wrong passwords per account, from any address, and locks only that account: it stops many sources guessing one account.' }),
+    scopeRule('login', 'Login'), scopeRule('setup', 'Setup'),
+    scopeRule('invalid', 'Invalid fetches (links that never existed, wrong #key, wrong password, bad tokens; shares that expired, were used up, revoked or deleted are not counted)'),
     h('div.card.stack', {}, int('guard.v6Prefix', 'IPv6 tracking prefix (/n)'))));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
+    h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
     int('lockout.max', 'Failed logins allowed'), dur('lockout.windowSec', 'Within'), dur('lockout.lockSec', 'Then lock the account for')));
   const save = h('button.cta', { type: 'button', text: 'Save settings' });
   save.onclick = async () => {
@@ -389,7 +428,7 @@ async function renderPublic() {
     h('div.btn-row', {}, save)));
 
   p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public account: capabilities & limits' }),
-    limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, onSaved: renderPublic })));
+    limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, inherited: overview.defaults.inherited, onSaved: renderPublic })));
   p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public quotas (counted per anonymous creator, in addition to global quotas)' }), quotasEditor(PUBLIC_ID, detail.quotas)));
 
   const t = data.trackers;
@@ -433,7 +472,7 @@ async function renderSecurity() {
   const p = clear(panel('security'));
   const [g, rules] = await Promise.all([guard(() => admin.guard()), guard(() => admin.ipRules())]);
   // Manual rules.
-  const cidr = h('input.input', { placeholder: 'IP or CIDR (v4 / v6)', 'aria-label': 'IP or CIDR', maxlength: '64' });
+  const cidr = h('input.input', { placeholder: 'IP, CIDR or range: 10.0.0.0/8, 10.0.0.5-10.0.0.20', 'aria-label': 'IP address, CIDR block or range', maxlength: '100' });
   const action = h('select.input', { 'aria-label': 'Action' }, h('option', { value: 'block', text: 'block' }), h('option', { value: 'allow', text: 'allow (never blocked or tracked)' }));
   const ttl = durationInput(null, { allowNull: true });
   const note = h('input.input', { placeholder: 'note (optional)', maxlength: '100', 'aria-label': 'Note' });

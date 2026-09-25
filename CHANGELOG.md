@@ -104,6 +104,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Fixed
 
+- **Admin:** global settings (share-size cap, viewer switch and size, limits, quotas) never apply
+  to the owner; the owner's own password can no longer be reset from the admin UI/API (use
+  Account); every limit and setting shows its default, and "Max API keys" can be "no limit";
+  expired, used-up, revoked or deleted shares no longer count as invalid fetches; the settings
+  explain per-IP protection versus account lockout; IP rules accept ranges (`a-b`) as well as
+  CIDR; every save confirms with a clear toast (errors in red).
 - **iOS:** icons no longer blow up to full width when a stale stylesheet is served (intrinsic
   SVG sizes), and the service worker now always revalidates static assets with the server
   (cache version 2 drops the old cache).
