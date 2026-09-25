@@ -64,7 +64,7 @@ flowchart TD
 | Accounts | Built-in login; one owner/admin; users with per-user capabilities, limits, quotas and API keys. |
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, and label shares. |
 | Admin | Users, impersonation ("log in as"), password resets, limits, quotas, session timeouts, file-size caps, viewer policy, brute-force rules, IP allow/block rules, audit log. |
-| Brute-force protection | Per-IP tracking for login, setup and invalid fetches (unknown links, wrong keys, wrong passwords); account lockout. |
+| Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
 | Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. Needs Legal/Compliance review before use — see SECURITY.md. |
 | CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
 | Installable | A PWA: install from the banner (or the browser menu; on iOS, Share → Add to Home Screen). The service worker caches only the static shell — never shares or API responses. |
@@ -139,19 +139,22 @@ working.
 - **Passwords** are stretched in the browser with Argon2id; the server only stores a hash of the
   result. Minimum length 12.
 - **Users** (owner only): create, disable, delete (optionally revoking their shares), reset a
-  password without knowing the old one, unlock, and **log in as** a user — every action taken
+  user's password without knowing the old one (never the owner's own — that changes on Account,
+  with the current password), unlock, and **log in as** a user — every action taken
   while impersonating is recorded with the real actor in the audit log, while the user's own
   activity shows it as theirs.
 - **Capabilities & limits** — defaults for everyone plus per-user overrides: notes/files on or
   off, max views, unlimited views allowed, max expiry, max share size, max single-file size, max
-  files per share, in-browser viewer, API keys (on/off, max count).
+  files per share, in-browser viewer, API keys (on/off, max count or no limit). Every setting shows
+  its built-in default. Global settings never restrict the owner (session timeouts and per-IP
+  protection still apply).
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
   *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).
 - **Settings** — session timeouts, file-share size cap (default 100 MiB, max 2 GiB), download
   window, upload deadline, viewer policy, brute-force rules, lockout rules.
 - **Security** — current blocks and tracked IPs per scope, manual allow/block rules for IPv4/IPv6
-  addresses and CIDR ranges (allow beats block).
+  addresses, CIDR blocks and ranges such as `10.0.0.5-10.0.0.20` (allow beats block).
 - **Import / export** — the owner exports the system configuration and/or some or all users
   (credentials and/or configuration; never the owner, sessions, API keys or shares) to a file
   **encrypted in the browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a

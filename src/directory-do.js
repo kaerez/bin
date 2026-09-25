@@ -18,12 +18,13 @@ import { DurableObject } from 'cloudflare:workers';
 import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, timingSafeEqualHex } from '../public/js/bytes.js';
 import { ARGON2 } from '../public/js/format.js';
 import {
-  SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi,
+  SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES,
 } from './lib/settings.js';
-import { normalizeRule, parseIp, parseCidr, cidrContains } from './lib/ip.js';
+import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
 import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
+import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -238,11 +239,26 @@ export class Directory extends DurableObject {
     return out;
   }
   #effective(u) {
-    if (u.role === 'owner') return { all: { ...UNLIMITED, apiMaxKeys: 100 }, api: { ...UNLIMITED } };
+    // Global (and per-user) limits never apply to the owner.
+    if (u.role === 'owner') return { all: { ...UNLIMITED }, api: { ...UNLIMITED } };
     const all = resolveLimits(this.#limitRows('', 'all'), this.#limitRows(u.id, 'all'));
     const api = restrictForApi(all, this.#limitRows('', 'api'), this.#limitRows(u.id, 'api'));
     return { all, api };
   }
+  /**
+   * Server-wide caps as they apply to `u`. The owner is exempt from the global
+   * settings that restrict what an account may do (the share-size cap and the
+   * viewer switch and size), keeping only the protocol's hard ceilings.
+   */
+  #caps(u, L, s) {
+    const owner = u.role === 'owner';
+    return {
+      maxShareBytes: owner ? HARD_MAX_SHARE_BYTES : Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity),
+      viewerEnabled: owner ? true : s['viewer.enabled'] && L.viewer,
+      viewerMaxBytes: owner ? SETTINGS['viewer.maxBytes'].max : s['viewer.maxBytes'],
+    };
+  }
+
   #viewerRules(u, limits) {
     const scope = u.role !== 'owner' && limits.viewerCustomRules ? u.id : '';
     return this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', scope).toArray()
@@ -407,21 +423,22 @@ export class Directory extends DurableObject {
     const eff = this.#effective(u);
     const s = this.#settings();
     const keyCount = this.sql.exec('SELECT COUNT(*) AS c FROM api_keys WHERE user_id = ?', u.id).one().c;
+    const caps = this.#caps(u, eff.all, s);
     return {
       user: this.#publicUser(u),
       impersonating,
       limits: eff.all,
       apiLimits: eff.api,
       caps: {
-        maxShareBytes: Math.min(s['files.maxShareBytes'], eff.all.maxShareBytes ?? Infinity),
+        maxShareBytes: caps.maxShareBytes,
         grantSec: s['files.grantSec'],
       },
       viewer: {
-        enabled: s['viewer.enabled'] && eff.all.viewer,
-        maxBytes: s['viewer.maxBytes'],
-        rules: s['viewer.enabled'] && eff.all.viewer ? this.#viewerRules(u, eff.all) : [],
+        enabled: caps.viewerEnabled,
+        maxBytes: caps.viewerMaxBytes,
+        rules: caps.viewerEnabled ? this.#viewerRules(u, eff.all) : [],
       },
-      apiKeys: { enabled: eff.all.apiEnabled, max: eff.all.apiMaxKeys, count: keyCount },
+      apiKeys: { enabled: eff.all.apiEnabled, max: eff.all.apiMaxKeys ?? MAX_API_KEYS, count: keyCount },
       quotas: u.role === 'owner' ? [] : this.#quotaStatus(u.id),
     };
   }
@@ -516,7 +533,8 @@ export class Directory extends DurableObject {
     const eff = this.#effective(u).all;
     if (!eff.apiEnabled) return fail(403, 'api_disabled', 'API keys are not enabled for this account.');
     const count = this.sql.exec('SELECT COUNT(*) AS c FROM api_keys WHERE user_id = ?', uid).one().c;
-    if (count >= eff.apiMaxKeys) return fail(409, 'too_many_keys', `This account may hold at most ${eff.apiMaxKeys} API keys.`);
+    const maxKeys = eff.apiMaxKeys ?? MAX_API_KEYS;
+    if (count >= maxKeys) return fail(409, 'too_many_keys', `This account may hold at most ${maxKeys} API keys.`);
     const label = cleanLabel(name);
     if (label === null || label === '') return fail(400, 'invalid_name', 'Give the key a name (up to 100 characters).');
     if (typeof hash !== 'string' || !HEX64_RE.test(hash)) return fail(400, 'invalid_key', 'invalid key');
@@ -582,7 +600,7 @@ export class Directory extends DurableObject {
       return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds${via}.`, { max: L.maxExpireSec });
     }
     if (req.kind === 'files') {
-      const cap = Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity);
+      const cap = this.#caps(u, L, s).maxShareBytes;
       if (!(req.bytes <= cap)) return fail(413, 'share_too_large', `A file share may be at most ${cap} bytes${via}.`, { max: cap });
       if (L.maxFilesPerShare !== null && !(Number.isSafeInteger(req.files) && req.files <= L.maxFilesPerShare)) {
         return fail(403, 'too_many_files', `At most ${L.maxFilesPerShare} files per share${via}.`, { max: L.maxFilesPerShare });
@@ -890,6 +908,15 @@ export class Directory extends DurableObject {
     return 'ok';
   }
 
+  /**
+   * True when `id` was a real share (it is still in the share index: active,
+   * or ended within the last SHARE_PRUNE_SEC). Fetches of such ids that find
+   * nothing — expired, used up, revoked, deleted — are not "invalid".
+   */
+  async isKnownShare(id) {
+    return this.sql.exec('SELECT 1 FROM shares WHERE id = ?', id).toArray().length > 0;
+  }
+
   async isShareLocked(id) {
     const r = this.sql.exec('SELECT locked FROM shares WHERE id = ?', id).toArray()[0];
     return !!(r && r.locked);
@@ -1036,6 +1063,9 @@ export class Directory extends DurableObject {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account has no password.');
+    // The owner changes their own password from Account (which asks for the
+    // current one); an admin-side reset would skip that step-up.
+    if (u.role === 'owner') return fail(403, 'use_account_page', 'Change the owner password from Account, with the current password.');
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
     this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), id);
@@ -1120,9 +1150,17 @@ export class Directory extends DurableObject {
   }
 
   async adminGlobal() {
+    const globalAll = this.#limitRows('', 'all');
     return {
       settings: this.#settings(),
-      limits: { all: this.#limitRows('', 'all'), api: this.#limitRows('', 'api') },
+      limits: { all: globalAll, api: this.#limitRows('', 'api') },
+      // What applies when nothing is set: the built-in defaults, and what a
+      // user inherits from the global rows.
+      defaults: {
+        settings: Object.fromEntries(Object.entries(SETTINGS).map(([k, v]) => [k, v.def])),
+        limits: Object.fromEntries(Object.entries(LIMITS).map(([k, v]) => [k, v.def])),
+        inherited: resolveLimits(globalAll, {}),
+      },
       quotas: this.sql.exec("SELECT id, channel, kind, n, unit, max FROM quotas WHERE user_id = ''").toArray(),
       viewerRules: this.sql.exec("SELECT match, value, renderer FROM viewer_rules WHERE user_id = '' ORDER BY id").toArray(),
     };
@@ -1165,7 +1203,7 @@ export class Directory extends DurableObject {
 
   async addIpRule({ cidr, action, expires, note }, actorId) {
     const c = normalizeRule(cidr);
-    if (!c) return fail(400, 'invalid_cidr', 'Enter an IPv4/IPv6 address or CIDR range.');
+    if (!c) return fail(400, 'invalid_cidr', 'Enter an IPv4/IPv6 address, a CIDR block (10.0.0.0/8) or a range (10.0.0.5-10.0.0.20).');
     if (action !== 'allow' && action !== 'block') return fail(400, 'invalid_action', 'action must be allow or block');
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
     const n = cleanLabel(note);
@@ -1263,9 +1301,9 @@ export class Directory extends DurableObject {
       // the caller (with no allow rule for it) refuses the import.
       const me = parseIp(callerIp ?? '');
       if (me) {
-        const after = [...(await this.ipRules()), ...ipAdd].map((r) => ({ action: r.action, c: parseCidr(r.cidr) }));
-        const allowed = after.some((r) => r.action === 'allow' && cidrContains(r.c, me));
-        const blocking = ipAdd.find((r) => r.action === 'block' && cidrContains(parseCidr(r.cidr), me));
+        const after = [...(await this.ipRules()), ...ipAdd].map((r) => ({ action: r.action, c: parseRule(r.cidr) }));
+        const allowed = after.some((r) => r.action === 'allow' && ruleContains(r.c, me));
+        const blocking = ipAdd.find((r) => r.action === 'block' && ruleContains(parseRule(r.cidr), me));
         if (blocking && !allowed) plan.errors.push(`system: the IP rule "block ${blocking.cidr}" would block your own address — remove it from the file or add an allow rule for yourself first`);
       }
       // Security-relevant changes are called out in the preview.

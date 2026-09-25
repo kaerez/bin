@@ -107,8 +107,46 @@ export function trackingKey(addr, v6Prefix = 64) {
   return formatCidr(parseCidr(`${formatV6(ip.n)}/${p}`));
 }
 
-/** Normalize a rule string to canonical CIDR form, or null if invalid. */
-export function normalizeRule(s) {
+const format = (v, n) => (v === 4 ? formatV4(n) : formatV6(n));
+
+/**
+ * Parse an IP rule → { v, lo, hi } (inclusive) or null. Accepted forms: a
+ * single address, CIDR ("10.0.0.0/8", "2001:db8::/32") or an inclusive range
+ * of two addresses of the same family ("10.0.0.5-10.0.0.20", spaces allowed).
+ */
+export function parseRule(s) {
+  if (typeof s !== 'string' || s.length > 100) return null;
+  const parts = s.split('-');
+  if (parts.length === 2) {
+    const a = parseIp(parts[0]);
+    const b = parseIp(parts[1]);
+    if (!a || !b || a.v !== b.v || a.n > b.n) return null;
+    return { v: a.v, lo: a.n, hi: b.n };
+  }
+  if (parts.length !== 1) return null;
   const c = parseCidr(s);
-  return c ? formatCidr(c) : null;
+  if (!c) return null;
+  const size = 1n << BigInt(bits(c.v) - c.prefix);
+  return { v: c.v, lo: c.n, hi: c.n + size - 1n };
+}
+
+/** True when the parsed rule covers the parsed address. */
+export function ruleContains(rule, ip) {
+  return !!rule && !!ip && rule.v === ip.v && ip.n >= rule.lo && ip.n <= rule.hi;
+}
+
+/**
+ * Normalize a rule string to its canonical form, or null if invalid: CIDR
+ * ("a/len") when the rule is exactly one aligned block, else "lo-hi".
+ */
+export function normalizeRule(s) {
+  const r = parseRule(s);
+  if (!r) return null;
+  const count = r.hi - r.lo + 1n;
+  // Exactly a power of two, aligned on its size → a CIDR block.
+  if ((count & (count - 1n)) === 0n && r.lo % count === 0n) {
+    const prefix = bits(r.v) - (count.toString(2).length - 1);
+    return `${format(r.v, r.lo)}/${prefix}`;
+  }
+  return `${format(r.v, r.lo)}-${format(r.v, r.hi)}`;
 }

@@ -41,6 +41,16 @@ async function failed(env, g, res) {
   return res;
 }
 
+/**
+ * A well-formed id that found nothing. Counted as invalid only when the id
+ * was never a share: fetching a share that expired, was used up, revoked or
+ * deleted is a legitimate recipient arriving late, not a probe.
+ */
+async function goneFor(env, g, id, res) {
+  if (await directory(env).isKnownShare(id)) return res;
+  return failed(env, g, res);
+}
+
 const proofFailure = (status) => (status === 'bad_link'
   ? err(403, 'bad_link', 'The link is incomplete or corrupted.')
   : err(403, 'bad_password', 'Wrong password.'));
@@ -99,16 +109,16 @@ export async function handlePublic(request, env, url) {
 async function readHead(env, g, id, info) {
   if (info.file) {
     const r = await fileStub(env, id).head();
-    if (r.status !== 'ok') return failed(env, g, err(410, 'gone', GONE));
+    if (r.status !== 'ok') return goneFor(env, g, id, err(410, 'gone', GONE));
     return json(r.head);
   }
   if (info.burn) {
     const r = await burnStub(env, id).head();
-    if (r.status !== 'ok') return failed(env, g, err(410, 'gone', GONE));
+    if (r.status !== 'ok') return goneFor(env, g, id, err(410, 'gone', GONE));
     return json(r.head);
   }
   const rec = await kvGet(env, id);
-  if (!rec) return failed(env, g, err(404, 'not_found', GONE));
+  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE));
   return json({ v: rec.paste.v, adata: rec.paste.adata, meta: rec.paste.meta });
 }
 
@@ -120,10 +130,10 @@ async function openPaste(env, g, id, info, { lh, kh }) {
       return json(r.paste);
     }
     if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
-    return failed(env, g, err(410, 'gone', GONE));
+    return goneFor(env, g, id, err(410, 'gone', GONE));
   }
   const rec = await kvGet(env, id);
-  if (!rec) return failed(env, g, err(404, 'not_found', GONE));
+  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE));
   if (!eqB64(lh, rec.acc.lh)) return failed(env, g, proofFailure('bad_link'));
   if (!eqB64(kh, rec.acc.kh)) return failed(env, g, proofFailure('bad_password'));
   const p = rec.paste;
@@ -143,7 +153,7 @@ async function openFile(env, g, id, { lh, kh }) {
   if (r.status === 'busy') {
     return json({ error: 'busy', message: 'Too many downloads of this share are in progress. Try again in a few minutes.' }, 429, { 'retry-after': '300' });
   }
-  return failed(env, g, err(410, 'gone', GONE));
+  return goneFor(env, g, id, err(410, 'gone', GONE));
 }
 
 /**
@@ -176,7 +186,7 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
   }
   if (status === 'bad_link' || status === 'bad_password') return failed(env, g, proofFailure(status));
   if (status === 'not_allowed') return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
-  return failed(env, g, err(410, 'gone', GONE));
+  return goneFor(env, g, id, err(410, 'gone', GONE));
 }
 
 async function downloadChunk(request, env, g, id, i) {
@@ -213,10 +223,10 @@ async function deleteByToken(request, env, g, id, info) {
     const r = await (info.file ? fileStub(env, id) : burnStub(env, id)).remove(token);
     if (r.status === 'ok') { await directory(env).markShareEnded(id, 'deleted'); return json({ status: 'deleted', id }); }
     if (r.status === 'bad') return failed(env, g, err(403, 'bad_token', 'Wrong deletion token. The share was not deleted.'));
-    return failed(env, g, err(404, 'not_found', GONE));
+    return goneFor(env, g, id, err(404, 'not_found', GONE));
   }
   const rec = await kvGet(env, id);
-  if (!rec) return failed(env, g, err(404, 'not_found', GONE));
+  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE));
   if (!(await verifyToken(token, rec.dth))) return failed(env, g, err(403, 'bad_token', 'Wrong deletion token. The share was not deleted.'));
   await kvDelete(env, id);
   await directory(env).markShareEnded(id, 'deleted');

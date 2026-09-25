@@ -16,15 +16,20 @@ export function showView(name) {
   if (shown && !shown.contains(document.activeElement)) shown.focus();
 }
 
-/** Transient bottom toast. */
+/**
+ * Transient bottom toast (role="status", so it is announced). Every save
+ * confirms with one. `{ error: true }` styles it as a failure and keeps it up
+ * longer.
+ */
 let toastTimer;
-export function toast(message) {
+export function toast(message, { error = false } = {}) {
   const t = document.getElementById('toast');
   if (!t) return;
   t.textContent = message;
+  t.classList.toggle('error', !!error);
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+  toastTimer = setTimeout(() => t.classList.remove('show'), error ? 6000 : 3500);
 }
 
 /** Copy text to the clipboard, with a legacy fallback. Returns a boolean. */
