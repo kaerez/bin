@@ -191,7 +191,9 @@
                 <div class="btn-row reveal d3 mt1">
                     <button type="button" class="btn btn-grow" id="copy-content">Copy text</button>
                     <button type="button" class="btn" id="toggle-raw">Raw</button>
+                    <button type="button" class="btn danger" id="paste-delete" hidden>Delete now</button>
                 </div>
+                <p class="msg" id="paste-msg" role="status" hidden></p>
             </section>
 
             <!-- ── FILES VIEW ─────────────────────────────────────────────────── -->
@@ -204,6 +206,9 @@
                     </button>
                 </div>
                 <div class="files-tree reveal d2" id="files-tree"></div>
+                <div class="btn-row reveal d3 mt1" id="files-delete-row" hidden>
+                    <button type="button" class="btn danger" id="files-delete">Delete now</button>
+                </div>
                 <p class="msg" id="files-progress" role="status" hidden></p>
                 <p class="msg error" id="files-msg" role="alert" hidden></p>
                 <div class="preview card" id="files-preview" hidden>

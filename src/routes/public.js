@@ -58,7 +58,7 @@ export async function handlePublic(request, env, url) {
     return err(410, 'moved', 'Creating notes now requires an account: POST /api/private/paste.');
   }
 
-  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|chunk)(?:\/(\d{1,6}))?)?$/);
+  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|chunk)(?:\/(\d{1,6}))?)?$/);
   if (!m) return null;
   const [, kind, rawId, action, idx] = m;
   const id = decodePathSegment(rawId);
@@ -82,6 +82,12 @@ export async function handlePublic(request, env, url) {
     assertNotCrossSite(request);
     const proofs = await proofHashes(request);
     return info.file ? openFile(env, g, id, proofs) : openPaste(env, g, id, info, proofs);
+  }
+  if (action === 'expire') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertNotCrossSite(request);
+    const proofs = await proofHashes(request);
+    return expireByOpener(env, g, id, info, proofs);
   }
   if (action === 'chunk' && info.file && idx !== undefined) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -137,6 +143,39 @@ async function openFile(env, g, id, { lh, kh }) {
   if (r.status === 'busy') {
     return json({ error: 'busy', message: 'Too many downloads of this share are in progress. Try again in a few minutes.' }, 429, { 'retry-after': '300' });
   }
+  return failed(env, g, err(410, 'gone', GONE));
+}
+
+/**
+ * "Delete now" by a recipient: needs the same two proofs as opening (so only
+ * someone who can open the share), works only when the sender allowed it, and
+ * is refused while the admin has the share locked. Spends no view.
+ */
+async function expireByOpener(env, g, id, info, { lh, kh }) {
+  const dir = directory(env);
+  if (info.file) binding(env, 'FILES');
+  // Checked now, not only at creation: a lock, or the admin withdrawing the
+  // sender's permission, stops "delete now" on existing shares too.
+  const allowed = await dir.recipientDeleteStatus(id);
+  if (allowed === 'locked') return err(423, 'share_locked', 'The administrator has locked this share; it cannot be deleted.');
+  if (allowed !== 'ok') return err(403, 'not_allowed', 'Recipients may not delete this share.');
+  let status;
+  if (info.file || info.burn) {
+    status = (await (info.file ? fileStub(env, id) : burnStub(env, id)).expireByOpener(lh, kh)).status;
+  } else {
+    const rec = await kvGet(env, id);
+    if (!rec) status = 'gone';
+    else if (!eqB64(lh, rec.acc.lh)) status = 'bad_link';
+    else if (!eqB64(kh, rec.acc.kh)) status = 'bad_password';
+    else if (rec.paste.meta.deletable !== true) status = 'not_allowed';
+    else { await kvDelete(env, id); status = 'ok'; }
+  }
+  if (status === 'ok') {
+    await dir.shareDeletedByRecipient(id);
+    return json({ status: 'deleted', id });
+  }
+  if (status === 'bad_link' || status === 'bad_password') return failed(env, g, proofFailure(status));
+  if (status === 'not_allowed') return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
   return failed(env, g, err(410, 'gone', GONE));
 }
 

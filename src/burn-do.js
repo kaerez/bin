@@ -21,6 +21,7 @@ function metaOut(rec) {
   const out = { expire: m.expire, created: m.created, expires: m.expires };
   out.views = rec.views;           // null = raised to unlimited
   out.left = rec.left;
+  if (m.deletable === true) out.deletable = true;
   return out;
 }
 
@@ -100,6 +101,22 @@ export class BurnPaste extends DurableObject {
       }
       await this.ctx.storage.put(KEY, next);
       return { status: 'ok', views: next.views, left: next.left, expires: next.paste.meta.expires };
+    });
+  }
+
+  /**
+   * "Delete now" by someone who can open the share (both proofs): only when
+   * the sender allowed it (meta.deletable). Spends no view.
+   */
+  async expireByOpener(lh, kh) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const rec = await this.#get();
+      if (!rec) return { status: 'gone' };
+      if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
+      if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
+      if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };
+      await this.#purge();
+      return { status: 'ok' };
     });
   }
 

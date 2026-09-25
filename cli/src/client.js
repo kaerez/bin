@@ -139,6 +139,18 @@ export class Client {
     });
   }
 
+  /**
+   * "Delete now" as a recipient: the same two access proofs as opening. Works
+   * only when the sender allowed it; spends no view.
+   */
+  expireShare(kind, id, { linkProof, keyProof }) {
+    return this.request(`/api/${kind}/${encodeURIComponent(id)}/expire`, {
+      method: 'POST',
+      headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof },
+      fallback: 'Delete failed.',
+    });
+  }
+
   // ── creation (API key) ─────────────────────────────────────────────────────
 
   /** Create a note. `paste` is encryptPaste().body. Returns { id, deletetoken, expires }. */

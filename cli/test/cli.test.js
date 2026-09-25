@@ -841,7 +841,7 @@ describe('dispatch and help ergonomics', () => {
     expect(await run(['--help'], a.io)).toBe(0);
     expect(a.text.out()).toMatch(/SECBIN_SERVER/);
     expect(a.text.out()).toMatch(/SECBIN_API_KEY/);
-    expect(a.text.out()).toMatch(/UNENCRYPTED/);
+    expect(a.text.out()).toMatch(/NOT ENCRYPTED: *\n *visible to the server and its administrators/);
     expect(a.text.out()).not.toMatch(/binthere|gaury/i);
   });
 

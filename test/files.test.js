@@ -15,10 +15,10 @@ beforeAll(async () => { oc = await owner(); });
 afterEach(() => vi.useRealTimers());
 
 /** Upload `files` [{path, bytes, type}] as `cookie`; returns share info. */
-async function upload(cookie, files, { views = null, expire = '1h', password = '', label, headers = {}, dirs = [] } = {}) {
+async function upload(cookie, files, { views = null, expire = '1h', password = '', label, headers = {}, dirs = [], deletable, metaDeletable = deletable } = {}) {
   const l = layout(files.map((f) => ({ path: f.path, type: f.type || 'application/octet-stream', size: f.bytes.length, mtime: 0 })), dirs);
   const manifest = buildManifest({ entries: l.entries, total: l.total });
-  const init = await fetchJson('/api/private/file', { method: 'POST', cookie, headers, body: { views, expire, padded: l.padded, files: files.length, maxFile: Math.max(0, ...files.map((f) => f.bytes.length)) } });
+  const init = await fetchJson('/api/private/file', { method: 'POST', cookie, headers, body: { views, expire, padded: l.padded, files: files.length, maxFile: Math.max(0, ...files.map((f) => f.bytes.length)), ...(deletable ? { deletable: true } : {}) } });
   if (init.status !== 201) return { init };
   const { id, uploadtoken, deletetoken, chunks } = await init.json();
   const key = await importFileKey(manifest.fk);
@@ -30,7 +30,7 @@ async function upload(cookie, files, { views = null, expire = '1h', password = '
     });
     if (r.status !== 200) throw new Error(`chunk ${i}: ${r.status} ${await r.text()}`);
   }
-  const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', bar: views !== null, views: views ?? undefined, expire, password });
+  const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', bar: views !== null, views: views ?? undefined, expire, password, deletable: metaDeletable });
   const fin = await fetchJson(`/api/private/file/${id}/finalize`, { method: 'POST', cookie, headers: { ...headers, 'x-upload-token': uploadtoken }, body: { paste: body, label } });
   return { id, deletetoken, uploadtoken, fragment, manifest, chunks, fin, init, l };
 }
@@ -204,5 +204,53 @@ describe('download grants', () => {
       await state.storage.put('grants', [{ h: '0'.repeat(64), exp: 1 }]);
     });
     expect((await openShare(s.id, s.fragment)).res.status).toBe(200);
+  });
+});
+
+describe('recipient "delete now" on file shares', () => {
+  const allow = (id) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: id, channel: 'all', patch: { openerDelete: true } } });
+  const expire = async (id, fragment, password = '') => {
+    const head = await (await fetchJson(`/api/file/${id}`)).json();
+    const { headers } = await proofHeaders(head.adata, fragment, password);
+    return fetchJson(`/api/file/${id}/expire`, { method: 'POST', headers });
+  };
+
+  it('refuses a manifest whose delete flag differs from the authorized upload', async () => {
+    const u = await makeUser('files-deletable-mismatch');
+    await allow(u.id);
+    const a = await upload(u.cookie, [{ path: 'a.txt', bytes: utf8('x') }], { deletable: true, metaDeletable: false });
+    expect(a.fin.status).toBe(400);
+    const b = await upload(u.cookie, [{ path: 'a.txt', bytes: utf8('x') }], { metaDeletable: true });
+    expect(b.fin.status).toBe(400);
+  });
+
+  it('deletes the share and its R2 chunks, with both proofs', async () => {
+    const u = await makeUser('files-deletable');
+    await allow(u.id);
+    const s = await upload(u.cookie, [{ path: 'a.txt', bytes: utf8('delete me') }], { deletable: true, password: 'pw-files-1' });
+    expect(s.fin.status).toBe(200);
+    expect((await (await fetchJson(`/api/file/${s.id}`)).json()).meta.deletable).toBe(true);
+    expect(await env.FILES.get(`f/${s.id}/0`)).not.toBeNull();
+    expect((await expire(s.id, s.fragment, 'wrong-password')).status).toBe(403);
+    expect(await env.FILES.get(`f/${s.id}/0`)).not.toBeNull();
+    expect((await expire(s.id, s.fragment, 'pw-files-1')).status).toBe(200);
+    expect(await env.FILES.get(`f/${s.id}/0`)).toBeNull();
+    expect((await fetchJson(`/api/file/${s.id}`)).status).toBe(410);
+    const mine = await (await fetchJson('/api/private/shares', { cookie: u.cookie })).json();
+    expect(mine.rows.find((r) => r.id === s.id).status).toBe('deleted');
+  });
+});
+
+describe('"delete now" after a file share\'s last view', () => {
+  it('is refused: downloads already granted run out on their own', async () => {
+    const u = await makeUser('files-deletable-closed');
+    await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { openerDelete: true } } });
+    const s = await upload(u.cookie, [{ path: 'a.txt', bytes: utf8('last view') }], { views: 1, deletable: true });
+    expect(s.fin.status).toBe(200);
+    const o = await openShare(s.id, s.fragment);
+    expect(o.res.status).toBe(200);
+    const { headers } = await proofHeaders(o.head.adata, s.fragment, '');
+    expect((await fetchJson(`/api/file/${s.id}/expire`, { method: 'POST', headers })).status).toBe(410);
+    expect(await env.FILES.get(`f/${s.id}/0`)).not.toBeNull();
   });
 });

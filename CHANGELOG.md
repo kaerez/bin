@@ -15,6 +15,20 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 
 ### Added
 
+- **Link and credential shares** (`fmt` `url` / `secret`), off until the administrator allows
+  them globally or per user:
+  - links: http(s) only, no embedded credentials; the recipient sees the real host (punycode,
+    look-alike and plain-HTTP warnings) and confirms before opening — never a redirect;
+  - credentials: title, user name, password, sign-in URL, notes and a one-time-code seed; masked
+    until revealed, with copy buttons and live RFC 6238 codes;
+  - CLI: `create --fmt url|secret` (credentials from a file, stdin or hidden prompts, never
+    argv), `get` prints links without opening them and credentials as escaped JSON or one
+    `--field`.
+- **"Delete now"**: if the administrator allows it and the sender opts in
+  (`--recipient-can-delete` in the CLI), whoever opens a share can delete it for everyone — it
+  needs both access proofs, spends no view, is refused while the share is locked, and appears
+  in the sender's activity. CLI: `secbin delete --now <url>`.
+
 - **Admin share management** (Admin → Shares):
   - every user's shares, filtered by users, type, status, label, lock, and a creation or expiry
     date or date/time range, with correct totals;

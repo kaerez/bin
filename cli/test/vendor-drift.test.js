@@ -19,6 +19,7 @@ const FILES = [
   ['zip.js', 'zip.js'],
   ['mime.js', 'mime.js'],
   ['filepolicy.js', 'filepolicy.js'],
+  ['sharetypes.js', 'sharetypes.js'],
   ['vendor/argon2.js', 'vendor/argon2.js'],
   ['vendor/argon2.LICENSE', 'vendor/argon2.LICENSE'],
   ['qrcode.js', 'qrcode.cjs'],

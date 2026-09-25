@@ -498,6 +498,9 @@ export class Directory extends DurableObject {
     const L = ch === 'api' ? eff.api : eff.all;
     const via = ch === 'api' ? ' via the API' : '';
     if (req.kind === 'text' && !L.text) return fail(403, 'text_disabled', `Creating notes is not allowed for this account${via}.`);
+    if (req.fmt === 'url' && !L.url) return fail(403, 'url_disabled', `Sharing links is not allowed for this account${via}.`);
+    if (req.fmt === 'secret' && !L.secret) return fail(403, 'secret_disabled', `Sharing secrets is not allowed for this account${via}.`);
+    if (req.deletable && !L.openerDelete) return fail(403, 'opener_delete_disabled', `Letting recipients delete shares is not allowed for this account${via}.`);
     if (req.kind === 'files' && !L.files) return fail(403, 'files_disabled', `File sharing is not allowed for this account${via}.`);
     if (req.views === null) {
       if (!L.allowUnlimitedViews) return fail(403, 'unlimited_views_disabled', `Unlimited views are not allowed for this account${via}.`);
@@ -622,6 +625,21 @@ export class Directory extends DurableObject {
   }
 
   /** Is this share locked by the admin? (Used by the public delete-by-token path.) */
+  /**
+   * May a recipient "delete now" this share at this moment? The sender's
+   * opt-in is in the share itself; this is the rest: not locked, and the
+   * sender's account still has the `openerDelete` permission (an admin who
+   * turns it off also stops shares created earlier).
+   */
+  async recipientDeleteStatus(id) {
+    const r = this.sql.exec('SELECT user_id, locked FROM shares WHERE id = ?', id).toArray()[0];
+    if (!r) return 'unknown';
+    if (r.locked) return 'locked';
+    const u = this.#user(r.user_id);
+    if (!u || u.disabled || !this.#effective(u).all.openerDelete) return 'not_allowed';
+    return 'ok';
+  }
+
   async isShareLocked(id) {
     const r = this.sql.exec('SELECT locked FROM shares WHERE id = ?', id).toArray()[0];
     return !!(r && r.locked);
@@ -700,6 +718,13 @@ export class Directory extends DurableObject {
 
   async markShareEnded(id, status) {
     this.sql.exec("UPDATE shares SET status = ? WHERE id = ? AND status = 'active'", status, id);
+  }
+
+  /** A recipient used "delete now" (the sender allowed it): end the row and tell the sender. */
+  async shareDeletedByRecipient(id) {
+    const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
+    this.sql.exec("UPDATE shares SET status = 'deleted' WHERE id = ? AND status = 'active'", id);
+    if (row) this.#log(null, row.user_id, 'share.deleted_by_recipient', `id=${id}`);
   }
 
   // ── admin: users ─────────────────────────────────────────────────────────

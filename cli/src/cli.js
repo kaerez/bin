@@ -37,23 +37,29 @@ Usage:
   secbin get <share-url | ->         open a note or file share ("-" reads the URL from stdin)
   secbin view <share-url | ->        alias for get
   secbin delete <share-url | id>     delete a share with its delete token
+  secbin delete --now <share-url|->  as a recipient, delete a share whose sender allows it
   secbin update                      update the global npm installation
   secbin version, -v                 show the version and check for updates
 
 create / send flags:
   --views <n|unlimited>  views before the share is deleted (default 1; max 100000)
   --expire <n>m|h|d      lifetime, 1m … 365d (default 24h)
-  --label <text>         label in your account's share list — stored UNENCRYPTED,
-                         visible only to your account
+  --label <text>         label in your account's share list — NOT ENCRYPTED:
+                         visible to the server and its administrators
   --password             prompt for a password (hidden, asked twice)
   --password-env <VAR>   read the password from an environment variable
   --api-key-file <path>  read the API key from a file (default: $SECBIN_API_KEY)
   -q, --qr               also print a scannable QR code (to stderr)
   -j, --json             print {url, id, deletetoken, expires, views} as JSON
+  --recipient-can-delete let whoever opens the share delete it at once
+                         ("delete now"; the administrator must allow it)
 create only:
   -t, --text <string>    use the given string as the note content
   -f, --file <path>      read content from a file instead of stdin
-  --fmt <fmt>            plaintext (default) | code | markdown
+  --fmt <fmt>            plaintext (default) | code | markdown | url | secret
+                         url: one http(s) link · secret: a credential — a JSON
+                         object {title, username, password, url, totp, notes}
+                         from --file or stdin, or asked for on a terminal
 send only:
   --mime <path>=<type>   override the detected type of a file in the share (repeatable)
   Symlinks are skipped, never followed. Names, folders and types stay encrypted;
@@ -65,8 +71,13 @@ get flags:
   --force                file share: overwrite existing files
   -y, --yes              skip the "this uses a view" confirmation
   --password-env <VAR>   read the password from an environment variable
+  --field <name>         credential share: print one field (title, username,
+                         password, url, totp, notes) or "code" (the current
+                         one-time code) instead of the JSON
 delete flags:
   --token-env <VAR>      read the delete token from an environment variable
+  --now                  recipient delete (see above); --password-env <VAR> for
+                         a password-protected share
 Global:
   -s, --server <url>     server origin for create/send, and delete by bare id
                          (default $SECBIN_SERVER — required, there is no built-in

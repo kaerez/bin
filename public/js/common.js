@@ -59,6 +59,9 @@ function svg(tag, attrs = {}, ...children) {
 }
 
 /** The one wording for "this field is stored in plaintext" — keep it in one place. */
+/** Share index kinds → the words the UI uses. */
+export const KIND_NAMES = Object.freeze({ text: 'note', files: 'files', url: 'link', secret: 'credential' });
+
 export const UNENCRYPTED_HINT_TEXT = 'Not encrypted — visible to the server and admins. Don’t put secrets here.';
 
 /**

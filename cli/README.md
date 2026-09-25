@@ -111,10 +111,11 @@ and a one-line summary of the share's lifecycle go to **stderr**.
 | --- | --- |
 | `-t, --text <string>` | Use the given string as the note content (it lands in argv and shell history) |
 | `-f, --file <path>` | Read the content from a file instead of stdin |
-| `--fmt <fmt>` | `plaintext` (default), `code` or `markdown`; this affects web rendering |
+| `--fmt <fmt>` | `plaintext` (default), `code`, `markdown`, `url` or `secret` (see below); this affects rendering |
+| `--recipient-can-delete` | Let whoever opens the share delete it at once ("delete now"). The administrator must allow it. Also on `send`. |
 | `--views <n\|unlimited>` | Views before the note is deleted. The default is `1` and the maximum is `100000`. `unlimited` keeps the note until it expires. |
 | `--expire <n>m\|h\|d` | Lifetime from `1m` to `365d` (default `24h`) |
-| `--label <text>` | A label in your account's share list. It is **stored unencrypted** and visible only to your account (up to 100 characters). |
+| `--label <text>` | A label in your account's share list (up to 100 characters). It is **not encrypted**: the server and its administrators can see it. |
 | `--password` | Prompt for a password (hidden, asked twice, up to 128 characters) |
 | `--password-env <VAR>` | Read the password from an environment variable |
 | `--api-key-file <path>` | Read the API key from a file instead of `$SECBIN_API_KEY` |
@@ -124,6 +125,18 @@ and a one-line summary of the share's lifecycle go to **stderr**.
 
 Your account's limits (maximum views, maximum expiry, quotas) are enforced by the server. A
 request beyond them is refused with the server's reason; it is never silently shortened.
+
+**Links and credentials** (if your administrator allows them):
+
+```sh
+secbin create --fmt url --text https://example.com/report     # one http(s) link
+secbin create --fmt secret --file cred.json                   # {"title","username","password","url","totp","notes"}
+secbin create --fmt secret                                    # on a terminal: asks for each field, hiding the password and seed
+```
+
+A credential is never taken from the command line (`--text` is refused with `--fmt secret`):
+arguments are visible to other local processes and land in shell history. Unknown fields,
+invalid links and malformed one-time-code seeds are refused before anything is sent.
 
 ### `secbin send <file|dir>… [flags]`
 
@@ -164,6 +177,14 @@ steps as the browser:
 For **notes**, the plaintext goes to stdout, or to `--out <file>` with mode `0600`. The
 file is opened before the view is spent, so an unwritable path fails first.
 
+A **link** share prints the validated link on stdout and its real host on stderr (with a
+warning for internationalized look-alike names or plain HTTP); it is never opened for you. A
+**credential** share prints its fields as JSON, or one field with `--field <name>`
+(`title`, `username`, `password`, `url`, `totp`, `notes`) or `--field code` for the current
+one-time code. Control characters are escaped before anything reaches a terminal. If the
+payload is malformed or the field is missing, the whole content is still printed (the view is
+already spent) with a warning.
+
 For **file shares**, the files are written under `--out <dir>` (default: the current
 directory). Only the chunks that cover the selected files are downloaded.
 
@@ -175,6 +196,7 @@ directory). Only the chunks that cover the selected files are downloaded.
 | `--force` | File share: overwrite existing regular files |
 | `-y, --yes` | Skip the "this uses a view" confirmation |
 | `--password-env <VAR>` | Read the password from an environment variable. Otherwise you are prompted on a TTY. |
+| `--field <name>` | Credential share: print one field, or `code` for the current one-time code |
 
 Downloads are confined to the output folder. Every target must resolve inside `--out`.
 Every path component below it is checked right before use, and a symbolic link found there
@@ -189,6 +211,10 @@ than left truncated.
 Deletes a note or file share with its delete token. The token is prompted for (hidden),
 or read with `--token-env <VAR>`. It is sent only in the `X-Delete-Token` header, never in
 a URL. A bare id needs `--server` or `SECBIN_SERVER`.
+
+`secbin delete --now <share-url | ->` deletes a share **as its recipient**, when the sender
+allowed it (`--recipient-can-delete`): no token, but the full link and, if set, the password
+(`--password-env <VAR>` or a prompt). It spends no view.
 
 ### `secbin update` / `secbin version`
 

@@ -7,7 +7,8 @@
 // nothing); view-limited notes and file shares count views; creation requires
 // `authorization: Bearer sbk_…`; file uploads enforce exact chunk sizes and a
 // manifest matching the authorized upload; chunks download under a grant;
-// errors are JSON { error, message } with real HTTP statuses.
+// errors are JSON { error, message } with real HTTP statuses. "Delete now"
+// (POST …/expire) needs both proofs and the sender's opt-in (meta.deletable).
 import { refusedTypes } from '../vendor/filepolicy.js';
 import { b64urlFromBytes, randomBytes, sha256Hex, utf8 } from '../vendor/bytes.js';
 import { proofHash } from '../vendor/crypto.js';
@@ -26,7 +27,7 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 /**
  * `policy` lets a test play the account's limits: { text: false, files: false,
  * quota: true, maxViews, maxFilesPerShare, maxFileBytes, fileTypeMode,
- * fileTypeRules, maxFolderDepth }.
+ * fileTypeRules, maxFolderDepth, openerDelete }.
  */
 export function makeServer({ keys = [KEY], policy = {} } = {}) {
   const notes = new Map(); // id → { paste, acc, dth, views, left, label }
@@ -76,12 +77,14 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       const views = bar ? (clean.meta.views ?? 1) : null;
       const limited = limitCheck('text', views);
       if (limited) return limited;
+      if (clean.meta.deletable === true && policy.openerDelete === false) return err(403, 'opener_delete_disabled', 'Recipient delete is not allowed.');
       const id = (bar ? 'b' : 'k') + b64urlFromBytes(randomBytes(16));
       const deletetoken = token();
       const created = now();
       const expires = created + expireSeconds(clean.meta.expire);
       const meta = { expire: clean.meta.expire, created, expires };
       if (bar) meta.views = views;
+      if (clean.meta.deletable === true) meta.deletable = true;
       notes.set(id, {
         paste: { v: 2, ct: clean.ct, wk: clean.wk, adata: clean.adata, meta },
         acc: clean.acc, dth: await sha256Hex(utf8(deletetoken)), views, left: views, label: body.label,
@@ -109,6 +112,7 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       }
       if (typed && refusedTypes(policy.fileTypeMode, policy.fileTypeRules, body.types).length) return err(403, 'file_type_not_allowed', 'refused');
       if (deep && !(body.depth <= policy.maxFolderDepth)) return err(403, 'folder_too_deep', 'too deep');
+      if (body.deletable === true && policy.openerDelete === false) return err(403, 'opener_delete_disabled', 'Recipient delete is not allowed.');
       const id = 'f' + b64urlFromBytes(randomBytes(16));
       const uploadtoken = token();
       const deletetoken = token();
@@ -143,7 +147,8 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       let clean;
       try { clean = validateCreate(body?.paste); } catch (e) { return err(400, 'invalid_format', e.message); }
       if (clean.adata.fmt !== 'files') return err(400, 'invalid_format', 'The manifest must be a fmt:"files" paste.');
-      if (clean.adata.bar !== (rec.views !== null) || clean.meta.expire !== rec.expire || (clean.meta.views ?? null) !== rec.views) {
+      if (clean.adata.bar !== (rec.views !== null) || clean.meta.expire !== rec.expire || (clean.meta.views ?? null) !== rec.views
+          || (clean.meta.deletable === true) !== (rec.init.deletable === true)) {
         return err(400, 'invalid_format', 'The manifest’s view limit and expiry must match the upload.');
       }
       for (let i = 0; i < rec.chunks; i++) if (!rec.data[i]) return err(409, 'incomplete', `Chunk ${i} has not been uploaded.`);
@@ -151,12 +156,13 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       const expires = created + expireSeconds(rec.expire);
       const meta = { expire: rec.expire, created, expires };
       if (rec.views !== null) meta.views = rec.views;
+      if (rec.init.deletable === true) meta.deletable = true;
       Object.assign(rec, { state: 'active', acc: clean.acc, label: body.label, paste: { v: 2, ct: clean.ct, wk: clean.wk, adata: clean.adata, meta } });
       return json(200, { ok: true, id: up[1], expires });
     }
 
     // ── public share API ────────────────────────────────────────────────────
-    const m = /^\/api\/(paste|file)\/([^/]+)(?:\/(open|chunk)(?:\/(\d+))?)?$/.exec(u.pathname);
+    const m = /^\/api\/(paste|file)\/([^/]+)(?:\/(open|chunk|expire)(?:\/(\d+))?)?$/.exec(u.pathname);
     if (!m) return err(404, 'not_found', 'Not found.');
     const [, kind, id, action, idx] = m;
     const isFile = id[0] === 'f';
@@ -204,6 +210,19 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       const grant = token();
       rec.grants.add(grant);
       return json(200, { paste, grant, grantExpires: now() + 3600, chunks: rec.chunks, padded: rec.padded });
+    }
+
+    if (action === 'expire' && idx === undefined) {
+      if (method !== 'POST') return err(405, 'method_not_allowed');
+      const lp = h.get('x-link-proof');
+      const kp = h.get('x-key-proof');
+      if (!isProof(lp) || !isProof(kp)) return err(400, 'missing_proof', 'Missing proofs.');
+      if (!rec || (isFile && rec.state !== 'active')) return missing();
+      if ((await proofHash(lp)) !== rec.acc.lh) return err(403, 'bad_link', 'The link is incomplete or corrupted.');
+      if ((await proofHash(kp)) !== rec.acc.kh) return err(403, 'bad_password', 'Wrong password.');
+      if (rec.paste.meta.deletable !== true) return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
+      (isFile ? files : notes).delete(id);
+      return json(200, { status: 'deleted', id });
     }
 
     if (action === 'chunk' && isFile && idx !== undefined) {

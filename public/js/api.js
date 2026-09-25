@@ -49,6 +49,13 @@ export const fetchHead = (kind, id) => request(`/api/${kind}/${enc(id)}`);
 export const openShare = (kind, id, { linkProof, keyProof }) =>
   request(`/api/${kind}/${enc(id)}/open`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof } });
 
+/**
+ * "Delete now" as a recipient (the sender allowed it): the same two access
+ * proofs as opening; spends no view.
+ */
+export const expireShare = (kind, id, { linkProof, keyProof }) =>
+  request(`/api/${kind}/${enc(id)}/expire`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof } });
+
 /** One encrypted chunk of a file share, under a download grant. */
 export async function fetchChunk(id, i, grant) {
   const res = await request(`/api/file/${enc(id)}/chunk/${i}`, { headers: { 'x-download-grant': grant }, raw: true });

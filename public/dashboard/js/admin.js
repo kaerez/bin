@@ -19,6 +19,9 @@ const MiB = 1024 * 1024;
 const LIMIT_UI = [
   ['text', 'Notes allowed', 'bool'],
   ['files', 'File sharing allowed', 'bool'],
+  ['url', 'Link shares allowed (needs notes)', 'bool'],
+  ['secret', 'Credential shares allowed (needs notes)', 'bool'],
+  ['openerDelete', 'Recipients may “delete now” (sender opts in)', 'bool'],
   ['maxViews', 'Max views per share', 'int'],
   ['allowUnlimitedViews', 'Unlimited views allowed', 'bool'],
   ['maxExpireSec', 'Max expiry', 'dur'],
@@ -33,7 +36,7 @@ const LIMIT_UI = [
   ['fileTypeRules', 'File type list', 'rules'],
   ['maxFolderDepth', 'Max folder depth', 'int'],
 ];
-const API_KEYS = ['text', 'files', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
+const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
   'Any file as plain text': [{ match: 'any', value: '', renderer: 'text' }],

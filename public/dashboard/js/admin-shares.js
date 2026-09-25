@@ -7,7 +7,7 @@
 // activity (unlike impersonation, which acts as the user).
 
 import { admin } from '../../js/api.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 
 const PAGE = 50;
@@ -58,7 +58,7 @@ export async function renderShares(p) {
 
   const userSel = h('select.input.multi', { multiple: true, size: String(Math.min(6, Math.max(3, users.length))), 'aria-label': 'Users (none selected = all)' },
     ...users.map((u) => h('option', { value: u.id, text: u.username })));
-  const kind = h('select.input', { 'aria-label': 'Type' }, h('option', { value: '', text: 'any type' }), h('option', { value: 'text', text: 'notes' }), h('option', { value: 'files', text: 'files' }));
+  const kind = h('select.input', { 'aria-label': 'Type' }, h('option', { value: '', text: 'any type' }), h('option', { value: 'text', text: 'notes' }), h('option', { value: 'url', text: 'links' }), h('option', { value: 'secret', text: 'credentials' }), h('option', { value: 'files', text: 'files' }));
   const status = h('select.input', { 'aria-label': 'Status' }, h('option', { value: '', text: 'any status' }),
     ...['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'].map((s) => h('option', { value: s, text: s })));
   const locked = h('select.input', { 'aria-label': 'Lock' }, h('option', { value: '', text: 'locked or not' }), h('option', { value: 'true', text: 'locked only' }), h('option', { value: 'false', text: 'unlocked only' }));
@@ -152,7 +152,7 @@ export async function renderShares(p) {
     tr.append(
       h('td.mono', { dataset: { label: 'User' }, text: r.username || '(deleted user)' }),
       h('td', { dataset: { label: 'Label' } }, labelIn, unencryptedHint(hintId)),
-      h('td.mono', { dataset: { label: 'Type' }, text: r.kind === 'files' ? 'files' : 'note' }),
+      h('td.mono', { dataset: { label: 'Type' }, text: KIND_NAMES[r.kind] || 'note' }),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
       h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
       h('td.mono', { dataset: { label: 'Views' }, text: views }),
@@ -182,7 +182,7 @@ export async function renderShares(p) {
     };
     const row = h('tr.extend-row', {}, h('td', { colspan: '8' },
       h('div.extend-box', {},
-        r.kind === 'text' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
+        r.kind !== 'files' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
         h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),
         h('p.mono.muted', { text: 'Admin changes are not bound by the user\'s limits (up to 100000 views and 365 days). Views and expiry can only increase.' }),
         h('div.btn-row', {}, save), emsg)));

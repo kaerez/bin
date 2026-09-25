@@ -14,6 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { encryptPaste, MAX_PLAINTEXT } from '../../vendor/crypto.js';
 import { FORMATS } from '../../vendor/format.js';
+import { buildSecret, parseShareUrl as parseLinkUrl, SECRET_FIELDS, ShareTypeError } from '../../vendor/sharetypes.js';
 import { refuseInlineApiKey, resolveApiKey } from '../apikey.js';
 import { ApiError, Client } from '../client.js';
 import { UsageError } from '../errors.js';
@@ -38,13 +39,51 @@ const OPTIONS = {
   'api-key-file': { type: 'string' },
   json: { type: 'boolean', default: false, short: 'j' },
   qr: { type: 'boolean', default: false, short: 'q' },
+  'recipient-can-delete': { type: 'boolean', default: false },
 };
 
+// Hidden prompts for the secret fields that must not echo; the rest are one line each.
+const SECRET_PROMPTS = [
+  ['title', 'Title', false], ['username', 'User name', false], ['password', 'Password', true],
+  ['url', 'Sign-in URL', false], ['totp', 'One-time-code seed or otpauth:// URI', true], ['notes', 'Notes', false],
+];
+
+/** A credential share's plaintext from a JSON object (file/stdin) — never argv. */
+function secretFromJson(text) {
+  let d;
+  try { d = JSON.parse(text); } catch { throw new UsageError('--fmt secret reads a JSON object of fields from --file or stdin'); }
+  if (!d || typeof d !== 'object' || Array.isArray(d)) throw new UsageError('--fmt secret reads a JSON object of fields from --file or stdin');
+  const unknown = Object.keys(d).filter((k) => !Object.hasOwn(SECRET_FIELDS, k));
+  if (unknown.length) throw new UsageError(`unknown secret field(s): ${unknown.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')} (allowed: ${Object.keys(SECRET_FIELDS).join(', ')})`);
+  return buildSecret(d);
+}
+
+async function secretFromPrompts(io) {
+  io.stderr('Credential share — leave a field empty to skip it.\n');
+  const fields = {};
+  for (const [k, label, hidden] of SECRET_PROMPTS) {
+    fields[k] = hidden ? await io.promptHidden(`${label}: `) : await io.promptLine(`${label}: `);
+  }
+  return buildSecret(fields);
+}
+
+/** Validate and normalize a typed payload ("url" / "secret"); other formats pass through. */
+function typedPayload(fmt, text) {
+  try {
+    if (fmt === 'url') return parseLinkUrl(text).href;
+    if (fmt === 'secret') return secretFromJson(text);
+  } catch (e) {
+    if (e instanceof ShareTypeError) throw new UsageError(e.message);
+    throw e;
+  }
+  return text;
+}
+
 /** Encrypt + upload a note. Shared with the wizard. Returns { url, id, deletetoken, expires }. */
-export async function createNote({ server, apiKey, text, password, fmt, views, expire, label, io }) {
+export async function createNote({ server, apiKey, text, password, fmt, views, expire, label, deletable = false, io }) {
   const bar = views !== null;
   const { body, fragment } = await encryptPaste({
-    text, password, fmt, bar, expire, views: bar ? views : undefined,
+    text, password, fmt, bar, expire, views: bar ? views : undefined, deletable,
   });
   const client = new Client(server, io.fetch, { apiKey });
   const { id, deletetoken, expires } = await client.createNote(body, label);
@@ -72,6 +111,11 @@ export async function cmdCreate(args, io) {
   if (values.text !== undefined && values.file !== undefined) {
     throw new UsageError('--text and --file are mutually exclusive');
   }
+  // Command-line arguments are visible to other local processes and land in
+  // shell history: never take credentials from them.
+  if (values.fmt === 'secret' && values.text !== undefined) {
+    throw new UsageError('--fmt secret does not take --text (arguments are visible to other processes): use --file, stdin, or the prompts');
+  }
   const views = parseViews(values.views);
   const expire = parseExpire(values.expire);
   const label = parseLabel(values.label);
@@ -79,7 +123,16 @@ export async function cmdCreate(args, io) {
   const apiKey = await resolveApiKey({ file: values['api-key-file'], io });
 
   let raw;
-  if (values.text !== undefined) {
+  let prompted = null;
+  if (values.fmt === 'secret' && values.file === undefined && io.stdinIsTTY) {
+    try {
+      prompted = await secretFromPrompts(io);
+    } catch (e) {
+      if (e instanceof ShareTypeError) throw new UsageError(e.message);
+      throw e;
+    }
+    raw = Buffer.from(prompted, 'utf8');
+  } else if (values.text !== undefined) {
     raw = Buffer.from(values.text, 'utf8');
   } else if (values.file !== undefined) {
     try {
@@ -103,11 +156,12 @@ export async function cmdCreate(args, io) {
   } catch {
     throw new UsageError('input is not valid UTF-8 (notes are text — use `secbin send` for binary files)');
   }
+  if (prompted === null) text = typedPayload(values.fmt, text);
 
   const password = await newPassword({ envVar: values['password-env'], promptWanted: values.password, io });
 
   const { url, id, deletetoken, expires } = await createNote({
-    server, apiKey, text, password, fmt: values.fmt, views, expire, label, io,
+    server, apiKey, text, password, fmt: values.fmt, views, expire, label, deletable: values['recipient-can-delete'], io,
   });
 
   if (values.json) {
