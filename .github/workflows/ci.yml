@@ -1,0 +1,56 @@
+# CI — every push to main and every pull request.
+#
+# Gates: lint, the frozen protocol vectors (byte-for-byte), all four vitest
+# projects (workerd, Node, DOM, CLI), and an independent Python re-derivation
+# of the vectors. Read-only token; no secrets are used.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Frozen vectors are byte-identical
+        run: node test/genvectors.mjs | diff -u test/vectors.expected.txt -
+
+      - name: Test (workerd, Node, DOM, CLI)
+        run: npm test
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cross-check vectors in Python
+        run: |
+          python -m pip install --disable-pip-version-check -r tools/requirements-vectors.txt
+          python tools/verify-vectors.py

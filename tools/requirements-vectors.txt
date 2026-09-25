@@ -1,0 +1,4 @@
+# Pinned dependencies for tools/verify-vectors.py (the independent Python
+# re-derivation of the protocol test vectors). Used by CI.
+argon2-cffi==25.1.0
+cryptography==50.0.1

@@ -15,6 +15,10 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 
 ### Added
 
+- **CI**: GitHub Actions runs a dependency audit, lint, the frozen-vector byte diff, all four
+  test projects and the Python vector cross-check on every push and PR. CodeQL
+  (`security-extended`) runs on PRs and weekly. Dependabot is grouped and weekly.
+
 - **Accounts, built in** (Cloudflare Access is no longer required): one owner/admin created or
   recovered at `/dashboard/setup` with the single-use `AUTHN` secret (a new value is needed for
   every recovery; setup is cleanly disabled when `AUTHN` is absent). Users, disable/enable,
@@ -47,6 +51,10 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
   shares); vectors cross-checked in Python.
 
 ### Changed
+
+- Dev dependencies: vitest 4.1.11, @cloudflare/vitest-pool-workers 0.22.0, wrangler 4.124+.
+  npm `overrides` pin patched `sharp` (≥ 0.35.4) and `brace-expansion` (≥ 1.1.21), so
+  `npm audit` reports no known vulnerabilities.
 
 - **Argon2id** (64 MiB, t=3, p=1, vendored hash-wasm) replaces PBKDF2 for share passwords;
   account passwords use it too (stretched in the browser).

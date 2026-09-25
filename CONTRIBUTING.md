@@ -54,7 +54,7 @@ country/edge-only behavior won't show locally.
 | **CSP** | `public/_headers` and `src/lib/http.js` (keep them identical) |
 | **Config** | `wrangler.toml` (assets, KV, R2, four DOs + migrations) — tracked in git; replace the KV ids for your own deployment (template: `wrangler.toml.example`); secrets via `wrangler secret put` |
 | **Tests** | `test/` (workerd), `test-node/` (Node), `test-dom/` (happy-dom), `cli/test/` (+ `test/genvectors.mjs`, `test/vectors.expected.txt`, `tools/verify-vectors.py`) |
-| **CI** | `.github/workflows/ci.yml` — lint + byte-for-byte vector diff + full suite on every push/PR |
+| **CI** | `.github/workflows/ci.yml` (dependency audit, lint, byte-for-byte vector diff, all four test projects, Python vector cross-check), `.github/workflows/codeql.yml` (CodeQL `security-extended`), `.github/dependabot.yml` (weekly, grouped) |
 
 `public/js/{bytes,crypto,format,files,kdf,zip,mime,markdown}.js` are **shared** — the browser imports them as static
 assets, the Worker bundles the pure ones, and the CLI vendors them, so the format stays a single source of truth.
@@ -79,8 +79,10 @@ Beyond the two hard rules, preserve these (see [`SECURITY.md`](./SECURITY.md) an
 
 ## Tests
 
-Every PR must keep `npm run lint` and `npm test` green (CI enforces both, plus a byte-for-byte
-diff of `node test/genvectors.mjs` output against `test/vectors.expected.txt`). The main suites
+Every PR must keep `npm run lint` and `npm test` green. CI enforces both, plus `npm audit
+--audit-level=high`, a byte-for-byte diff of `node test/genvectors.mjs` output against
+`test/vectors.expected.txt`, and `tools/verify-vectors.py` (dependencies pinned in
+`tools/requirements-vectors.txt`). The main suites
 (all run in `workerd`):
 
 | Suite | Covers |
@@ -145,11 +147,10 @@ format is versioned separately again, in `SPEC.md` (currently v2).
 
 1. Bump `cli/package.json` `version` (and the CHANGELOG), commit.
 2. Tag and push: `git tag cli-vX.Y.Z && git push --tags`.
-3. [`release.yml`](./.github/workflows/release.yml) takes it from there: it re-runs lint,
-   the vector byte-diff, all three test projects, verifies the tag matches
-   `cli/package.json`, then runs `npm publish --provenance --access public` from `cli/`
-   (prepack re-checks vendor drift as a final gate). It needs the `NPM_TOKEN` repository
-   secret (an npm automation token with publish rights).
+3. Publish manually from a clean checkout of that tag: `npm ci` at the repo root, then
+   `cd cli && npm publish --access public`. `prepack` re-checks vendor drift and re-runs the
+   CLI tests as a final gate. There is no automated release workflow yet, so the package has
+   no npm provenance attestation.
 
 Caveats worth knowing:
 
