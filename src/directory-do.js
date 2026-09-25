@@ -22,6 +22,7 @@ import {
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES,
 } from './lib/settings.js';
 import { normalizeRule } from './lib/ip.js';
+import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -511,6 +512,27 @@ export class Directory extends DurableObject {
       }
       if (L.maxFileBytes !== null && !(Number.isSafeInteger(req.maxFile) && req.maxFile <= L.maxFileBytes)) {
         return fail(413, 'file_too_large', `Each file may be at most ${L.maxFileBytes} bytes${via}.`, { max: L.maxFileBytes });
+      }
+      // File policy: checked against what the client declares — and it only
+      // declares when a policy applies (the declaration is never stored).
+      const typed = L.fileTypeMode === 'allow' || L.fileTypeMode === 'block';
+      const deep = L.maxFolderDepth !== null;
+      if ((typed && req.types === undefined) || (deep && req.depth === undefined)) {
+        return fail(400, 'declaration_required', 'This account has a file policy: declare the file types and folder depth.', {
+          policy: { mode: L.fileTypeMode, rules: typed ? L.fileTypeRules : [], maxFolderDepth: L.maxFolderDepth },
+        });
+      }
+      if (typed) {
+        const types = checkDeclaredTypes(req.types);
+        if (!types) return fail(400, 'invalid_declaration', 'Invalid file type declaration.');
+        const refused = refusedTypes(L.fileTypeMode, L.fileTypeRules, types);
+        if (refused.length) {
+          return fail(403, 'file_type_not_allowed', `These file types may not be shared${via}: ${refused.slice(0, 5).map(describeType).join(', ')}${refused.length > 5 ? ', …' : ''}.`,
+            { refused: refused.slice(0, 50) });
+        }
+      }
+      if (deep && !(Number.isSafeInteger(req.depth) && req.depth >= 0 && req.depth <= MAX_FOLDER_DEPTH && req.depth <= L.maxFolderDepth)) {
+        return fail(403, 'folder_too_deep', `Folders may be nested at most ${L.maxFolderDepth} levels deep${via}.`, { max: L.maxFolderDepth });
       }
     }
     if (u.role === 'owner') return { ok: true, refund: [] };

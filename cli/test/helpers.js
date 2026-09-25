@@ -8,6 +8,7 @@
 // `authorization: Bearer sbk_…`; file uploads enforce exact chunk sizes and a
 // manifest matching the authorized upload; chunks download under a grant;
 // errors are JSON { error, message } with real HTTP statuses.
+import { refusedTypes } from '../vendor/filepolicy.js';
 import { b64urlFromBytes, randomBytes, sha256Hex, utf8 } from '../vendor/bytes.js';
 import { proofHash } from '../vendor/crypto.js';
 import { CHUNK, PAD, TAG } from '../vendor/files.js';
@@ -24,7 +25,8 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * `policy` lets a test play the account's limits: { text: false, files: false,
- * quota: true, maxViews, maxFilesPerShare, maxFileBytes }.
+ * quota: true, maxViews, maxFilesPerShare, maxFileBytes, fileTypeMode,
+ * fileTypeRules, maxFolderDepth }.
  */
 export function makeServer({ keys = [KEY], policy = {} } = {}) {
   const notes = new Map(); // id → { paste, acc, dth, views, left, label }
@@ -100,6 +102,13 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       if (limited) return limited;
       if (policy.maxFilesPerShare !== undefined && !(body.files <= policy.maxFilesPerShare)) return err(403, 'too_many_files', `At most ${policy.maxFilesPerShare} files per share via the API.`);
       if (policy.maxFileBytes !== undefined && !(body.maxFile <= policy.maxFileBytes)) return err(413, 'file_too_large', `Each file may be at most ${policy.maxFileBytes} bytes via the API.`);
+      const typed = policy.fileTypeMode === 'allow' || policy.fileTypeMode === 'block';
+      const deep = policy.maxFolderDepth !== undefined;
+      if ((typed && body.types === undefined) || (deep && body.depth === undefined)) {
+        return json(400, { error: 'declaration_required', message: 'declare', policy: { mode: policy.fileTypeMode ?? 'any', rules: typed ? policy.fileTypeRules : [], maxFolderDepth: deep ? policy.maxFolderDepth : null } });
+      }
+      if (typed && refusedTypes(policy.fileTypeMode, policy.fileTypeRules, body.types).length) return err(403, 'file_type_not_allowed', 'refused');
+      if (deep && !(body.depth <= policy.maxFolderDepth)) return err(403, 'folder_too_deep', 'too deep');
       const id = 'f' + b64urlFromBytes(randomBytes(16));
       const uploadtoken = token();
       const deletetoken = token();

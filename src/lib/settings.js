@@ -4,6 +4,7 @@
 
 import { MAX_TTL, MAX_VIEWS } from '../../public/js/format.js';
 import { HARD_MAX_SHARE_BYTES, RENDERERS } from '../../public/js/files.js';
+import { FILE_TYPE_MODES, MAX_FOLDER_DEPTH, normalizeRules } from '../../public/js/filepolicy.js';
 
 const MIN = 60;
 const HOUR = 3600;
@@ -72,16 +73,25 @@ export const LIMITS = {
   viewerCustomRules:   { type: 'bool', def: false },
   apiEnabled:          { type: 'bool', def: false },
   apiMaxKeys:          { type: 'int', min: 0, max: 100, nullable: false, def: 5 },
+  // File policy (public/js/filepolicy.js): allow/block list of types, folder depth.
+  fileTypeMode:        { type: 'enum', values: FILE_TYPE_MODES, def: 'any' },
+  fileTypeRules:       { type: 'rules', def: [] },
+  maxFolderDepth:      { type: 'int', min: 0, max: MAX_FOLDER_DEPTH, nullable: true, def: null },
 };
 
 // Keys the API channel may restrict further (never widen).
 export const API_LIMIT_KEYS = ['text', 'files', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec',
-  'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes'];
+  'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 
 export function checkLimit(key, value, channel = 'all') {
   const s = Object.prototype.hasOwnProperty.call(LIMITS, key) ? LIMITS[key] : null;
   if (!s) throw new Error(`unknown limit "${key}"`);
   if (channel === 'api' && !API_LIMIT_KEYS.includes(key)) throw new Error(`"${key}" cannot be set for the API channel`);
+  if (s.type === 'enum') {
+    if (!s.values.includes(value)) throw new Error(`${key} must be one of ${s.values.join(', ')}`);
+    return value;
+  }
+  if (s.type === 'rules') return normalizeRules(value);
   if (value === null) {
     if (s.type === 'bool' || !s.nullable) throw new Error(`${key} cannot be empty`);
     return null;
@@ -121,7 +131,8 @@ export function restrictForApi(all, apiGlobalRows, apiUserRows) {
   return out;
 }
 
-export const UNLIMITED = Object.freeze(Object.fromEntries(Object.entries(LIMITS).map(([k, s]) => [k, s.type === 'bool' ? true : (s.nullable ? null : 100)])));
+export const UNLIMITED = Object.freeze(Object.fromEntries(Object.entries(LIMITS).map(([k, s]) => [k,
+  s.type === 'bool' ? true : s.type === 'enum' ? 'any' : s.type === 'rules' ? [] : (s.nullable ? null : 100)])));
 
 // ── quotas ───────────────────────────────────────────────────────────────────
 export const QUOTA_UNITS = { s: 1, m: MIN, h: HOUR, d: DAY, mo: null, y: null };
