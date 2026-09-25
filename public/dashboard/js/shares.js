@@ -1,5 +1,6 @@
 // shares.js — "My shares": list what I sent (label, type, lifetime, views),
 // raise views / extend expiry within my limits, rename labels, revoke now.
+// A share the administrator has locked is shown frozen: no control changes it.
 
 import { listShares, updateShare, revokeShare } from '../../js/api.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint } from '../../js/common.js';
@@ -51,7 +52,8 @@ function render() {
       ? 'unlimited'
       : `${r.left ?? '—'} left of ${r.views_total}`;
     const expires = r.expires ? (active && r.expires > now() ? `in ${formatCoarse(r.expires - now())}` : formatDate(r.expires)) : '—';
-    const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': 'Label', placeholder: '(no label)' });
+    const locked = !!r.locked;
+    const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': 'Label', placeholder: '(no label)', disabled: locked });
     // Shown under the field while it is being edited (see .label-cell in styles.css);
     // aria-describedby announces it on focus either way.
     const labelHint = unencryptedHint(`share-label-hint-${i}`, labelIn);
@@ -59,7 +61,9 @@ function render() {
       try { await updateShare(r.id, { label: labelIn.value }); r.label = labelIn.value; toast('label saved'); } catch (e) { toast(friendlyError(e)); labelIn.value = r.label || ''; }
     });
     const actions = h('div.btn-row.row-actions');
-    if (active) {
+    if (active && locked) {
+      actions.appendChild(h('span.mono.muted', { text: 'Locked by the administrator — it cannot be changed or revoked.' }));
+    } else if (active) {
       actions.appendChild(h('button.btn', { type: 'button', text: 'Extend', on: { click: () => openExtend(r, tr) } }));
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
       armConfirm(rv, 'Revoke now — irreversible', async () => {
@@ -75,7 +79,8 @@ function render() {
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
       h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
       h('td.mono', { dataset: { label: 'Views' }, text: views }),
-      h('td', { dataset: { label: 'Status' } }, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status })),
+      h('td', { dataset: { label: 'Status' } }, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status }),
+        locked ? h('span.pill.warn', { text: 'locked', title: 'Locked by the administrator' }) : null),
       h('td.cell-actions', {}, actions));
     body.appendChild(tr);
   }

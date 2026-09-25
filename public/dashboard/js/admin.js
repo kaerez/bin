@@ -402,7 +402,9 @@ async function renderAudit() {
     const r = await guard(() => admin.audit(before));
     if (!r) return;
     for (const a of r.rows) {
-      const who = a.imp ? `${a.actor} as ${a.subject}` : a.actor || 'system';
+      // imp: done while impersonating; adm: an admin's direct change to another
+      // user's share (in this log only, never in the user's own activity).
+      const who = a.imp ? `${a.actor} as ${a.subject}` : `${a.actor || 'system'}${a.adm ? ' (admin)' : ''}`;
       const on = !a.imp && a.subject && a.subject !== a.actor ? a.subject : '';
       body.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'When' }, text: formatDate(a.ts) }), h('td', { dataset: { label: 'Who' }, text: who }),
         h('td', { dataset: { label: 'On user' }, text: on }), h('td.mono', { dataset: { label: 'Action' }, text: a.action }), h('td', { dataset: { label: 'Details' }, text: a.detail })));
