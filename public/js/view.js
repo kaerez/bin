@@ -4,6 +4,7 @@
 // checks before releasing ciphertext or spending a view. All content is
 // rendered with DOM construction only.
 
+import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
 import { validateManifest, buildTree, basename } from './files.js';

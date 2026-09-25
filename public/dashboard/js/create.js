@@ -5,6 +5,7 @@
 // Link ("url") and credential ("secret") shares are notes with a typed,
 // validated payload (public/js/sharetypes.js); the server sees only the type.
 
+import '../../js/kdf-progress.js';
 import { encryptPaste } from '../../js/crypto.js';
 import { createNote, initFileShare, uploadChunk, finalizeFileShare, deleteShare, ApiError } from '../../js/api.js';
 import { expireSeconds, MAX_VIEWS } from '../../js/format.js';

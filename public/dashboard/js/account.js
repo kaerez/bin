@@ -1,6 +1,7 @@
 // account.js — my limits and quotas, change password (current required;
 // stretched locally), API keys (if allowed), and my activity log.
 
+import '../../js/kdf-progress.js';
 import { changePassword, listKeys, createKey, revokeKey, myActivity, ApiError } from '../../js/api.js';
 import { stretch, newCredential, checkNewPassword } from '../../js/pwauth.js';
 import { prelogin } from '../../js/api.js';

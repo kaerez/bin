@@ -22,6 +22,7 @@ const FILES = [
   ['sharetypes.js', 'sharetypes.js'],
   ['vendor/argon2.js', 'vendor/argon2.js'],
   ['vendor/argon2.LICENSE', 'vendor/argon2.LICENSE'],
+  ...['argon2.js', 'blake2.js', '_blake.js', '_md.js', '_u64.js', 'utils.js', 'LICENSE'].map((f) => [`vendor/noble/${f}`, `vendor/noble/${f}`]),
   ['qrcode.js', 'qrcode.cjs'],
 ];
 

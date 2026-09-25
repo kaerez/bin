@@ -652,11 +652,14 @@ button.back { cursor: pointer; }
   column-gap: .8rem; row-gap: .6rem; align-items: start;
   padding: .85rem .5rem .85rem 1rem; background: var(--sheet); color: var(--ink);
   border: 1px solid var(--rule-2); border-radius: 6px; box-shadow: var(--shadow-overlay); }
+/* Top placement (iPad, Chrome/Edge on iPhone: their Share button is up there). */
+.pwa-banner[data-pos="top"] { bottom: auto; top: max(.75rem, env(safe-area-inset-top, 0px)); }
 /* The iOS variant has no action row (instructions + close only). */
 .pwa-banner[data-mode="ios"] { grid-template-areas: "ico body close"; }
 /* While it is open, the page gets enough trailing room to scroll its last
    content above the banner. */
 html.pwa-banner-open body { padding-bottom: calc(10rem + env(safe-area-inset-bottom, 0px)); }
+html.pwa-banner-open.pwa-banner-top body { padding-bottom: 0; padding-top: calc(7rem + env(safe-area-inset-top, 0px)); }
 .pwa-banner-ico { grid-area: ico; display: block; width: 40px; height: 40px; border-radius: 9px; margin-top: .1rem; }
 .pwa-banner-body { grid-area: body; min-width: 0; padding-top: .1rem; }
 .pwa-banner-title { font-weight: 500; font-size: .9375rem; line-height: 1.35; }
@@ -676,8 +679,23 @@ html.pwa-banner-open body { padding-bottom: calc(10rem + env(safe-area-inset-bot
 .pwa-close-ico { width: 18px; height: 18px; }
 @media (prefers-reduced-motion: no-preference) {
   .pwa-banner { animation: pwaIn .32s var(--ease) both; }
+  .pwa-banner[data-pos="top"] { animation-name: pwaInTop; }
 }
 @keyframes pwaIn { from { opacity: 0; transform: translateY(14px); } }
+@keyframes pwaInTop { from { opacity: 0; transform: translateY(-14px); } }
+
+/* ── slow key derivation (public/js/kdf-progress.js) ─────────────────────────
+   Only when WebAssembly is off (e.g. Lockdown Mode) and Argon2id runs in plain
+   JavaScript. Floats above everything but the modal scrim, never blocks input. */
+.kdf-progress { position: fixed; z-index: 60; left: 0; right: 0; margin: 0 auto;
+  top: max(.75rem, env(safe-area-inset-top, 0px));
+  width: calc(100% - max(.75rem, env(safe-area-inset-left, 0px)) - max(.75rem, env(safe-area-inset-right, 0px))); max-width: 30rem;
+  padding: .8rem 1rem; background: var(--sheet); color: var(--ink); border: 1px solid var(--rule-2); border-radius: 6px;
+  box-shadow: var(--shadow-overlay); font-size: .85rem; line-height: 1.45; }
+.kdf-progress-title { font-weight: 500; }
+.kdf-progress-pct { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.kdf-progress-bar { display: block; width: 100%; height: 6px; margin: .5rem 0 .45rem; accent-color: var(--accent-fill); }
+.kdf-progress-why { font-size: .75rem; color: var(--ink-3); }
 /* Very small phones: drop the icon, give the text the full width. */
 @media (max-width: 360px) {
   .pwa-banner { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "body close" "actions actions"; padding-left: .85rem; }
