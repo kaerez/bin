@@ -18,7 +18,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, timingSafeEqualHex } from '../public/js/bytes.js';
 import { ARGON2 } from '../public/js/format.js';
 import {
-  SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS,
+  SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
@@ -439,6 +439,8 @@ export class Directory extends DurableObject {
         rules: caps.viewerEnabled ? this.#viewerRules(u, eff.all) : [],
       },
       apiKeys: { enabled: eff.all.apiEnabled, max: eff.all.apiMaxKeys ?? MAX_API_KEYS, count: keyCount },
+      // For the browser to enforce on a password change (the server never sees passwords).
+      passwordPolicy: Object.fromEntries(PASSWORD_POLICY_KEYS.map((k) => [k, eff.all[k]])),
       quotas: u.role === 'owner' ? [] : this.#quotaStatus(u.id),
     };
   }

@@ -6,7 +6,7 @@
 
 import '../../js/kdf-progress.js';
 import { admin } from '../../js/api.js';
-import { newCredential, checkNewPassword } from '../../js/pwauth.js';
+import { newCredential, checkNewPassword, describePolicy } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
@@ -37,6 +37,11 @@ const LIMIT_UI = [
   ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
   ['fileTypeRules', 'File type list', 'rules'],
   ['maxFolderDepth', 'Max folder depth', 'int'],
+  ['pwMinLength', 'Password: minimum length', 'int', { nullable: false }],
+  ['pwUpper', 'Password: needs an upper-case letter', 'bool'],
+  ['pwLower', 'Password: needs a lower-case letter', 'bool'],
+  ['pwDigit', 'Password: needs a digit', 'bool'],
+  ['pwSymbol', 'Password: needs a symbol', 'bool'],
 ];
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
@@ -245,14 +250,17 @@ function rulesEditor(scope, list, { withPresets = true } = {}) {
 // ── users ────────────────────────────────────────────────────────────────────
 async function renderUsers() {
   const p = clear(panel('users'));
+  await refreshOverview(); // the global password policy may have just changed
   const data = await guard(() => admin.users());
   if (!data) return;
   const user = h('input.input', { placeholder: 'username', maxlength: '64', 'aria-label': 'New username', autocomplete: 'off' });
-  const pw = h('input.input', { type: 'password', placeholder: 'password (min. 12)', 'aria-label': 'New user password', autocomplete: 'new-password' });
+  // New users get the global password policy (their own overrides come later).
+  const newPolicy = overview?.defaults?.inherited;
+  const pw = h('input.input', { type: 'password', placeholder: 'password', 'aria-label': 'New user password', autocomplete: 'new-password', title: describePolicy(newPolicy) });
   const pw2 = h('input.input', { type: 'password', placeholder: 'repeat password', 'aria-label': 'Repeat password', autocomplete: 'new-password' });
   const add = h('button.btn', { type: 'button', text: 'Create user' });
   add.onclick = async () => {
-    const bad = checkNewPassword(pw.value, pw2.value);
+    const bad = checkNewPassword(pw.value, pw2.value, newPolicy);
     if (bad) return msg(bad, true);
     add.disabled = true;
     const cred = await newCredential(pw.value);
@@ -260,7 +268,8 @@ async function renderUsers() {
     add.disabled = false;
     if (r) renderUsers();
   };
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, user, pw, pw2, add)));
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, user, pw, pw2, add),
+    h('p.mono.muted', { text: `Password policy: ${describePolicy(newPolicy)} Checked in the browser only; the server never sees passwords.` })));
 
   const body = h('tbody');
   // The built-in public account is managed under Public access, not here.
@@ -291,11 +300,12 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   const d = await guard(() => admin.user(id));
   if (!d) return;
   box.appendChild(h('h2.section-title', { text: `Manage ${d.user.username}` }));
-  const npw = h('input.input', { type: 'password', placeholder: 'new password (min. 12)', autocomplete: 'new-password', 'aria-label': 'New password' });
+  const userPolicy = d.effective.all;
+  const npw = h('input.input', { type: 'password', placeholder: 'new password', autocomplete: 'new-password', 'aria-label': 'New password', title: describePolicy(userPolicy) });
   const npw2 = h('input.input', { type: 'password', placeholder: 'repeat', autocomplete: 'new-password', 'aria-label': 'Repeat new password' });
   const setBtn = h('button.btn', { type: 'button', text: 'Set password' });
   setBtn.onclick = async () => {
-    const bad = checkNewPassword(npw.value, npw2.value);
+    const bad = checkNewPassword(npw.value, npw2.value, userPolicy);
     if (bad) return msg(bad, true);
     setBtn.disabled = true;
     const cred = await newCredential(npw.value);
@@ -303,7 +313,8 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
     setBtn.disabled = false;
     npw.value = npw2.value = '';
   };
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }), h('div.toolbar', {}, npw, npw2, setBtn)));
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }), h('div.toolbar', {}, npw, npw2, setBtn),
+    h('p.mono.muted', { text: `This user's password policy: ${describePolicy(userPolicy)}` })));
   if (passwordOnly) return;
 
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities & limits (GUI + API)' }), limitsEditor({ scope: id, channel: 'all', rows: d.limits.all, effective: d.effective.all, inherited: overview?.defaults.inherited, onSaved: () => openUser(id, false, { scroll: false }) })));

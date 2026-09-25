@@ -289,7 +289,7 @@ blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|
 | `POST /api/private/file` `{views, expire, padded, files?, maxFile?, types?, depth?}` | session / key | start a file share → 201 `{id, uploadtoken, deletetoken, chunks}` |
 | `PUT /api/private/file/:id/chunk/:i` (octet-stream, `X-Upload-Token`) | session / key | upload chunk `i` (exact size, §12) |
 | `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
-| `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy |
+| `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy, `passwordPolicy` `{pwMinLength, pwUpper, pwLower, pwDigit, pwSymbol}` (the browser enforces it; the server cannot) |
 | `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions). Never blocked by a login lockout. A wrong `current` → 403 `wrong_password`, also counted against the IP's login guard. The 10th wrong attempt in the window (default) → 401 `session_revoked`, which ends every session of the account |
 | `GET /api/private/me/activity` | session | own activity (never shows the actor) |
 | `GET/POST /api/private/me/keys`, `DELETE …/keys/:id` | session | API keys |

@@ -137,7 +137,10 @@ working.
   (HS256, `SIG`) and then encrypted (A256GCM, `ENC`). Idle and absolute timeouts are set by the
   owner. Rotating `SIG`/`ENC` signs everyone out.
 - **Passwords** are stretched in the browser with Argon2id; the server only stores a hash of the
-  result. Minimum length 12.
+  result. The **password policy** (minimum length 12–128, and optionally an upper-case letter, a
+  lower-case letter, a digit and a symbol) is set globally and per user, shown next to every
+  password field and **enforced by the browser only**: the server never sees a password, so it
+  cannot check one. The owner always has the built-in policy (12 characters).
 - **Users** (owner only): create, disable, delete (optionally revoking their shares), reset a
   user's password without knowing the old one (never the owner's own — that changes on Account,
   with the current password), unlock, and **log in as** a user — every action taken
