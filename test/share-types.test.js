@@ -88,6 +88,18 @@ describe('recipient "delete now"', () => {
     expect(await env.PASTES.get(n.id)).toBeNull();
   });
 
+  it('withdrawing the permission also stops shares created earlier', async () => {
+    const u = await makeUser('deleter-withdrawn');
+    await limits(u.id, { openerDelete: true });
+    const n = await createNote(u.cookie, { deletable: true });
+    await limits(u.id, { openerDelete: false });
+    const r = await expire(n.id, n.fragment);
+    expect(r.status).toBe(403);
+    expect((await r.json()).error).toBe('not_allowed');
+    expect(await env.PASTES.get(n.id)).not.toBeNull();
+    await limits(u.id, { openerDelete: 'inherit' });
+  });
+
   it('file shares: the upload must be authorized for it and the manifest must match', async () => {
     const u = await makeUser('deleter-files');
     await limits(u.id, { openerDelete: true });

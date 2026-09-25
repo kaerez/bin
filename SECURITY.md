@@ -148,11 +148,14 @@ compromise. Defenses:
 - **Credential shares** (`fmt: "secret"`) are validated fail-closed and rendered field by field
   with `textContent`; password and one-time-code seed stay masked until revealed. One-time codes
   are computed in the page (WebCrypto HMAC), never by the server. The CLI never takes a
-  credential from its arguments (only a file, stdin or hidden prompts) and escapes control
-  characters before printing to a terminal.
+  credential from its arguments (only a file, stdin or hidden prompts) and, when printing a
+  link or credential to a terminal, escapes control characters (newlines and tabs kept);
+  `--out` files get the exact value. Plain notes are printed as they are, like `cat`.
 - **"Delete now"** by a recipient needs both access proofs (so only someone who can open the
-  share), the sender's opt-in *and* the admin's permission; it is refused while the admin has
-  the share locked and counts wrong proofs as invalid attempts. It spends no view.
+  share), the sender's opt-in *and* the admin's permission — checked again at the moment of
+  deletion, so withdrawing it also covers shares created earlier. It is refused while the admin
+  has the share locked or after a file share's last view, counts wrong proofs as invalid
+  attempts, and spends no view.
 - **Downloads** are always `application/octet-stream` / `application/zip` with sanitized
   names; ZIP member names come from validated paths (no absolute or `../` entries).
 

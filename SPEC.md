@@ -240,7 +240,7 @@ Common errors on any route:
 | `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes; at most 20 live grants per client (a reopen replaces its oldest); 429 `busy` (+ `Retry-After`) when 2000 are live |
 | `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
 | `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
-| `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable`; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 |
+| `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable` and the sender's account still has `openerDelete`; not after a file share's last view; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 |
 | `POST /api/paste` | v1 anonymous create — removed | — | 410 |
 
 Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` counts as an

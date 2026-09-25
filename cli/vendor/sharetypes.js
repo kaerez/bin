@@ -33,6 +33,9 @@ export function parseShareUrl(text) {
   if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new ShareTypeError('Only http:// and https:// links can be shared.');
   if (u.username || u.password) throw new ShareTypeError('Links with a user name or password in them cannot be shared — use a secret share instead.');
   if (!u.hostname) throw new ShareTypeError('That link has no host.');
+  // The stored form is the normalized href (percent-encoded), which can be
+  // longer than what was typed: bound that, so the recipient accepts it too.
+  if (u.href.length > MAX_URL_LENGTH) throw new ShareTypeError(`That link is too long once encoded (max ${MAX_URL_LENGTH} characters).`);
   return u;
 }
 
@@ -110,6 +113,7 @@ export function parseSecret(text) {
     if (typeof d[k] !== 'string' || d[k].length > SECRET_FIELDS[k]) throw new ShareTypeError('This secret could not be read.');
     out[k] = d[k];
   }
+  if (Object.keys(out).length === 0) throw new ShareTypeError('This secret could not be read.');
   return out;
 }
 
@@ -140,7 +144,7 @@ export function parseTotp(input) {
     if (u.host.toLowerCase() !== 'totp') throw new ShareTypeError('Only time-based (totp) codes are supported.');
     secret = u.searchParams.get('secret') || '';
     const alg = (u.searchParams.get('algorithm') || 'SHA1').toUpperCase();
-    algorithm = { SHA1: 'SHA-1', SHA256: 'SHA-256', SHA512: 'SHA-512' }[alg];
+    algorithm = new Map([['SHA1', 'SHA-1'], ['SHA256', 'SHA-256'], ['SHA512', 'SHA-512']]).get(alg);
     if (!algorithm) throw new ShareTypeError('Unsupported one-time-code algorithm.');
     digits = Number(u.searchParams.get('digits') || 6);
     period = Number(u.searchParams.get('period') || 30);

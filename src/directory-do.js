@@ -625,6 +625,21 @@ export class Directory extends DurableObject {
   }
 
   /** Is this share locked by the admin? (Used by the public delete-by-token path.) */
+  /**
+   * May a recipient "delete now" this share at this moment? The sender's
+   * opt-in is in the share itself; this is the rest: not locked, and the
+   * sender's account still has the `openerDelete` permission (an admin who
+   * turns it off also stops shares created earlier).
+   */
+  async recipientDeleteStatus(id) {
+    const r = this.sql.exec('SELECT user_id, locked FROM shares WHERE id = ?', id).toArray()[0];
+    if (!r) return 'unknown';
+    if (r.locked) return 'locked';
+    const u = this.#user(r.user_id);
+    if (!u || u.disabled || !this.#effective(u).all.openerDelete) return 'not_allowed';
+    return 'ok';
+  }
+
   async isShareLocked(id) {
     const r = this.sql.exec('SELECT locked FROM shares WHERE id = ?', id).toArray()[0];
     return !!(r && r.locked);

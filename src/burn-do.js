@@ -104,7 +104,6 @@ export class BurnPaste extends DurableObject {
     });
   }
 
-  /** Delete via delete token. 'ok' | 'bad' | 'notfound'. */
   /**
    * "Delete now" by someone who can open the share (both proofs): only when
    * the sender allowed it (meta.deletable). Spends no view.
@@ -121,6 +120,7 @@ export class BurnPaste extends DurableObject {
     });
   }
 
+  /** Delete via delete token. 'ok' | 'bad' | 'notfound'. */
   async remove(token) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#get();

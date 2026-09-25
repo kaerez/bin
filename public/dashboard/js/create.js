@@ -121,7 +121,7 @@ function wireTypedPanels() {
       const notes = [];
       if (d.idn) notes.push(`shown to the recipient as ${d.ascii} — international characters can imitate another site`);
       if (d.insecure) notes.push('not HTTPS');
-      hostHint.textContent = `Destination: ${d.unicode}${notes.length ? ` (${notes.join('; ')})` : ''}`;
+      clear(hostHint).append('Destination: ', h('bdi', { dir: 'ltr', text: d.unicode }), notes.length ? ` (${notes.join('; ')})` : '');
       if (notes.length) hostHint.classList.add('warn');
     } catch (e) {
       link.setAttribute('aria-invalid', 'true');
