@@ -32,7 +32,8 @@ Requires Node.js ≥ 20 (`.nvmrc` pins 22) and npm. From the repository root:
 npm install
 cp .dev.vars.example .dev.vars   # AUTHN / SIG / ENC for local dev
 npm run dev      # wrangler dev → http://localhost:8787 (KV, R2 and DOs emulated locally)
-npm test         # vitest: workerd, Node and DOM projects
+npm test         # vitest: workerd, Node, DOM and CLI projects
+npm run test:cli # just the CLI suite
 npm run test:watch   # workerd suites, watch mode
 npm run test:coverage  # istanbul coverage (v8 provider can't run inside workerd)
 npm run lint     # ESLint 9 flat config (eslint.config.js)
@@ -46,17 +47,17 @@ country/edge-only behavior won't show locally.
 
 | Area | Files |
 |---|---|
-| **Format & AAD** (shared browser + Worker) | `public/js/format.js`, `public/js/files.js` — change ⇒ bump `v`, update `SPEC.md`, add vectors |
+| **Format & AAD** (shared browser + CLI + Worker) | `public/js/format.js`, `public/js/files.js` — change ⇒ bump `v`, update `SPEC.md`, add vectors |
 | **Crypto primitives** | `public/js/crypto.js`, `public/js/kdf.js` (Argon2id), `public/js/bytes.js` |
 | **Backend** | `src/index.js` (router), `src/routes/*`, the DOs `src/{burn,fileshare,directory,guard}-do.js`, `src/lib/*` |
 | **Frontend** | `public/index.html` + `public/js/view.js` (viewer), `public/dashboard/**` (signed-in app), `public/css/styles.css` |
 | **CSP** | `public/_headers` and `src/lib/http.js` (keep them identical) |
 | **Config** | `wrangler.toml` (assets, KV, R2, four DOs + migrations) — tracked in git; replace the KV ids for your own deployment (template: `wrangler.toml.example`); secrets via `wrangler secret put` |
-| **Tests** | `test/` (workerd), `test-node/` (Node), `test-dom/` (happy-dom) (+ `test/genvectors.mjs`, `test/vectors.expected.txt`, `tools/verify-vectors.py`) |
+| **Tests** | `test/` (workerd), `test-node/` (Node), `test-dom/` (happy-dom), `cli/test/` (+ `test/genvectors.mjs`, `test/vectors.expected.txt`, `tools/verify-vectors.py`) |
 | **CI** | `.github/workflows/ci.yml` — lint + byte-for-byte vector diff + full suite on every push/PR |
 
 `public/js/{bytes,crypto,format,files,kdf,zip,mime,markdown}.js` are **shared** — the browser imports them as static
-assets, the Worker bundles the pure ones, so the format stays a single source of truth.
+assets, the Worker bundles the pure ones, and the CLI vendors them, so the format stays a single source of truth.
 Keep these modules dependency-light and free of Node/DOM globals *at import time* (functions may
 use `document`; top-level code must not).
 
@@ -94,6 +95,10 @@ diff of `node test/genvectors.mjs` output against `test/vectors.expected.txt`). 
 | `test/auth.test.js`, `test/admin.test.js`, `test/shares.test.js` | Accounts, sessions, admin, limits, quotas, guard, My shares |
 | `test-dom/*.test.js` | XSS mount surfaces, viewer safety, a11y, folder walker |
 
+The CLI package has its own Node-environment suites under `cli/test/` (frozen vectors re-run in
+plain Node, URL parsing, mocked-API round trips, and a vendor-drift byte-compare that fails if
+`cli/vendor/` diverges from `public/js/` — re-align with `node cli/scripts/sync-shared.mjs`).
+
 Add or update tests alongside behavior changes. New rendering paths and any crypto/format change
 **require** test coverage, not just passing existing suites.
 
@@ -123,8 +128,9 @@ Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): 
 
 ## Releasing
 
-The **application** (root `package.json`) is tagged `vX.Y.Z`. The paste
-format is versioned separately, in `SPEC.md` (currently v2).
+Two artifacts version independently: the **application** (root `package.json`, tagged
+`vX.Y.Z`) and the **CLI npm package** (`cli/package.json`, tagged `cli-vX.Y.Z`). The paste
+format is versioned separately again, in `SPEC.md` (currently v2).
 
 **Application release** (`vX.Y.Z`):
 
@@ -134,6 +140,25 @@ format is versioned separately, in `SPEC.md` (currently v2).
    push --tags`.
 3. Deploy with `npm run deploy` (the app deploys from the working tree, not from the tag —
    tag first so the release is anchored to a ref).
+
+**CLI release** (`cli-vX.Y.Z`):
+
+1. Bump `cli/package.json` `version` (and the CHANGELOG), commit.
+2. Tag and push: `git tag cli-vX.Y.Z && git push --tags`.
+3. [`release.yml`](./.github/workflows/release.yml) takes it from there: it re-runs lint,
+   the vector byte-diff, all three test projects, verifies the tag matches
+   `cli/package.json`, then runs `npm publish --provenance --access public` from `cli/`
+   (prepack re-checks vendor drift as a final gate). It needs the `NPM_TOKEN` repository
+   secret (an npm automation token with publish rights).
+
+Caveats worth knowing:
+
+- **Publishing only works from the monorepo.** `prepack` compares `cli/vendor/` against
+  `../../public/js/` and runs vitest hoisted from the *root* install — a standalone `cli/`
+  checkout fails fast with an explanatory message. Run `npm ci` at the repo root first.
+- **Line endings matter.** The tracked `.gitattributes` forces LF; publish from a checkout
+  that respects it, or the `#!/usr/bin/env node` shebang and the byte-exact vendor-drift
+  check can break.
 
 ## Reporting vulnerabilities
 
