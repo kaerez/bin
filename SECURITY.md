@@ -190,6 +190,18 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
 - **Impersonation** ("log in as"): owner only, never nested, no admin access or key minting
   while impersonating; each action is logged with the real actor (the user's own activity view
   shows it as theirs).
+- **Admin share management**: the owner sees every user's shares and can change a share's label, views
+  and expiry, revoke it, or **lock** it.
+  - **Only metadata:** it never gains access to share content, which stays end-to-end
+    encrypted.
+  - **Bounds:** admin changes are increase-only and bounded by the protocol maxima, not by the
+    user's limits.
+  - **Logging:** they are recorded in the audit log as direct admin actions, and they do not
+    appear in the user's own activity. Impersonation is different: it acts *as* the user and
+    shows up as the user's own.
+  - **Locks:** a locked share is frozen for its sender (no edits, no revoke) and for its delete
+    token, until the owner unlocks it. Natural expiry and view exhaustion still apply. Locked
+    rows are kept in the share index; they are not pruned.
 - **Brute-force protection** (admin-configurable, per IP; IPv6 aggregated to /64 by default):
   - `login`, `setup`, and `invalid` — unknown/expired share ids, **wrong `#` keys, wrong share
     passwords**, bad download grants and bad delete/upload tokens;

@@ -15,6 +15,15 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 
 ### Added
 
+- **Admin share management** (Admin → Shares):
+  - every user's shares, filtered by users, type, status, label, lock, and a creation or expiry
+    date or date/time range, with correct totals;
+  - the owner can change labels, views and expiry, revoke, and lock/unlock;
+  - a locked share is frozen for its sender and its delete token;
+  - direct admin changes are logged in the audit log but not in the user's own activity.
+- **Directory schema migrations**: versioned, idempotent and tested, for Directories created by
+  older releases.
+
 - **CI**: GitHub Actions runs a dependency audit, lint, the frozen-vector byte diff, all four
   test projects and the Python vector cross-check on every push and PR. CodeQL
   (`security-extended`) runs on PRs and weekly. Dependabot is grouped and weekly.

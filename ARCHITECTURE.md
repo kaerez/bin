@@ -36,6 +36,10 @@ administration, backed by KV, R2 and four Durable Object classes. One deploy, on
 | accounts & config | `Directory` DO (singleton, SQLite) | users, revoked sessions, API keys, limits, quotas + usage, settings, viewer rules, IP rules, share index, activity |
 | brute-force state | `Guard` DOs (8 shards by IP hash) | per-scope failure counters and blocks with alarm cleanup |
 
+The Directory's schema is versioned: `SCHEMA` always describes the latest shape, and an ordered
+list of idempotent `MIGRATIONS` upgrades instances created by older releases (the applied version is
+kept in `meta.schema_version`). Never edit a shipped migration — append one.
+
 The Directory is a Durable Object rather than KV because limits, quotas, lockouts and counters
 need atomic, immediately consistent read-modify-write.
 
