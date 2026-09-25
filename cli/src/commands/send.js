@@ -187,7 +187,7 @@ export function policyDeclaration(policy, files, dirs) {
   const { types, depth } = declare(entries);
   const out = {};
   if (p.mode === 'allow' || p.mode === 'block') {
-    let rules = [];
+    let rules;
     try { rules = normalizeRules(Array.isArray(p.rules) ? p.rules : []); } catch { rules = []; }
     const odd = files.filter((f) => uncheckableExt(f.path));
     if (odd.length) {

@@ -46,7 +46,7 @@ export function parseShareUrl(text) {
  */
 export function describeHost(u) {
   const ascii = u.hostname;
-  let unicode = ascii;
+  let unicode;
   try { unicode = ascii.split('.').map((l) => (l.startsWith('xn--') ? decodePunycode(l.slice(4)) : l)).join('.'); } catch { unicode = ascii; }
   return { ascii, unicode, idn: unicode !== ascii, insecure: u.protocol === 'http:' };
 }
