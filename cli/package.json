@@ -1,0 +1,46 @@
+{
+  "name": "secbin",
+  "version": "0.1.0",
+  "description": "CLI for secbin — zero-knowledge, end-to-end encrypted notes and file sharing. Encrypts locally (AES-256-GCM, Argon2id); the key rides in the URL fragment and never reaches the server.",
+  "license": "MIT",
+  "author": "nxfu",
+  "type": "module",
+  "bin": {
+    "secbin": "bin/secbin.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "vendor/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "sync": "node scripts/sync-shared.mjs",
+    "prepack": "node scripts/sync-shared.mjs --check && vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kaerez/bin.git",
+    "directory": "cli"
+  },
+  "homepage": "https://github.com/kaerez/bin/tree/main/cli#readme",
+  "bugs": {
+    "url": "https://github.com/kaerez/bin/issues"
+  },
+  "keywords": [
+    "pastebin",
+    "file-sharing",
+    "encryption",
+    "zero-knowledge",
+    "end-to-end",
+    "aes-256-gcm",
+    "argon2id",
+    "view-limit",
+    "cli"
+  ]
+}
