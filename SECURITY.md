@@ -314,6 +314,20 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - Kill switches: `DISABLE_BFP=true` (everything, including IP rules) and
     `DISABLE_BFP_SETUP=true` (setup only).
 
+### Activity log retention and clearing
+
+- The activity/audit log is kept for at most `log.maxAgeSec` (default 365 days) and
+  `log.maxEntries` (default 500 000, oldest deleted first); per-user limits
+  (`logMaxAgeSec`, `logMaxEntries`) can keep less about an account. Pruning runs hourly and
+  every 500 writes. Entries about the owner are exempt (global settings never apply to the
+  owner) and are removed only by hand.
+- The owner can **clear** the log — everything, or one account's entries, optionally only those
+  older than a date. It needs the owner's password again (like export), and, as configured, it
+  **leaves no record**: after a clear, nothing in the system shows that entries existed or were
+  removed. Audit trails can be subject to retention duties (for example SOX record-keeping for
+  systems in scope); decide the retention settings and who may clear with your Legal / Risk /
+  Compliance team — this document is not legal or compliance advice.
+
 ### Admin export / import
 
 - An export can hold password **verifiers** (enough to test guesses offline) and the whole

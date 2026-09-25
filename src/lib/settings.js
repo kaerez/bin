@@ -39,6 +39,9 @@ export const SETTINGS = {
   'lockout.lockSec':     { type: 'int', min: 1, max: 365 * DAY, def: 15 * MIN },
   // Public (anonymous) share creation — off by default. See SECURITY.md §6
   // "Public access": tracking anonymous creators is a regulated activity.
+  // Activity log retention (everything except entries about the owner).
+  'log.maxAgeSec':       { type: 'int', min: DAY, max: 3650 * DAY, def: 365 * DAY },
+  'log.maxEntries':      { type: 'int', min: 1000, max: 5000000, def: 500000 },
   'public.enabled':      { type: 'bool', def: false },
   // How anonymous creators are counted against the public quotas:
   //   tracker          — a random ID the browser keeps (cookie, ETag cache,
@@ -119,6 +122,10 @@ export const LIMITS = {
   // re:… rules, checked by the sender's browser / CLI (the server cannot see
   // the URL). The owner may share any safe link.
   urlRules:            { type: 'urlrules', def: [...DEFAULT_URL_RULES], owner: ['scheme:*'] },
+  // Activity-log retention for entries about this account (null: only the
+  // global log.* settings apply).
+  logMaxAgeSec:        { type: 'int', min: DAY, max: 3650 * DAY, nullable: true, def: null },
+  logMaxEntries:       { type: 'int', min: 10, max: 5000000, nullable: true, def: null },
   // Password policy (public/js/pwauth.js). Enforced by the browser only: the
   // server receives an Argon2id proof, never the password. `owner` is what
   // applies to the owner (global settings never do): the built-in minimum.

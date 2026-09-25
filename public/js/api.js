@@ -114,6 +114,7 @@ export const admin = {
   impersonate: (id) => request(`${A}/users/${enc(id)}/impersonate`, { method: 'POST', headers: INTENT }),
   revokeUserKey: (id, keyId) => request(`${A}/users/${enc(id)}/keys/${enc(keyId)}`, { method: 'DELETE', headers: INTENT }),
   unimpersonate: () => request(`${A}/unimpersonate`, { method: 'POST', headers: INTENT }),
+  clearLogs: (body) => request(`${A}/logs/clear`, { method: 'POST', body }),
   audit: (before, user) => request(`${A}/audit?${new URLSearchParams({ ...(before ? { before } : {}), ...(user ? { user } : {}) })}`),
   guard: () => request(`${A}/guard`),
   unblock: (scope, key) => request(`${A}/guard/unblock`, { method: 'POST', body: { scope, key } }),

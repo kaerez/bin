@@ -15,6 +15,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Activity-log retention and clearing:** global maximum age and size (Settings) and per-user
+  limits; entries about the owner are exempt. The owner can clear all entries, one account's or
+  those older than a date (password required; leaves no record).
 - **URL rules for link shares** (Defaults & quotas, or per user): allow schemes such as `tel:`,
   `mailto:` or `sms:` besides http(s), or only links matching regular expressions, with a live
   tester in the editor. Checked by the sender's browser and the CLI (new
