@@ -597,6 +597,9 @@ button.back { cursor: pointer; }
 .file-total { padding: .3rem 1.1rem .8rem; font-size: .72rem; color: var(--ink-3); }
 .file-total.over { color: var(--seal); }
 .file-policy { padding: 0 1.1rem .8rem; font-size: .72rem; color: var(--ink-2); }
+.receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
+.opens-box { padding: .5rem 0; }
+.opens-box .table { font-size: .75rem; }
 .url-rules { display: flex; flex-direction: column; gap: .4rem; min-width: 0; }
 .ok-text { color: var(--ok, #2f7d4f); }
 .rules-in { min-width: 14rem; font-family: var(--mono, monospace); resize: vertical; }

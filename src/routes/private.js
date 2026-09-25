@@ -147,11 +147,17 @@ export async function handlePrivate(request, env, url, ctx) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     return withAuth(a, json(await listShares(env, a, url)));
   }
-  const sm = p.match(/^\/api\/private\/shares\/([^/]+)(\/revoke)?$/);
+  const sm = p.match(/^\/api\/private\/shares\/([^/]+)(\/revoke|\/opens)?$/);
   if (sm) {
     const id = decodePathSegment(sm[1]);
     const info = id && parseId(id);
     if (!info) return err(404, 'not_found', 'Share not found.');
+    if (sm[2] === '/opens') {
+      // Read receipts: times always, details as the admin allows this account.
+      if (request.method !== 'GET') return methodNotAllowed('GET');
+      const r = await dir.shareOpens(a.user.id, id);
+      return withAuth(a, r.ok ? json({ total: r.total, fields: r.fields, rows: r.rows }) : fromDir(r));
+    }
     if (sm[2]) {
       if (request.method !== 'POST') return methodNotAllowed('POST');
       assertIntent(request);

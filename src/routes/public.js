@@ -7,6 +7,7 @@
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
 import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
+import { parseUserAgent, parseLanguages } from '../lib/ua.js';
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
 import { b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
@@ -51,6 +52,28 @@ async function goneFor(env, g, id, res) {
   return failed(env, g, res);
 }
 
+/**
+ * Read receipt: record that a share was opened, with what the request itself
+ * revealed (address, Cloudflare's coarse location, browser, OS, languages).
+ * Never fails the open.
+ */
+async function recordOpen(env, request, id) {
+  try {
+    const ua = parseUserAgent(request.headers.get('user-agent'));
+    const cf = request.cf || {};
+    await directory(env).recordOpen(id, {
+      ip: request.headers.get('cf-connecting-ip') || '',
+      country: typeof cf.country === 'string' ? cf.country : '',
+      region: typeof cf.region === 'string' ? cf.region : '',
+      city: typeof cf.city === 'string' ? cf.city : '',
+      browser: ua.browser, version: ua.version, os: ua.os,
+      langs: parseLanguages(request.headers.get('accept-language')),
+    });
+  } catch (e) {
+    console.warn('secbin: read receipt not recorded', e && e.message ? e.message : e);
+  }
+}
+
 const proofFailure = (status) => (status === 'bad_link'
   ? err(403, 'bad_link', 'The link is incomplete or corrupted.')
   : err(403, 'bad_password', 'Wrong password.'));
@@ -91,7 +114,9 @@ export async function handlePublic(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
     const proofs = await proofHashes(request);
-    return info.file ? openFile(env, g, id, proofs) : openPaste(env, g, id, info, proofs);
+    const res = await (info.file ? openFile(env, g, id, proofs) : openPaste(env, g, id, info, proofs));
+    if (res.status === 200) await recordOpen(env, request, id);
+    return res;
   }
   if (action === 'expire') {
     if (request.method !== 'POST') return methodNotAllowed('POST');

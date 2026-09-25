@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS trackers (id_hash TEXT PRIMARY KEY, created INTEGER N
   uses INTEGER NOT NULL DEFAULT 0, ip_hash TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS trackers_ip ON trackers(ip_hash, created);
 CREATE INDEX IF NOT EXISTS trackers_seen ON trackers(last_seen);
+CREATE TABLE IF NOT EXISTS opens (id INTEGER PRIMARY KEY AUTOINCREMENT, share_id TEXT NOT NULL, user_id TEXT NOT NULL, ts INTEGER NOT NULL,
+  ip TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', region TEXT NOT NULL DEFAULT '', city TEXT NOT NULL DEFAULT '',
+  browser TEXT NOT NULL DEFAULT '', browser_ver TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', langs TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id);
+CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -85,6 +90,14 @@ const MIGRATIONS = [
       uses INTEGER NOT NULL DEFAULT 0, ip_hash TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '')`);
     m.sql.exec('CREATE INDEX IF NOT EXISTS trackers_ip ON trackers(ip_hash, created)');
     m.sql.exec('CREATE INDEX IF NOT EXISTS trackers_seen ON trackers(last_seen)');
+  },
+  // 4: read receipts (every open of a share)
+  (m) => {
+    m.sql.exec(`CREATE TABLE IF NOT EXISTS opens (id INTEGER PRIMARY KEY AUTOINCREMENT, share_id TEXT NOT NULL, user_id TEXT NOT NULL, ts INTEGER NOT NULL,
+      ip TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', region TEXT NOT NULL DEFAULT '', city TEXT NOT NULL DEFAULT '',
+      browser TEXT NOT NULL DEFAULT '', browser_ver TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', langs TEXT NOT NULL DEFAULT '')`);
+    m.sql.exec('CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts)');
   },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -116,6 +129,15 @@ const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
+const MAX_OPENS_PER_SHARE = 1000;
+// Read-receipt details and the limit that lets a sender see each one.
+const RECEIPT_FIELDS = [
+  { limit: 'receiptIp', cols: ['ip'] },
+  { limit: 'receiptLocation', cols: ['country', 'region', 'city'] },
+  { limit: 'receiptBrowser', cols: ['browser', 'browser_ver'] },
+  { limit: 'receiptOs', cols: ['os'] },
+  { limit: 'receiptLanguages', cols: ['langs'] },
+];
 
 const now = () => Math.floor(Date.now() / 1000);
 const newId = () => b64urlFromBytes(randomBytes(12));
@@ -892,7 +914,8 @@ export class Directory extends DurableObject {
     const where = `WHERE user_id = ? AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}`;
     const args = status ? [uid, like, String(status)] : [uid, like];
     const rows = this.sql.exec(
-      `SELECT id, kind, label, created, expires, views_total, status, locked FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
+      `SELECT id, kind, label, created, expires, views_total, status, locked,
+        (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id) AS opens FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
       ...args, lim, off).toArray();
     // The total counts what the filters match, so pagination is correct.
     const total = this.sql.exec(`SELECT COUNT(*) AS c FROM shares ${where}`, ...args).one().c;
@@ -908,6 +931,53 @@ export class Directory extends DurableObject {
     return this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status,
       s.locked, s.locked_at, lu.username AS locked_by
       FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by WHERE s.id = ?`, id).toArray()[0] || null;
+  }
+
+  // ── read receipts ────────────────────────────────────────────────────────
+  /**
+   * Record one open of a share (only shares in the index — account shares).
+   * `info` holds what the request revealed about the opener; it is kept as
+   * long as the activity log (log.* settings / per-user limits) and at most
+   * MAX_OPENS_PER_SHARE per share (the oldest go first).
+   */
+  async recordOpen(shareId, info = {}) {
+    const r = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0];
+    if (!r) return;
+    // eslint-disable-next-line no-control-regex
+    const t = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, n);
+    this.sql.exec(`INSERT INTO opens (share_id, user_id, ts, ip, country, region, city, browser, browser_ver, os, langs)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, shareId, r.user_id, now(), t(info.ip, 64), t(info.country, 8), t(info.region, 64),
+    t(info.city, 64), t(info.browser, 32), t(info.version, 8), t(info.os, 32), t(info.langs, 200));
+    const c = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
+    if (c > MAX_OPENS_PER_SHARE) {
+      this.sql.exec('DELETE FROM opens WHERE id IN (SELECT id FROM opens WHERE share_id = ? ORDER BY id ASC LIMIT ?)', shareId, c - MAX_OPENS_PER_SHARE);
+    }
+  }
+
+  /**
+   * The opens of a share. The sender (`uid` = the share's owner) sees the time
+   * of every open and only the details the admin lets that account see
+   * (receipt* limits); the admin (`admin: true`) always sees everything.
+   */
+  async shareOpens(uid, shareId, { admin = false, limit = 200 } = {}) {
+    const s = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0];
+    if (!s || (!admin && s.user_id !== uid)) return fail(404, 'not_found', 'Share not found.');
+    const lim = Math.max(1, Math.min(MAX_OPENS_PER_SHARE, limit | 0));
+    const rows = this.sql.exec('SELECT ts, ip, country, region, city, browser, browser_ver, os, langs FROM opens WHERE share_id = ? ORDER BY id DESC LIMIT ?', shareId, lim).toArray();
+    const total = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
+    let fields = RECEIPT_FIELDS;
+    if (!admin) {
+      const owner = this.#user(s.user_id);
+      const L = owner ? this.#effective(owner).all : {};
+      fields = RECEIPT_FIELDS.filter((f) => L[f.limit] === true);
+    }
+    const keys = new Set(fields.flatMap((f) => f.cols));
+    return {
+      ok: true,
+      total,
+      fields: fields.map((f) => f.limit),
+      rows: rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => k === 'ts' || keys.has(k)))),
+    };
   }
 
   /** Is this share locked by the admin? (Used by the public delete-by-token path.) */
@@ -1003,7 +1073,7 @@ export class Directory extends DurableObject {
     range('s.created', createdFrom, createdTo);
     range('s.expires', expiresFrom, expiresTo);
     const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const rows = this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status,
+    const rows = this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status, (SELECT COUNT(*) FROM opens o WHERE o.share_id = s.id) AS opens,
       s.locked, s.locked_at, lu.username AS locked_by
       FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by
       ${w} ORDER BY s.created DESC LIMIT ? OFFSET ?`, ...args, lim, off).toArray();
@@ -1070,7 +1140,7 @@ export class Directory extends DurableObject {
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in and cannot be deleted.');
     const shares = this.sql.exec("SELECT id FROM shares WHERE user_id = ? AND status = 'active'", id).toArray().map((r) => r.id);
     this.ctx.storage.transactionSync(() => {
-      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
+      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
       this.sql.exec('DELETE FROM users WHERE id = ?', id);
       this.#log(actorId, id, 'user.deleted', `username=${u.username}`);
     });
@@ -1439,9 +1509,14 @@ export class Directory extends DurableObject {
     const owner = this.#owner();
     const oid = owner ? owner.id : '';
     this.sql.exec('DELETE FROM activity WHERE ts < ? AND subject_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
+    // Read receipts live as long as the log does.
+    this.sql.exec('DELETE FROM opens WHERE ts < ? AND user_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
     for (const u of this.sql.exec("SELECT * FROM users WHERE role IN ('user', 'public')").toArray()) {
       const L = this.#effective(u).all;
-      if (L.logMaxAgeSec !== null) this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND ts < ?', u.id, ts - L.logMaxAgeSec);
+      if (L.logMaxAgeSec !== null) {
+        this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND ts < ?', u.id, ts - L.logMaxAgeSec);
+        this.sql.exec('DELETE FROM opens WHERE user_id = ? AND ts < ?', u.id, ts - L.logMaxAgeSec);
+      }
       if (L.logMaxEntries !== null) {
         this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND id NOT IN (SELECT id FROM activity WHERE subject_id = ? ORDER BY id DESC LIMIT ?)', u.id, u.id, L.logMaxEntries);
       }
@@ -1475,7 +1550,11 @@ export class Directory extends DurableObject {
     const q = where.length ? ` WHERE ${where.join(' AND ')}` : '';
     const n = this.sql.exec(`SELECT COUNT(*) AS c FROM activity${q}`, ...args).one().c;
     this.sql.exec(`DELETE FROM activity${q}`, ...args);
-    return { ok: true, deleted: n };
+    // Read receipts go with the log (same scope: the share's sender).
+    const oq = q.replace('subject_id = ?', 'user_id = ?');
+    const opens = this.sql.exec(`SELECT COUNT(*) AS c FROM opens${oq}`, ...args).one().c;
+    this.sql.exec(`DELETE FROM opens${oq}`, ...args);
+    return { ok: true, deleted: n, receipts: opens };
   }
 
   async adminLog(entry, actorId) {

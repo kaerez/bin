@@ -93,6 +93,7 @@ export const finalizeFileShare = (id, uploadToken, paste, label) =>
   request(`/api/private/file/${enc(id)}/finalize`, { method: 'POST', headers: { 'x-upload-token': uploadToken }, body: { paste, label } });
 
 export const listShares = (qs = '') => request(`/api/private/shares${qs}`);
+export const shareOpens = (id) => request(`/api/private/shares/${encodeURIComponent(id)}/opens`);
 export const updateShare = (id, body) => request(`/api/private/shares/${enc(id)}`, { method: 'PATCH', body });
 export const revokeShare = (id) => request(`/api/private/shares/${enc(id)}/revoke`, { method: 'POST', headers: INTENT });
 
@@ -128,6 +129,7 @@ export const admin = {
   exportData: (body) => request(`${A}/export`, { method: 'POST', body }),
   importData: (body) => request(`${A}/import`, { method: 'POST', body }),
   updateShare: (id, patch) => request(`${A}/shares/${enc(id)}`, { method: 'PATCH', body: patch }),
+  shareOpens: (id) => request(`${A}/shares/${enc(id)}/opens`),
   revokeShare: (id) => request(`${A}/shares/${enc(id)}/revoke`, { method: 'POST', headers: INTENT }),
   lockShare: (id, locked) => request(`${A}/shares/${enc(id)}/lock`, { method: 'POST', body: { locked } }),
 };

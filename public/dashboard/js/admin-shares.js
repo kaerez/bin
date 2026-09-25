@@ -9,6 +9,7 @@
 import { admin } from '../../js/api.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
+import { opensButton } from './receipts.js';
 
 const PAGE = 50;
 const now = () => Math.floor(Date.now() / 1000);
@@ -87,7 +88,7 @@ export async function renderShares(p) {
         h('div.btn-row', {}, apply, reset))),
     summary, msg,
     h('div.table-wrap', {}, h('table.table', {},
-      h('thead', {}, h('tr', {}, ...['User', 'Label', 'Type', 'Created', 'Expires', 'Views', 'Status', ''].map((c) => h('th', { text: c })))),
+      h('thead', {}, h('tr', {}, ...['User', 'Label', 'Type', 'Created', 'Expires', 'Views', 'Opened', 'Status', ''].map((c) => h('th', { text: c })))),
       body)),
     more));
 
@@ -156,6 +157,7 @@ export async function renderShares(p) {
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
       h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
       h('td.mono', { dataset: { label: 'Views' }, text: views }),
+      h('td', { dataset: { label: 'Opened' } }, opensButton(r, () => admin.shareOpens(r.id), 9, tr)),
       statusCell,
       h('td', { dataset: { label: 'Actions' } }, actions));
     return tr;
@@ -180,7 +182,7 @@ export async function renderShares(p) {
       save.disabled = true;
       try { await admin.updateShare(r.id, patch); toast('Share updated.'); load(true); } catch (e) { save.disabled = false; showMsg(emsg, friendlyError(e)); toast(friendlyError(e), { error: true }); }
     };
-    const row = h('tr.extend-row', {}, h('td', { colspan: '8' },
+    const row = h('tr.extend-row', {}, h('td', { colspan: '9' },
       h('div.extend-box', {},
         r.kind !== 'files' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
         h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),

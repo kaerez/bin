@@ -300,6 +300,8 @@ blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|
 | `GET/POST /api/private/me/keys`, `DELETE …/keys/:id` | session | API keys |
 | `GET /api/private/shares`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session | My shares |
 | `/api/private/admin/*` | owner session, not impersonating | overview, settings, limits, quotas, viewer rules, users (+ password, unlock, impersonate, keys), unimpersonate, audit, guard, ip-rules, shares |
+| `GET /api/private/shares/:id/opens` | session | read receipts of my share → `{total, fields, rows: [{ts, …allowed fields}]}` (newest first, at most 200) |
+| `GET /api/private/admin/shares/:id/opens` | owner | the same with every field: `ip, country, region, city, browser, browser_ver, os, langs` |
 | `POST /api/private/admin/logs/clear` `{current, scope: "all"\|"user", user?, before?}` | owner | delete activity entries (all, or about `user`; only `ts < before` when given) → `{deleted}`; `current` is the owner's password proof (403 `wrong_password`); leaves no record |
 | `GET /api/private/admin/shares` `?users=id,id&kind=&status=&q=&locked=true\|false&createdFrom=&createdTo=&expiresFrom=&expiresTo=&limit=&offset=` | owner | every user's shares, filtered (times in unix seconds, each bound optional) → `{rows, total}` |
 | `GET/PATCH /api/private/admin/shares/:id`, `POST …/:id/revoke`, `POST …/:id/lock` `{locked}` | owner | inspect, change (increase-only, protocol maxima), revoke, lock/unlock — logged as admin actions |

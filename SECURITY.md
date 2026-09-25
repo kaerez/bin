@@ -314,6 +314,21 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - Kill switches: `DISABLE_BFP=true` (everything, including IP rules) and
     `DISABLE_BFP_SETUP=true` (setup only).
 
+### Read receipts
+
+- Every successful open of an account's share (a wrong link or password is not an open) is
+  recorded: the time, and what the opener's request itself revealed — the IP address,
+  Cloudflare's coarse location (country, region, city), the browser and version, the operating
+  system and the `Accept-Language` languages. At most 1000 per share are kept (oldest first), for
+  as long as the activity log (same age limits; clearing an account's log clears its receipts).
+- The sender sees the time of every open in My shares; the other details only as far as the
+  admin allows that account (`receiptIp`, `receiptLocation`, `receiptBrowser`, `receiptOs`,
+  `receiptLanguages`, all off by default). The admin always sees everything. Anonymous (public)
+  shares are recorded for the admin only.
+- The share page tells recipients before they reveal or unlock a share that opening is recorded.
+  These are recipients' personal data (GDPR): decide what senders may see, the retention period
+  and the notice wording with your Legal / Compliance team.
+
 ### Activity log retention and clearing
 
 - The activity/audit log is kept for at most `log.maxAgeSec` (default 365 days) and

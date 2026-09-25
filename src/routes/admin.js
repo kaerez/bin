@@ -65,6 +65,14 @@ export async function handleAdmin(request, env, url) {
     return json({ rows: await withLiveStatus(env, dir, rows), total });
   }
 
+  const om = p.match(/^\/api\/private\/admin\/shares\/([A-Za-z0-9_-]{16,32})\/opens$/);
+  if (om) {
+    // The admin always sees every read-receipt detail.
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    const r = await dir.shareOpens(me, om[1], { admin: true });
+    return r.ok ? json({ total: r.total, fields: r.fields, rows: r.rows }) : fromDir(r);
+  }
+
   const sm = p.match(/^\/api\/private\/admin\/shares\/([A-Za-z0-9_-]{16,32})(?:\/(revoke|lock))?$/);
   if (sm) {
     const id = sm[1];
