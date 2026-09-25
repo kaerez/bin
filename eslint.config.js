@@ -32,6 +32,12 @@ export default [
     languageOptions: { globals: { ...globals.browser } },
   },
 
+  // The browser service worker: a classic script with service-worker globals.
+  {
+    files: ['public/sw.js'],
+    languageOptions: { sourceType: 'script', globals: { ...globals.serviceworker } },
+  },
+
   // Worker: service-worker/Web-API globals (fetch, Response, URL, crypto, DO).
   {
     files: ['src/**/*.js'],
