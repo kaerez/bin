@@ -68,6 +68,7 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
     if (u.pathname === '/api/private/policy' && policy.urlRules !== undefined) {
       const denied = auth();
       if (denied) return denied;
+      if (policy.noPolicyScope) return err(403, 'scope_denied', 'This API key does not have the "policy" scope.');
       return json(200, { url: true, urlRules: policy.urlRules });
     }
 

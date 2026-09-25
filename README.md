@@ -217,7 +217,8 @@ secbin send ./reports report.pdf --password
 secbin get 'https://bin.example.com/p/f…#…' --out ./downloads
 ```
 
-See [`cli/README.md`](./cli/README.md).
+See [`cli/README.md`](./cli/README.md). To call the REST API directly (curl, Python, Node), see
+[`docs/API.md`](./docs/API.md) and [`examples/api/`](./examples/api/).
 
 ## Architecture
 

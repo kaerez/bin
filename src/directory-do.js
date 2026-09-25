@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS viewer_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, match TEXT NOT NULL,
   value TEXT NOT NULL, renderer TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL,
-  name TEXT NOT NULL, created INTEGER NOT NULL, last_used INTEGER, expires INTEGER);
+  name TEXT NOT NULL, created INTEGER NOT NULL, last_used INTEGER, expires INTEGER,
+  scopes TEXT NOT NULL DEFAULT 'notes,files,policy');
 CREATE TABLE IF NOT EXISTS revoked_sessions (sid TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS failures (user_id TEXT PRIMARY KEY, count INTEGER NOT NULL, start INTEGER NOT NULL,
   locked_until INTEGER NOT NULL DEFAULT 0);
@@ -99,6 +100,8 @@ const MIGRATIONS = [
     m.sql.exec('CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id)');
     m.sql.exec('CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts)');
   },
+  // 5: per-key API scopes (existing keys keep every scope) — see API_SCOPES
+  (m) => m.addColumn('api_keys', 'scopes', "TEXT NOT NULL DEFAULT 'notes,files,policy'"),
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -129,6 +132,12 @@ const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
+/**
+ * What an API key may do (chosen when it is created; every scope by default):
+ * notes — create notes (all formats), files — upload file shares, policy —
+ * read the account's policy (GET /api/private/policy, used by the CLI).
+ */
+export const API_SCOPES = ['notes', 'files', 'policy'];
 const MAX_OPENS_PER_SHARE = 1000;
 // Read-receipt details and the limit that lets a sender see each one.
 const RECEIPT_FIELDS = [
@@ -550,10 +559,11 @@ export class Directory extends DurableObject {
 
   // ── API keys ─────────────────────────────────────────────────────────────
   async listKeys(uid) {
-    return this.sql.exec('SELECT id, name, created, last_used, expires FROM api_keys WHERE user_id = ? ORDER BY created DESC', uid).toArray();
+    return this.sql.exec('SELECT id, name, created, last_used, expires, scopes FROM api_keys WHERE user_id = ? ORDER BY created DESC', uid).toArray()
+      .map((k) => ({ ...k, scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) }));
   }
 
-  async createKey(uid, { name, hash, expires }) {
+  async createKey(uid, { name, hash, expires, scopes }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'public') return fail(403, 'api_disabled', 'The public account never has API keys.');
@@ -566,9 +576,16 @@ export class Directory extends DurableObject {
     if (label === null || label === '') return fail(400, 'invalid_name', 'Give the key a name (up to 100 characters).');
     if (typeof hash !== 'string' || !HEX64_RE.test(hash)) return fail(400, 'invalid_key', 'invalid key');
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
+    let sc = API_SCOPES;
+    if (scopes !== undefined) {
+      if (!Array.isArray(scopes) || !scopes.length || scopes.some((x) => !API_SCOPES.includes(x))) {
+        return fail(400, 'invalid_scopes', `Choose one or more scopes: ${API_SCOPES.join(', ')}.`);
+      }
+      sc = API_SCOPES.filter((x) => scopes.includes(x));
+    }
     const id = newId();
-    this.sql.exec('INSERT INTO api_keys (key_hash, id, user_id, name, created, expires) VALUES (?, ?, ?, ?, ?, ?)', hash, id, uid, label, now(), expires ?? null);
-    this.#log(uid, uid, 'apikey.created', `name=${label}`);
+    this.sql.exec('INSERT INTO api_keys (key_hash, id, user_id, name, created, expires, scopes) VALUES (?, ?, ?, ?, ?, ?, ?)', hash, id, uid, label, now(), expires ?? null, sc.join(','));
+    this.#log(uid, uid, 'apikey.created', `name=${label} scopes=${sc.join(',')}`);
     return { ok: true, id };
   }
 
@@ -591,7 +608,7 @@ export class Directory extends DurableObject {
     if (u.disabled) return { disabled: true };
     if (!this.#effective(u).all.apiEnabled) return null; // disallowing API use stops existing keys at once
     if (!k.last_used || ts - k.last_used > 60) this.sql.exec('UPDATE api_keys SET last_used = ? WHERE key_hash = ?', ts, hash);
-    return { user: this.#publicUser(u) };
+    return { user: this.#publicUser(u), scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) };
   }
 
   // ── creation authorization + quotas ──────────────────────────────────────

@@ -272,6 +272,14 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
 - **API keys** (`sbk_…`, stored hashed) authenticate share creation only — never account or
   admin endpoints. The owner decides who may hold keys and how many; API limits and quotas can
   only narrow the account's limits. Revoking API permission disables existing keys at once.
+  - **Scopes:** each key carries a subset of `notes`, `files` and `policy`, chosen at creation
+    and fixed for its lifetime; a call outside them is `403 scope_denied`. Issue each automation
+    the narrowest key it needs (least privilege) and an expiry.
+  - **Storage:** the key is shown once. Keep it in a secrets manager (for example HashiCorp Vault
+    or AWS Secrets Manager) and pass it through the environment, never in source code, shell
+    history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`
+    only.
+  - The built-in public account never holds keys.
 - **Impersonation** ("log in as"): owner only, never nested, no admin access or key minting
   while impersonating; each action is logged with the real actor (the user's own activity view
   shows it as theirs).

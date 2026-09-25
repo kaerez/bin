@@ -231,6 +231,8 @@ Common errors on any route:
 - `503 server_not_configured`: `SIG`/`ENC` are missing or invalid (auth and private routes only).
 - `403 account_disabled`: a disabled account's session or API key. The session cookie is also
   cleared.
+- `403 scope_denied`: an API key without the scope the route needs (`notes` for
+  `POST /api/private/paste`, `files` for the file routes, `policy` for `GET /api/private/policy`).
 
 ### Public (capability-gated)
 
@@ -297,7 +299,7 @@ blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|
 | `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy, `passwordPolicy` `{pwMinLength, pwUpper, pwLower, pwDigit, pwSymbol}` (the browser enforces it; the server cannot) |
 | `POST /api/private/me/password` `{current, salt, t, proof}` | session | change password (ends other sessions). Never blocked by a login lockout. A wrong `current` → 403 `wrong_password`, also counted against the IP's login guard. The 10th wrong attempt in the window (default) → 401 `session_revoked`, which ends every session of the account |
 | `GET /api/private/me/activity` | session | own activity (never shows the actor) |
-| `GET/POST /api/private/me/keys`, `DELETE …/keys/:id` | session | API keys |
+| `GET/POST /api/private/me/keys` `{name, expiresInSec?, scopes?}`, `DELETE …/keys/:id` | session | API keys; `scopes` is a subset of `notes`, `files`, `policy` (default all three; empty or unknown → 400 `invalid_scopes`). Listing returns each key's `scopes` |
 | `GET /api/private/shares`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session | My shares |
 | `/api/private/admin/*` | owner session, not impersonating | overview, settings, limits, quotas, viewer rules, users (+ password, unlock, impersonate, keys), unimpersonate, audit, guard, ip-rules, shares |
 | `GET /api/private/shares/:id/opens` | session | read receipts of my share → `{total, fields, rows: [{ts, …allowed fields}]}` (newest first, at most 200) |

@@ -62,6 +62,13 @@ describe('link shares (--fmt url)', () => {
     expect((await make(regex, ['--fmt', 'url', '--text', 'https://example.org/'])).code).toBe(2);
   });
 
+  it('explains a key without the policy scope', async () => {
+    const server = makeServer({ policy: { urlRules: ['scheme:https'], noPolicyScope: true } });
+    const c = await make(server, ['--fmt', 'url', '--text', 'https://example.com/']);
+    expect(c.code).toBe(2);
+    expect(c.err).toMatch(/scope "policy"/);
+  });
+
   it('flags plain-http links', async () => {
     const server = makeServer();
     const c = await make(server, ['--fmt', 'url', '--text', 'http://example.com/']);

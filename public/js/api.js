@@ -79,7 +79,7 @@ export const me = () => request('/api/private/me');
 export const changePassword = (body) => request('/api/private/me/password', { method: 'POST', body });
 export const myActivity = (before) => request(`/api/private/me/activity${before ? `?before=${enc(before)}` : ''}`);
 export const listKeys = () => request('/api/private/me/keys');
-export const createKey = (name, expiresInSec) => request('/api/private/me/keys', { method: 'POST', body: { name, expiresInSec } });
+export const createKey = (name, expiresInSec, scopes) => request('/api/private/me/keys', { method: 'POST', body: { name, expiresInSec, scopes } });
 export const revokeKey = (id) => request(`/api/private/me/keys/${enc(id)}`, { method: 'DELETE', headers: INTENT });
 
 export async function createNote(paste, label) {
