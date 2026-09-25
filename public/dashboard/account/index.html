@@ -230,6 +230,30 @@
                     <p class="msg" id="pw-msg" role="alert" hidden></p>
                 </form>
 
+                <div class="card stack reveal d3" id="passkeys-card">
+                    <h2 class="section-title">Passkeys</h2>
+                    <p class="subtitle" id="passkeys-sub">Sign in with this device's fingerprint, face or screen lock instead of your password, or add it as a second step after the password. You can have several (one per device).</p>
+                    <p class="msg" id="recovery-used" role="status" hidden></p>
+                    <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Added</th><th>Last used</th><th>Synced</th><th></th></tr></thead><tbody id="passkeys-body"></tbody></table></div>
+                    <div class="stack" id="passkeys-actions">
+                        <label class="field-label" for="passkey-current">Current password (confirms every change here)</label>
+                        <input type="password" class="input" id="passkey-current" autocomplete="current-password" aria-label="Current password, to confirm passkey changes" />
+                        <form class="toolbar" id="passkey-form">
+                            <input class="input" id="passkey-name" placeholder="Passkey name, e.g. work laptop" maxlength="100" aria-label="Passkey name" />
+                            <button type="submit" class="btn" id="passkey-add">Add a passkey</button>
+                        </form>
+                        <label class="inline" id="mfa-row"><input type="checkbox" id="mfa-toggle" /> Also require a passkey (or a recovery code) after my password</label>
+                        <p class="mono muted" id="recovery-status"></p>
+                        <div class="btn-row"><button type="button" class="btn" id="recovery-regen">New recovery codes</button></div>
+                    </div>
+                    <div class="stack" id="recovery-new" hidden>
+                        <p class="mono key-warn">Save these 20 recovery codes somewhere safe now. Each works once in place of a passkey; they will not be shown again.</p>
+                        <ol class="recovery-codes mono" id="recovery-list"></ol>
+                        <div class="btn-row"><button type="button" class="btn" id="recovery-copy">Copy</button><button type="button" class="btn" id="recovery-download">Download (.txt)</button></div>
+                    </div>
+                    <p class="msg" id="passkeys-msg" role="alert" hidden></p>
+                </div>
+
                 <div class="card stack reveal d3" id="keys-card">
                     <h2 class="section-title">API keys</h2>
                     <p class="subtitle" id="keys-sub">Keys let the <code class="mono">secbin</code> CLI create shares for you (and nothing else). Use them via <code class="mono">SECBIN_API_KEY</code> or <code class="mono">--api-key-file</code>.</p>

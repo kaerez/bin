@@ -25,6 +25,7 @@ const fx = vi.hoisted(() => {
       caps: { maxShareBytes: 1 << 20 },
       viewer: { enabled: false },
       apiKeys: { enabled: true, max: 5 },
+      passkeys: { mode: 'any', count: 1, required: false, recoveryLeft: 20 },
       quotas: [],
     },
   };
@@ -45,6 +46,8 @@ vi.mock('../public/js/api.js', () => {
     listKeys: vi.fn(async () => ({ keys: [{ id: 'k1', name: 'laptop', created: fx.now, last_used: null, expires: null }] })),
     myActivity: vi.fn(async () => ({ rows: [{ id: 1, ts: fx.now, action: 'login', detail: 'ok' }] })),
     createKey: vi.fn(), revokeKey: vi.fn(), changePassword: vi.fn(), prelogin: vi.fn(),
+    myPasskeys: vi.fn(async () => ({ ok: true, mode: 'any', mfa: false, required: false, max: 10, recoveryLeft: 20, passkeys: [{ id: 'p1', name: 'phone', created: fx.now, lastUsed: null, synced: true }] })),
+    passkeyRegisterOptions: vi.fn(), addPasskey: vi.fn(), removePasskey: vi.fn(), regenerateRecoveryCodes: vi.fn(), setSecondFactor: vi.fn(),
     admin: {
       overview: vi.fn(async () => ({ env: {}, limits: { all: {}, api: {} }, quotas: [], settings: {}, viewerRules: [] })),
       users: vi.fn(async () => ({ users: [
@@ -142,12 +145,12 @@ describe('dashboard tables carry data-label for the stacked mobile layout', () =
     expect(ids.size).toBe(rows.length); // unique ids
   });
 
-  it('Account: API-key and activity rows are labelled', async () => {
+  it('Account: passkey, API-key and activity rows are labelled', async () => {
     mountPage('public/dashboard/account/index.html');
     await import('../public/dashboard/js/account.js');
     await settle();
     const tables = document.querySelectorAll('#view-account table.table');
-    expect(tables).toHaveLength(2);
+    expect(tables).toHaveLength(3);
     for (const t of tables) expectLabelled(t);
   });
 

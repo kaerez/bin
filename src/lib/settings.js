@@ -96,6 +96,8 @@ export function settingsWithDefaults(rows) {
 // ── per-user capability limits ───────────────────────────────────────────────
 // Each key resolves: user override → global default row → code default.
 // `null` on a numeric key means "no limit" (still bounded by hard ceilings).
+export const PASSKEY_MODES = ['any', 'second', 'off'];
+
 export const LIMITS = {
   text:                { type: 'bool', def: true },
   files:               { type: 'bool', def: true },
@@ -142,6 +144,11 @@ export const LIMITS = {
   pwLower:             { type: 'bool', def: false, owner: false },
   pwDigit:             { type: 'bool', def: false, owner: false },
   pwSymbol:            { type: 'bool', def: false, owner: false },
+  // Passkeys (WebAuthn): "any" — sign in with a passkey alone, or use it as a
+  // second factor after the password (the user chooses); "second" — only as a
+  // second factor (every password login then needs one); "off" — none.
+  // Recovery codes stand in for a passkey wherever one is accepted.
+  passkeys:            { type: 'enum', values: PASSKEY_MODES, def: 'any', owner: 'any' },
 };
 
 /** The password-policy keys of the limits (see public/js/pwauth.js). */

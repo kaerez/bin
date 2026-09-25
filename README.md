@@ -180,6 +180,10 @@ working.
   500 000), with per-user limits; entries about the owner are kept until cleared. The owner can
   clear everything, one account's entries or entries older than a date (password required; no
   record is kept of the clearing — check retention duties with Legal / Compliance first).
+- **Passkeys:** each account can add passkeys (Account) and sign in with one instead of the
+  password, or require one after the password; 20 one-time recovery codes stand in for a lost
+  passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
+  none. The admin can remove a user's passkeys if they lose them all.
 - **Human check (optional):** Cloudflare Turnstile on login, password changes and anonymous
   share creation when `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET` are both set (see Deploying).
 - **Kill switches** — plain env vars, case-insensitive `true`:

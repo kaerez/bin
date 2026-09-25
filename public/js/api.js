@@ -75,6 +75,11 @@ export const setup = (body) => request('/api/auth/setup', { method: 'POST', body
 export const prelogin = (username) => request('/api/auth/prelogin', { method: 'POST', body: { username } });
 export const login = (username, proof, turnstile) => request('/api/auth/login', { method: 'POST', headers: human(turnstile), body: { username, proof } });
 export const logout = () => request('/api/auth/logout', { method: 'POST', headers: INTENT });
+// Passkeys (public/js/passkeys.js does the WebAuthn part).
+export const passkeyLoginOptions = () => request('/api/auth/passkey/options', { method: 'POST', body: {} });
+export const passkeyLogin = (challengeId, credential, turnstile) => request('/api/auth/passkey/login', { method: 'POST', headers: human(turnstile), body: { challengeId, credential } });
+export const recoveryLogin = (username, code, turnstile) => request('/api/auth/recovery', { method: 'POST', headers: human(turnstile), body: { username, code } });
+export const secondFactor = (body) => request('/api/auth/second-factor', { method: 'POST', body });
 
 // ── signed-in ────────────────────────────────────────────────────────────────
 export const me = () => request('/api/private/me');
@@ -83,6 +88,12 @@ export const myActivity = (before) => request(`/api/private/me/activity${before 
 export const listKeys = () => request('/api/private/me/keys');
 export const createKey = (name, expiresInSec, scopes) => request('/api/private/me/keys', { method: 'POST', body: { name, expiresInSec, scopes } });
 export const revokeKey = (id) => request(`/api/private/me/keys/${enc(id)}`, { method: 'DELETE', headers: INTENT });
+export const myPasskeys = () => request('/api/private/me/passkeys');
+export const passkeyRegisterOptions = () => request('/api/private/me/passkeys/options', { method: 'POST', body: {} });
+export const addPasskey = (body) => request('/api/private/me/passkeys', { method: 'POST', body });
+export const removePasskey = (id, current) => request(`/api/private/me/passkeys/${enc(id)}/remove`, { method: 'POST', body: { current } });
+export const regenerateRecoveryCodes = (current) => request('/api/private/me/recovery-codes', { method: 'POST', body: { current } });
+export const setSecondFactor = (on, current) => request('/api/private/me/second-factor', { method: 'POST', body: { on, current } });
 
 export async function createNote(paste, label) {
   const d = await request('/api/private/paste', { method: 'POST', body: { paste, label } });
@@ -116,6 +127,7 @@ export const admin = {
   unlock: (id) => request(`${A}/users/${enc(id)}/unlock`, { method: 'POST', headers: INTENT }),
   impersonate: (id) => request(`${A}/users/${enc(id)}/impersonate`, { method: 'POST', headers: INTENT }),
   revokeUserKey: (id, keyId) => request(`${A}/users/${enc(id)}/keys/${enc(keyId)}`, { method: 'DELETE', headers: INTENT }),
+  resetPasskeys: (id) => request(`${A}/users/${enc(id)}/passkeys`, { method: 'POST', headers: INTENT }),
   unimpersonate: () => request(`${A}/unimpersonate`, { method: 'POST', headers: INTENT }),
   clearLogs: (body) => request(`${A}/logs/clear`, { method: 'POST', body }),
   audit: (before, user) => request(`${A}/audit?${new URLSearchParams({ ...(before ? { before } : {}), ...(user ? { user } : {}) })}`),
