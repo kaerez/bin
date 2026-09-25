@@ -14,7 +14,9 @@ export const CSP = [
   "media-src blob:",
   "connect-src 'self'",
   "font-src 'self'",
+  // The service worker (/sw.js) and the pdf.js worker; the web app manifest.
   "worker-src 'self'",
+  "manifest-src 'self'",
   "base-uri 'none'",
   "form-action 'self'",
   "frame-ancestors 'none'",
