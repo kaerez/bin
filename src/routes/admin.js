@@ -251,6 +251,23 @@ export async function handleAdmin(request, env, url) {
     }
   }
 
+  // Clearing logs destroys evidence, so it needs the owner's password again.
+  if (p === '/api/private/admin/logs/clear') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    const body = await readJsonBody(request, 16 * 1024);
+    const g = await ipContext(env, request);
+    const current = await verifierFrom(body.current);
+    const step = current ? await dir.verifyCurrent(me, current, { lockoutOff: g.off.all }) : { ok: false, status: 400, error: 'invalid_credential', message: 'Re-enter your password to continue.' };
+    if (!step.ok) {
+      if (step.error === 'wrong_password' || step.error === 'session_revoked') await recordFailure(env, g, 'login');
+      const res = fromDir(step);
+      if (step.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
+      return res;
+    }
+    const r = await dir.clearLogs({ scope: body.scope, userId: body.user, before: body.before ?? null });
+    return r.ok ? json(r) : fromDir(r);
+  }
+
   if (p === '/api/private/admin/audit') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const before = Number(url.searchParams.get('before')) || null;

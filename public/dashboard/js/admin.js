@@ -6,7 +6,7 @@
 
 import '../../js/kdf-progress.js';
 import { admin } from '../../js/api.js';
-import { newCredential, checkNewPassword, describePolicy } from '../../js/pwauth.js';
+import { newCredential, checkNewPassword, describePolicy, loginProof } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
@@ -39,6 +39,8 @@ const LIMIT_UI = [
   ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
   ['fileTypeRules', 'File type list', 'rules'],
   ['maxFolderDepth', 'Max folder depth', 'int'],
+  ['logMaxAgeSec', 'Keep this account\'s log entries for at most', 'dur'],
+  ['logMaxEntries', 'Keep at most this many log entries about the account', 'int'],
   ['pwMinLength', 'Password: minimum length', 'int', { nullable: false }],
   ['pwUpper', 'Password: needs an upper-case letter', 'bool'],
   ['pwLower', 'Password: needs a lower-case letter', 'bool'],
@@ -410,6 +412,9 @@ async function renderSettings() {
     scopeRule('login', 'Login'), scopeRule('setup', 'Setup'),
     scopeRule('invalid', 'Invalid fetches (links that never existed, wrong #key, wrong password, bad tokens; shares that expired, were used up, revoked or deleted are not counted)'),
     h('div.card.stack', {}, int('guard.v6Prefix', 'IPv6 tracking prefix (/n)'))));
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Activity log' }),
+    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. Per-user limits (Defaults & quotas or a user) can keep less about an account. Entries about the owner are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
+    dur('log.maxAgeSec', 'Keep entries for at most'), int('log.maxEntries', 'Keep at most this many entries')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
     int('lockout.max', 'Failed logins allowed'), dur('lockout.windowSec', 'Within'), dur('lockout.lockSec', 'Then lock the account for')));
@@ -568,6 +573,44 @@ async function renderSecurity() {
 }
 
 // ── audit ────────────────────────────────────────────────────────────────────
+/**
+ * Clear some or all of the activity log: everything, or one account's
+ * entries, optionally only those older than a date. Needs the owner's
+ * password again; nothing records that it happened.
+ */
+function clearLogsCard(onDone) {
+  const scope = h('select.input', { 'aria-label': 'Which log entries' },
+    h('option', { value: 'all', text: 'all accounts' }), h('option', { value: 'user', text: 'one account' }));
+  const who = h('select.input', { 'aria-label': 'Account', hidden: true });
+  const olderOn = h('input', { type: 'checkbox', 'aria-label': 'Only entries older than a date' });
+  const date = h('input.input', { type: 'date', 'aria-label': 'Older than', disabled: true });
+  const mine = h('input.input', { type: 'password', placeholder: 'your password', autocomplete: 'current-password', 'aria-label': 'Your password, to confirm' });
+  const go = h('button.btn.danger', { type: 'button', text: 'Delete log entries' });
+  scope.onchange = async () => {
+    who.hidden = scope.value !== 'user';
+    if (!who.hidden && !who.options.length) {
+      const d = await guard(() => admin.users());
+      for (const u of d?.users || []) who.appendChild(h('option', { value: u.id, text: `${u.username}${u.role === 'owner' ? ' (owner)' : ''}` }));
+    }
+  };
+  olderOn.onchange = () => { date.disabled = !olderOn.checked; };
+  armConfirm(go, 'Delete for good?', async () => {
+    if (!mine.value) return msg('Enter your password to confirm.', true);
+    if (olderOn.checked && !date.value) return msg('Pick the date.', true);
+    const before = olderOn.checked ? Math.floor(Date.parse(`${date.value}T00:00:00Z`) / 1000) : null;
+    const current = await loginProof(profile.user.username, mine.value);
+    const r = await guard(() => admin.clearLogs({ current, scope: scope.value, user: scope.value === 'user' ? who.value : undefined, before }));
+    mine.value = '';
+    if (r) {
+      toast(`${r.deleted} log entr${r.deleted === 1 ? 'y' : 'ies'} deleted.`);
+      onDone();
+    }
+  });
+  return h('div.card.stack', {}, h('h2.section-title', { text: 'Clear logs' }),
+    h('p.mono.muted', { text: 'Deletes entries for good, without leaving a record that they existed. Audit trails may be subject to retention duties (e.g. SOX): check with Legal / Compliance before clearing.' }),
+    h('div.toolbar', {}, scope, who, h('label.inline', {}, olderOn, ' older than'), date, mine, go));
+}
+
 async function renderAudit() {
   const p = clear(panel('audit'));
   const body = h('tbody');
@@ -588,6 +631,7 @@ async function renderAudit() {
     more.hidden = r.rows.length < 100;
   };
   more.onclick = load;
+  p.appendChild(clearLogsCard(() => renderAudit()));
   p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['When', 'Who', 'On user', 'Action', 'Details'].map((t) => h('th', { text: t })))), body)));
   p.appendChild(h('div.btn-row', {}, more));
   await load();

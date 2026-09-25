@@ -170,6 +170,10 @@ working.
   localStorage and IndexedDB, self-healing; unresolvable conflicts are blocked), per network, or
   both (permissive or restrictive). The composer shows an editable notice. **Get Legal /
   Compliance sign-off first** (ePrivacy/GDPR); see [SECURITY.md](./SECURITY.md).
+- **Activity log** — kept for at most a set age and number of entries (defaults 365 days and
+  500 000), with per-user limits; entries about the owner are kept until cleared. The owner can
+  clear everything, one account's entries or entries older than a date (password required; no
+  record is kept of the clearing — check retention duties with Legal / Compliance first).
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup
   only). Default off.

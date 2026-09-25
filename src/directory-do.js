@@ -217,6 +217,9 @@ export class Directory extends DurableObject {
    * the admin panel on the subject's data (never shown in the user's own log).
    */
   #log(actor, subject, action, detail = '') {
+    // Enforce the size limit now and then, not only in the hourly alarm.
+    this.logWrites = ((this.logWrites ?? 0) + 1) % 500;
+    if (this.logWrites === 0) this.#pruneLogs();
     const obj = actor && typeof actor === 'object';
     const imp = !!(obj && actor.imp);
     const adm = !!(obj && actor.adm);
@@ -1424,6 +1427,57 @@ export class Directory extends DurableObject {
     return out(true);
   }
 
+  /**
+   * Activity-log retention: the global age and size (log.* settings) and each
+   * account's own limits (logMaxAgeSec / logMaxEntries, for entries about that
+   * account). Entries about the owner are exempt: global settings never apply
+   * to the owner, who can clear them by hand.
+   */
+  #pruneLogs() {
+    const s = this.#settings();
+    const ts = now();
+    const owner = this.#owner();
+    const oid = owner ? owner.id : '';
+    this.sql.exec('DELETE FROM activity WHERE ts < ? AND subject_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
+    for (const u of this.sql.exec("SELECT * FROM users WHERE role IN ('user', 'public')").toArray()) {
+      const L = this.#effective(u).all;
+      if (L.logMaxAgeSec !== null) this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND ts < ?', u.id, ts - L.logMaxAgeSec);
+      if (L.logMaxEntries !== null) {
+        this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND id NOT IN (SELECT id FROM activity WHERE subject_id = ? ORDER BY id DESC LIMIT ?)', u.id, u.id, L.logMaxEntries);
+      }
+    }
+    const count = this.sql.exec('SELECT COUNT(*) AS c FROM activity WHERE subject_id IS NOT ?', oid).one().c;
+    if (count > s['log.maxEntries']) {
+      this.sql.exec('DELETE FROM activity WHERE id IN (SELECT id FROM activity WHERE subject_id IS NOT ? ORDER BY id ASC LIMIT ?)', oid, count - s['log.maxEntries']);
+    }
+  }
+
+  /**
+   * Admin: delete log entries — all of them, or those about one account —
+   * optionally only those older than `before` (unix seconds). Leaves no
+   * record of the clearing (as configured). Returns the number deleted.
+   */
+  async clearLogs({ scope, userId, before }) {
+    const where = [];
+    const args = [];
+    if (scope === 'user') {
+      if (typeof userId !== 'string' || !this.#user(userId)) return fail(404, 'not_found', 'User not found.');
+      where.push('subject_id = ?');
+      args.push(userId);
+    } else if (scope !== 'all') {
+      return fail(400, 'invalid', 'scope must be "all" or "user"');
+    }
+    if (before !== undefined && before !== null) {
+      if (!Number.isSafeInteger(before) || before <= 0) return fail(400, 'invalid', 'before must be a unix time in seconds');
+      where.push('ts < ?');
+      args.push(before);
+    }
+    const q = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+    const n = this.sql.exec(`SELECT COUNT(*) AS c FROM activity${q}`, ...args).one().c;
+    this.sql.exec(`DELETE FROM activity${q}`, ...args);
+    return { ok: true, deleted: n };
+  }
+
   async adminLog(entry, actorId) {
     this.#log(actorId, entry.subject ?? null, entry.action, entry.detail ?? '');
   }
@@ -1443,6 +1497,7 @@ export class Directory extends DurableObject {
   // ── housekeeping ─────────────────────────────────────────────────────────
   async alarm() {
     const ts = now();
+    this.#pruneLogs();
     this.sql.exec('DELETE FROM revoked_sessions WHERE exp < ?', ts);
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
     // Anonymous trackers expire after being idle, with their usage counters.
