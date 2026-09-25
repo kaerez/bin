@@ -5,8 +5,15 @@
 
    CSP-strict: external stylesheet only, no inline styles, self-hosted fonts.
    Theming: light "Archive" values live on :root; `html.dark` re-binds the same
-   slots to the dark "Plate" preset (the shipped default — index.html sets
-   class="dark"; /js/theme-init.js restores the saved preference before paint).
+   slots to the dark "Plate" preset (the no-JS default — index.html sets
+   class="dark"; /js/theme-init.js applies the saved choice, or else the system
+   `prefers-color-scheme`, before paint).
+
+   Responsive: every page must work from a 320px phone to a desktop — safe-area
+   insets (viewport-fit=cover), dvh units, ≥16px form controls on touch/small
+   screens (iOS zooms on anything smaller), ≥44px touch targets on coarse
+   pointers, and wide tables that reflow into labelled cards below 640px. See
+   "responsive & touch" at the end of this file.
    Every rule reads through the tokens, so the two blocks flip the whole app. */
 
 /* ── self-hosted fonts (font-src 'self') ─────────────────────────────────── */
@@ -88,11 +95,15 @@ html.dark {
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { color-scheme: light; }
 html.dark { color-scheme: dark; }
-html { background: var(--paper); color: var(--ink); font-size: 16px; scroll-behavior: smooth; scrollbar-width: thin; scrollbar-color: var(--rule-3) transparent; }
+html { background: var(--paper); color: var(--ink); font-size: 16px; scroll-behavior: smooth; scrollbar-width: thin; scrollbar-color: var(--rule-3) transparent;
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 /* No colour transition here — the theme flip is owned by one mechanism further
    down (see "theme flip"), not by each surface on its own clock. */
-body { font-family: var(--sans); background: var(--paper); color: var(--ink); min-height: 100vh; line-height: 1.65;
+/* viewport-fit=cover lets the canvas run under the notch / home indicator; the
+   insets keep content out of those areas (all 0 on devices without them). */
+body { font-family: var(--sans); background: var(--paper); color: var(--ink); min-height: 100vh; min-height: 100dvh; line-height: 1.65;
   display: flex; flex-direction: column;
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; overflow-x: hidden; }
 /* Faint engraved-line grain — pure CSS, CSP-safe, decorative only. */
 body::before { content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
@@ -184,9 +195,9 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 }
 
 /* ── guilloché watermark (landing ambience; pure ornament) ───────────────── */
-.watermark { position: fixed; z-index: 0; top: -120px; right: -140px; width: 460px; height: 460px;
+.watermark { position: fixed; z-index: 0; top: calc(-120px + env(safe-area-inset-top, 0px)); right: calc(-140px + env(safe-area-inset-right, 0px)); width: 460px; height: 460px;
   color: var(--ink); opacity: var(--wm-opacity); pointer-events: none; user-select: none; }
-@media (max-width: 768px) { .watermark { width: 280px; height: 280px; top: -90px; right: -110px; } }
+@media (max-width: 768px) { .watermark { width: 280px; height: 280px; top: calc(-90px + env(safe-area-inset-top, 0px)); right: calc(-110px + env(safe-area-inset-right, 0px)); } }
 
 /* ── topbar ──────────────────────────────────────────────────────────────── */
 .topbar { position: relative; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 1rem;
@@ -350,12 +361,14 @@ html.dark .theme-toggle .ico-moon { display: block; }
 }
 
 /* ── modal (password) ────────────────────────────────────────────────────── */
-.modal-scrim { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 1.5rem;
+.modal-scrim { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
+  padding: max(1.5rem, env(safe-area-inset-top, 0px)) max(1.5rem, env(safe-area-inset-right, 0px)) max(1.5rem, env(safe-area-inset-bottom, 0px)) max(1.5rem, env(safe-area-inset-left, 0px));
   background: rgba(4, 8, 12, .62); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); animation: scrimIn .2s var(--ease); }
 @keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes modalRise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .modal:focus { outline: none; }
-.modal { width: 100%; max-width: 420px; background: var(--sheet); border: 1px solid var(--rule-2); border-radius: 6px; padding: 1.5rem;
+.modal { width: 100%; max-width: 420px; max-height: 100%; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--sheet); border: 1px solid var(--rule-2); border-radius: 6px; padding: 1.5rem;
   box-shadow: var(--shadow-overlay); animation: modalRise .2s var(--ease); }
 .modal-title { font-family: var(--serif); font-size: 1.375rem; font-weight: 500; letter-spacing: -.01em; }
 .modal-sub { font-size: .85rem; color: var(--ink-2); margin-top: .4rem; }
@@ -363,7 +376,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
 .modal-pw + .modal-pw { margin-top: .5rem; }
 .modal-pw .input { flex: 1; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .modal-msg { padding: .5rem 0 0; text-align: left; }
-.modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: .6rem; margin-top: 1.15rem; }
+.modal-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .6rem; margin-top: 1.15rem; }
 .modal-btn { padding: .5rem 1rem; }
 
 /* ── success: the sealed artifact ────────────────────────────────────────── */
@@ -441,7 +454,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
 
 /* ── status / expired panel ──────────────────────────────────────────────── */
 .status-panel { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem;
-  min-height: 72vh; text-align: center; padding: 2rem 0; }
+  min-height: 72vh; min-height: 72dvh; text-align: center; padding: 2rem 0; }
 .status-ico { width: 44px; height: 44px; color: var(--ink-3); }
 .status-panel .msg { padding: 0; color: var(--ink-2); font-size: .9rem; }
 .status-panel .msg.error { color: var(--ink-2); }
@@ -458,9 +471,9 @@ html.dark .theme-toggle .ico-moon { display: block; }
 /* ── messages / toast / footer ───────────────────────────────────────────── */
 .msg { font-family: var(--mono); font-size: .8125rem; color: var(--ink-2); letter-spacing: .01em; padding: 1.25rem 0; text-align: center; }
 .msg.error { color: var(--seal); }
-#toast { position: fixed; left: 50%; bottom: 2rem; z-index: 50; transform: translateX(-50%) translateY(12px);
+#toast { position: fixed; left: 50%; bottom: calc(2rem + env(safe-area-inset-bottom, 0px)); z-index: 50; transform: translateX(-50%) translateY(12px);
   background: var(--accent-fill); color: var(--accent-fg); font-family: var(--mono); font-size: .75rem; font-weight: 500; letter-spacing: .02em;
-  padding: .7rem 1.1rem; border-radius: 3px; max-width: 90vw; text-align: center; box-shadow: var(--shadow-overlay);
+  padding: .7rem 1.1rem; border-radius: 3px; max-width: calc(100vw - 2rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)); text-align: center; overflow-wrap: anywhere; box-shadow: var(--shadow-overlay);
   opacity: 0; pointer-events: none; transition: opacity .3s var(--ease), transform .3s var(--ease); }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
@@ -539,7 +552,8 @@ button.back { cursor: pointer; }
 .card.stack { margin-bottom: 1rem; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 .inline, .inline-ctl { display: inline-flex; align-items: center; gap: .4rem; font-size: .82rem; }
-.kv { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.2rem; font-size: .85rem; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem 1.2rem; font-size: .85rem; }
+.kv dd { overflow-wrap: anywhere; }
 .kv dt { color: var(--ink-3); }
 .limits-grid { display: flex; flex-direction: column; gap: .45rem; }
 .limit-row { display: grid; grid-template-columns: minmax(10rem, 15rem) auto auto 1fr; align-items: center; gap: .5rem; }
@@ -550,12 +564,12 @@ button.back { cursor: pointer; }
   padding: .45rem .5rem; border-bottom: 1px solid var(--rule-2); }
 .table td { padding: .45rem .5rem; border-bottom: 1px solid var(--rule); vertical-align: middle; }
 .table tr[data-status]:not([data-status="active"]) td { color: var(--ink-3); }
-.row-actions { gap: .35rem; flex-wrap: nowrap; }
+.row-actions { gap: .35rem; flex-wrap: wrap; }
 .row-actions .btn, .tree-btn { min-height: 30px; padding: .3rem .6rem; font-size: .75rem; }
 .label-in { width: 100%; min-width: 9rem; }
 .extend-box { display: flex; flex-direction: column; gap: .5rem; padding: .6rem 0; }
 .key-warn { color: var(--warn); font-size: .75rem; }
-.keygen-row { display: grid; grid-template-columns: 4rem 1fr auto; gap: .6rem; align-items: center; }
+.keygen-row { display: grid; grid-template-columns: 4rem minmax(0, 1fr) auto; gap: .6rem; align-items: center; }
 .keygen-val { overflow-x: auto; white-space: nowrap; font-size: .75rem; color: var(--ink-2); }
 .keygen-name { font-size: .72rem; color: var(--ink-3); }
 .label-row { display: flex; flex-direction: column; gap: .35rem; margin-top: 1rem; }
@@ -579,7 +593,7 @@ button.back { cursor: pointer; }
 .file-total { padding: .3rem 1.1rem .8rem; font-size: .72rem; color: var(--ink-3); }
 .file-total.over { color: var(--seal); }
 .viewer-opt { display: flex; align-items: center; gap: .5rem; padding: 0 1.1rem .9rem; font-size: .82rem; color: var(--ink-2); }
-.mime-in { width: 12rem; padding: .3rem .5rem; font-size: .72rem; }
+.mime-in { width: 12rem; max-width: 100%; padding: .3rem .5rem; font-size: .72rem; }
 .mime-in[aria-invalid="true"] { border-color: var(--seal); color: var(--seal); }
 
 /* ── trees (composer + viewer) ────────────────────────────────────────────── */
@@ -604,10 +618,105 @@ button.back { cursor: pointer; }
 .preview { margin-top: 1rem; }
 .preview-head { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; margin-bottom: .8rem; }
 .preview-title { font-size: .78rem; color: var(--ink-2); overflow-wrap: anywhere; }
-.preview-body { max-height: 75vh; overflow: auto; }
+.preview-body { max-height: 75vh; max-height: 75dvh; overflow: auto; }
 .viewer-frame { display: flex; justify-content: center; background: var(--sheet-2); border-radius: 4px; padding: .6rem; }
 .viewer-img, .viewer-pdf { max-width: 100%; height: auto; image-rendering: auto; background: #fff; }
-.viewer-media { width: 100%; max-height: 70vh; }
+.viewer-media { width: 100%; max-height: 70vh; max-height: 70dvh; }
 .viewer-toolbar { display: flex; align-items: center; justify-content: center; gap: .8rem; margin-bottom: .6rem; }
 .viewer-page { font-size: .75rem; color: var(--ink-3); }
 .viewer-note { padding: .6rem 0; }
+
+/* ── plaintext-field hint ("not encrypted") ───────────────────────────────────
+   Built by unencryptedHint() in /js/common.js and wired to its input with
+   aria-describedby. Ochre, like the other caution text; the open padlock is the
+   same glyph as the composer's Password toggle at rest. */
+.hint-unencrypted { display: flex; align-items: flex-start; gap: .45rem; font-size: .75rem; line-height: 1.45; color: var(--warn); }
+.hint-ico { flex: none; width: 14px; height: 14px; margin-top: .12em; }
+/* My shares: one hint per editable label, shown while that label is being
+   edited (focus-within covers typing, including the stacked mobile cards). */
+.label-cell { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+.label-cell .hint-unencrypted { display: none; }
+.label-cell:focus-within .hint-unencrypted { display: flex; }
+
+/* ── responsive & touch ───────────────────────────────────────────────────────
+   Last in the file on purpose: these rules must win over the compact desktop
+   metrics above (same or higher specificity, later in the cascade). */
+
+/* iOS Safari zooms the page into any focused control whose text is < 16px —
+   so on touch devices and small screens every control is at least 1rem. The
+   compact controls (.mime-in, .opt-num, .label-in) are named explicitly with a
+   doubled class so their own smaller size can never win. */
+@media (hover: none), (pointer: coarse), (max-width: 768px) {
+  input, select, textarea,
+  .input, .editor, .opt .input, .input.mime-in, .input.opt-num, .input.label-in { font-size: 1rem; }
+}
+
+/* Touch targets: ≥ 44×44 CSS px wherever the pointer is a finger (and on narrow
+   windows, which are almost always phones). */
+@media (hover: none), (pointer: coarse), (max-width: 768px) {
+  .btn, .send, .lock, .cta, .back, .tab, .copy-btn, .modal-btn,
+  .row-actions .btn, .tree-btn { min-height: 44px; min-width: 44px; }
+  .copy-btn, .tab { display: inline-flex; align-items: center; justify-content: center; }
+  .theme-toggle, .tree-toggle { width: 44px; height: 44px; }
+  .tree-spacer { width: 44px; }
+  .peek, .opt-toggle { min-width: 44px; }
+  .peek, .input { min-height: 44px; }
+  .opt { min-height: 44px; }
+  .brand { min-height: 44px; align-items: center; }
+  .foot-links a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; }
+  .viewer-opt, label.inline { min-height: 44px; }
+  input[type="checkbox"] { width: 1.25rem; height: 1.25rem; flex: none; }
+  /* No double-tap-to-zoom delay on controls. */
+  a, button, input, select, textarea, label { touch-action: manipulation; }
+}
+
+/* Phones: the topbar becomes brand + theme toggle, with the nav as its own
+   full-width row of equal buttons (display: contents lifts the two controls
+   out of .topbar-right so they can be ordered). */
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; row-gap: .6rem; }
+  .topbar-right { display: contents; }
+  .topbar .theme-toggle { order: 1; margin-left: auto; }
+  .dash-nav { order: 2; flex: 1 1 100%; }
+  .dash-nav .back { flex: 1 1 auto; justify-content: center; }
+}
+
+/* Wide tables reflow into one card per row; each cell shows its column name
+   from data-label (set by the JS that builds the row). The header row stays in
+   the accessibility tree, visually hidden. Cells without a data-label (row
+   actions, the full-width extend form) span the card. */
+@media (max-width: 640px) {
+  .table-wrap { overflow-x: visible; }
+  .toolbar + .table-wrap { margin-top: .75rem; }
+  .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
+  .table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .table tr { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; padding: .3rem .85rem; margin-bottom: .6rem; }
+  .table tr.extend-row { border-style: dashed; margin-top: -.3rem; }
+  .table td { border-bottom: 1px solid var(--rule); padding: .5rem 0; overflow-wrap: anywhere; }
+  .table tr > td:last-child { border-bottom: 0; }
+  .table td[data-label] { display: grid; grid-template-columns: minmax(5.5rem, 34%) minmax(0, 1fr); gap: .75rem; align-items: center; }
+  .table td[data-label]::before { content: attr(data-label); font-family: var(--mono); font-size: .65rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+  .table td[data-label] > * { justify-self: start; }
+  .table td[data-label] > .label-cell { justify-self: stretch; }
+  .table td[data-label]:empty { display: none; }
+  .table .cell-actions .btn-row > .btn, .table .cell-actions > .btn { flex: 1 1 auto; }
+  .label-in { min-width: 0; }
+  .limits-grid .limit-row { padding-bottom: .45rem; border-bottom: 1px solid var(--rule); }
+}
+
+/* Small phones (≤ 480px): nothing may force a horizontal scroll at 320px, and
+   dialogs become near-full-screen sheets whose content scrolls. */
+@media (max-width: 480px) {
+  .pw .input { min-width: 0; }
+  .toolbar > .input:not(.opt-num) { flex: 1 1 100%; min-width: 0; }
+  .toolbar > .btn { flex: 1 1 auto; }
+  .tree-row .mime-in { flex: 1 1 10rem; width: auto; min-width: 0; }
+  .tree-list .tree-list { padding-left: .6rem; margin-left: .3rem; }
+  .card { padding: 1rem; }
+  .keygen-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .keygen-row .keygen-name { grid-column: 1 / -1; }
+  .modal-scrim { align-items: stretch;
+    padding: max(.5rem, env(safe-area-inset-top, 0px)) max(.5rem, env(safe-area-inset-right, 0px)) max(.5rem, env(safe-area-inset-bottom, 0px)) max(.5rem, env(safe-area-inset-left, 0px)); }
+  .modal { max-width: none; align-self: center; padding: 1.25rem 1rem; }
+  .modal-actions > * { flex: 1 1 auto; justify-content: center; }
+}
