@@ -3,13 +3,14 @@
 // except "unimpersonate", which is how an impersonating owner returns.
 
 import { json, err, readJsonBody, assertIntent, methodNotAllowed } from '../lib/http.js';
-import { authenticate, issueSession } from '../lib/auth.js';
-import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSettings } from '../lib/guard.js';
+import { authenticate, issueSession, logoutCookie } from '../lib/auth.js';
+import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSettings, ipContext, recordFailure } from '../lib/guard.js';
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
 import { GUARD_SCOPES } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
 import { purgeShare, changeShare, withLiveStatus } from './private.js';
 import { parseId } from '../lib/ids.js';
+import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS } from '../lib/portable.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
@@ -90,6 +91,45 @@ export async function handleAdmin(request, env, url) {
     if (typeof body.locked !== 'boolean') return err(400, 'invalid', 'Send {"locked": true|false}.');
     const r = await dir.setShareLock(me, id, body.locked);
     return r.ok ? json({ ok: true, locked: r.locked }) : fromDir(r);
+  }
+
+  // ── export / import (always re-confirmed with the owner's password) ──────
+  if (p === '/api/private/admin/export' || p === '/api/private/admin/import') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    const isImport = p.endsWith('import');
+    const body = await readJsonBody(request, isImport ? MAX_IMPORT_BYTES : 64 * 1024);
+    const g = await ipContext(env, request);
+    // Step-up: an export can hold password verifiers and an import can
+    // replace credentials, so a session alone (e.g. a stolen cookie) is not
+    // enough. A wrong password counts like a wrong current password.
+    const current = await verifierFrom(body.current);
+    const step = current ? await dir.verifyCurrent(me, current, { lockoutOff: g.off.all }) : { ok: false, status: 400, error: 'invalid_credential', message: 'Re-enter your password to continue.' };
+    if (!step.ok) {
+      if (step.error === 'wrong_password' || step.error === 'session_revoked') await recordFailure(env, g, 'login');
+      const res = fromDir(step);
+      if (step.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
+      return res;
+    }
+    if (!isImport) {
+      const users = body.users === 'all' ? 'all' : Array.isArray(body.users) ? body.users.filter((u) => ID_RE.test(String(u))).slice(0, MAX_EXPORT_USERS) : [];
+      const r = await dir.exportData({
+        system: body.system === true, users, credentials: body.credentials === true, config: body.config === true, origin: url.origin,
+      }, me);
+      return r.ok ? json({ document: r.doc }) : fromDir(r);
+    }
+    let doc;
+    let decisions;
+    try {
+      doc = validateExport(body.document);
+      decisions = validateDecisions(body.decisions, doc);
+    } catch (e) {
+      if (e instanceof PortableError) return err(400, 'invalid_import', e.message);
+      throw e;
+    }
+    const r = await dir.importData(doc, decisions, { dryRun: body.dryRun !== false, callerIp: g.ip }, me);
+    if (!r.ok) return json({ error: r.error, message: r.message, plan: r.plan }, r.status);
+    if (r.applied) invalidateGuardCaches();
+    return json(r);
   }
 
   if (p === '/api/private/admin/overview') {

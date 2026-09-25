@@ -21,7 +21,8 @@ import {
   SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES,
 } from './lib/settings.js';
-import { normalizeRule } from './lib/ip.js';
+import { normalizeRule, parseIp, parseCidr, cidrContains } from './lib/ip.js';
+import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
 import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
 
 const SCHEMA = `
@@ -402,6 +403,27 @@ export class Directory extends DurableObject {
   async changePassword(uid, { current, salt, t, verifier, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
+    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    if (wrong) return wrong;
+    const bad = this.#checkCredential(salt, t, verifier);
+    if (bad) return fail(400, 'invalid_credential', bad);
+    this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), uid);
+    this.#log(uid, uid, 'password.changed');
+    return { ok: true, ver: u.sess_ver + 1 };
+  }
+
+  /**
+   * Step-up check of a signed-in account's current password (password change,
+   * admin export/import). Wrong answers count toward the same threshold as a
+   * login lockout; reaching it ends every session of the account.
+   */
+  async verifyCurrent(uid, current, { lockoutOff = false } = {}) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    return this.#checkCurrent(u, current, lockoutOff) ?? { ok: true };
+  }
+
+  #checkCurrent(u, current, lockoutOff) {
     const ts = now();
     if (typeof current !== 'string' || !timingSafeEqualHex(current, u.pw_verifier)) {
       if (!lockoutOff) {
@@ -421,11 +443,7 @@ export class Directory extends DurableObject {
       return fail(403, 'wrong_password', 'The current password is incorrect.');
     }
     this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
-    const bad = this.#checkCredential(salt, t, verifier);
-    if (bad) return fail(400, 'invalid_credential', bad);
-    this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), uid);
-    this.#log(uid, uid, 'password.changed');
-    return { ok: true, ver: u.sess_ver + 1 };
+    return null;
   }
 
   async activity(uid, { before = null, limit = 50 } = {}) {
@@ -929,6 +947,193 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM ip_rules WHERE id = ?', id);
     this.#log(actorId, null, 'iprule.removed', `${r.action} ${r.cidr}`);
     return { ok: true };
+  }
+
+  // ── admin: export / import (secbin-export/v1, see src/lib/portable.js) ──
+  /**
+   * The plaintext export document. `users` is 'all' or a list of user ids;
+   * the owner is never included. The caller encrypts it before it is stored.
+   */
+  async exportData({ system = false, users = [], credentials = false, config = false, origin }, actorId) {
+    const doc = { format: EXPORT_FORMAT, created: now(), users: [] };
+    if (typeof origin === 'string') doc.origin = origin.slice(0, 200);
+    if (system) {
+      doc.system = {
+        settings: this.#settings(),
+        limits: { all: this.#limitRows('', 'all'), api: this.#limitRows('', 'api') },
+        quotas: this.#quotaRows(''),
+        viewerRules: this.sql.exec("SELECT match, value, renderer FROM viewer_rules WHERE user_id = '' ORDER BY id").toArray(),
+        ipRules: (await this.ipRules()).map((r) => ({ cidr: r.cidr, action: r.action, expires: r.expires ?? null, note: r.note || '' })),
+      };
+    }
+    const rows = users === 'all'
+      ? this.sql.exec("SELECT * FROM users WHERE role = 'user' ORDER BY username LIMIT ?", MAX_EXPORT_USERS + 1).toArray()
+      : (Array.isArray(users) ? users : []).slice(0, MAX_EXPORT_USERS + 1).map((id) => this.#user(id)).filter((u) => u && u.role === 'user');
+    // Never produce a file that the import would refuse.
+    if (rows.length > MAX_EXPORT_USERS && (credentials || config)) {
+      return fail(413, 'too_many_users', `An export holds at most ${MAX_EXPORT_USERS} users — export them in parts.`);
+    }
+    if (credentials || config) {
+      for (const u of rows) {
+        const e = { username: u.username };
+        if (credentials) e.credentials = { salt: u.pw_salt, t: u.pw_t, verifier: u.pw_verifier, disabled: !!u.disabled };
+        if (config) {
+          e.config = {
+            limits: { all: this.#limitRows(u.id, 'all'), api: this.#limitRows(u.id, 'api') },
+            quotas: this.#quotaRows(u.id),
+            viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', u.id).toArray(),
+          };
+        }
+        doc.users.push(e);
+      }
+    }
+    this.#log(actorId, null, 'export.created',
+      `system=${system ? 1 : 0} users=${doc.users.length} credentials=${credentials ? 1 : 0} config=${config ? 1 : 0}`);
+    // Which accounts left the system (and whether with verifiers), in chunks
+    // that fit the audit detail field.
+    this.#logChunks(actorId, null, 'export.users', `${[credentials ? 'credentials' : null, config ? 'config' : null].filter(Boolean).join('+')}: `, doc.users.map((e) => e.username));
+    return { ok: true, doc };
+  }
+
+  /** Log `items` as as many entries as needed to fit the detail field (nothing truncated). */
+  #logChunks(actorId, subject, action, prefix, items) {
+    let cur = [];
+    const flush = () => { if (cur.length) this.#log(actorId, subject, action, `${prefix}${cur.join(', ')}`); cur = []; };
+    for (const it of items) {
+      if (cur.length && `${prefix}${[...cur, it].join(', ')}`.length > 480) flush();
+      cur.push(String(it).slice(0, 400));
+    }
+    flush();
+  }
+
+  #quotaRows(userId) {
+    return this.sql.exec('SELECT channel, kind, n, unit, max FROM quotas WHERE user_id = ? ORDER BY id', userId).toArray();
+  }
+
+  /**
+   * Plan (dryRun) or apply an import of a validated document with validated
+   * decisions (portable.js). Applying is all-or-nothing: one storage
+   * transaction, and any planning error refuses the whole import.
+   */
+  async importData(doc, decisions, { dryRun = true, callerIp = null } = {}, actorId) {
+    const plan = { system: null, users: [], errors: [], warnings: [] };
+    if (decisions.system) {
+      const cur = this.#settings();
+      const existingRules = new Set((await this.ipRules()).map((r) => `${r.action} ${r.cidr}`));
+      const ts = now();
+      const ipAdd = doc.system.ipRules.filter((r) => (r.expires === null || r.expires > ts) && !existingRules.has(`${r.action} ${r.cidr}`));
+      const merged = { ...cur, ...doc.system.settings };
+      if (merged['session.idleSec'] > merged['session.absSec']) plan.errors.push('system: the idle timeout would exceed the absolute timeout');
+      // Never lock out the owner who is importing: a new block rule covering
+      // the caller (with no allow rule for it) refuses the import.
+      const me = parseIp(callerIp ?? '');
+      if (me) {
+        const after = [...(await this.ipRules()), ...ipAdd].map((r) => ({ action: r.action, c: parseCidr(r.cidr) }));
+        const allowed = after.some((r) => r.action === 'allow' && cidrContains(r.c, me));
+        const blocking = ipAdd.find((r) => r.action === 'block' && cidrContains(parseCidr(r.cidr), me));
+        if (blocking && !allowed) plan.errors.push(`system: the IP rule "block ${blocking.cidr}" would block your own address — remove it from the file or add an allow rule for yourself first`);
+      }
+      // Security-relevant changes are called out in the preview.
+      for (const [k, v] of Object.entries(doc.system.settings)) {
+        if (/^(guard|lockout)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
+      }
+      for (const r of ipAdd) if (r.action === 'allow') plan.warnings.push(`adds an allow rule (exempts ${r.cidr} from brute-force protection and blocks)`);
+      plan.system = {
+        settings: Object.entries(doc.system.settings).filter(([k, v]) => cur[k] !== v).map(([key, to]) => ({ key, from: cur[key], to })),
+        limits: { all: Object.keys(doc.system.limits.all).length, api: Object.keys(doc.system.limits.api).length },
+        quotas: doc.system.quotas.length,
+        viewerRules: doc.system.viewerRules.length,
+        ipRulesAdded: ipAdd.map((r) => `${r.action} ${r.cidr}`),
+        ipRulesSkipped: doc.system.ipRules.length - ipAdd.length,
+      };
+      plan.system._ipAdd = ipAdd;
+    }
+    for (const u of doc.users) {
+      const d = decisions.users.get(u.username);
+      if (!d) { plan.users.push({ username: u.username, action: 'skip' }); continue; }
+      const existing = this.#userByName(d.as);
+      const parts = [u.credentials ? 'credentials' : null, u.config ? 'config' : null].filter(Boolean);
+      const entry = { username: u.username, as: d.as, parts };
+      if (existing && existing.role !== 'user') {
+        entry.action = 'refused';
+        plan.errors.push(`"${d.as}" is the owner account and cannot be imported over — import it under another name`);
+      } else if (existing && !d.overwrite) {
+        entry.action = 'conflict';
+        plan.errors.push(`"${d.as}" already exists — choose overwrite, another name, or skip`);
+      } else if (!existing && !u.credentials) {
+        entry.action = 'refused';
+        plan.errors.push(`"${d.as}" does not exist here and the export has no credentials for it — it cannot be created`);
+      } else {
+        entry.action = existing ? 'overwrite' : 'create';
+        if (existing && u.credentials) entry.note = 'ends its sessions and revokes its API keys; its shares stay';
+      }
+      plan.users.push(entry);
+    }
+    const out = (applied) => {
+      const { _ipAdd, ...system } = plan.system ?? {};
+      return { ok: true, applied, plan: { system: plan.system ? system : null, users: plan.users, errors: plan.errors, warnings: plan.warnings } };
+    };
+    if (dryRun) return out(false);
+    if (plan.errors.length) return fail(409, 'import_conflicts', `The import was not applied: ${plan.errors.length} problem${plan.errors.length === 1 ? '' : 's'} (run the preview).`, { plan: out(false).plan });
+
+    const ts = now();
+    const replaceScope = (userId, limits, quotas, rules) => {
+      this.sql.exec('DELETE FROM limits WHERE user_id = ?', userId);
+      for (const ch of ['all', 'api']) {
+        for (const [k, v] of Object.entries(limits[ch])) this.sql.exec('INSERT INTO limits (user_id, channel, key, value) VALUES (?, ?, ?, ?)', userId, ch, k, JSON.stringify(v));
+      }
+      for (const o of this.sql.exec('SELECT id FROM quotas WHERE user_id = ?', userId).toArray()) this.sql.exec('DELETE FROM usage WHERE quota_id = ?', o.id);
+      this.sql.exec('DELETE FROM quotas WHERE user_id = ?', userId);
+      for (const q of quotas) this.sql.exec('INSERT INTO quotas (id, user_id, channel, kind, n, unit, max) VALUES (?, ?, ?, ?, ?, ?, ?)', newId(), userId, q.channel, q.kind, q.n, q.unit, q.max);
+      this.sql.exec('DELETE FROM viewer_rules WHERE user_id = ?', userId);
+      for (const r of rules) this.sql.exec('INSERT INTO viewer_rules (user_id, match, value, renderer) VALUES (?, ?, ?, ?)', userId, r.match, r.value, r.renderer);
+    };
+    this.ctx.storage.transactionSync(() => {
+      if (plan.system) {
+        const s = doc.system;
+        for (const [k, v] of Object.entries(s.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
+        replaceScope('', s.limits, s.quotas, s.viewerRules);
+        for (const r of plan.system._ipAdd) this.sql.exec('INSERT INTO ip_rules (id, cidr, action, expires, note, created) VALUES (?, ?, ?, ?, ?, ?)', newId(), r.cidr, r.action, r.expires, r.note, ts);
+        // The same entries the admin API writes, so an import is as visible as
+        // the equivalent manual changes.
+        this.#log(actorId, null, 'import.system', `settings=${plan.system.settings.length} ipRules+${plan.system._ipAdd.length}`);
+        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${JSON.stringify(c.to)}`));
+        for (const ch of ['all', 'api']) this.#logChunks(actorId, null, 'limits.updated', `import global ${ch}: `, Object.entries(s.limits[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`).concat(Object.keys(s.limits[ch]).length ? [] : ['none']));
+        this.#logChunks(actorId, null, 'quotas.updated', 'import global: ', s.quotas.length ? s.quotas.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`) : ['none']);
+        this.#log(actorId, null, 'viewer_rules.updated', `import global: ${s.viewerRules.length} rules`);
+        for (const r of plan.system._ipAdd) this.#log(actorId, null, 'iprule.added', `import: ${r.action} ${r.cidr}${r.note ? ` (${r.note})` : ''}`);
+      }
+      for (const [i, u] of doc.users.entries()) {
+        const e = plan.users[i];
+        if (e.action !== 'create' && e.action !== 'overwrite') continue;
+        let id;
+        if (e.action === 'create') {
+          id = newId();
+          const c = u.credentials;
+          this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, disabled, created, updated) VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?)",
+            id, e.as, c.salt, c.t, c.verifier, c.disabled ? 1 : 0, ts, ts);
+        } else {
+          id = this.#userByName(e.as).id;
+          if (u.credentials) {
+            const c = u.credentials;
+            // New credentials end every existing session, revoke the account's
+            // API keys (they are not tied to the password) and clear lockouts.
+            this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, disabled = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?',
+              c.salt, c.t, c.verifier, c.disabled ? 1 : 0, ts, id);
+            this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
+            this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', id);
+            this.sql.exec('DELETE FROM api_keys WHERE user_id = ?', id);
+          }
+        }
+        if (u.config) {
+          replaceScope(id, u.config.limits, u.config.quotas, u.config.viewerRules);
+          const L = u.config.limits;
+          for (const ch of ['all', 'api']) this.#logChunks(actorId, id, 'limits.updated', `import ${ch}: `, Object.keys(L[ch]).length ? Object.entries(L[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`) : ['none']);
+        }
+        this.#log(actorId, id, 'user.imported', `${e.action}${e.as !== u.username ? ` from=${u.username}` : ''} parts=${e.parts.join('+')}`);
+      }
+    });
+    return out(true);
   }
 
   async adminLog(entry, actorId) {

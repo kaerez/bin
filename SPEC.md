@@ -278,6 +278,13 @@ Every `404`/`410`, `bad_link`, `bad_password`, `bad_grant` and `bad_token` count
 | `GET /api/private/admin/shares` `?users=id,id&kind=&status=&q=&locked=true\|false&createdFrom=&createdTo=&expiresFrom=&expiresTo=&limit=&offset=` | owner | every user's shares, filtered (times in unix seconds, each bound optional) → `{rows, total}` |
 | `GET/PATCH /api/private/admin/shares/:id`, `POST …/:id/revoke`, `POST …/:id/lock` `{locked}` | owner | inspect, change (increase-only, protocol maxima), revoke, lock/unlock — logged as admin actions |
 
+| `POST /api/private/admin/export` `{current, system?, users?: "all"\|[id…], credentials?, config?}` | owner | the plaintext `secbin-export/v1` document for the browser to encrypt (never the owner) |
+| `POST /api/private/admin/import` `{current, document, decisions: {system, users: {name: {as?, overwrite?}}}, dryRun}` | owner | `dryRun` (default) → `{plan}`; otherwise applied atomically → `{applied: true, plan}`; `409 import_conflicts` with the plan when anything would conflict |
+
+`current` is the owner's password proof (as for a password change); a wrong one is `403
+wrong_password`. The export file format is described in `src/lib/portable.js` (document) and
+`public/js/exportcrypt.js` (envelope).
+
 A **locked** share answers `423 share_locked` to its sender's `PATCH`/revoke, to delete-by-token
 and to a recipient's "delete now".
 

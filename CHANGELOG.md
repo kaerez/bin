@@ -15,6 +15,11 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 
 ### Added
 
+- **Encrypted admin import/export** (Admin → Import / export): system configuration and/or
+  selected users (credentials and/or configuration), never the owner, sessions or API keys;
+  encrypted in the browser with a passphrase; imports are decrypted locally, previewed, then
+  applied all-or-nothing, with per-user skip/create/overwrite/rename. Both require the owner's
+  password again.
 - **Link and credential shares** (`fmt` `url` / `secret`), off until the administrator allows
   them globally or per user:
   - links: http(s) only, no embedded credentials; the recipient sees the real host (punycode,
