@@ -1,5 +1,5 @@
 // theme.js — wires the topbar light/dark toggle (deferred, first-party, CSP-safe).
-// theme-init.js already applied the saved preference before paint; this handles
+// theme-init.js already applied the saved (or system) theme before paint; this handles
 // clicks: flip the class on <html>, persist it, and animate the flip rather than
 // snapping between palettes (see "theme flip" in styles.css).
 (function () {
@@ -14,12 +14,15 @@
   // before the button exists, so the a11y state is set here instead).
   btn.setAttribute('aria-pressed', String(root.classList.contains('dark')));
 
-  // The state change itself, shared by all three paths below.
-  const apply = function (next) {
+  // The state change itself, shared by all the paths below. Only a click
+  // persists: that makes it an explicit choice, which then beats the system
+  // preference (see theme-init.js).
+  const apply = function (next, persist) {
     root.classList.toggle('dark', next === 'dark');
     btn.setAttribute('aria-pressed', String(next === 'dark'));
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.content = next === 'dark' ? '#0d1117' : '#f2f1ec';
+    if (!persist) return;
     try {
       localStorage.setItem('secbin:theme', next);
     } catch {
@@ -27,20 +30,39 @@
     }
   };
 
+  const hasExplicitChoice = function () {
+    try {
+      const v = localStorage.getItem('secbin:theme');
+      return v === 'light' || v === 'dark';
+    } catch {
+      return false;
+    }
+  };
+
+  // No explicit choice yet: keep following the system theme live (e.g. iOS
+  // switching to dark at sunset). An explicit choice stops this.
+  if (typeof matchMedia === 'function') {
+    const mq = matchMedia('(prefers-color-scheme: light)');
+    const follow = function (e) {
+      if (!hasExplicitChoice()) apply(e.matches ? 'light' : 'dark', false);
+    };
+    if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', follow);
+  }
+
   btn.addEventListener('click', function () {
     const next = root.classList.contains('dark') ? 'light' : 'dark';
 
     // Reduced motion: flip outright. The stylesheet has the wave and the
     // fallback transition switched off, so waiting on either would just delay it.
     if (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      apply(next);
+      apply(next, true);
       return;
     }
 
     // Snapshot the painted page so the stylesheet can wash the new palette
     // across it. Nothing re-renders, so scroll, focus and an open modal survive.
     if (typeof document.startViewTransition === 'function') {
-      const vt = document.startViewTransition(function () { apply(next); });
+      const vt = document.startViewTransition(function () { apply(next, true); });
       // A second click interrupts the running flip and rejects its promises.
       if (vt && vt.finished && typeof vt.finished.catch === 'function') {
         vt.finished.catch(function () { /* superseded by a newer flip */ });
@@ -53,7 +75,7 @@
     // engines this path exists for are the ones that otherwise coalesce it away.
     root.classList.add('theming');
     void root.offsetWidth;
-    apply(next);
+    apply(next, true);
     clearTimeout(untheme);
     untheme = setTimeout(function () { root.classList.remove('theming'); }, FLIP_MS);
   });
