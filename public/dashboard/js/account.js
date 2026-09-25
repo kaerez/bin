@@ -83,7 +83,7 @@ function wirePassword() {
 function wireKeys() {
   const card = $('#keys-card');
   if (!profile.apiKeys.enabled) {
-    $('#keys-sub').textContent = 'API keys are not enabled for your account. Ask the administrator if you need CLI access.';
+    $('#keys-sub').textContent = 'API keys are not enabled for your account. Ask the administrator if you need API access.';
     $('#key-form').hidden = true;
     return renderKeys();
   }

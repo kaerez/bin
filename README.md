@@ -11,7 +11,6 @@
 <p align="center">
   <a href="./SPEC.md">Protocol</a> ·
   <a href="./SECURITY.md">Threat model</a> ·
-  <a href="./cli/README.md">CLI</a> ·
   <a href="https://github.com/kaerez/bin/issues">Report a bug</a>
 </p>
 
@@ -21,7 +20,7 @@
 </div>
 
 secbin lets signed-in users share **notes, files and whole folders** through a link. Everything
-is encrypted in the sender's browser (or the CLI) **before** it leaves the device — note text,
+is encrypted in the sender's browser **before** it leaves the device — note text,
 file contents, and every piece of metadata about them: file names, folder structure, MIME types,
 per-file sizes. The key lives only in the link's `#fragment`, which browsers never send to a
 server. Recipients need nothing but the link (and the password, if one was set).
@@ -63,7 +62,6 @@ flowchart TD
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, and label shares. |
 | Admin | Users, impersonation ("log in as"), password resets, limits, quotas, session timeouts, file-size caps, viewer policy, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (unknown links, wrong keys, wrong passwords); account lockout. |
-| CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
 | Minimal surface | Strict CSP, self-hosted fonts, no third-party scripts, no analytics, no outbound requests. |
 
 > [!WARNING]
@@ -86,8 +84,8 @@ account. KV, R2, the Durable Objects and everything else are emulated locally.
 | Command | Description |
 | --- | --- |
 | `npm run dev` | Local dev server |
-| `npm test` | All suites: Worker in `workerd`, crypto/files in Node, DOM/a11y in happy-dom, and the CLI |
-| `npm run test:node` / `test:dom` / `test:cli` | One project only |
+| `npm test` | All suites: Worker in `workerd`, crypto/files in Node, DOM/a11y in happy-dom |
+| `npm run test:node` / `test:dom` | One project only |
 | `npm run lint` | ESLint 9 |
 | `npm run vendor` | Re-fetch and verify the pinned Argon2id (hash-wasm) and pdf.js builds |
 | `npm run kv:create` | Create the `PASTES` KV namespace (+ preview) |
@@ -157,16 +155,10 @@ Cloudflare Access is no longer needed. You may still layer it in front of `/dash
 
 ## CLI
 
-```bash
-npm install -g ./cli
-export SECBIN_SERVER=https://bin.example.com
-export SECBIN_API_KEY=sbk_…            # Dashboard → Account → API keys (if the admin allows it)
-echo "hello" | secbin create --views 2 --expire 3d
-secbin send ./reports report.pdf --password
-secbin get 'https://bin.example.com/p/f…#…' --out ./downloads
-```
-
-See [`cli/README.md`](./cli/README.md).
+The v1 command-line client was removed: it speaks protocol v1 and cannot talk to a v2 server.
+The v2 `secbin` CLI (API keys, file and folder sharing) ships separately. Until then, API keys
+work with any HTTP client as `Authorization: Bearer <key>` on the creation endpoints
+([`SPEC.md`](./SPEC.md)).
 
 ## Architecture
 

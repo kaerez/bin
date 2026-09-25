@@ -18,9 +18,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "vitest run && vitest run --config vitest.node.config.js && vitest run --config vitest.dom.config.js && vitest run --config cli/vitest.config.js",
+    "test": "vitest run && vitest run --config vitest.node.config.js && vitest run --config vitest.dom.config.js",
     "test:dom": "vitest run --config vitest.dom.config.js",
-    "test:cli": "vitest run --config cli/vitest.config.js",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",

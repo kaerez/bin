@@ -53,14 +53,14 @@ need atomic, immediately consistent read-modify-write.
 | `src/lib/settings.js` | Settings/limits/quotas schema and resolution |
 | `src/lib/config.js` | Tolerant env-var readers (`AUTHN`, `SIG`, `ENC`, `DISABLE_BFP*`) |
 | `src/*-do.js` | The four Durable Object classes |
-| `public/js/{bytes,format,crypto,kdf,files,zip,mime}.js` | Shared protocol modules (browser + CLI, vendored and drift-tested) |
+| `public/js/{bytes,format,crypto,kdf,files,zip,mime}.js` | Shared protocol modules (browser and Worker validation) |
 | `public/js/{view,viewer,pdfview,downloads}.js` | Public viewer, safe renderers, downloads |
 | `public/dashboard/js/*.js` | Composer, My shares, account, admin, chrome |
 | `public/js/vendor/` | Pinned hash-wasm Argon2 and pdf.js builds (`tools/vendor.mjs`) |
 
 ## Zero-knowledge boundary
 
-The browser (or CLI) derives everything secret from the fragment and the optional password and
+The browser derives everything secret from the fragment and the optional password and
 sends the server only ciphertext, proof hashes, and non-secret settings. See `SECURITY.md` §3
 for the exact list of what the server can observe.
 
@@ -71,6 +71,5 @@ for the exact list of what the server can observe.
 | `vitest.config.js` | workerd (real KV/R2/DOs) | notes, files, auth, admin, quotas, guard, shares, formats, ids |
 | `vitest.node.config.js` | Node | protocol vectors, Argon2id KAT, files/zip/mime |
 | `vitest.dom.config.js` | happy-dom | XSS mount surfaces, viewer safety, a11y, folder walker |
-| `cli/vitest.config.js` | Node | the `secbin` CLI |
 
 `tools/verify-vectors.py` re-derives the vectors independently in Python.

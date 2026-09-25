@@ -56,8 +56,8 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
   Worker); restricted APIs live under `/api/private/*`.
 - CSP adds `'wasm-unsafe-eval'` (WebAssembly only), `worker-src 'self'`, and `blob:` for viewer
   images/media.
-- The CLI is now **`secbin`** (see `cli/README.md`): no default server, API keys, `--views`,
-  `--expire`, `--label`, `send` for files/folders, and file-share downloads.
+- The v1 `binthere` CLI is removed (it cannot speak protocol v2); the v2 `secbin` CLI ships
+  separately.
 
 ### Removed
 

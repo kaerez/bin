@@ -169,7 +169,8 @@ Per-user limits (§13) may be lower.
   (`FileShare` DO + R2).
 - **Delete token / upload token / download grant** = `b64url(random(32))`. The server stores only
   `hex(SHA-256(token))` and compares in constant time. Tokens travel in headers, never URLs.
-- **API key** = `"sbk_" ‖ b64url(random(32))`, stored as SHA-256.
+- **API key** = `"sbk_" ‖ b64url(random(32))`, stored as SHA-256. Sent as
+  `Authorization: Bearer <key>`, and accepted only on the endpoints marked "key" in §10.
 - **Share URL** = `<origin>/p/<id>#<b64url(F)>`.
 
 ---

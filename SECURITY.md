@@ -122,20 +122,11 @@ The browser downloads and trusts JavaScript from the server. Whoever controls th
 the repository or the Cloudflare account can serve code that reads keys and plaintext. Client-side
 encryption protects data from the *storage* layer, not from a compromised *delivery* of the app.
 
-### The CLI
-
-`cli/` (`secbin`) implements the same protocol with the same vendored modules (drift-tested).
-Its trust anchor is your local installation. It never follows symlinks when sending, confines
-downloads to the output directory, refuses to write through symlinks or overwrite without
-`--force`, and reads the API key from `SECBIN_API_KEY` or a file — never a flag value. Share URLs
-passed as arguments are visible to other local processes; `secbin get -` reads one from stdin.
-
 ## 5. Trust boundaries
 
 | Boundary | Trusted with content? | Notes |
 |---|---|---|
 | Sender's / recipient's browser + served JS | **Yes** (unavoidable) | §4 |
-| CLI process | **Yes** | §4 |
 | Network | No | TLS; the fragment is never sent |
 | Worker, KV, R2, Durable Objects | No | Ciphertext + metadata (§3) |
 | Owner / admin | No (content) | Sees account metadata, can impersonate; cannot decrypt |
