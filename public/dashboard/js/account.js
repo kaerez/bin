@@ -118,8 +118,9 @@ async function renderKeys() {
       armConfirm(rv, 'Revoke?', async () => {
         try { await revokeKey(k.id); renderKeys(); } catch (e) { showMsg($('#keys-msg'), friendlyError(e)); }
       });
-      body.appendChild(h('tr', {}, h('td', { text: k.name }), h('td.mono', { text: formatDate(k.created) }),
-        h('td.mono', { text: formatDate(k.last_used) }), h('td.mono', { text: k.expires ? formatDate(k.expires) : 'never' }), h('td', {}, rv)));
+      body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
+        h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
+        h('td.mono', { dataset: { label: 'Expires' }, text: k.expires ? formatDate(k.expires) : 'never' }), h('td.cell-actions', {}, rv)));
     }
   } catch (e) {
     showMsg($('#keys-msg'), friendlyError(e));
@@ -131,7 +132,8 @@ async function loadActivity(fresh) {
   if (fresh) { clear(body); lastActivity = null; }
   try {
     const { rows } = await myActivity(lastActivity);
-    for (const r of rows) body.appendChild(h('tr', {}, h('td.mono', { text: formatDate(r.ts) }), h('td.mono', { text: r.action }), h('td', { text: r.detail })));
+    for (const r of rows) body.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'When' }, text: formatDate(r.ts) }),
+      h('td.mono', { dataset: { label: 'Action' }, text: r.action }), h('td', { dataset: { label: 'Details' }, text: r.detail })));
     if (rows.length) lastActivity = rows[rows.length - 1].id;
     $('#activity-more').hidden = rows.length < 50;
   } catch { /* non-fatal */ }

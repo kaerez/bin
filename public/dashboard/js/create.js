@@ -9,7 +9,7 @@ import { expireSeconds, MAX_VIEWS } from '../../js/format.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk, checkPath, checkMime, buildTree, basename } from '../../js/files.js';
 import { detectMime, normalizeMime, COMMON_TYPES } from '../../js/mime.js';
 import { $, showView, toast, copyText, flashCopied } from '../../js/ui.js';
-import { h, clear, showMsg, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from '../../js/common.js';
 import { walkEntry } from '../../js/walk.js';
 import { ready } from './nav.js';
 
@@ -26,6 +26,9 @@ init();
 async function init() {
   profile = await ready;
   const L = profile.limits;
+  // The label is the one plaintext field in the composer — say so right under it.
+  const labelIn = $('#share-label');
+  labelIn.after(unencryptedHint('share-label-hint', labelIn));
   showView('create');
   const noteTab = $('#tab-note');
   const filesTab = $('#tab-files');

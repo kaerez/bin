@@ -218,9 +218,9 @@ async function renderUsers() {
     } else {
       actions.appendChild(h('button.btn', { type: 'button', text: 'Reset my password', on: { click: () => openUser(u.id, true) } }));
     }
-    body.appendChild(h('tr', {}, h('td', { text: u.username }), h('td.mono', { text: u.role }),
-      h('td', {}, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
-      h('td.mono', { text: formatDate(u.created) }), h('td', {}, actions)));
+    body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td.mono', { dataset: { label: 'Role' }, text: u.role }),
+      h('td', { dataset: { label: 'Status' } }, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
+      h('td.mono', { dataset: { label: 'Created' }, text: formatDate(u.created) }), h('td.cell-actions', {}, actions)));
   }
   p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Role', 'Status', 'Created', ''].map((t) => h('th', { text: t })))), body)));
   p.appendChild(h('div', { id: 'user-detail' }));
@@ -254,7 +254,8 @@ async function openUser(id, passwordOnly = false) {
   for (const k of d.keys) {
     const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
     armConfirm(rv, 'Revoke?', async () => { await guard(() => admin.revokeUserKey(id, k.id), 'Key revoked.'); openUser(id); });
-    keys.appendChild(h('tr', {}, h('td', { text: k.name }), h('td.mono', { text: formatDate(k.created) }), h('td.mono', { text: formatDate(k.last_used) }), h('td', {}, rv)));
+    keys.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
+      h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }), h('td.cell-actions', {}, rv)));
   }
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'API keys' }),
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', ''].map((t) => h('th', { text: t })))), keys))));
@@ -341,9 +342,10 @@ async function renderSecurity() {
   };
   const rbody = h('tbody');
   for (const r of rules?.rules || []) {
-    rbody.appendChild(h('tr', {}, h('td.mono', { text: r.cidr }), h('td', {}, h(`span.pill.${r.action === 'allow' ? 'ok' : 'bad'}`, { text: r.action })),
-      h('td.mono', { text: r.expires ? formatDate(r.expires) : 'never' }), h('td', { text: r.note }),
-      h('td', {}, h('button.btn', { type: 'button', text: 'Remove', on: { click: async () => { await guard(() => admin.removeIpRule(r.id), 'Rule removed.'); renderSecurity(); } } }))));
+    rbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'Range' }, text: r.cidr }),
+      h('td', { dataset: { label: 'Action' } }, h(`span.pill.${r.action === 'allow' ? 'ok' : 'bad'}`, { text: r.action })),
+      h('td.mono', { dataset: { label: 'Expires' }, text: r.expires ? formatDate(r.expires) : 'never' }), h('td', { dataset: { label: 'Note' }, text: r.note }),
+      h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Remove', on: { click: async () => { await guard(() => admin.removeIpRule(r.id), 'Rule removed.'); renderSecurity(); } } }))));
   }
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Manual IP rules' }),
     h('p.mono.muted', { text: 'Block rules deny the whole API and dashboard. Allow beats block. Leave the duration empty for a permanent rule.' }),
@@ -352,13 +354,15 @@ async function renderSecurity() {
 
   const bbody = h('tbody');
   for (const b of g?.blocks || []) {
-    bbody.appendChild(h('tr', {}, h('td.mono', { text: b.key }), h('td.mono', { text: b.scope }), h('td.mono', { text: formatDate(b.since) }), h('td.mono', { text: formatDate(b.until) }),
-      h('td', {}, h('button.btn', { type: 'button', text: 'Unblock', on: { click: async () => { await guard(() => admin.unblock(b.scope, b.key), 'Unblocked.'); renderSecurity(); } } }))));
+    bbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: b.key }), h('td.mono', { dataset: { label: 'Scope' }, text: b.scope }),
+      h('td.mono', { dataset: { label: 'Since' }, text: formatDate(b.since) }), h('td.mono', { dataset: { label: 'Until' }, text: formatDate(b.until) }),
+      h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Unblock', on: { click: async () => { await guard(() => admin.unblock(b.scope, b.key), 'Unblocked.'); renderSecurity(); } } }))));
   }
   const tbody = h('tbody');
   for (const t of g?.tracking || []) {
-    tbody.appendChild(h('tr', {}, h('td.mono', { text: t.key }), h('td.mono', { text: t.scope }), h('td.mono', { text: String(t.count) }), h('td.mono', { text: formatDate(t.expires) }),
-      h('td', {}, h('div.btn-row', {},
+    tbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: t.key }), h('td.mono', { dataset: { label: 'Scope' }, text: t.scope }),
+      h('td.mono', { dataset: { label: 'Failures' }, text: String(t.count) }), h('td.mono', { dataset: { label: 'Window ends' }, text: formatDate(t.expires) }),
+      h('td.cell-actions', {}, h('div.btn-row.row-actions', {},
         h('button.btn', { type: 'button', text: 'Clear', on: { click: async () => { await guard(() => admin.unblock(t.scope, t.key), 'Cleared.'); renderSecurity(); } } }),
         h('button.btn.danger', { type: 'button', text: 'Block 24h', on: { click: async () => { await guard(() => admin.block(t.scope, t.key, 86400), 'Blocked.'); renderSecurity(); } } })))));
   }
@@ -381,7 +385,8 @@ async function renderAudit() {
     for (const a of r.rows) {
       const who = a.imp ? `${a.actor} as ${a.subject}` : a.actor || 'system';
       const on = !a.imp && a.subject && a.subject !== a.actor ? a.subject : '';
-      body.appendChild(h('tr', {}, h('td.mono', { text: formatDate(a.ts) }), h('td', { text: who }), h('td', { text: on }), h('td.mono', { text: a.action }), h('td', { text: a.detail })));
+      body.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'When' }, text: formatDate(a.ts) }), h('td', { dataset: { label: 'Who' }, text: who }),
+        h('td', { dataset: { label: 'On user' }, text: on }), h('td.mono', { dataset: { label: 'Action' }, text: a.action }), h('td', { dataset: { label: 'Details' }, text: a.detail })));
     }
     if (r.rows.length) before = r.rows[r.rows.length - 1].id;
     more.hidden = r.rows.length < 100;
