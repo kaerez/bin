@@ -89,13 +89,14 @@ Every PR must keep `npm run lint` and `npm test` green. CI enforces both, plus `
 |---|---|
 | `test-node/crypto.test.js` | Frozen v2 vectors + Argon2id KAT (Node; workerd cannot compile WASM) |
 | `test-node/files.test.js` | File-share format, chunk crypto, ZIP, MIME |
+| `test-node/headers.test.js`, `test-node/sw.test.js` | Security headers parity + CSP guarantees; service-worker caching rules (never `/api/*`, `/p/*`, query strings) |
 | `test/format.test.js` | Share format v2 parsing / fail-closed behavior |
 | `test/markdown.test.js` | Markdown XSS safety — **add a case for any new rendering path** |
 | `test/highlight.test.js` | Code tokenizer / classification |
 | `test/ids.test.js` | ID and delete-token generation |
 | `test/notes.test.js`, `test/files.test.js` | Notes and file shares end to end, proofs, view counting |
 | `test/auth.test.js`, `test/admin.test.js`, `test/shares.test.js` | Accounts, sessions, admin, limits, quotas, guard, My shares |
-| `test-dom/*.test.js` | XSS mount surfaces, viewer safety, a11y, folder walker |
+| `test-dom/*.test.js` | XSS mount surfaces, viewer safety, a11y, folder walker, install banner |
 
 The CLI package has its own Node-environment suites under `cli/test/` (frozen vectors re-run in
 plain Node, URL parsing, mocked-API round trips, and a vendor-drift byte-compare that fails if
