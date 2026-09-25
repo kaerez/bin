@@ -51,6 +51,7 @@ const LIMIT_UI = [
   ['pwLower', 'Password: needs a lower-case letter', 'bool'],
   ['pwDigit', 'Password: needs a digit', 'bool'],
   ['pwSymbol', 'Password: needs a symbol', 'bool'],
+  ['passkeys', 'Passkeys', 'enum', { values: [['any', 'sign in alone or as a second factor'], ['second', 'only as a second factor after the password'], ['off', 'not allowed']] }],
 ];
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 const URL_RULES_HINT = 'One rule per line. scheme:https allows every https link; scheme:tel, scheme:mailto, scheme:sms… allow those schemes; re:<regular expression> allows links it matches (case-insensitive, against the whole link — anchor with ^, e.g. re:^https://([a-z0-9-]+\\.)*example\\.com/). javascript:, data:, file: and similar can never be allowed. The sender\'s browser or CLI checks the rules: the server never sees the link.';
@@ -380,6 +381,13 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   }
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'API keys' }),
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', 'Scopes', ''].map((t) => h('th', { text: t })))), keys))));
+  const pk = d.passkeys || { count: 0, recoveryLeft: 0, mfa: false };
+  const pkReset = h('button.btn.danger', { type: 'button', text: 'Remove all passkeys', disabled: !pk.count });
+  armConfirm(pkReset, 'Remove passkeys and codes?', async () => { await guard(() => admin.resetPasskeys(id), 'Passkeys and recovery codes removed.'); openUser(id, false, { scroll: false }); });
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Passkeys' }),
+    h('p.mono', { text: pk.count ? `${pk.count} passkey${pk.count === 1 ? '' : 's'}, ${pk.recoveryLeft} recovery code${pk.recoveryLeft === 1 ? '' : 's'} left${pk.mfa ? '; password logins also need a passkey' : ''}.` : 'No passkeys.' }),
+    h('p.mono.muted', { text: 'For a user who lost every passkey and recovery code: removing them lets the password alone sign in again (set a new password too if needed).' }),
+    h('div.btn-row', {}, pkReset)));
   if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 

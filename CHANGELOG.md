@@ -15,6 +15,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Passkeys:** sign in with a passkey instead of a password (no username needed), or require one
+  after the password; up to 10 per account. The first passkey comes with 20 one-time recovery
+  codes that work wherever a passkey does. The admin decides per user or globally whether passkeys
+  may sign in alone, only as a second step, or not at all, and can remove a user's passkeys. The
+  server verifies WebAuthn itself (origin, RP ID, user verification, signature, counter; no
+  dependency).
 - **Cloudflare Turnstile (optional):** when `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET` are both
   set, login, password changes and anonymous share creation need a human check, usually
   invisible. The server verifies each token once, for this hostname and that form's action,

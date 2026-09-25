@@ -9,6 +9,7 @@ import { readSession, issueSession, logoutCookie, unconfigured } from '../lib/au
 import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { requestOptions } from '../lib/webauthn.js';
 
 const AUTH_LABEL = utf8('secbin-auth/v2');
 
@@ -24,6 +25,21 @@ export async function verifierFrom(dB64) {
 }
 
 const blockedErr = (b) => err(429, 'blocked', 'Too many attempts from your network. Try again later.', b.until ? { until: b.until } : undefined);
+
+/** A Directory login result → the session cookie, or the error (failures count against the IP). */
+async function signedIn(env, g, res) {
+  if (!res.ok) {
+    if (res.status === 401) {
+      const r = await recordFailure(env, g, 'login');
+      if (r.newlyBlocked) return blockedErr(r);
+    }
+    return err(res.status, res.error, res.message, res.until ? { until: res.until } : undefined);
+  }
+  const { cookie } = await issueSession(env, { uid: res.user.id, ver: res.user.ver, settings: res.settings });
+  const out = { ok: true, user: { id: res.user.id, username: res.user.username, role: res.user.role } };
+  if (typeof res.recoveryLeft === 'number') out.recoveryLeft = res.recoveryLeft;
+  return json(out, 200, { 'set-cookie': cookie });
+}
 
 export async function handleAuth(request, env, url) {
   const p = url.pathname;
@@ -90,15 +106,41 @@ export async function handleAuth(request, env, url) {
     const body = await readJsonBody(request);
     const verifier = await verifierFrom(body.proof);
     const res = await directory(env).login({ username: body.username, verifier: verifier ?? '', lockoutOff: g.off.all });
-    if (!res.ok) {
-      if (res.error === 'invalid_login') {
-        const r = await recordFailure(env, g, 'login');
-        if (r.newlyBlocked) return blockedErr(r);
-      }
-      return err(res.status, res.error, res.message, res.until ? { until: res.until } : undefined);
+    if (res.ok && res.secondFactor) {
+      // Right password; the account also needs a passkey (or recovery code).
+      const f = res.secondFactor;
+      return json({ ok: true, secondFactor: { challengeId: f.challengeId, publicKey: requestOptions(f, url.hostname), recoveryLeft: f.recoveryLeft } });
     }
-    const { cookie } = await issueSession(env, { uid: res.user.id, ver: res.user.ver, settings: res.settings });
-    return json({ ok: true, user: { id: res.user.id, username: res.user.username, role: res.user.role } }, 200, { 'set-cookie': cookie });
+    return signedIn(env, g, res);
+  }
+
+  // ── passkeys: sign in alone, or as the second step of a password login ──
+  if (p === '/api/auth/passkey/options') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    const g = await ipContext(env, request);
+    const b = await isBlocked(env, g, 'login');
+    if (b.blocked) return blockedErr(b);
+    const r = await directory(env).passkeyLoginOptions();
+    return json({ challengeId: r.challengeId, publicKey: requestOptions(r, url.hostname) });
+  }
+  if (p === '/api/auth/passkey/login' || p === '/api/auth/recovery' || p === '/api/auth/second-factor') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    if (!sessionKeys(env)) return unconfigured().toResponse();
+    const g = await ipContext(env, request);
+    const b = await isBlocked(env, g, 'login');
+    if (b.blocked) return blockedErr(b);
+    // The second step rides on the password step's human check.
+    if (p !== '/api/auth/second-factor') await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
+    const body = await readJsonBody(request);
+    const dir = directory(env);
+    const origin = url.origin;
+    const rpId = url.hostname;
+    const res = p === '/api/auth/passkey/login'
+      ? await dir.passkeyLogin({ challengeId: body.challengeId, credential: body.credential, origin, rpId })
+      : p === '/api/auth/recovery'
+        ? await dir.recoveryLogin({ username: body.username, code: body.code, lockoutOff: g.off.all })
+        : await dir.secondFactor({ challengeId: body.challengeId, credential: body.credential, code: body.code, origin, rpId, lockoutOff: g.off.all });
+    return signedIn(env, g, res);
   }
 
   if (p === '/api/auth/logout') {

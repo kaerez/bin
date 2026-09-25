@@ -14,6 +14,7 @@ import { verifierFrom } from './auth.js';
 import { handleAdmin } from './admin.js';
 import { binding } from '../lib/config.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { creationOptions } from '../lib/webauthn.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const EXTRA_KEYS = ['max', 'quota', 'until', 'policy', 'refused'];
@@ -143,6 +144,46 @@ export async function handlePrivate(request, env, url, ctx) {
     assertIntent(request);
     const r = await dir.revokeKey(a.user.id, km[1], actorId(a));
     return r.ok ? json({ ok: true }) : fromDir(r);
+  }
+
+  // ── passkeys and recovery codes (every change needs the current password) ──
+  if (p === '/api/private/me/passkeys' || p.startsWith('/api/private/me/passkeys/') || p === '/api/private/me/recovery-codes' || p === '/api/private/me/second-factor') {
+    if (p === '/api/private/me/passkeys' && request.method === 'GET') {
+      const st = await dir.passkeyStatus(a.user.id);
+      return withAuth(a, st.ok ? json(st) : fromDir(st));
+    }
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    if (a.actor) return err(403, 'impersonating', 'Passkeys cannot be changed while impersonating.');
+    if (p === '/api/private/me/passkeys/options') {
+      const r = await dir.passkeyRegisterOptions(a.user.id);
+      return r.ok ? json({ challengeId: r.challengeId, publicKey: creationOptions(r, url.hostname) }) : fromDir(r);
+    }
+    const g = await ipContext(env, request);
+    const body = await readJsonBody(request);
+    const current = await verifierFrom(body.current);
+    if (!current) return err(400, 'invalid_credential', 'Enter your current password.');
+    const lockoutOff = g.off.all;
+    const rm = p.match(/^\/api\/private\/me\/passkeys\/([A-Za-z0-9_-]{16,1400})\/remove$/);
+    let r;
+    if (p === '/api/private/me/passkeys') {
+      r = await dir.addPasskey(a.user.id, { challengeId: body.challengeId, credential: body.credential, name: body.name, current, origin: url.origin, rpId: url.hostname, lockoutOff });
+    } else if (rm) {
+      r = await dir.removePasskey(a.user.id, rm[1], { current, lockoutOff });
+    } else if (p === '/api/private/me/recovery-codes') {
+      r = await dir.regenerateRecoveryCodes(a.user.id, { current, lockoutOff });
+    } else if (p === '/api/private/me/second-factor') {
+      r = await dir.setSecondFactor(a.user.id, { on: body.on, current, lockoutOff });
+    } else {
+      return err(404, 'not_found', 'Not found.');
+    }
+    if (!r.ok) {
+      // As for a password change: wrong current passwords count against the network.
+      if (r.error === 'wrong_password' || r.error === 'session_revoked') await recordFailure(env, g, 'login');
+      const res = fromDir(r);
+      if (r.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
+      return res;
+    }
+    return json(r, p === '/api/private/me/passkeys' ? 201 : 200);
   }
 
   if (p === '/api/private/shares') {

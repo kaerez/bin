@@ -98,6 +98,7 @@
                 <form class="stack reveal d2 form" id="login-form" autocomplete="on">
                     <label class="field-label" for="login-user">Username</label>
                     <input class="input" id="login-user" name="username" autocomplete="username" required maxlength="64" />
+                    <div class="contents" id="login-pass-block">
                     <label class="field-label" for="login-pass">Password</label>
                     <div class="pw pw-wide">
                         <input type="password" id="login-pass" class="input" placeholder="Password" autocomplete="current-password" aria-label="Password" />
@@ -135,9 +136,28 @@
                             </svg>
                         </button>
                     </div>
+                    </div>
+                    <div class="contents" id="login-code-block" hidden>
+                        <label class="field-label" for="login-code">Recovery code</label>
+                        <input class="input mono" id="login-code" autocomplete="one-time-code" maxlength="24" placeholder="XXXX-XXXX-XXXX-XXXX" spellcheck="false" autocapitalize="characters" />
+                    </div>
                     <div class="turnstile" id="login-turnstile" hidden></div>
                     <button type="submit" class="cta" id="login-btn">Log in</button>
                     <p class="msg error" id="login-msg" role="alert" hidden></p>
+                    <div class="login-alt">
+                        <button type="button" class="btn" id="passkey-btn" hidden>Sign in with a passkey</button>
+                        <button type="button" class="linkbtn" id="recovery-toggle" aria-pressed="false">Use a recovery code instead</button>
+                    </div>
+                </form>
+                <form class="stack reveal d2 form" id="second-form" hidden>
+                    <h2 class="section-title">Confirm it is you</h2>
+                    <p class="subtitle">This account also needs one of its passkeys.</p>
+                    <button type="button" class="cta" id="second-passkey">Use my passkey</button>
+                    <label class="field-label" for="second-code">Or enter a recovery code</label>
+                    <input class="input mono" id="second-code" autocomplete="one-time-code" maxlength="24" placeholder="XXXX-XXXX-XXXX-XXXX" spellcheck="false" autocapitalize="characters" />
+                    <button type="submit" class="btn" id="second-code-btn">Continue with the code</button>
+                    <p class="msg error" id="second-msg" role="alert" hidden></p>
+                    <button type="button" class="linkbtn" id="second-back">Start over</button>
                 </form>
             </section>
             <footer class="foot reveal d4">

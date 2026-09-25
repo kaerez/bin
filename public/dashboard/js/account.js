@@ -1,8 +1,10 @@
 // account.js — my limits and quotas, change password (current required;
-// stretched locally), API keys (if allowed), and my activity log.
+// stretched locally), passkeys and recovery codes, API keys (if allowed), and
+// my activity log.
 
 import '../../js/kdf-progress.js';
-import { changePassword, listKeys, createKey, revokeKey, myActivity, ApiError } from '../../js/api.js';
+import { changePassword, listKeys, createKey, revokeKey, myActivity, ApiError, myPasskeys, passkeyRegisterOptions, addPasskey, removePasskey, regenerateRecoveryCodes, setSecondFactor } from '../../js/api.js';
+import { passkeysSupported, createPasskey } from '../../js/passkeys.js';
 import { stretch, newCredential, checkNewPassword, describePolicy } from '../../js/pwauth.js';
 import { prelogin } from '../../js/api.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
@@ -19,6 +21,7 @@ let lastActivity = null;
   $('#acct-sub').textContent = `Signed in as ${profile.user.username}${profile.user.role === 'owner' ? ' (owner)' : ''}.`;
   renderLimits();
   wirePassword();
+  wirePasskeys();
   wireKeys();
   loadActivity(true);
   $('#activity-more').onclick = () => loadActivity(false);
@@ -144,6 +147,117 @@ async function renderKeys() {
   } catch (e) {
     showMsg($('#keys-msg'), friendlyError(e));
   }
+}
+
+// ── passkeys and recovery codes ────────────────────────────────────────────
+const MODE_TEXT = {
+  any: 'Sign in with a passkey alone, or require it after your password.',
+  second: 'The administrator allows passkeys only as a second step: once you add one, every password login asks for it.',
+};
+
+/** The current password as a proof (the server checks it for every change here). */
+async function currentProof() {
+  const pw = $('#passkey-current').value;
+  if (!pw) throw new Error('Enter your current password first.');
+  const { salt, t } = await prelogin(profile.user.username);
+  return stretch(pw, salt, t);
+}
+
+function showCodes(codes) {
+  const list = clear($('#recovery-list'));
+  for (const c of codes) list.appendChild(h('li', { text: c }));
+  $('#recovery-new').hidden = false;
+  const text = `secbin recovery codes for ${profile.user.username} (${location.host})\nEach works once in place of a passkey.\n\n${codes.join('\n')}\n`;
+  $('#recovery-copy').onclick = async () => { await copyText(codes.join('\n')); toast('Recovery codes copied.'); };
+  $('#recovery-download').onclick = () => {
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const a = h('a', { href: url, download: `secbin-recovery-codes-${profile.user.username}.txt` });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  $('#recovery-new').scrollIntoView({ block: 'nearest' });
+}
+
+async function passkeyAction(fn, done) {
+  const msg = $('#passkeys-msg');
+  msg.hidden = true;
+  try {
+    const r = await fn(await currentProof());
+    if (done) done(r);
+    await renderPasskeys();
+  } catch (e) {
+    const text = e instanceof ApiError && e.code === 'wrong_password' ? 'The current password is incorrect.' : friendlyError(e);
+    showMsg(msg, text);
+    toast(text, { error: true });
+  }
+}
+
+async function renderPasskeys() {
+  const body = clear($('#passkeys-body'));
+  let st;
+  try { st = await myPasskeys(); } catch (e) { showMsg($('#passkeys-msg'), friendlyError(e)); return; }
+  for (const p of st.passkeys) {
+    const rm = h('button.btn.danger', { type: 'button', text: 'Remove' });
+    armConfirm(rm, st.passkeys.length === 1 ? 'Remove (and its recovery codes)?' : 'Remove?', () => passkeyAction(
+      (current) => removePasskey(p.id, current), () => toast('Passkey removed.'),
+    ));
+    body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: p.name }), h('td.mono', { dataset: { label: 'Added' }, text: formatDate(p.created) }),
+      h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(p.lastUsed) }), h('td.mono', { dataset: { label: 'Synced' }, text: p.synced ? 'yes' : 'this device only' }),
+      h('td.cell-actions', {}, rm)));
+  }
+  if (!st.passkeys.length) body.appendChild(h('tr', {}, h('td.muted', { colspan: '5', text: 'No passkeys yet.' })));
+  const has = st.passkeys.length > 0;
+  $('#passkeys-sub').textContent = MODE_TEXT[st.mode] || $('#passkeys-sub').textContent;
+  $('#mfa-row').hidden = st.mode !== 'any' || !has;
+  $('#mfa-toggle').checked = st.mfa;
+  $('#recovery-status').textContent = has
+    ? `${st.recoveryLeft} of 20 recovery codes left.${st.required ? ' Password logins ask for a passkey or a code.' : ''}`
+    : 'Adding your first passkey gives you 20 one-time recovery codes.';
+  $('#recovery-regen').hidden = !has;
+  $('#passkey-add').disabled = st.passkeys.length >= st.max;
+}
+
+function wirePasskeys() {
+  const card = $('#passkeys-card');
+  const mode = profile.passkeys?.mode || 'off';
+  if (mode === 'off') {
+    $('#passkeys-sub').textContent = 'Passkeys are not enabled for your account.';
+    $('#passkeys-actions').hidden = true;
+    return renderPasskeys();
+  }
+  const left = new URLSearchParams(location.search).get('recovery');
+  if (left !== null && /^\d+$/.test(left)) {
+    showMsg($('#recovery-used'), `You signed in with a recovery code; ${left} left. If you lost your passkey, remove it and add a new one, or create new codes.`, false);
+  }
+  if (profile.impersonatedBy) { $('#passkeys-actions').hidden = true; return renderPasskeys(); }
+  if (!passkeysSupported()) {
+    $('#passkey-form').hidden = true;
+    card.querySelector('#passkeys-sub').textContent += ' This browser cannot create passkeys.';
+  }
+  $('#passkey-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = $('#passkey-name').value.trim() || 'Passkey';
+    passkeyAction(async (current) => {
+      const o = await passkeyRegisterOptions();
+      const credential = await createPasskey(o.publicKey);
+      return addPasskey({ challengeId: o.challengeId, credential, name, current });
+    }, (r) => {
+      $('#passkey-name').value = '';
+      toast('Passkey added.');
+      if (r.codes) showCodes(r.codes);
+    });
+  });
+  $('#mfa-toggle').addEventListener('change', (e) => {
+    const on = e.target.checked;
+    passkeyAction((current) => setSecondFactor(on, current), () => toast(on ? 'Password logins now also need a passkey.' : 'A password alone signs you in again.'))
+      .finally(() => renderPasskeys());
+  });
+  armConfirm($('#recovery-regen'), 'Replace all codes?', () => passkeyAction(
+    (current) => regenerateRecoveryCodes(current), (r) => { toast('New recovery codes created; the old ones no longer work.'); showCodes(r.codes); },
+  ));
+  return renderPasskeys();
 }
 
 async function loadActivity(fresh) {

@@ -366,6 +366,46 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - Kill switches: `DISABLE_BFP=true` (everything, including IP rules) and
     `DISABLE_BFP_SETUP=true` (setup only).
 
+### Passkeys and recovery codes
+
+Every account (owner included) can register up to 10 passkeys (WebAuthn discoverable credentials)
+on Account. The `passkeys` limit, set globally or per user, decides how they may be used; the owner
+is never restricted by it:
+
+| `passkeys` | Passkey alone | Password, then passkey | Recovery code alone |
+|---|---|---|---|
+| `any` (default) | yes | if the user turns it on | yes |
+| `second` | no | always, once the user has one | no (only as the second step) |
+| `off` | no | no (the password alone signs in) | no |
+
+- **What the server verifies** (`src/lib/webauthn.js`, Web Crypto only, no dependency):
+  - the one-time challenge (5 minutes; single use), the ceremony type and the exact origin;
+  - the RP ID hash (the site's hostname);
+  - **user presence and user verification** (a PIN or biometric on the device), so a passkey
+    is two factors;
+  - the signature (ES256, EdDSA or RS256 ≥ 2048 bits) with the key stored at registration;
+  - a signature counter that must not go backwards (a cloned authenticator is refused);
+  - on usernameless sign-in, the user handle must match.
+
+  Attestation is not requested (`none`), so any authenticator is accepted.
+- **Adding or removing a passkey**, turning the second step on or off, and creating new recovery
+  codes all need the **current password**. Wrong passwords count as for a password change. None
+  of these actions is possible while impersonating.
+- **Recovery codes.** The first passkey comes with 20 codes. Each is 80 random bits, shown once,
+  stored as SHA-256 only, and works once, wherever a passkey would. New codes revoke the old set,
+  and removing the last passkey removes the codes and the second-step requirement.
+- **Brute-force protection.**
+  - A wrong recovery code, or a failed second step, counts toward the account lockout and the
+    per-IP login guard, like a wrong password.
+  - The second step allows 5 tries per password entry.
+  - Turnstile, when configured, also covers passkey and recovery-code logins.
+  - Pending sign-in challenges are capped and expire.
+- **Losing everything.**
+  - The admin can remove a user's passkeys and codes (Users → Manage → Passkeys), after which
+    the password alone signs in; the admin can also set a new password.
+  - Owner recovery through `AUTHN` also removes the owner's passkeys.
+- Passkeys and recovery codes are never exported.
+
 ### Read receipts
 
 - Every successful open of an account's share (a wrong link or password is not an open) is
@@ -406,8 +446,8 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   cookie alone cannot exfiltrate verifiers or replace credentials. Wrong passwords count like
   wrong current passwords (the account's sessions end at the lockout threshold) and against the
   IP's login guard.
-- Never exported: the owner account, sessions, API keys, shares, usage counters, the activity
-  log. An import can never create or replace an owner; accounts it creates are plain users.
+- Never exported: the owner account, sessions, API keys, passkeys and recovery codes, shares,
+  usage counters, the activity log. An import can never create or replace an owner; accounts it creates are plain users.
 - Imports are re-validated field by field on the server with the same checkers as the admin API
   (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
   previewed as a dry run, and are applied in one storage transaction or not at all. Replacing

@@ -199,7 +199,7 @@ export async function handleAdmin(request, env, url) {
     return methodNotAllowed('GET, POST');
   }
 
-  const um = p.match(/^\/api\/private\/admin\/users\/([A-Za-z0-9_-]{16})(?:\/(password|unlock|impersonate|keys\/([A-Za-z0-9_-]{16})))?$/);
+  const um = p.match(/^\/api\/private\/admin\/users\/([A-Za-z0-9_-]{16})(?:\/(password|unlock|impersonate|passkeys|keys\/([A-Za-z0-9_-]{16})))?$/);
   if (um) {
     const [, uid, action, keyId] = um;
     if (!action) {
@@ -242,6 +242,13 @@ export async function handleAdmin(request, env, url) {
       if (request.method !== 'POST') return methodNotAllowed('POST');
       assertIntent(request);
       return json(await dir.unlockUser(uid, me));
+    }
+    if (action === 'passkeys') {
+      // A user who lost their passkeys and recovery codes: remove them all.
+      if (request.method !== 'POST') return methodNotAllowed('POST');
+      assertIntent(request);
+      const r = await dir.adminResetPasskeys(uid, me);
+      return r.ok ? json(r) : fromDir(r);
     }
     if (action === 'impersonate') {
       if (request.method !== 'POST') return methodNotAllowed('POST');

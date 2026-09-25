@@ -15,7 +15,8 @@
 // keys and the setup token as SHA-256 hashes.
 
 import { DurableObject } from 'cloudflare:workers';
-import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, timingSafeEqualHex } from '../public/js/bytes.js';
+import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, timingSafeEqualHex, sha256Hex } from '../public/js/bytes.js';
+import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn.js';
 import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, PASSWORD_POLICY_KEYS,
@@ -29,7 +30,8 @@ import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
   pw_salt TEXT NOT NULL, pw_t INTEGER NOT NULL, pw_verifier TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0,
-  sess_ver INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL, updated INTEGER NOT NULL);
+  sess_ver INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL, updated INTEGER NOT NULL,
+  webauthn_handle TEXT, mfa INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS limits (user_id TEXT NOT NULL, channel TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
   PRIMARY KEY (user_id, channel, key));
 CREATE TABLE IF NOT EXISTS quotas (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, channel TEXT NOT NULL, kind TEXT NOT NULL,
@@ -66,6 +68,14 @@ CREATE TABLE IF NOT EXISTS opens (id INTEGER PRIMARY KEY AUTOINCREMENT, share_id
   browser TEXT NOT NULL DEFAULT '', browser_ver TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', langs TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id);
 CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts);
+CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, public_key TEXT NOT NULL,
+  alg INTEGER NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, transports TEXT NOT NULL DEFAULT '',
+  backup_eligible INTEGER NOT NULL DEFAULT 0, backed_up INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, last_used INTEGER);
+CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
+CREATE TABLE IF NOT EXISTS recovery_codes (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS recovery_user ON recovery_codes(user_id);
+CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL, challenge TEXT NOT NULL,
+  exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -102,6 +112,19 @@ const MIGRATIONS = [
   },
   // 5: per-key API scopes (existing keys keep every scope) — see API_SCOPES
   (m) => m.addColumn('api_keys', 'scopes', "TEXT NOT NULL DEFAULT 'notes,files,policy'"),
+  // 6: passkeys, recovery codes, WebAuthn challenges; users.webauthn_handle, users.mfa
+  (m) => {
+    m.addColumn('users', 'webauthn_handle', 'TEXT');
+    m.addColumn('users', 'mfa', 'INTEGER NOT NULL DEFAULT 0');
+    m.sql.exec(`CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, public_key TEXT NOT NULL,
+      alg INTEGER NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, transports TEXT NOT NULL DEFAULT '',
+      backup_eligible INTEGER NOT NULL DEFAULT 0, backed_up INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, last_used INTEGER)`);
+    m.sql.exec('CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id)');
+    m.sql.exec('CREATE TABLE IF NOT EXISTS recovery_codes (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created INTEGER NOT NULL)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS recovery_user ON recovery_codes(user_id)');
+    m.sql.exec(`CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL, challenge TEXT NOT NULL,
+      exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0)`);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -139,6 +162,33 @@ const SHARE_PRUNE_SEC = 30 * 86400;
  */
 export const API_SCOPES = ['notes', 'files', 'policy'];
 const MAX_OPENS_PER_SHARE = 1000;
+// Passkeys (see the passkeys section and src/lib/webauthn.js).
+const MAX_PASSKEYS = 10;
+const RECOVERY_CODES = 20;
+const CHALLENGE_SEC = 300;
+const MAX_CHALLENGES = 5000;
+const SECOND_FACTOR_TRIES = 5;
+// Recovery codes: 16 Crockford base32 characters (80 random bits), shown as
+// XXXX-XXXX-XXXX-XXXX; stored as SHA-256 only. Typing is forgiving: case,
+// dashes and spaces are ignored and O/I/L read as 0/1/1.
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+function newRecoveryCode() {
+  const b = randomBytes(10);
+  let bits = 0;
+  let acc = 0;
+  let out = '';
+  for (const x of b) {
+    acc = (acc << 8) | x;
+    bits += 8;
+    while (bits >= 5) { bits -= 5; out += CROCKFORD[(acc >> bits) & 31]; }
+  }
+  return out.match(/.{4}/g).join('-');
+}
+export function normalizeRecoveryCode(code) {
+  if (typeof code !== 'string' || code.length > 64) return null;
+  const v = code.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  return /^[0-9A-HJKMNP-TV-Z]{16}$/.test(v) ? v : null;
+}
 // Read-receipt details and the limit that lets a sender see each one.
 const RECEIPT_FIELDS = [
   { limit: 'receiptIp', cols: ['ip'] },
@@ -335,7 +385,9 @@ export class Directory extends DurableObject {
         this.sql.exec('UPDATE users SET username = ?, pw_salt = ?, pw_t = ?, pw_verifier = ?, disabled = 0, sess_ver = sess_ver + 1, updated = ? WHERE id = ?',
           username, salt, t, verifier, ts, owner.id);
         this.sql.exec('DELETE FROM failures WHERE user_id = ?', owner.id);
-        this.#log(owner.id, owner.id, 'owner.recovered', `username=${username}`);
+        // Recovery must get the owner in even if their passkeys are lost too.
+        this.#dropPasskeys(owner.id);
+        this.#log(owner.id, owner.id, 'owner.recovered', `username=${username} (passkeys removed)`);
       } else {
         const id = newId();
         this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'owner', ?, ?, ?, ?, ?)",
@@ -373,9 +425,14 @@ export class Directory extends DurableObject {
       return fail(401, 'invalid_login', 'Wrong username or password.');
     }
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
-    this.sql.exec('DELETE FROM failures WHERE user_id = ?', u.id);
+    if (this.#needsSecondFactor(u)) {
+      // No session yet: the browser answers this challenge with a passkey (or
+      // a recovery code) — see secondFactor().
+      this.#log(u.id, u.id, 'login.password_ok', 'awaiting passkey');
+      return { ok: true, secondFactor: { ...this.#newChallenge('second', u.id), allow: this.#allowList(u.id), recoveryLeft: this.#recoveryLeft(u.id) } };
+    }
     this.#log(u.id, u.id, 'login');
-    return { ok: true, user: { id: u.id, username: u.username, role: u.role, ver: u.sess_ver }, settings: this.#sessionSettings(s) };
+    return this.#sessionFor(u, s);
   }
 
   /** Account lockout end time, or 0. The owner is never locked out. */
@@ -475,6 +532,7 @@ export class Directory extends DurableObject {
       apiKeys: { enabled: eff.all.apiEnabled, max: eff.all.apiMaxKeys ?? MAX_API_KEYS, count: keyCount },
       // For the browser to enforce on a password change (the server never sees passwords).
       passwordPolicy: Object.fromEntries(PASSWORD_POLICY_KEYS.map((k) => [k, eff.all[k]])),
+      passkeys: { mode: eff.all.passkeys, count: this.#passkeyCount(u.id), required: this.#needsSecondFactor(u), recoveryLeft: this.#recoveryLeft(u.id) },
       quotas: u.role === 'owner' ? [] : this.#quotaStatus(u.id),
     };
   }
@@ -609,6 +667,284 @@ export class Directory extends DurableObject {
     if (!this.#effective(u).all.apiEnabled) return null; // disallowing API use stops existing keys at once
     if (!k.last_used || ts - k.last_used > 60) this.sql.exec('UPDATE api_keys SET last_used = ? WHERE key_hash = ?', ts, hash);
     return { user: this.#publicUser(u), scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) };
+  }
+
+  // ── passkeys (WebAuthn) and recovery codes ───────────────────────────────
+  // The Worker passes the request's origin and RP ID (its hostname); this
+  // object holds the one-time challenges and does every check (see
+  // src/lib/webauthn.js). Awaits happen only between self-contained steps:
+  // a challenge is taken (deleted or counted) before verification, and the
+  // writes after it re-check what they depend on.
+
+  #passkeyMode(u) { return this.#effective(u).all.passkeys; }
+  #passkeyCount(uid) { return this.sql.exec('SELECT COUNT(*) AS c FROM passkeys WHERE user_id = ?', uid).one().c; }
+  #recoveryLeft(uid) { return this.sql.exec('SELECT COUNT(*) AS c FROM recovery_codes WHERE user_id = ?', uid).one().c; }
+  /** Does a password login of `u` also need a passkey (or recovery code)? */
+  #needsSecondFactor(u) {
+    const mode = this.#passkeyMode(u);
+    if (mode === 'off' || !this.#passkeyCount(u.id)) return false;
+    return mode === 'second' || !!u.mfa;
+  }
+  #webauthnHandle(u) {
+    if (u.webauthn_handle) return u.webauthn_handle;
+    const h = b64urlFromBytes(randomBytes(16));
+    this.sql.exec('UPDATE users SET webauthn_handle = ? WHERE id = ?', h, u.id);
+    return h;
+  }
+  #newChallenge(purpose, uid = null) {
+    const ts = now();
+    this.sql.exec('DELETE FROM webauthn_challenges WHERE exp <= ?', ts);
+    // Unauthenticated callers can create login challenges: keep the table bounded.
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM webauthn_challenges').one().c >= MAX_CHALLENGES) {
+      this.sql.exec('DELETE FROM webauthn_challenges WHERE id IN (SELECT id FROM webauthn_challenges ORDER BY exp LIMIT ?)', MAX_CHALLENGES / 10);
+    }
+    const id = newId();
+    const challenge = b64urlFromBytes(randomBytes(32));
+    this.sql.exec('INSERT INTO webauthn_challenges (id, user_id, purpose, challenge, exp) VALUES (?, ?, ?, ?, ?)', id, uid, purpose, challenge, ts + CHALLENGE_SEC);
+    return { challengeId: id, challenge, timeoutMs: CHALLENGE_SEC * 1000 };
+  }
+  /** One-time use: the challenge is deleted as it is read. */
+  #takeChallenge(id, purpose) {
+    if (typeof id !== 'string' || id.length > 40) return null;
+    const c = this.sql.exec('DELETE FROM webauthn_challenges WHERE id = ? AND purpose = ? RETURNING *', id, purpose).toArray()[0];
+    return c && c.exp > now() ? c : null;
+  }
+  #allowList(uid) {
+    return this.sql.exec('SELECT id, transports FROM passkeys WHERE user_id = ? ORDER BY created', uid).toArray()
+      .map((p) => ({ id: p.id, transports: p.transports ? p.transports.split(',') : [] }));
+  }
+  #sessionFor(u, s = this.#settings()) {
+    this.sql.exec('DELETE FROM failures WHERE user_id = ?', u.id);
+    return { ok: true, user: { id: u.id, username: u.username, role: u.role, ver: u.sess_ver }, settings: this.#sessionSettings(s) };
+  }
+  async #codeHash(code) {
+    const norm = normalizeRecoveryCode(code);
+    return norm ? sha256Hex(utf8(`secbin-recovery/v1:${norm}`)) : null;
+  }
+  async #issueCodes(uid) {
+    const codes = [];
+    const hashes = [];
+    for (let i = 0; i < RECOVERY_CODES; i++) {
+      const c = newRecoveryCode();
+      codes.push(c);
+      hashes.push(await this.#codeHash(c));
+    }
+    const ts = now();
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ?', uid);
+      for (const h of hashes) this.sql.exec('INSERT INTO recovery_codes (hash, user_id, created) VALUES (?, ?, ?)', h, uid, ts);
+    });
+    return codes;
+  }
+  #dropPasskeys(uid) {
+    this.sql.exec('DELETE FROM passkeys WHERE user_id = ?', uid);
+    this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ?', uid);
+    this.sql.exec('UPDATE users SET mfa = 0 WHERE id = ?', uid);
+  }
+
+  /** The signed-in user's passkeys, mode and recovery-code count. */
+  async passkeyStatus(uid) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    const mode = this.#passkeyMode(u);
+    return {
+      ok: true,
+      mode,
+      mfa: mode === 'second' || !!u.mfa,
+      required: this.#needsSecondFactor(u),
+      max: MAX_PASSKEYS,
+      recoveryLeft: this.#recoveryLeft(uid),
+      passkeys: this.sql.exec('SELECT id, name, created, last_used, backed_up FROM passkeys WHERE user_id = ? ORDER BY created', uid).toArray()
+        .map((p) => ({ id: p.id, name: p.name, created: p.created, lastUsed: p.last_used, synced: !!p.backed_up })),
+    };
+  }
+
+  /** Start registering a passkey (the current password is checked on completion). */
+  async passkeyRegisterOptions(uid) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (this.#passkeyMode(u) === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
+    if (this.#passkeyCount(uid) >= MAX_PASSKEYS) return fail(409, 'too_many_passkeys', `An account can have up to ${MAX_PASSKEYS} passkeys. Remove one first.`);
+    return { ok: true, ...this.#newChallenge('register', uid), user: { handle: this.#webauthnHandle(u), name: u.username }, exclude: this.#allowList(uid) };
+  }
+
+  async addPasskey(uid, { challengeId, credential, name, current, origin, rpId, lockoutOff = false }) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    const c = this.#takeChallenge(challengeId, 'register');
+    if (!c || c.user_id !== uid) return fail(400, 'challenge_expired', 'That passkey request expired. Try again.');
+    if (this.#passkeyMode(u) === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
+    const label = cleanLabel(name);
+    if (label === null || label === '') return fail(400, 'invalid_name', 'Give the passkey a name (up to 100 characters).');
+    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    if (wrong) return wrong;
+    const r = await verifyRegistration(credential, { challenge: c.challenge, origin, rpId });
+    if (!r.ok) return fail(400, 'invalid_passkey', `The passkey could not be verified (${r.reason}).`);
+    if (this.sql.exec('SELECT 1 FROM passkeys WHERE id = ?', r.credentialId).toArray().length) {
+      return fail(409, 'passkey_exists', 'That passkey is already registered.');
+    }
+    if (this.#passkeyCount(uid) >= MAX_PASSKEYS) return fail(409, 'too_many_passkeys', `An account can have up to ${MAX_PASSKEYS} passkeys.`);
+    const first = this.#passkeyCount(uid) === 0;
+    this.sql.exec('INSERT INTO passkeys (id, user_id, name, public_key, alg, sign_count, transports, backup_eligible, backed_up, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      r.credentialId, uid, label, r.publicKey, r.alg, r.signCount, r.transports.join(','), r.backupEligible ? 1 : 0, r.backedUp ? 1 : 0, now());
+    this.#log(uid, uid, 'passkey.added', `name=${label}`);
+    // The first passkey comes with a fresh set of recovery codes, shown once.
+    const codes = first || this.#recoveryLeft(uid) === 0 ? await this.#issueCodes(uid) : null;
+    if (codes) this.#log(uid, uid, 'recovery.issued', `count=${codes.length}`);
+    return { ok: true, id: r.credentialId, codes };
+  }
+
+  async removePasskey(uid, id, { current, lockoutOff = false }) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    if (wrong) return wrong;
+    const p = this.sql.exec('SELECT name FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid).toArray()[0];
+    if (!p) return fail(404, 'not_found', 'Passkey not found.');
+    this.sql.exec('DELETE FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid);
+    this.#log(uid, uid, 'passkey.removed', `name=${p.name}`);
+    // Without passkeys, recovery codes and the second-factor choice mean nothing.
+    if (!this.#passkeyCount(uid)) {
+      this.#dropPasskeys(uid);
+      this.#log(uid, uid, 'recovery.revoked', 'last passkey removed');
+    }
+    return { ok: true };
+  }
+
+  async regenerateRecoveryCodes(uid, { current, lockoutOff = false }) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    if (wrong) return wrong;
+    if (!this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'Add a passkey first: recovery codes stand in for a passkey.');
+    const codes = await this.#issueCodes(uid);
+    this.#log(uid, uid, 'recovery.issued', `count=${codes.length} (old codes revoked)`);
+    return { ok: true, codes };
+  }
+
+  /** The user's choice (mode "any"): should a password login also need a passkey? */
+  async setSecondFactor(uid, { on, current, lockoutOff = false }) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    if (typeof on !== 'boolean') return fail(400, 'invalid', 'on must be true or false');
+    const mode = this.#passkeyMode(u);
+    if (mode === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
+    if (mode === 'second' && !on) return fail(403, 'second_factor_required', 'The administrator requires a passkey after the password.');
+    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    if (wrong) return wrong;
+    if (on && !this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'Add a passkey first.');
+    this.sql.exec('UPDATE users SET mfa = ? WHERE id = ?', on ? 1 : 0, uid);
+    this.#log(uid, uid, on ? 'mfa.enabled' : 'mfa.disabled');
+    return { ok: true };
+  }
+
+  /** Usernameless sign-in: a challenge any of the site's passkeys can answer. */
+  async passkeyLoginOptions() {
+    return { ok: true, ...this.#newChallenge('login') };
+  }
+
+  async #checkAssertion(p, credential, challenge, origin, rpId) {
+    const r = await verifyAssertion(credential, { challenge, origin, rpId, publicKey: p.public_key, signCount: p.sign_count });
+    if (!r.ok) return r;
+    // Written only if no concurrent assertion moved the counter past this one.
+    this.sql.exec('UPDATE passkeys SET sign_count = ?, backed_up = ?, last_used = ? WHERE id = ? AND (sign_count < ? OR ? = 0)',
+      r.signCount, r.backedUp ? 1 : 0, now(), p.id, r.signCount, r.signCount);
+    return r;
+  }
+
+  /** Sign in with a passkey alone (mode "any" only). */
+  async passkeyLogin({ challengeId, credential, origin, rpId }) {
+    const c = this.#takeChallenge(challengeId, 'login');
+    if (!c) return fail(400, 'challenge_expired', 'That sign-in request expired. Try again.');
+    const id = assertionId(credential);
+    const p = id && this.sql.exec('SELECT * FROM passkeys WHERE id = ?', id).toArray()[0];
+    const u = p && this.#user(p.user_id);
+    if (!u || (u.role !== 'owner' && u.role !== 'user')) return fail(401, 'invalid_passkey', 'This passkey is not registered here.');
+    const r = await this.#checkAssertion(p, credential, c.challenge, origin, rpId);
+    if (!r.ok) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
+    if (r.userHandle && u.webauthn_handle && r.userHandle !== u.webauthn_handle) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
+    const mode = this.#passkeyMode(u);
+    if (mode === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for this account.');
+    if (mode === 'second') return fail(403, 'password_first', 'This account signs in with its password first, then the passkey.');
+    if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
+    this.#log(u.id, u.id, 'login', `passkey=${p.name}`);
+    return this.#sessionFor(u);
+  }
+
+  /** Sign in with a recovery code instead of a passkey (mode "any" only). */
+  async recoveryLogin({ username, code, lockoutOff = false }) {
+    const u = this.#loginUser(username);
+    const ts = now();
+    const s = this.#settings();
+    const hash = await this.#codeHash(code);
+    if (!u) return fail(401, 'invalid_login', 'Wrong username or recovery code.');
+    const locked = this.#lockedUntil(u, ts, lockoutOff);
+    if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
+    const mode = this.#passkeyMode(u);
+    const valid = hash && mode !== 'off' && this.sql.exec('SELECT 1 FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash).toArray().length;
+    if (!valid) {
+      this.#passwordFailure(u, ts, s, lockoutOff);
+      return fail(401, 'invalid_login', 'Wrong username or recovery code.');
+    }
+    // A valid code is not spent when it cannot sign in on its own here.
+    if (mode === 'second') return fail(403, 'password_first', 'This account signs in with its password first, then a passkey or recovery code.');
+    if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
+    this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash);
+    this.#log(u.id, u.id, 'login', `recovery code (${this.#recoveryLeft(u.id)} left)`);
+    return { ...this.#sessionFor(u, s), recoveryLeft: this.#recoveryLeft(u.id) };
+  }
+
+  /**
+   * The second step of a password login: a passkey assertion or a recovery
+   * code for the challenge issued by login(). A few tries per challenge; each
+   * failure counts toward the account lockout.
+   */
+  async secondFactor({ challengeId, credential, code, origin, rpId, lockoutOff = false }) {
+    const ts = now();
+    const c = typeof challengeId === 'string' && challengeId.length <= 40
+      && this.sql.exec("SELECT * FROM webauthn_challenges WHERE id = ? AND purpose = 'second'", challengeId).toArray()[0];
+    if (!c || c.exp <= ts) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
+    const u = this.#user(c.user_id);
+    if (!u) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
+    this.sql.exec('UPDATE webauthn_challenges SET tries = tries + 1 WHERE id = ?', c.id);
+    if (c.tries + 1 > SECOND_FACTOR_TRIES) {
+      this.sql.exec('DELETE FROM webauthn_challenges WHERE id = ?', c.id);
+      return fail(400, 'challenge_expired', 'Too many tries. Enter your password again.');
+    }
+    const s = this.#settings();
+    let how = null;
+    if (typeof code === 'string' && code) {
+      const hash = await this.#codeHash(code);
+      if (hash && this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ? AND hash = ? RETURNING hash', u.id, hash).toArray().length) {
+        how = `recovery code (${this.#recoveryLeft(u.id)} left)`;
+      }
+    } else {
+      const id = assertionId(credential);
+      const p = id && this.sql.exec('SELECT * FROM passkeys WHERE id = ? AND user_id = ?', id, u.id).toArray()[0];
+      if (p && (await this.#checkAssertion(p, credential, c.challenge, origin, rpId)).ok) how = `passkey=${p.name}`;
+    }
+    if (!how) {
+      this.#passwordFailure(u, ts, s, lockoutOff);
+      return fail(401, 'invalid_second_factor', typeof code === 'string' && code ? 'That recovery code is not valid (each works once).' : 'The passkey could not be verified.');
+    }
+    // Spend the challenge; a concurrent success already did → refuse this one.
+    if (!this.sql.exec('DELETE FROM webauthn_challenges WHERE id = ? RETURNING id', c.id).toArray().length) {
+      return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
+    }
+    if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
+    this.#log(u.id, u.id, 'login', `password + ${how}`);
+    // recoveryLeft only when a code was spent (the browser then points to Account).
+    return typeof code === 'string' && code ? { ...this.#sessionFor(u, s), recoveryLeft: this.#recoveryLeft(u.id) } : this.#sessionFor(u, s);
+  }
+
+  /** Admin: remove every passkey (and recovery code) of a user who lost them. */
+  async adminResetPasskeys(id, actorId) {
+    const u = this.#user(id);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    const n = this.#passkeyCount(id);
+    this.#dropPasskeys(id);
+    this.#log(actorId, id, 'passkeys.reset_by_admin', `removed=${n}`);
+    return { ok: true, removed: n };
   }
 
   // ── creation authorization + quotas ──────────────────────────────────────
@@ -1157,7 +1493,7 @@ export class Directory extends DurableObject {
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in and cannot be deleted.');
     const shares = this.sql.exec("SELECT id FROM shares WHERE user_id = ? AND status = 'active'", id).toArray().map((r) => r.id);
     this.ctx.storage.transactionSync(() => {
-      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
+      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
       this.sql.exec('DELETE FROM users WHERE id = ?', id);
       this.#log(actorId, id, 'user.deleted', `username=${u.username}`);
     });
@@ -1195,6 +1531,7 @@ export class Directory extends DurableObject {
       quotas: this.sql.exec('SELECT id, channel, kind, n, unit, max FROM quotas WHERE user_id = ?', id).toArray(),
       viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', id).toArray(),
       keys: await this.listKeys(id),
+      passkeys: { count: this.#passkeyCount(id), recoveryLeft: this.#recoveryLeft(id), mfa: this.#needsSecondFactor(u) },
     };
   }
 
@@ -1595,6 +1932,7 @@ export class Directory extends DurableObject {
     const ts = now();
     this.#pruneLogs();
     this.sql.exec('DELETE FROM revoked_sessions WHERE exp < ?', ts);
+    this.sql.exec('DELETE FROM webauthn_challenges WHERE exp <= ?', ts);
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
     // Anonymous trackers expire after being idle, with their usage counters.
     const idleBefore = ts - this.#settings()['public.trackerIdleSec'];
