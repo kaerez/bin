@@ -40,7 +40,7 @@ export default defineConfig({
       include: ['src/**/*.js', 'public/js/format.js', 'public/js/bytes.js'],
       // Vendored library and browser-only glue with no DOM test harness
       // (see README roadmap: Playwright e2e would cover these).
-      exclude: ['public/js/qrcode.js', 'public/js/{api,ui,app,theme,theme-init,announce,stars}.js'],
+      exclude: ['public/js/qrcode.js', 'public/js/{api,ui,theme,theme-init}.js'],
       // Floors, not targets — catch a large untested addition, don't block
       // small refactors. Measured 2026-07: ~84% statements / ~79% branches.
       thresholds: { statements: 80, branches: 70 },

@@ -68,6 +68,8 @@ describe('impersonation', () => {
     const a = audit.rows.find((r) => r.action === 'share.created');
     expect(a.actor).toBe('owner');
     expect(a.subject).toBe('carol');
+    expect(a.imp).toBe(1);
+    expect(audit.rows.find((r) => r.action === 'user.created').imp).toBe(0); // acting ON a user ≠ impersonating
     // Return to admin.
     const back = await fetchJson('/api/private/admin/unimpersonate', { method: 'POST', cookie: ic, headers: intent });
     expect(back.status).toBe(200);

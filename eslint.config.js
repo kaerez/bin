@@ -28,7 +28,7 @@ export default [
 
   // Browser client: DOM + Web Crypto + streams.
   {
-    files: ['public/js/**/*.js'],
+    files: ['public/js/**/*.js', 'public/dashboard/**/*.js'],
     languageOptions: { globals: { ...globals.browser } },
   },
 

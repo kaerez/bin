@@ -87,5 +87,5 @@ export async function authenticate(request, env, { allowApiKey = false } = {}) {
   return { user: s.user, actor: s.actor, claims: s.claims, setCookie: s.setCookie, channel: 'all' };
 }
 
-/** The id recorded as the actor of an action (the owner while impersonating). */
-export const actorId = (a) => (a.actor ? a.actor.id : a.user.id);
+/** The actor recorded for an action: the user, or { id: owner, imp: true } while impersonating. */
+export const actorId = (a) => (a.actor ? { id: a.actor.id, imp: true } : a.user.id);

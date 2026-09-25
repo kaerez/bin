@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS revoked_sessions (sid TEXT PRIMARY KEY, exp INTEGER N
 CREATE TABLE IF NOT EXISTS failures (user_id TEXT PRIMARY KEY, count INTEGER NOT NULL, start INTEGER NOT NULL,
   locked_until INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor_id TEXT,
-  subject_id TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
+  subject_id TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', imp INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
   created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL);
@@ -111,9 +111,15 @@ export class Directory extends DurableObject {
   #publicUser(u) {
     return u && { id: u.id, username: u.username, role: u.role, disabled: !!u.disabled, created: u.created, updated: u.updated };
   }
+  /**
+   * `actor` is a user id, or { id, imp: true } when the owner acted while
+   * impersonating `subject` (the user's own log hides this; the audit shows it).
+   */
   #log(actor, subject, action, detail = '') {
-    this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail) VALUES (?, ?, ?, ?, ?)',
-      now(), actor ?? null, subject ?? null, action, cleanDetail(detail));
+    const imp = !!(actor && typeof actor === 'object' && actor.imp);
+    const actorIdValue = actor && typeof actor === 'object' ? actor.id : actor;
+    this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp) VALUES (?, ?, ?, ?, ?, ?)',
+      now(), actorIdValue ?? null, subject ?? null, action, cleanDetail(detail), imp ? 1 : 0);
   }
   #settings() {
     const rows = {};
@@ -716,7 +722,7 @@ export class Directory extends DurableObject {
     if (before) { where.push('a.id < ?'); args.push(before); }
     if (subject) { where.push('a.subject_id = ?'); args.push(subject); }
     return this.sql.exec(
-      `SELECT a.id, a.ts, a.action, a.detail, a.actor_id, a.subject_id, ua.username AS actor, us.username AS subject
+      `SELECT a.id, a.ts, a.action, a.detail, a.actor_id, a.subject_id, a.imp, ua.username AS actor, us.username AS subject
        FROM activity a LEFT JOIN users ua ON ua.id = a.actor_id LEFT JOIN users us ON us.id = a.subject_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ?`, ...args, lim).toArray();
   }

@@ -9,7 +9,8 @@
 //   public/js/vendor/argon2.js        hash-wasm's Argon2 UMD build, re-wrapped as
 //                                     an ES module (header/footer only; the
 //                                     library body is byte-for-byte upstream)
-//   public/js/vendor/pdfjs/…          pdf.js display + worker builds, its wasm
+//   public/js/vendor/pdfjs/…          pdf.js "legacy" display + worker builds (polyfilled
+//                                     for current browsers), its wasm
 //                                     image decoders, standard fonts and cmaps
 //
 // Never hand-edit the outputs; bump the version + pin here and re-run instead.
@@ -67,8 +68,8 @@ try {
   const pdfDir = path.join(vendorDir, 'pdfjs');
   await rm(pdfDir, { recursive: true, force: true });
   await mkdir(pdfDir, { recursive: true });
-  await cp(path.join(pdf, 'build', 'pdf.min.mjs'), path.join(pdfDir, 'pdf.min.mjs'));
-  await cp(path.join(pdf, 'build', 'pdf.worker.min.mjs'), path.join(pdfDir, 'pdf.worker.min.mjs'));
+  await cp(path.join(pdf, 'legacy', 'build', 'pdf.min.mjs'), path.join(pdfDir, 'pdf.min.mjs'));
+  await cp(path.join(pdf, 'legacy', 'build', 'pdf.worker.min.mjs'), path.join(pdfDir, 'pdf.worker.min.mjs'));
   for (const d of ['wasm', 'standard_fonts', 'cmaps']) await cp(path.join(pdf, d), path.join(pdfDir, d), { recursive: true });
   await cp(path.join(pdf, 'LICENSE'), path.join(pdfDir, 'LICENSE'));
 

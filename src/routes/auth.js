@@ -102,7 +102,7 @@ export async function handleAuth(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
     const s = await readSession(request, env);
-    if (s.ok) await directory(env).revokeSession(s.claims.sid, s.claims.exp, s.actor ? s.actor.id : s.user.id, s.user.id);
+    if (s.ok) await directory(env).revokeSession(s.claims.sid, s.claims.exp, s.actor ? { id: s.actor.id, imp: true } : s.user.id, s.user.id);
     return json({ ok: true }, 200, { 'set-cookie': logoutCookie() });
   }
 
