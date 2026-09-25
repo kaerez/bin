@@ -25,6 +25,10 @@ const KEY = 'rec';
 // value limit and wedge the share.
 const GRANTS_KEY = 'grants';
 export const MAX_ACTIVE_GRANTS = 2000;
+// One client (tracking key: an IP, or an IPv6 /64) holds at most this many live
+// grants; opening again replaces its oldest. So a single link holder cannot
+// fill the table and lock everyone else out — that takes 100 distinct networks.
+export const MAX_GRANTS_PER_CLIENT = 20;
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && timingSafeEqualHex(a, b);
 
@@ -52,12 +56,16 @@ export class FileShare extends DurableObject {
   }
 
   async #purge(rec) {
-    // Without the FILES binding no chunk could ever have been stored (uploads
-    // need it too), so there is nothing to delete — never let a deployment
-    // error wedge the share's state or its alarm.
-    if (rec && this.env.FILES && typeof this.env.FILES.delete === 'function') {
-      const keys = Array.from({ length: rec.chunks }, (_, i) => r2Key(rec.id, i));
-      for (let i = 0; i < keys.length; i += 1000) await this.env.FILES.delete(keys.slice(i, i + 1000));
+    if (rec) {
+      const r2 = this.env.FILES;
+      if (r2 && typeof r2.delete === 'function') {
+        const keys = Array.from({ length: rec.chunks }, (_, i) => r2Key(rec.id, i));
+        for (let i = 0; i < keys.length; i += 1000) await r2.delete(keys.slice(i, i + 1000));
+      } else if (Array.isArray(rec.sizes) && rec.sizes.some((n) => n > 0)) {
+        // Ciphertext was stored but R2 is unbound now: fail (the alarm retries)
+        // rather than forget the share and leave its chunks behind.
+        throw new Error('FILES binding missing: cannot delete stored chunks');
+      }
     }
     await this.ctx.storage.deleteAll();
     await this.ctx.storage.deleteAlarm();
@@ -80,7 +88,7 @@ export class FileShare extends DurableObject {
       if (await this.#rec()) return false;
       const chunks = Math.ceil(padded / CHUNK);
       const deadline = nowSec() + pendingSec;
-      await this.#put({ id, state: 'pending', uid, uth, dth, padded, chunks, sizes: [], views, left: views, expire, ttl, deadline });
+      await this.#put({ id, state: 'pending', uid, uth, dth, padded, chunks, sizes: [], views, left: views, expire, ttl, deadline, grants: [] });
       await this.ctx.storage.setAlarm(deadline * 1000);
       return true;
     });
@@ -125,7 +133,7 @@ export class FileShare extends DurableObject {
       if (rec.views !== null) meta.views = rec.views;
       const next = {
         id: rec.id, state: 'active', dth: rec.dth, padded: rec.padded, chunks: rec.chunks, views: rec.views, left: rec.left,
-        expire: rec.expire, ttl: rec.ttl, expires, acc,
+        expire: rec.expire, ttl: rec.ttl, expires, acc, grants: [],
         paste: { v: paste.v, ct: paste.ct, wk: paste.wk, adata: paste.adata, meta },
       }; // uid + upload token dropped: the share is no longer linked to the uploader here
       await this.#put(next);
@@ -147,19 +155,30 @@ export class FileShare extends DurableObject {
     return { status: 'ok', head: { v: rec.paste.v, adata: rec.paste.adata, meta: this.#metaOut(rec) }, padded: rec.padded, chunks: rec.chunks };
   }
 
-  /** Verify proofs, spend a view, register a grant (hash) valid for grantSec. */
-  async open(lh, kh, grantHash, grantSec) {
+  /**
+   * Verify proofs, spend a view, register a grant (hash) valid for grantSec.
+   * `client` is an opaque hash of the caller's tracking key (never an IP).
+   */
+  async open(lh, kh, grantHash, grantSec, client = '') {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#live();
       if (!rec || rec.state !== 'active') return { status: 'gone' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
       if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
       const t = nowSec();
-      const grants = await this.#grants(rec, t);
-      if (grants.length >= MAX_ACTIVE_GRANTS) return { status: 'busy' };
+      let grants = await this.#grants(rec, t);
+      const mine = grants.filter((g) => client && g.c === client);
+      if (mine.length >= MAX_GRANTS_PER_CLIENT) {
+        const oldest = mine.reduce((a, b) => (b.exp < a.exp ? b : a));
+        grants = grants.filter((g) => g !== oldest);
+      } else if (grants.length >= MAX_ACTIVE_GRANTS) {
+        return { status: 'busy' };
+      }
       const gexp = Math.min(t + grantSec, rec.expires);
-      grants.push({ h: grantHash, exp: gexp });
-      delete rec.grants;
+      grants.push({ h: grantHash, exp: gexp, c: client });
+      // Grants now live under GRANTS_KEY; an empty inline array keeps records
+      // readable by the previous release if a deploy is rolled back.
+      rec.grants = [];
       if (rec.left !== null) {
         rec.left -= 1;
         if (rec.left <= 0) {

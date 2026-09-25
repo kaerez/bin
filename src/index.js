@@ -72,7 +72,8 @@ export default {
       if (e instanceof HttpError) return e.toResponse();
       if (e instanceof BindingMissing) {
         console.error(`deployment error: the ${e.binding} binding is missing or invalid`);
-        return err(503, 'not_configured', `Server storage is not configured: the ${e.binding} binding is missing. Check wrangler.toml.`, { binding: e.binding });
+        // The binding's name goes to the logs, not to the (possibly anonymous) caller.
+        return err(503, 'not_configured', 'The server is not fully configured. Please contact the administrator.');
       }
       console.error('unhandled error', e && e.stack ? e.stack : e);
       return err(500, 'server_error', 'Something went wrong. Please try again.');

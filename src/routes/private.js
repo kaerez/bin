@@ -3,8 +3,8 @@
 // "My shares" and admin surfaces are session-only.
 
 import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
-import { authenticate, issueSession, actorId } from '../lib/auth.js';
-import { directory, cachedSettings, ipContext, isBlocked, recordFailure } from '../lib/guard.js';
+import { authenticate, issueSession, actorId, logoutCookie } from '../lib/auth.js';
+import { directory, cachedSettings, ipContext, recordFailure } from '../lib/guard.js';
 import { genId, parseId, genDeleteToken, genToken, genApiKey, hashToken } from '../lib/ids.js';
 import { ttlSeconds, MAX_BODY, MAX_BURN_RECORD, kvExists, kvPut, kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
 import { validateCreate, FormatError, MAX_CT_B64, expireSeconds, MAX_VIEWS, MAX_TTL } from '../../public/js/format.js';
@@ -15,7 +15,8 @@ import { handleAdmin } from './admin.js';
 import { binding } from '../lib/config.js';
 
 const now = () => Math.floor(Date.now() / 1000);
-const fromDir = (r) => err(r.status, r.error, r.message, r.max !== undefined ? { max: r.max } : r.quota ? { quota: r.quota } : undefined);
+const fromDir = (r) => err(r.status, r.error, r.message,
+  r.max !== undefined ? { max: r.max } : r.quota ? { quota: r.quota } : r.until ? { until: r.until } : undefined);
 
 /** Attach a sliding-session cookie refresh to any JSON response. */
 function withAuth(a, res) {
@@ -81,16 +82,18 @@ export async function handlePrivate(request, env, url, ctx) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     if (a.actor) return err(403, 'impersonating', 'Use the admin panel to reset this user’s password.');
     const g = await ipContext(env, request);
-    const b = await isBlocked(env, g, 'login');
-    if (b.blocked) return err(429, 'blocked', 'Too many attempts from your network. Try again later.', b.until ? { until: b.until } : undefined);
     const body = await readJsonBody(request);
     const current = await verifierFrom(body.current);
     const next = await verifierFrom(body.proof);
     if (!current || !next) return err(400, 'invalid_credential', 'Invalid password proof.');
     const r = await dir.changePassword(a.user.id, { current, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
     if (!r.ok) {
-      if (r.error === 'wrong_password') await recordFailure(env, g, 'login');
-      return fromDir(r);
+      // Wrong current passwords also count against the caller's network, so a
+      // thief's IP gets blocked from logging in again.
+      if (r.error === 'wrong_password' || r.error === 'session_revoked') await recordFailure(env, g, 'login');
+      const res = fromDir(r);
+      if (r.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
+      return res;
     }
     // The session version moved on (all other sessions end); keep this device signed in.
     const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env) });
@@ -199,6 +202,7 @@ async function createNote(request, env, a) {
 
 // ── file uploads ───────────────────────────────────────────────────────────
 async function initFile(request, env, a) {
+  binding(env, 'FILES'); // fail before charging quota if R2 is not configured
   const body = await readJsonBody(request);
   const { views, expire, padded } = body;
   if (views !== null && !(Number.isSafeInteger(views) && views >= 1 && views <= MAX_VIEWS)) return err(400, 'invalid_views', `views must be 1–${MAX_VIEWS} or null (unlimited).`);
@@ -361,6 +365,7 @@ async function revokeShare(env, a, id, info) {
 
 export async function purgeShare(env, id, info = parseId(id)) {
   if (!info) return;
+  if (info.file) binding(env, 'FILES'); // never report a revoke that left ciphertext in R2
   if (info.file) await fileStub(env, id).revoke();
   else if (info.burn) await burnStub(env, id).revoke();
   else await kvDelete(env, id);

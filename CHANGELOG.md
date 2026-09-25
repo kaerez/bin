@@ -55,8 +55,9 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
 - **Security hardening** (items reported by the review sweep):
   - **Disabled accounts** get an explicit `403 account_disabled`, and their session cookie is
     cleared, on every authenticated route. The dashboard sends them to login with a message.
-  - **Missing bindings** return `503 not_configured` naming the binding instead of a 500. File
-    shares no longer wedge when R2 is unbound.
+  - **Missing bindings** return a generic `503 not_configured` instead of a 500; the binding's
+    name is logged, not returned. File shares no longer wedge when R2 is unbound, and file
+    uploads, revokes and deletes check R2 first.
   - **Headers:**
     - Trusted Types are enforced, with a single same-origin `secbin` policy that pdf.js's
       worker now goes through.
@@ -66,15 +67,18 @@ longer be opened, and anonymous creation (`POST /api/paste`) is gone (`410`).
     - `test-node/headers.test.js` keeps `public/_headers` identical to the Worker's headers.
   - **CSRF:** `Sec-Fetch-Site: same-site` is refused on state-changing requests.
   - **`h()`** refuses unsafe URL schemes in URL-valued attributes.
-  - **File shares:** download grants are stored outside the share record and capped at 2000
-    live grants per share (`429 busy`).
-  - **Password change:** a wrong current password counts toward account lockout and the login
-    guard.
+  - **File shares:** download grants are stored outside the share record. Each client holds at
+    most 20 live grants (a reopen replaces its oldest), and a share at most 2000 (`429 busy`).
+  - **Password change:** never blocked by a login lockout. Repeated wrong current passwords
+    end every session of the account, and each attempt counts against the IP's login guard.
   - **Time cost:** account passwords must use the default Argon2id time cost, so prelogin cannot
     reveal which accounts exist.
   - **My shares:** totals honor the search and status filters.
-  - **CLI `update`:** requires an npm provenance attestation and a sha512 integrity hash, and
-    installs exactly the version it verified with `--ignore-scripts`.
+  - **CLI `update`:**
+    - requires an npm provenance attestation and a sha512 integrity hash;
+    - downloads exactly the version it verified and checks the tarball against that hash;
+    - installs that file with `--ignore-scripts`;
+    - `secbin version` reports instead of failing when no verified release exists.
   - **Vendoring:** qrcode-generator is pinned at 2.0.4 via `tools/vendor.mjs`.
 
 - Dev dependencies: vitest 4.1.11, @cloudflare/vitest-pool-workers 0.22.0, wrangler 4.124+.
