@@ -14,6 +14,9 @@
 import { argon2id } from './vendor/noble/argon2.js';
 
 self.onmessage = (e) => {
+  // A dedicated worker only hears its creating page, whose messages carry an
+  // empty origin; anything else (never expected) is ignored.
+  if (e.origin && e.origin !== self.location.origin) return;
   const { password, salt, t, m, p } = e.data || {};
   let last = -1;
   try {
