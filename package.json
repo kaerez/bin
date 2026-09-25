@@ -30,13 +30,13 @@
     "r2:create": "wrangler r2 bucket create secbin-files"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.5",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@eslint/js": "^9.39.5",
     "@vitest/coverage-istanbul": "^4.1.10",
     "eslint": "^9.39.5",
     "globals": "^15.15.0",
     "happy-dom": "^20.11.0",
     "vitest": "^4.1.11",
-    "wrangler": "^4.111.0"
+    "wrangler": "^4.124.0"
   }
 }
