@@ -3,6 +3,7 @@
 // Routes:
 //   /api/auth/*      login, logout, setup/recovery, session probe (public)
 //   /api/private/*   everything that needs an account (session or API key)
+//   /api/public/*    anonymous creation (the public account), when enabled
 //   /api/paste/*, /api/file/*, /api/config   capability-gated public reads
 //   /dashboard*      the signed-in app (login/setup pages are the exceptions)
 //   everything else  Workers Static Assets (landing page + viewer)
@@ -19,6 +20,7 @@ import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
 import { handlePrivate } from './routes/private.js';
 import { handlePublic } from './routes/public.js';
+import { handlePublicApi } from './routes/publicapi.js';
 
 export { BurnPaste } from './burn-do.js';
 export { FileShare } from './fileshare-do.js';
@@ -60,6 +62,7 @@ async function route(request, env, url, ctx) {
   if (isDash) return handleDashboard(request, env, url);
   if (pathname.startsWith('/api/auth/')) return (await handleAuth(request, env, url)) ?? err(404, 'not_found', 'Not found.');
   if (pathname.startsWith('/api/private/') || pathname === '/api/private') return handlePrivate(request, env, url, ctx);
+  if (pathname.startsWith('/api/public/')) return handlePublicApi(request, env, url);
   return (await handlePublic(request, env, url)) ?? err(404, 'not_found', 'Not found.');
 }
 

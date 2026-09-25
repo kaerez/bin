@@ -161,7 +161,7 @@ async function sessionSettings(env) {
 }
 
 // ── notes ──────────────────────────────────────────────────────────────────
-async function createNote(request, env, a) {
+export async function createNote(request, env, a) {
   const body = await readJsonBody(request, MAX_BODY);
   const clean = parseCreatePaste(body);
   if (clean.adata.fmt === 'files') return err(400, 'invalid_format', 'File manifests are created through /api/private/file.');
@@ -171,7 +171,7 @@ async function createNote(request, env, a) {
   const dir = directory(env);
   const fmt = clean.adata.fmt;
   const deletable = clean.meta.deletable === true;
-  const auth = await dir.authorizeCreate(a.user.id, a.channel, { kind: 'text', fmt, deletable, views, expireSec: ttl });
+  const auth = await dir.authorizeCreate(a.user.id, a.channel, { kind: 'text', fmt, deletable, views, expireSec: ttl, subjects: a.subjects });
   if (!auth.ok) return fromDir(auth);
 
   const created = now();
@@ -204,12 +204,12 @@ async function createNote(request, env, a) {
     throw e;
   }
   const kind = fmt === 'url' || fmt === 'secret' ? fmt : 'text';
-  await dir.recordShare({ id, uid: a.user.id, kind, label: body.label, created, expires, views }, actorId(a));
+  await dir.recordShare({ id, uid: a.user.id, kind, label: a.noLabel ? '' : body.label, created, expires, views }, actorId(a));
   return json({ id, deletetoken: deleteToken, expires }, 201);
 }
 
 // ── file uploads ───────────────────────────────────────────────────────────
-async function initFile(request, env, a) {
+export async function initFile(request, env, a) {
   binding(env, 'FILES'); // fail before charging quota if R2 is not configured
   const body = await readJsonBody(request);
   const { views, expire, padded } = body;
@@ -224,6 +224,7 @@ async function initFile(request, env, a) {
   const auth = await dir.authorizeCreate(a.user.id, a.channel, {
     kind: 'files', views, expireSec: ttl, bytes: padded,
     files: body.files, maxFile: body.maxFile, types: body.types, depth: body.depth, deletable: body.deletable === true,
+    subjects: a.subjects,
   });
   if (!auth.ok) return fromDir(auth);
   const uploadToken = genToken();
@@ -246,7 +247,7 @@ async function initFile(request, env, a) {
   return json({ id, uploadtoken: uploadToken, deletetoken: deleteToken, chunks: Math.ceil(padded / (8 * 1024 * 1024)) }, 201);
 }
 
-async function putChunk(request, env, a, id, i) {
+export async function putChunk(request, env, a, id, i) {
   assertNotCrossSite(request);
   const ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (ct !== 'application/octet-stream') return err(415, 'unsupported_media_type', 'Chunks must be application/octet-stream.');
@@ -269,7 +270,7 @@ async function putChunk(request, env, a, id, i) {
   return json({ ok: true });
 }
 
-async function finalizeFile(request, env, a, id) {
+export async function finalizeFile(request, env, a, id) {
   const token = request.headers.get('x-upload-token') || '';
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return err(403, 'bad_token', 'Missing or invalid X-Upload-Token.');
   const body = await readJsonBody(request, MAX_BODY);
@@ -282,7 +283,7 @@ async function finalizeFile(request, env, a, id) {
   if (r.status === 'mismatch') return err(400, 'invalid_format', 'The manifest’s view limit, expiry and recipient-delete setting must match the upload.');
   if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
   if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
-  await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null }, actorId(a));
+  await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: a.noLabel ? '' : body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null }, actorId(a));
   return json({ ok: true, id, expires: r.expires });
 }
 

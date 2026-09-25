@@ -82,7 +82,7 @@ async function refreshOverview() {
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
-  ({ users: renderUsers, shares: () => renderShares(panel('shares')), defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
+  ({ users: renderUsers, shares: () => renderShares(panel('shares')), defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, public: renderPublic, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────
@@ -230,7 +230,8 @@ async function renderUsers() {
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, user, pw, pw2, add)));
 
   const body = h('tbody');
-  for (const u of data.users) {
+  // The built-in public account is managed under Public access, not here.
+  for (const u of data.users.filter((x) => x.role !== 'public')) {
     const actions = h('div.btn-row.row-actions');
     if (u.role !== 'owner') {
       actions.appendChild(h('button.btn', { type: 'button', text: 'Manage', on: { click: () => openUser(u.id) } }));
@@ -331,6 +332,82 @@ async function renderSettings() {
     await guard(() => admin.settings(patch), 'Settings saved.');
   };
   p.appendChild(save);
+}
+
+// ── public access ────────────────────────────────────────────────────────────
+const PUBLIC_ID = 'public-user-0000';
+const TRACKING = [
+  ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],
+  ['ip', 'Network address only', 'Counts per IP address (IPv6 per the tracking prefix), stored only as a keyed hash. Nothing is stored in the browser; people behind one address share the limits.'],
+  ['both-permissive', 'Both — permissive', 'Counts per browser and per network; refused only when both are over a limit (a shared office address alone does not block a new browser).'],
+  ['both-restrictive', 'Both — restrictive', 'Counts per browser and per network; refused when either is over a limit (a new browser on an exhausted network is refused).'],
+];
+
+async function renderPublic() {
+  const p = clear(panel('public'));
+  await refreshOverview();
+  if (!overview) return;
+  const s = overview.settings;
+  const data = await guard(() => admin.publicAccess());
+  const detail = await guard(() => admin.user(PUBLIC_ID));
+  if (!data || !detail) return;
+
+  const on = h('input', { type: 'checkbox', checked: s['public.enabled'] });
+  const radios = TRACKING.map(([v, label, hint]) => {
+    const r = h('input', { type: 'radio', name: 'public-tracking', value: v, checked: s['public.tracking'] === v });
+    return h('label.radio-opt', {}, r, h('span', {}, h('strong', { text: label }), h('span.mono.muted.block', { text: hint })));
+  });
+  const notice = h('input', { type: 'checkbox', checked: s['public.notice'] });
+  const noticeText = h('textarea.input', { rows: '3', maxlength: '1000', 'aria-label': 'Notice text' });
+  noticeText.value = s['public.noticeText'];
+  const perIp = numberInput(s['public.newTrackersPerIp']);
+  const perWin = durationInput(s['public.newTrackersWindowSec']);
+  const idle = durationInput(s['public.trackerIdleSec']);
+  const save = h('button.cta', { type: 'button', text: 'Save public access' });
+  save.onclick = async () => {
+    const mode = radios.map((l) => l.querySelector('input')).find((r) => r.checked)?.value || 'tracker';
+    const patch = {
+      'public.enabled': on.checked, 'public.tracking': mode, 'public.notice': notice.checked, 'public.noticeText': noticeText.value,
+      'public.newTrackersPerIp': perIp.read(), 'public.newTrackersWindowSec': perWin.read(), 'public.trackerIdleSec': idle.read(),
+    };
+    for (const [k, v] of Object.entries(patch)) if (typeof v === 'number' && !Number.isFinite(v)) return msg(`Enter a value for ${k}.`, true);
+    const ok = await guard(() => admin.settings(patch), 'Public access saved.');
+    if (ok) renderPublic();
+  };
+
+  p.appendChild(h('div.card.stack', {},
+    h('h2.section-title', { text: 'Public (anonymous) sharing' }),
+    h('p.subtitle', { text: 'When on, the home page offers the composer to anyone, as the built-in public account: no password, no dashboard, no API keys. Its capabilities, limits and quotas are set below; quotas are counted per anonymous creator.' }),
+    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the mode and the notice before turning this on.' }),
+    h('label.inline', {}, on, ' Allow anonymous sharing'),
+    h('fieldset.range', {}, h('legend', { text: 'How anonymous creators are counted' }), ...radios),
+    h('label.inline', {}, notice, ' Show a notice on the public composer'),
+    h('label.field', {}, h('span.field-label', { text: 'Notice text' }), noticeText),
+    h('div.limit-row', {}, h('span.field-label', { text: 'New senders (browser ids) per network' }), perIp, h('span.field-label', { text: 'per' }), perWin),
+    h('div.limit-row', {}, h('span.field-label', { text: 'Forget idle browser ids after' }), idle),
+    h('p.muted', { text: 'A browser id is stored only when it first creates a share; that is when the per-network limit is spent. Clearing browser storage gives a new id, so tracker mode allows up to (new senders × quota) shares per network per window.' }),
+    h('div.btn-row', {}, save)));
+
+  p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public account: capabilities & limits' }),
+    limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, onSaved: renderPublic })));
+  p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public quotas (counted per anonymous creator, in addition to global quotas)' }), quotasEditor(PUBLIC_ID, detail.quotas)));
+
+  const t = data.trackers;
+  const body = h('tbody');
+  for (const r of t.rows) {
+    const act = (action, label, cls = 'btn') => h(`button.${cls}`, { type: 'button', text: label, on: { click: async () => { if (await guard(() => admin.tracker(r.id, action), `Browser id ${action === 'forget' ? 'forgotten' : `${action}ed`}.`)) renderPublic(); } } });
+    body.appendChild(h('tr', {},
+      h('td.mono', { dataset: { label: 'Id' }, text: r.id }),
+      h('td.mono', { dataset: { label: 'First seen' }, text: formatDate(r.created) }),
+      h('td.mono', { dataset: { label: 'Last seen' }, text: formatDate(r.last_seen) }),
+      h('td.mono', { dataset: { label: 'Shares' }, text: String(r.uses) }),
+      h('td', { dataset: { label: 'Status' } }, r.blocked ? h('span.pill.bad', { text: r.reason === 'conflict' ? 'blocked: conflicting copies' : 'blocked' }) : h('span.pill.ok', { text: 'ok' })),
+      h('td.cell-actions', {}, h('div.btn-row', {}, r.blocked ? act('unblock', 'Unblock') : act('block', 'Block', 'btn.danger'), act('forget', 'Forget', 'btn')))));
+  }
+  p.appendChild(h('div.card.stack', {},
+    h('h3.field-label', { text: `Anonymous browser ids (${t.total}, ${t.blocked} blocked)` }),
+    h('p.mono.muted', { text: 'Ids are shown as a prefix of their keyed hash; the ids themselves are not stored. Forgetting one also resets its quota usage.' }),
+    t.rows.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Id', 'First seen', 'Last seen', 'Shares', 'Status', ''].map((x) => h('th', { text: x })))), body)) : h('p.mono.muted', { text: 'None yet.' })));
 }
 
 // ── viewer ───────────────────────────────────────────────────────────────────

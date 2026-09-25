@@ -132,6 +132,20 @@ export async function handleAdmin(request, env, url) {
     return json(r);
   }
 
+  // ── public access: its profile, trackers (settings go through /settings) ──
+  if (p === '/api/private/admin/public') {
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    const blockedOnly = url.searchParams.get('blocked') === 'true';
+    return json({ profile: await dir.publicProfile(), trackers: await dir.listTrackers({ limit: 200, blocked: blockedOnly ? true : null }) });
+  }
+  const tm = p.match(/^\/api\/private\/admin\/public\/trackers\/([A-Za-z0-9_-]{12})$/);
+  if (tm) {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    const body = await readJsonBody(request);
+    const r = await dir.adminTracker(tm[1], body.action, me);
+    return r.ok ? json(r) : fromDir(r);
+  }
+
   if (p === '/api/private/admin/overview') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const g = await dir.adminGlobal();

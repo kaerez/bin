@@ -105,6 +105,13 @@ describe('admin import', () => {
     await login('ie-over-a', 'second-password-1');
   });
 
+  it('the preview calls out a change to public (anonymous) access', async () => {
+    const doc = await exportDoc({ system: true });
+    doc.system.settings['public.enabled'] = !doc.system.settings['public.enabled'];
+    const { plan } = await (await importDoc(doc, { system: true, users: {} })).json();
+    expect(plan.warnings.some((w) => w.includes('public.enabled'))).toBe(true);
+  });
+
   it('config-only entries cannot create accounts; system settings are applied', async () => {
     const u = await makeUser('ie-config');
     const doc = await exportDoc({ system: true, users: [u.id], config: true });

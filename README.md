@@ -65,6 +65,7 @@ flowchart TD
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, and label shares. |
 | Admin | Users, impersonation ("log in as"), password resets, limits, quotas, session timeouts, file-size caps, viewer policy, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (unknown links, wrong keys, wrong passwords); account lockout. |
+| Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. Needs Legal/Compliance review before use — see SECURITY.md. |
 | CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
 | Installable | A PWA: install from the banner (or the browser menu; on iOS, Share → Add to Home Screen). The service worker caches only the static shell — never shares or API responses. |
 | Minimal surface | Strict CSP, self-hosted fonts, no third-party scripts, no analytics, no outbound requests. |
@@ -156,6 +157,13 @@ working.
   **encrypted in the browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a
   file after decrypting it locally: a preview (dry run) first, per-user skip/create/overwrite
   or rename, then an all-or-nothing import. Both need the owner's password again.
+- **Public access** (off by default) — a built-in `(public)` account that cannot sign in,
+  be deleted or hold API keys. When enabled, the home page shows a composer limited to that
+  account's limits and quotas (seeded conservatively: notes only, ≤ 10 views, ≤ 7 days, 10 per
+  day). Limits are counted per browser (a random identifier kept in a cookie, the ETag cache,
+  localStorage and IndexedDB, self-healing; unresolvable conflicts are blocked), per network, or
+  both (permissive or restrictive). The composer shows an editable notice. **Get Legal /
+  Compliance sign-off first** (ePrivacy/GDPR); see [SECURITY.md](./SECURITY.md).
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup
   only). Default off.

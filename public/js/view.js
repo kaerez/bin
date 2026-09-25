@@ -8,7 +8,8 @@ import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
 import { validateManifest, buildTree, basename } from './files.js';
-import { fetchHead, openShare, expireShare, fetchConfig, session, ApiError } from './api.js';
+import { fetchHead, openShare, expireShare, fetchConfig, session, ApiError, publicProfile, publicApi, setPublicAid } from './api.js';
+import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill } from './ui.js';
@@ -35,14 +36,40 @@ if (route) {
 async function initLanding() {
   showView('landing');
   const btn = $('#auth-link');
+  let signedIn = false;
   try {
     const s = await session();
     if (s.authenticated) {
+      signedIn = true;
       btn.textContent = 'Dashboard';
       btn.href = '/dashboard/';
     }
   } catch { /* offline: keep "Log in" */ }
   btn.hidden = false;
+  if (!signedIn) await initPublicComposer();
+}
+
+/**
+ * Public (anonymous) sharing, when the admin enabled it: the composer runs as
+ * the built-in public account. The tracker is resolved first when the counting
+ * mode uses one; any refusal leaves the plain landing page with a message.
+ */
+async function initPublicComposer() {
+  let prof;
+  try { prof = await publicProfile(); } catch { return; }
+  if (!prof || prof.enabled !== true) return;
+  try {
+    const t = await ensureTracker();
+    setPublicAid(t.aid);
+  } catch (e) {
+    const note = h('p.msg.error', { role: 'alert', text: e instanceof ApiError ? e.message : 'Anonymous sharing is unavailable right now.' });
+    $('#view-landing .stack').appendChild(note);
+    return;
+  }
+  const n = $('#public-notice');
+  if (prof.notice) { n.textContent = prof.notice; n.hidden = false; }
+  const { startComposer } = await import('./composer.js');
+  startComposer(prof, publicApi, { publicMode: true });
 }
 
 // ── viewer ───────────────────────────────────────────────────────────────────

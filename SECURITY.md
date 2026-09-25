@@ -316,6 +316,76 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   exported verifiers may leave the environment at all is a policy decision for your Security /
   Compliance function.
 
+### Public (anonymous) access
+
+> [!IMPORTANT]
+> **Legal / Compliance review required before enabling.** Anonymous sharing lets anyone publish
+> content from your domain, and the tracker below stores an identifier on the visitor's device
+> for rate limiting. Storing or reading such an identifier is regulated in the EU/UK (ePrivacy
+> Directive art. 5(3), PECR) and the identifier and the keyed network hash are pseudonymous
+> personal data under GDPR. Whether the "strictly necessary" exemption applies, which lawful
+> basis and retention period apply, what the on-page notice must say, and how abuse reports are
+> handled are decisions for your Legal, Risk and Compliance functions — this document is not
+> legal or compliance advice.
+
+- **Off by default** (`public.enabled`). When off, every `/api/public/*` route except the
+  profile answers `403 public_disabled` and the landing page shows no composer.
+- **The public account** (`public-user-0000`, shown as `(public)`) is built in and created once.
+  It has no password and can never sign in (its name is outside the username alphabet, and
+  prelogin/login treat it as unknown); it cannot be deleted, renamed, disabled, impersonated,
+  given a password, exported or given API keys, and it has no dashboard or My shares. Its
+  limits and quotas are edited like any account's; the admin sees its shares in Admin → Shares.
+- **Conservative seeded limits:** notes only (files, links, credentials and "delete now" off),
+  at most 10 views, no unlimited views, at most 7 days, 10 shares per day per subject. The
+  file policy and every server-side check of the account handlers apply unchanged.
+- **Counting subjects** (`public.tracking`):
+  - `tracker` (default) — a random 128-bit id issued by the server;
+  - `ip` — the network (an IPv6 /64 by default, per `guard.v6Prefix`), nothing stored in the
+    browser;
+  - `both-restrictive` — both are counted, and a creation is refused when **either** is over a
+    quota;
+  - `both-permissive` — both are counted, and a creation is refused only when **both** are over.
+  Subjects are stored only as HMAC-SHA-256 values keyed with a per-deployment secret held in the
+  Directory; the raw id and the address are never stored. An import that changes any `public.*`
+  setting is called out in the import preview.
+- **The tracker** is a random id the server issues and authenticates with an HMAC tag
+  (12 random bytes ‖ issue time ‖ 8-byte tag, keyed with the per-deployment secret). It is
+  **stateless until it first creates a share**: page visits store nothing on the server. The
+  browser keeps it in four places: the `__Host-secbin_aid` cookie (HttpOnly, Secure,
+  SameSite=Strict, 400 days), the ETag of `GET /api/public/t` (`Cache-Control: private,
+  no-cache`, so the browser revalidates with `If-None-Match`), `localStorage` and IndexedDB.
+  - On every visit all copies are sent (at most one per store). The id presented most often
+    wins and every missing, malformed, forged or expired copy is re-seeded from it
+    (self-healing). Only ids this server issued count, so random values cannot outvote or block
+    anyone, and the HttpOnly cookie keeps a victim's id away from other sites.
+  - A tie is broken in favour of the only tied id that has created shares, or else the oldest
+    (two tabs racing on a first visit are not an attack). If two or more tied ids have **each**
+    created shares, the right one cannot be determined: every one of them is blocked
+    (`403 tracker_conflict`, counted as an invalid request for the IP) until the admin
+    unblocks it.
+  - A creation must carry the id in both the cookie and the `X-Secbin-Aid` header, and they
+    must match; a cross-site form can do neither (plus the usual `Sec-Fetch-Site` check).
+  - An id is stored on its first creation, at most `public.newTrackersPerIp` (default 5) new ids
+    per network per `public.newTrackersWindowSec` (default a day; `429 tracker_rate_limited`)
+    and at most 200 000 in all (`429 busy`). Clearing browser storage therefore yields a new id
+    and a fresh per-id quota, but only that many times per network per window: tracker mode
+    allows up to *new ids × quota* shares per network per window. Use a `both-*` mode to cap the
+    network as a whole.
+  - Ids idle for `public.trackerIdleSec` (default 90 days) are purged together with their usage
+    counters; network counters (`pub:ip:*`) age out with the other usage rows (400 days).
+  - Anonymous shares carry no label (anything sent is dropped), and the per-id "shares" count
+    in the admin view counts successful creations only.
+- **Limits of the design:** these are rate limits, not identity. A determined sender with many
+  networks (or many IPv6 /64s) can create more; `ip` mode counts everyone behind one NAT
+  together. Pair it with Cloudflare WAF / rate-limiting rules (a Turnstile challenge is planned).
+- **Notice:** the composer shows an admin-editable notice (`public.notice`,
+  `public.noticeText`, on by default) explaining the identifier; the wording is yours to approve.
+- **Administration:** Admin → Public access lists trackers (hash prefix, created, last seen,
+  uses, blocked reason) and can unblock, block or forget one (forgetting also clears its
+  counters). Conflicts and admin actions are audited.
+- File uploads by the public account (when the admin enables files) use the same upload-token
+  capability as account uploads; the quota is charged when the upload starts.
+
 ### API surface hardening
 
 - No CORS headers; JSON bodies are read under a streaming byte cap (4 MiB; 8 MiB + 16 B for

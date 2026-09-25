@@ -11,6 +11,9 @@ const HOUR = 3600;
 const DAY = 86400;
 const MiB = 1024 * 1024;
 
+export const PUBLIC_TRACKING = ['tracker', 'ip', 'both-permissive', 'both-restrictive'];
+export const DEFAULT_PUBLIC_NOTICE = 'Anonymous sharing is limited. To enforce the limits, this site keeps a random identifier in your browser (a cookie and similar storage) and/or uses your network address. It is used only for these limits and is not shared with anyone.';
+
 // ── global settings ──────────────────────────────────────────────────────────
 export const SETTINGS = {
   'session.idleSec':     { type: 'int', min: 5 * MIN, max: 90 * DAY, def: 12 * HOUR },
@@ -33,6 +36,24 @@ export const SETTINGS = {
   'lockout.max':         { type: 'int', min: 1, max: 100000, def: 10 },
   'lockout.windowSec':   { type: 'int', min: 1, max: 30 * DAY, def: 10 * MIN },
   'lockout.lockSec':     { type: 'int', min: 1, max: 365 * DAY, def: 15 * MIN },
+  // Public (anonymous) share creation — off by default. See SECURITY.md §6
+  // "Public access": tracking anonymous creators is a regulated activity.
+  'public.enabled':      { type: 'bool', def: false },
+  // How anonymous creators are counted against the public quotas:
+  //   tracker          — a random ID the browser keeps (cookie, ETag cache,
+  //                      localStorage, IndexedDB), self-healing;
+  //   ip               — the network address (IPv6 by guard.v6Prefix), salted
+  //                      and hashed; nothing is stored in the browser;
+  //   both-permissive  — both are counted; refused only when BOTH are over;
+  //   both-restrictive — both are counted; refused when EITHER is over.
+  'public.tracking':     { type: 'enum', values: PUBLIC_TRACKING, def: 'tracker' },
+  'public.notice':       { type: 'bool', def: true },
+  'public.noticeText':   { type: 'text', max: 1000, def: DEFAULT_PUBLIC_NOTICE },
+  // New browser ids that may start creating shares, per network per window
+  // (spent on an id's first creation, never on page visits).
+  'public.newTrackersPerIp': { type: 'int', min: 1, max: 10000, def: 5 },
+  'public.newTrackersWindowSec': { type: 'int', min: MIN, max: 30 * DAY, def: DAY },
+  'public.trackerIdleSec': { type: 'int', min: DAY, max: 730 * DAY, def: 90 * DAY },
 };
 
 export const GUARD_SCOPES = ['login', 'setup', 'invalid'];
@@ -44,6 +65,17 @@ export function checkSetting(key, value) {
   if (s.type === 'bool') {
     if (typeof value !== 'boolean') throw new Error(`${key} must be true or false`);
     return value;
+  }
+  if (s.type === 'enum') {
+    if (!s.values.includes(value)) throw new Error(`${key} must be one of ${s.values.join(', ')}`);
+    return value;
+  }
+  if (s.type === 'text') {
+    if (typeof value !== 'string') throw new Error(`${key} must be text`);
+    // eslint-disable-next-line no-control-regex
+    const v = value.replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim();
+    if (v.length > s.max) throw new Error(`${key} is at most ${s.max} characters`);
+    return v;
   }
   if (!Number.isSafeInteger(value) || value < s.min || value > s.max) {
     throw new Error(`${key} must be an integer between ${s.min} and ${s.max}`);
