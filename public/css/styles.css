@@ -641,6 +641,51 @@ button.back { cursor: pointer; }
 .label-cell .hint-unencrypted { display: none; }
 .label-cell:focus-within .hint-unencrypted { display: flex; }
 
+/* ── PWA install banner (public/js/install-banner.js) ───────────────────────
+   A bottom sheet on every page except the installed app. Fixed, so it carries
+   its own safe-area insets; never wider than the viewport (320px included);
+   44px targets everywhere; the slide-in only runs when motion is allowed. */
+.pwa-banner { position: fixed; z-index: 45; left: 0; right: 0; margin: 0 auto;
+  bottom: max(.75rem, env(safe-area-inset-bottom, 0px));
+  width: calc(100% - max(.75rem, env(safe-area-inset-left, 0px)) - max(.75rem, env(safe-area-inset-right, 0px))); max-width: 34rem;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "ico body close" ". actions actions";
+  column-gap: .8rem; row-gap: .6rem; align-items: start;
+  padding: .85rem .5rem .85rem 1rem; background: var(--sheet); color: var(--ink);
+  border: 1px solid var(--rule-2); border-radius: 6px; box-shadow: var(--shadow-overlay); }
+/* The iOS variant has no action row (instructions + close only). */
+.pwa-banner[data-mode="ios"] { grid-template-areas: "ico body close"; }
+/* While it is open, the page gets enough trailing room to scroll its last
+   content above the banner. */
+html.pwa-banner-open body { padding-bottom: calc(10rem + env(safe-area-inset-bottom, 0px)); }
+.pwa-banner-ico { grid-area: ico; display: block; width: 40px; height: 40px; border-radius: 9px; margin-top: .1rem; }
+.pwa-banner-body { grid-area: body; min-width: 0; padding-top: .1rem; }
+.pwa-banner-title { font-weight: 500; font-size: .9375rem; line-height: 1.35; }
+.pwa-banner-text { margin-top: .15rem; font-size: .8125rem; line-height: 1.5; color: var(--ink-2); overflow-wrap: anywhere; }
+.pwa-banner-text strong { color: var(--ink); font-weight: 500; }
+.pwa-share-ico { display: inline-block; width: 1.05em; height: 1.05em; margin: 0 .1em 0 .25em; vertical-align: -.2em; color: var(--accent); }
+.pwa-banner-actions { grid-area: actions; display: flex; flex-wrap: wrap; gap: .5rem; padding-right: .5rem; }
+.pwa-banner-actions .btn { min-height: 44px; min-width: 44px; }
+.btn.pwa-install { background: var(--accent-fill); color: var(--accent-fg); border-color: var(--accent-fill); }
+.btn.pwa-install:hover { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
+.btn.pwa-install:active { background: var(--accent-fill-active); border-color: var(--accent-fill-active); }
+.pwa-close { grid-area: close; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin-top: -.45rem;
+  padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--ink-3); cursor: pointer; touch-action: manipulation;
+  transition: color .14s ease, background-color .14s ease; }
+.pwa-close:hover { color: var(--ink); background: var(--sheet-2); }
+.pwa-close:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--sheet), 0 0 0 4px var(--ring); }
+.pwa-close-ico { width: 18px; height: 18px; }
+@media (prefers-reduced-motion: no-preference) {
+  .pwa-banner { animation: pwaIn .32s var(--ease) both; }
+}
+@keyframes pwaIn { from { opacity: 0; transform: translateY(14px); } }
+/* Very small phones: drop the icon, give the text the full width. */
+@media (max-width: 360px) {
+  .pwa-banner { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "body close" "actions actions"; padding-left: .85rem; }
+  .pwa-banner-ico { display: none; }
+  .pwa-banner[data-mode="ios"] { grid-template-areas: "body close"; }
+  .pwa-banner-actions > .btn { flex: 1 1 auto; }
+}
+
 /* ── responsive & touch ───────────────────────────────────────────────────────
    Last in the file on purpose: these rules must win over the compact desktop
    metrics above (same or higher specificity, later in the cascade). */

@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "secbin",
+  "short_name": "secbin",
+  "description": "Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it.",
+  "lang": "en",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#0d1117",
+  "background_color": "#0d1117",
+  "prefer_related_applications": false,
+  "icons": [
+    { "src": "/img/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/img/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/img/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -33,6 +33,9 @@ describe('security headers', () => {
     expect(d['base-uri']).toEqual(["'none'"]);
     expect(d['require-trusted-types-for']).toEqual(["'script'"]);
     expect(d['trusted-types']).toEqual(['secbin']);
+    // PWA: the service worker and the manifest are first-party only.
+    expect(d['worker-src']).toEqual(["'self'"]);
+    expect(d['manifest-src']).toEqual(["'self'"]);
     expect(CSP).not.toMatch(/'unsafe-inline'|'unsafe-eval'|\*|https?:/);
   });
 

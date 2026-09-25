@@ -98,14 +98,15 @@ compromise. Defenses:
   ```
   default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self';
   img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self';
-  worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';
+  worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';
   frame-src 'none'; object-src 'none'; require-trusted-types-for 'script';
   trusted-types secbin; upgrade-insecure-requests
   ```
   - `'wasm-unsafe-eval'` allows **WebAssembly compilation only** (Argon2id; pdf.js image
     decoders). JavaScript `eval`/`new Function` remain blocked.
   - `blob:` for images/media is used only by the viewer for content it has sniffed itself.
-  - `worker-src 'self'` is for pdf.js's parser worker.
+  - `worker-src 'self'` is for pdf.js's parser worker and the service worker (`/sw.js`);
+    `manifest-src 'self'` is for the web app manifest. Both are first-party only.
   - **Trusted Types** are enforced. DOM XSS sinks (`innerHTML`, script and worker URLs, and
     similar) refuse plain strings, and exactly one policy, `secbin` (`public/js/tt.js`), may
     exist. It mints script URLs only for this origin's `/js/*.js` and `/sw.js`, and refuses
@@ -158,6 +159,40 @@ compromise. Defenses:
   attempts, and spends no view.
 - **Downloads** are always `application/octet-stream` / `application/zip` with sanitized
   names; ZIP member names come from validated paths (no absolute or `../` entries).
+
+### Service worker and install banner (PWA)
+
+secbin is installable. `public/sw.js` (scope `/`) is registered from `public/js/pwa.js`
+through the `secbin` Trusted Types policy (it mints the `/sw.js` URL and nothing else outside
+`/js/`), and is served with the same CSP / COEP / CORP headers as every other asset. It is
+deliberately **not a content cache**:
+
+- It only ever touches **same-origin `GET` requests without a query string**. Everything else —
+  other origins, `POST`/`PUT`/`DELETE`, any URL with `?…`, `Range` requests, encoded or dot
+  path segments — is not intercepted at all (no `respondWith()`), so it can neither be served
+  from nor written to the cache.
+- **`/api/*` and `/p/*` are never intercepted and never cached** — no ciphertext, grants,
+  account data or share pages ever reach Cache Storage. (Share keys live in the URL fragment,
+  which is never part of a request in the first place.) `/dashboard*` pages are not cached
+  either.
+- The only things it stores are static assets under `/css/`, `/js/`, `/fonts/`, `/img/`, the
+  manifest, the favicon, and the public landing page `/` as the offline shell — and only a
+  plain same-origin `200` that is not a redirect and not marked `no-store`/`private`.
+- Everything is **network-first**: while online the browser always runs the code the server
+  is serving now; a cached copy is used only when the network fails.
+- The cache name is versioned (`secbin-static-<n>`); on activation every older secbin cache is
+  deleted and open pages are claimed (`skipWaiting` + `clients.claim`). The worker is
+  registered with `updateViaCache: 'none'` and served `Cache-Control: no-cache`, and browsers
+  never route the update check for `/sw.js` through a service worker, so a new deployment
+  replaces the worker on the next navigation.
+- The request filter (`requestPolicy`) is unit-tested in `test-node/sw.test.js`.
+
+The install banner (`public/js/install-banner.js`) is built with DOM APIs only and never
+appears in the installed app (`display-mode: standalone`, or iOS `navigator.standalone`).
+Dismissing it sets one first-party cookie, `secbin_pwa_dismiss=1` (`Max-Age` one year,
+`Path=/`, `SameSite=Lax`, `Secure` on HTTPS). It is readable by page script by design (not
+`HttpOnly`), carries no identifier, and the server ignores it; it is sent with same-site
+requests like any cookie. Declining the browser's own install dialog records the same value.
 
 ### Deployment-compromise limitation (important)
 
