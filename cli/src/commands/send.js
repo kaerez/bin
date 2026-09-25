@@ -40,6 +40,7 @@ const OPTIONS = {
   'api-key-file': { type: 'string' },
   json: { type: 'boolean', default: false, short: 'j' },
   qr: { type: 'boolean', default: false, short: 'q' },
+  'recipient-can-delete': { type: 'boolean', default: false },
 };
 
 /** Apply `--mime <share-path>=<type>` overrides (validated with checkMime). */
@@ -110,13 +111,15 @@ export async function cmdSend(args, io) {
   const password = await newPassword({ envVar: values['password-env'], promptWanted: values.password, io });
   const { body, fragment } = await encryptPaste({
     text: manifestText, fmt: 'files', password, bar: views !== null, views: views ?? undefined, expire,
+    deletable: values['recipient-can-delete'],
   });
 
   // ── upload ────────────────────────────────────────────────────────────────
   const client = new Client(server, io.fetch, { apiKey });
   // files/maxFile are declared so the server can apply per-account limits;
   // names, types and individual sizes stay inside the encrypted manifest.
-  const initBody = { views, expire, padded: l.padded, files: files.length, maxFile: Math.max(0, ...files.map((f) => f.size)) };
+  const initBody = { views, expire, padded: l.padded, files: files.length, maxFile: Math.max(0, ...files.map((f) => f.size)),
+    ...(values['recipient-can-delete'] ? { deletable: true } : {}) };
   let init;
   try {
     init = await client.initFile(initBody);

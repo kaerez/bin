@@ -20,6 +20,7 @@ import { parseArgs } from 'node:util';
 import { deriveAccess, openPaste } from '../../vendor/crypto.js';
 import { checkPath, chunkCount, ManifestError, paddedLength, validateManifest } from '../../vendor/files.js';
 import { FormatError, validateHead, validatePaste } from '../../vendor/format.js';
+import { describeHost, parseSecret, parseShareUrl as parseLinkUrl, SECRET_FIELDS, ShareTypeError, totpCode } from '../../vendor/sharetypes.js';
 import { ApiError, Client } from '../client.js';
 import { UsageError } from '../errors.js';
 import { freshFolder, OverwriteError, preflight, prepareRoot, writeDir, writeFile } from '../extract.js';
@@ -36,7 +37,70 @@ const OPTIONS = {
   list: { type: 'boolean', default: false, short: 'l' },
   path: { type: 'string', short: 'p' },
   force: { type: 'boolean', default: false },
+  field: { type: 'string' },
 };
+
+// --field for a credential share: one of its fields, or "code" (the current one-time code).
+const FIELD_NAMES = [...Object.keys(SECRET_FIELDS), 'code'];
+
+// Escape C0/C1 controls (and DEL) so decrypted, sender-controlled text shown
+// as a status line cannot inject terminal escape sequences.
+// eslint-disable-next-line no-control-regex
+const safeLine = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+/**
+ * The text `get` prints for a decrypted note. Typed shares are validated
+ * fail-closed like the web viewer: a link is printed, never opened, with its
+ * real host on stderr; a credential is JSON unless one --field is asked for.
+ * This runs after the view is spent, so it never throws: anything unexpected
+ * is reported on stderr and the content is still printed.
+ */
+async function renderNote(fmt, text, field, io) {
+  const tty = io.stdoutIsTTY === true;
+  if (fmt === 'url') {
+    let u;
+    try { u = parseLinkUrl(text); } catch (e) {
+      if (!(e instanceof ShareTypeError)) throw e;
+      io.stderr(`warning: this link share does not hold a valid link (${e.message}); printing it as text\n`);
+      return tty ? `${safeLine(text)}\n` : text;
+    }
+    const h = describeHost(u);
+    io.stderr(`link to ${h.ascii}${h.idn ? ` (displayed as ${safeLine(h.unicode)} — international characters can imitate another site)` : ''}${h.insecure ? ' — not HTTPS' : ''}\n`);
+    return `${u.href}\n`;
+  }
+  if (fmt !== 'secret') return text;
+  let sec;
+  try { sec = parseSecret(text); } catch (e) {
+    if (!(e instanceof ShareTypeError)) throw e;
+    io.stderr(`warning: ${e.message} Printing it as text.\n`);
+    return tty ? `${safeLine(text)}\n` : text;
+  }
+  // JSON.stringify escapes C0 controls; also escape DEL and C1 (e.g. CSI).
+  const json = `${JSON.stringify(sec, null, 2).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}\n`;
+  if (field === undefined) {
+    if (sec.totp !== undefined) io.stderr('contains a one-time-code seed: --field code prints the current code\n');
+    return json;
+  }
+  if (field === 'code') {
+    if (sec.totp !== undefined) {
+      try {
+        const { code, remaining } = await totpCode(sec.totp);
+        io.stderr(`valid for ${remaining}s\n`);
+        return `${code}\n`;
+      } catch (e) {
+        if (!(e instanceof ShareTypeError)) throw e;
+        io.stderr(`warning: ${e.message}\n`);
+      }
+    }
+    io.stderr('warning: no usable one-time-code seed; printing the whole credential instead\n');
+    return json;
+  }
+  if (sec[field] === undefined) {
+    io.stderr(`warning: this credential has no "${field}" field; printing the whole credential instead\n`);
+    return json;
+  }
+  return tty ? `${safeLine(sec[field])}\n` : `${sec[field]}\n`;
+}
 
 const GRANT_RE = /^[A-Za-z0-9_-]{43}$/;
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -113,6 +177,10 @@ export async function cmdGet(args, io) {
   if (kind === 'paste' && (values.list || values.path !== undefined || values.force)) {
     throw new UsageError('--list, --path and --force apply to file shares only');
   }
+  if (values.field !== undefined && !FIELD_NAMES.includes(values.field)) {
+    throw new UsageError(`invalid --field "${values.field.slice(0, 40)}" (one of: ${FIELD_NAMES.join(', ')})`);
+  }
+  if (kind === 'file' && values.field !== undefined) throw new UsageError('--field applies to credential shares only');
   if (values.list && (values.out !== undefined || values.force)) {
     throw new UsageError('--list prints the file list only; it takes no --out / --force');
   }
@@ -154,8 +222,16 @@ export async function cmdGet(args, io) {
     }
   };
 
-  if (kind === 'paste') return getNote({ io, values, openShare, access: () => access });
-  return getFiles({ io, values, client, id, sub, limited, openShare, access: () => access });
+  if (kind === 'paste' && values.field !== undefined && head.adata.fmt !== 'secret') {
+    throw new UsageError('--field applies to credential shares only');
+  }
+  const code = kind === 'paste'
+    ? await getNote({ io, values, openShare, access: () => access })
+    : await getFiles({ io, values, client, id, sub, limited, openShare, access: () => access });
+  if (head.meta.deletable === true) {
+    io.stderr('the sender lets you delete this share now: echo <url> | secbin delete --now -\n');
+  }
+  return code;
 }
 
 async function getNote({ io, values, openShare, access }) {
@@ -176,6 +252,7 @@ async function getNote({ io, values, openShare, access }) {
   try {
     const paste = validatePaste(await openShare());
     const out = await openPaste({ paste, access: access() });
+    out.text = await renderNote(paste.adata.fmt, out.text, values.field, io);
     if (outFile) {
       try {
         await outFile.writeFile(out.text);

@@ -153,7 +153,7 @@ export async function gunzip(bytes, maxOut = MAX_PLAINTEXT) {
  * URL-fragment secret F — which MUST stay client-side.
  */
 export async function encryptPaste({
-  text, password = '', fmt = 'plaintext', bar = false, expire = '24h', views, t = ARGON2.tDefault,
+  text, password = '', fmt = 'plaintext', bar = false, expire = '24h', views, t = ARGON2.tDefault, deletable = false,
 }) {
   const data = utf8(text);
   if (data.length > MAX_PLAINTEXT) throw new Error('paste too large');
@@ -197,7 +197,7 @@ export async function encryptPaste({
     wk: b64urlFromBytes(wk),
     adata,
     // `views` (view limit) is only meaningful for bar pastes; format.js rejects it otherwise.
-    meta: views === undefined ? { expire } : { expire, views },
+    meta: { expire, ...(views === undefined ? {} : { views }), ...(deletable ? { deletable: true } : {}) },
     acc: {
       lh: await proofHash(b64urlFromBytes(linkProof)),
       kh: await proofHash(b64urlFromBytes(keyProof)),

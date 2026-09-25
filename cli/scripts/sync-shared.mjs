@@ -2,7 +2,7 @@
 // sync-shared.mjs — vendor the frozen shared modules into cli/vendor/.
 //
 // npm cannot pack files outside the package root, so the CLI ships byte-identical
-// copies of the protocol modules public/js/{bytes,format,crypto,kdf,files,zip,mime}.js,
+// copies of the protocol modules public/js/{bytes,format,crypto,kdf,files,zip,mime,filepolicy,sharetypes}.js,
 // the pinned hash-wasm Argon2id build (public/js/vendor/argon2.js → vendor/vendor/,
 // so kdf.js's relative "./vendor/argon2.js" import resolves unchanged) with its
 // license, the repo LICENSE, and qrcode.js renamed to qrcode.cjs so Node's
@@ -23,7 +23,7 @@ const pub = path.join(repoRoot, 'public', 'js');
 
 /** [source relative to public/js, destination relative to cli/] — keep in sync with test/vendor-drift.test.js. */
 const SHARED = [
-  ...['bytes.js', 'format.js', 'crypto.js', 'kdf.js', 'files.js', 'zip.js', 'mime.js', 'filepolicy.js'].map((f) => [f, `vendor/${f}`]),
+  ...['bytes.js', 'format.js', 'crypto.js', 'kdf.js', 'files.js', 'zip.js', 'mime.js', 'filepolicy.js', 'sharetypes.js'].map((f) => [f, `vendor/${f}`]),
   ['vendor/argon2.js', 'vendor/vendor/argon2.js'],
   ['vendor/argon2.LICENSE', 'vendor/vendor/argon2.LICENSE'],
   ['qrcode.js', 'vendor/qrcode.cjs'],

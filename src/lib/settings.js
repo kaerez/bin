@@ -63,6 +63,10 @@ export function settingsWithDefaults(rows) {
 export const LIMITS = {
   text:                { type: 'bool', def: true },
   files:               { type: 'bool', def: true },
+  // Structured share types and recipient "delete now": off unless the admin allows them.
+  url:                 { type: 'bool', def: false },
+  secret:              { type: 'bool', def: false },
+  openerDelete:        { type: 'bool', def: false },
   maxViews:            { type: 'int', min: 1, max: MAX_VIEWS, nullable: true, def: null },
   allowUnlimitedViews: { type: 'bool', def: true },
   maxExpireSec:        { type: 'int', min: 60, max: MAX_TTL, nullable: true, def: null },
@@ -80,7 +84,7 @@ export const LIMITS = {
 };
 
 // Keys the API channel may restrict further (never widen).
-export const API_LIMIT_KEYS = ['text', 'files', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec',
+export const API_LIMIT_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec',
   'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 
 export function checkLimit(key, value, channel = 'all') {

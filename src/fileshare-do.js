@@ -83,12 +83,12 @@ export class FileShare extends DurableObject {
   }
 
   // ── upload ────────────────────────────────────────────────────────────────
-  async init({ id, uid, uth, dth, padded, views, expire, ttl, pendingSec }) {
+  async init({ id, uid, uth, dth, padded, views, expire, ttl, pendingSec, deletable = false }) {
     return this.ctx.blockConcurrencyWhile(async () => {
       if (await this.#rec()) return false;
       const chunks = Math.ceil(padded / CHUNK);
       const deadline = nowSec() + pendingSec;
-      await this.#put({ id, state: 'pending', uid, uth, dth, padded, chunks, sizes: [], views, left: views, expire, ttl, deadline, grants: [] });
+      await this.#put({ id, state: 'pending', uid, uth, dth, padded, chunks, sizes: [], views, left: views, expire, ttl, deadline, grants: [], deletable: !!deletable });
       await this.ctx.storage.setAlarm(deadline * 1000);
       return true;
     });
@@ -123,7 +123,8 @@ export class FileShare extends DurableObject {
       if (rec.uid !== uid || !safeEq(uth, rec.uth)) return { status: 'forbidden' };
       // The encrypted manifest must declare what the upload was authorized for.
       if (paste.adata.bar !== (rec.views !== null) || paste.meta.expire !== rec.expire
-          || (paste.meta.views ?? null) !== (rec.views === null ? null : rec.views)) return { status: 'mismatch' };
+          || (paste.meta.views ?? null) !== (rec.views === null ? null : rec.views)
+          || (paste.meta.deletable === true) !== !!rec.deletable) return { status: 'mismatch' };
       for (let i = 0; i < rec.chunks; i++) {
         if (rec.sizes[i] !== expectedChunkSize(rec.padded, i)) return { status: 'incomplete', missing: i };
       }
@@ -131,6 +132,7 @@ export class FileShare extends DurableObject {
       const expires = created + rec.ttl;
       const meta = { expire: rec.expire, created, expires };
       if (rec.views !== null) meta.views = rec.views;
+      if (rec.deletable) meta.deletable = true;
       const next = {
         id: rec.id, state: 'active', dth: rec.dth, padded: rec.padded, chunks: rec.chunks, views: rec.views, left: rec.left,
         expire: rec.expire, ttl: rec.ttl, expires, acc, grants: [],
@@ -196,6 +198,19 @@ export class FileShare extends DurableObject {
         paste: { v: p.v, ct: p.ct, wk: p.wk, adata: p.adata, meta: this.#metaOut(rec) },
         grantExpires: gexp, chunks: rec.chunks, padded: rec.padded,
       };
+    });
+  }
+
+  /** "Delete now" by someone holding both proofs, when the sender allowed it. */
+  async expireByOpener(lh, kh) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const rec = await this.#live();
+      if (!rec || rec.state === 'pending') return { status: 'gone' };
+      if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
+      if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
+      if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };
+      await this.#purge(rec);
+      return { status: 'ok' };
     });
   }
 

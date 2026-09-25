@@ -169,13 +169,16 @@ async function createNote(request, env, a) {
   const views = bar ? (clean.meta.views ?? 1) : null;
   const ttl = ttlSeconds(clean.meta.expire);
   const dir = directory(env);
-  const auth = await dir.authorizeCreate(a.user.id, a.channel, { kind: 'text', views, expireSec: ttl });
+  const fmt = clean.adata.fmt;
+  const deletable = clean.meta.deletable === true;
+  const auth = await dir.authorizeCreate(a.user.id, a.channel, { kind: 'text', fmt, deletable, views, expireSec: ttl });
   if (!auth.ok) return fromDir(auth);
 
   const created = now();
   const expires = created + ttl;
   const meta = { expire: clean.meta.expire, created, expires };
   if (bar) meta.views = views;
+  if (deletable) meta.deletable = true;
   const paste = { v: clean.v, ct: clean.ct, wk: clean.wk, adata: clean.adata, meta };
   const deleteToken = genDeleteToken();
   const record = { paste, dth: await hashToken(deleteToken), acc: clean.acc };
@@ -200,7 +203,8 @@ async function createNote(request, env, a) {
     await dir.refund(a.user.id, auth.refund);
     throw e;
   }
-  await dir.recordShare({ id, uid: a.user.id, kind: 'text', label: body.label, created, expires, views }, actorId(a));
+  const kind = fmt === 'url' || fmt === 'secret' ? fmt : 'text';
+  await dir.recordShare({ id, uid: a.user.id, kind, label: body.label, created, expires, views }, actorId(a));
   return json({ id, deletetoken: deleteToken, expires }, 201);
 }
 
@@ -219,7 +223,7 @@ async function initFile(request, env, a) {
   const dir = directory(env);
   const auth = await dir.authorizeCreate(a.user.id, a.channel, {
     kind: 'files', views, expireSec: ttl, bytes: padded,
-    files: body.files, maxFile: body.maxFile, types: body.types, depth: body.depth,
+    files: body.files, maxFile: body.maxFile, types: body.types, depth: body.depth, deletable: body.deletable === true,
   });
   if (!auth.ok) return fromDir(auth);
   const uploadToken = genToken();
@@ -230,7 +234,7 @@ async function initFile(request, env, a) {
       id = genId('f');
       const ok = await fileStub(env, id).init({
         id, uid: a.user.id, uth: await hashToken(uploadToken), dth: await hashToken(deleteToken),
-        padded, views, expire, ttl, pendingSec: settings['files.pendingSec'],
+        padded, views, expire, ttl, pendingSec: settings['files.pendingSec'], deletable: body.deletable === true,
       });
       if (ok) break;
       if (attempt >= 4) throw new Error('id allocation failed');
@@ -275,7 +279,7 @@ async function finalizeFile(request, env, a, id) {
   const stub = fileStub(env, id);
   const r = await stub.finalize(a.user.id, await hashToken(token), { paste: clean, acc: clean.acc });
   if (r.status === 'forbidden') return err(403, 'forbidden', 'Not your upload.');
-  if (r.status === 'mismatch') return err(400, 'invalid_format', 'The manifest’s view limit and expiry must match the upload.');
+  if (r.status === 'mismatch') return err(400, 'invalid_format', 'The manifest’s view limit, expiry and recipient-delete setting must match the upload.');
   if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
   if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
   await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null }, actorId(a));

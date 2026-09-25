@@ -14,7 +14,7 @@ import { parseId } from '../lib/ids.js';
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const now = () => Math.floor(Date.now() / 1000);
-const SHARE_KINDS = ['text', 'files'];
+const SHARE_KINDS = ['text', 'files', 'url', 'secret'];
 const SHARE_STATUSES = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'];
 
 /** Parse the admin share-list filters from the query string (all optional). */

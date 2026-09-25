@@ -29,7 +29,8 @@ export function expireSeconds(expire) {
 // ordinary pastes (bar: false), which carry no `views`. `left` is server-set on
 // reads: views remaining (null on a view-limited share raised to unlimited).
 export const MAX_VIEWS = 100000;
-export const FORMATS = ['plaintext', 'code', 'markdown', 'files'];
+// 'url' and 'secret' carry structured payloads (public/js/sharetypes.js).
+export const FORMATS = ['plaintext', 'code', 'markdown', 'files', 'url', 'secret'];
 export const COMP = ['gzip', 'none'];
 export const KDFS = ['hkdf', 'argon2id-hkdf'];
 
@@ -41,7 +42,7 @@ export const MAX_CT_B64 = 3000000; // ~2.25 MiB of ciphertext
 export const MAX_WK_B64 = 128;     // wrapped CEK is 48 bytes → 64 b64url chars
 
 const ADATA_KEYS = ['alg', 'kdf', 'iter', 'comp', 'fmt', 'bar', 'ivc', 'ivw', 'skdf'];
-const META_KEYS = ['expire', 'created', 'expires', 'views', 'left'];
+const META_KEYS = ['expire', 'created', 'expires', 'views', 'left', 'deletable'];
 const DANGEROUS_KEYS = ['__proto__', 'constructor', 'prototype'];
 
 /** Thrown for any format violation. Callers map this to HTTP 400 / a UI error. */
@@ -197,6 +198,12 @@ function validateMeta(m) {
       throw new FormatError('invalid left');
     }
     out.left = m.left;
+  }
+  // Sender opted in to "anyone who opens this may delete it now" (non-secret;
+  // the server enforces it). Only ever present as `true`.
+  if (has('deletable')) {
+    if (m.deletable !== true) throw new FormatError('invalid deletable');
+    out.deletable = true;
   }
   return out;
 }
