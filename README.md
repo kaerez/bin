@@ -150,6 +150,11 @@ working.
   window, upload deadline, viewer policy, brute-force rules, lockout rules.
 - **Security** — current blocks and tracked IPs per scope, manual allow/block rules for IPv4/IPv6
   addresses and CIDR ranges (allow beats block).
+- **Import / export** — the owner exports the system configuration and/or some or all users
+  (credentials and/or configuration; never the owner, sessions, API keys or shares) to a file
+  **encrypted in the browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a
+  file after decrypting it locally: a preview (dry run) first, per-user skip/create/overwrite
+  or rename, then an all-or-nothing import. Both need the owner's password again.
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup
   only). Default off.

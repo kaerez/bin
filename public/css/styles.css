@@ -741,3 +741,6 @@ button.back { cursor: pointer; }
 .secret-row .btn-row { flex-wrap: nowrap; }
 .totp-code { font-family: var(--mono); font-size: 1.4rem; letter-spacing: .2em; }
 @media (max-width: 640px) { .secret-row { grid-template-columns: minmax(0, 1fr); } }
+
+/* ── admin import / export ─────────────────────────────────────────────── */
+.plan-list { margin: 0; padding-left: 1.1rem; display: grid; gap: .2rem; font-size: .8rem; white-space: pre-wrap; word-break: break-word; }

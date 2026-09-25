@@ -11,6 +11,7 @@ import { toast } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { ready } from './nav.js';
 import { renderShares } from './admin-shares.js';
+import { renderPortable } from './admin-portable.js';
 
 const $ = (s) => document.querySelector(s);
 const panel = (name) => document.querySelector(`.admin-panel[data-panel="${name}"]`);
@@ -52,13 +53,14 @@ const VIEWER_PRESETS = {
 const RENDERERS = ['text', 'markdown', 'code', 'image', 'pdf', 'media'];
 
 let overview = null;
+let profile = null;
 const msg = (text, isError = false) => { showMsg($('#admin-msg'), text, isError); if (text && !isError) setTimeout(() => { $('#admin-msg').hidden = true; }, 3000); };
 const guard = async (fn, okText) => {
   try { const r = await fn(); if (okText) msg(okText); return r; } catch (e) { msg(friendlyError(e), true); return null; }
 };
 
 (async () => {
-  await ready;
+  profile = await ready;
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.onclick = () => selectTab(t.dataset.tab);
   await refreshOverview();
   selectTab('users');
@@ -79,7 +81,7 @@ async function refreshOverview() {
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
-  ({ users: renderUsers, shares: () => renderShares(panel('shares')), defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, audit: renderAudit })[name]();
+  ({ users: renderUsers, shares: () => renderShares(panel('shares')), defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────

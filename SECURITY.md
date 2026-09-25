@@ -246,6 +246,29 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - Kill switches: `DISABLE_BFP=true` (everything, including IP rules) and
     `DISABLE_BFP_SETUP=true` (setup only).
 
+### Admin export / import
+
+- An export can hold password **verifiers** (enough to test guesses offline) and the whole
+  configuration, so it exists only encrypted: the server builds the plaintext document for the
+  signed-in owner, and the browser encrypts it before saving (`public/js/exportcrypt.js`:
+  passphrase ≥ 12 characters → Argon2id m = 64 MiB, t = 3 → AES-256-GCM, with the fixed KDF
+  parameters, salt and IV bound into the AAD). A crafted file cannot ask for more KDF work.
+- Export and import both require the **owner's password again** (step-up): a stolen session
+  cookie alone cannot exfiltrate verifiers or replace credentials. Wrong passwords count like
+  wrong current passwords (the account's sessions end at the lockout threshold) and against the
+  IP's login guard.
+- Never exported: the owner account, sessions, API keys, shares, usage counters, the activity
+  log. An import can never create or replace an owner; accounts it creates are plain users.
+- Imports are re-validated field by field on the server with the same checkers as the admin API
+  (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
+  previewed as a dry run, and are applied in one storage transaction or not at all. Replacing
+  an account's credentials ends its sessions. IP rules are only ever added, never removed.
+- Exports and imports are recorded in the audit log (`export.created`, `import.system`,
+  `user.imported`).
+- The passphrase is the only protection of the file: keep file and passphrase apart. Whether
+  exported verifiers may leave the environment at all is a policy decision for your Security /
+  Compliance function.
+
 ### API surface hardening
 
 - No CORS headers; JSON bodies are read under a streaming byte cap (4 MiB; 8 MiB + 16 B for
