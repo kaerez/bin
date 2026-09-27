@@ -4,8 +4,8 @@
 // token works once: take() hands out the current one, and the next take()
 // starts a fresh challenge. The server side is src/lib/turnstile.js.
 //
-// The widget stays invisible unless Cloudflare needs the visitor to interact
-// ("interaction-only"); its script is the only third-party code secbin loads,
+// The widget is always shown ("always"), so the visitor sees the check pass
+// before the protected button enables; its script is the only third-party code secbin loads,
 // and only on those pages (see the CSP in src/lib/http.js).
 
 import { scriptURL, TURNSTILE_SCRIPT } from './tt.js';
@@ -43,6 +43,7 @@ export async function turnstileSiteKey() {
 
 const OFF = Object.freeze({ active: false, take: async () => null });
 const WAITING = 'Waiting for the human check…';
+let noteSeq = 0;
 const BUTTON_DISABLED = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'disabled');
 
 /**
@@ -53,14 +54,7 @@ const BUTTON_DISABLED = Object.getOwnPropertyDescriptor(HTMLButtonElement.protot
  */
 function gate(btn, waiting) {
   let want = BUTTON_DISABLED.get.call(btn);
-  const title = btn.getAttribute('title');
-  const apply = () => {
-    const wait = waiting();
-    BUTTON_DISABLED.set.call(btn, want || wait);
-    if (wait) btn.setAttribute('title', WAITING);
-    else if (title === null) btn.removeAttribute('title');
-    else btn.setAttribute('title', title);
-  };
+  const apply = () => BUTTON_DISABLED.set.call(btn, want || waiting());
   Object.defineProperty(btn, 'disabled', {
     configurable: true,
     get: () => BUTTON_DISABLED.get.call(btn),
@@ -84,8 +78,26 @@ export async function humanCheck(container, action, { gate: buttons = [] } = {})
   let state = 'pending'; // pending (site key unknown) | on | off
   let broken = null;
   const waiting = () => state === 'pending' || (state === 'on' && !token);
-  const gates = buttons.filter(Boolean).map((b) => gate(b, waiting));
-  const update = () => { for (const g of gates) g(); };
+  const gated = buttons.filter(Boolean);
+  const gates = gated.map((b) => gate(b, waiting));
+  // The reason, shown under the first protected button while the check is
+  // pending (only once the server is known to have one), and referenced by
+  // every protected button for screen readers.
+  let note = null;
+  if (gated.length) {
+    note = document.createElement('p');
+    note.className = 'mono muted human-wait';
+    note.id = `human-wait-${++noteSeq}`;
+    note.setAttribute('role', 'status');
+    note.textContent = WAITING;
+    note.hidden = true;
+    gated[0].insertAdjacentElement('afterend', note);
+    for (const b of gated) b.setAttribute('aria-describedby', [b.getAttribute('aria-describedby'), note.id].filter(Boolean).join(' '));
+  }
+  const update = () => {
+    for (const g of gates) g();
+    if (note) note.hidden = !(state === 'on' && !token && !broken);
+  };
   const sitekey = container ? await turnstileSiteKey() : null;
   if (!sitekey) { state = 'off'; update(); return OFF; }
   state = 'on';
@@ -102,7 +114,7 @@ export async function humanCheck(container, action, { gate: buttons = [] } = {})
       action,
       theme: 'auto',
       size: 'flexible',
-      appearance: 'interaction-only',
+      appearance: 'always',
       'refresh-expired': 'auto',
       language: 'auto',
       callback: (t) => { token = t; update(); settle((x) => x.resolve(t)); },
@@ -111,6 +123,7 @@ export async function humanCheck(container, action, { gate: buttons = [] } = {})
     });
   } catch (e) {
     broken = e instanceof Error ? e : new Error(LOAD_FAILED);
+    update();
     // The buttons stay disabled: say why, where the widget would be.
     const note = document.createElement('p');
     note.className = 'msg error';

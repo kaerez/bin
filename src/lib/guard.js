@@ -10,6 +10,7 @@ import { GUARD_SHARDS } from '../guard-do.js';
 const CACHE_MS = 30 * 1000;
 let rulesCache = { at: 0, rules: [] };
 let settingsCache = { at: 0, settings: null };
+let publicConfigCache = { at: 0, config: null };
 
 export const directory = (env) => {
   const ns = binding(env, 'DIRECTORY');
@@ -20,6 +21,19 @@ export const directory = (env) => {
 export function invalidateGuardCaches() {
   rulesCache = { at: 0, rules: [] };
   settingsCache = { at: 0, settings: null };
+  publicConfigCache = { at: 0, config: null };
+}
+
+/**
+ * The public /api/config body (anonymous, identical for everyone), cached per
+ * isolate like the settings so a flood of anonymous requests does not reach
+ * the single Directory object each time.
+ */
+export async function cachedPublicConfig(env) {
+  if (!publicConfigCache.config || Date.now() - publicConfigCache.at > CACHE_MS) {
+    publicConfigCache = { at: Date.now(), config: await directory(env).publicConfig() };
+  }
+  return publicConfigCache.config;
 }
 
 export async function cachedSettings(env) {

@@ -114,6 +114,28 @@ describe('send → get round trip', () => {
     expect(server.chunkGets()).toHaveLength(0); // listing fetches no content
   });
 
+  it('--list escapes C1 control characters in sender-chosen names (no terminal escapes)', async () => {
+    if (!posix) return;
+    const server = makeServer();
+    const root = join(tmp, 'c1');
+    await mkdir(root);
+    // U+009B is the single-character CSI; U+009D starts an OSC sequence.
+    await writeFile(join(root, 'evil\u009b2Jname\u009d0;title\u009c.txt'), 'x');
+    const s = await send(server, [root, '--views', 'unlimited']);
+    expect(s.code).toBe(0);
+    const g = await get(server, [s.url, '--list']);
+    expect(g.code).toBe(0);
+    expect(g.out).not.toMatch(/[\u0080-\u009f]/);
+    expect(g.out).toContain('evil\\u009b2Jname\\u009d0;title\\u009c.txt');
+    // Error lines that quote those names (here: refusing to overwrite) are escaped too.
+    const dest = join(tmp, 'c1-out');
+    expect((await get(server, [s.url, '--out', dest])).code).toBe(0);
+    const again = await get(server, [s.url, '--out', dest]);
+    expect(again.code).toBe(2);
+    expect(again.err).toMatch(/refusing to overwrite/);
+    expect(again.err).not.toMatch(/[\u0080-\u009f]/);
+  });
+
   it('--path downloads one folder (keeping its name) or one file, fetching only its chunks', async () => {
     const server = makeServer();
     const src = await makeTree();
