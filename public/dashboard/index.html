@@ -69,7 +69,7 @@
                     type="button"
                     id="themeToggle"
                     class="theme-toggle"
-                    aria-label="Toggle light/dark theme"
+                    aria-label="Dark theme"
                     aria-pressed="true"
                 >
                     <svg
@@ -153,8 +153,8 @@
                         </div>
                     </div>
                     <div id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden>
-                        <div class="dropzone" id="dropzone" tabindex="0" aria-describedby="drop-hint">
-                            <p class="dropzone-title">Drop files or folders here</p>
+                        <div class="dropzone" id="dropzone" role="group" aria-labelledby="drop-title" aria-describedby="drop-hint">
+                            <p class="dropzone-title" id="drop-title">Drop files or folders here</p>
                             <p class="mono dropzone-hint" id="drop-hint">Everything — names, folders, types — is encrypted in your browser.</p>
                             <div class="btn-row center">
                                 <button type="button" class="btn" id="add-files">Add files</button>
@@ -164,7 +164,7 @@
                             <input type="file" id="folder-input" multiple webkitdirectory hidden />
                         </div>
                         <div class="file-list" id="file-list"></div>
-                        <p class="mono file-total" id="file-total" aria-live="polite"></p>
+                        <p class="mono file-total" id="file-total" role="status"></p>
                         <p class="mono file-policy" id="file-policy" role="note" hidden></p>
                         <label class="viewer-opt" id="viewer-opt" hidden>
                             <input type="checkbox" id="allow-view" /> Allow recipients to view files in the browser
@@ -289,7 +289,7 @@
                     <label class="field-label" for="share-label">Label (optional, for your own reference)</label>
                     <input class="input" id="share-label" maxlength="100" placeholder="e.g. Contract for ACME" />
                 </div>
-                <p class="msg" id="upload-progress" role="status" hidden></p>
+                <p class="msg" id="upload-progress" role="status"></p>
 
 
                 <p id="create-msg" class="msg error" role="alert" hidden></p>
@@ -523,25 +523,25 @@
                 </div>
             </section>
 
-                        <footer class="foot reveal d4">
-                <nav class="foot-links" id="foot-links" aria-label="Project">
-                    <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
-                    <span class="foot-sep" aria-hidden="true">·</span>
-                    <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
-                    <span class="foot-sep" aria-hidden="true">·</span>
-                    <a href="/accessibility/">Accessibility</a>
-                </nav>
-                <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
-                    <span class="feat" role="listitem">Private</span>
-                    <span class="feat" role="listitem">End-to-end encrypted</span>
-                    <span class="feat" role="listitem">Notes &amp; files</span>
-                </div>
-                <p class="foot-crypto mono" aria-label="Cryptography">
-                    AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
-                    <span class="foot-frag">#fragment</span>
-                </p>
-            </footer>
         </main>
+        <footer class="foot reveal d4">
+            <nav class="foot-links" id="foot-links" aria-label="Project">
+                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="/accessibility/">Accessibility</a>
+            </nav>
+            <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
+                <span class="feat" role="listitem">Private</span>
+                <span class="feat" role="listitem">End-to-end encrypted</span>
+                <span class="feat" role="listitem">Notes &amp; files</span>
+            </div>
+            <p class="foot-crypto mono">
+                AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                <span class="foot-frag">#fragment</span>
+            </p>
+        </footer>
 
         <div id="toast" role="status" aria-live="polite"></div>
     </body>

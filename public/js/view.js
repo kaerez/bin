@@ -14,7 +14,7 @@ import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill } from './ui.js';
-import { h, clear, showMsg, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
+import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
 import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
 import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
 import { validateRefsManifest } from './refsmanifest.js';
@@ -212,6 +212,7 @@ function passwordScreen(head, limited, open) {
     if (inFlight) return;
     inFlight = true;
     msg.hidden = true;
+    markInvalid(input, msg, false);
     btn.disabled = true;
     const label = btn.textContent;
     btn.textContent = 'Unlocking…';
@@ -222,8 +223,8 @@ function passwordScreen(head, limited, open) {
       inFlight = false;
       btn.disabled = false;
       btn.textContent = label;
-      if (e instanceof PasswordRequired) { showMsg(msg, 'Please enter the password.'); input.focus(); return; }
-      if (e instanceof ApiError && e.code === 'bad_password') { showMsg(msg, 'Wrong password — try again.'); input.select(); return; }
+      if (e instanceof PasswordRequired) { showMsg(msg, 'Please enter the password.'); markInvalid(input, msg); input.focus(); return; }
+      if (e instanceof ApiError && e.code === 'bad_password') { showMsg(msg, 'Wrong password — try again.'); markInvalid(input, msg); input.select(); return; }
       openError(e);
     }
   };
@@ -250,6 +251,7 @@ function lifetimePills(pills, meta, bar) {
 
 function renderNote(paste, result) {
   showView('paste');
+  $('#paste-title').textContent = ({ url: 'Shared link', secret: 'Shared credential' })[result.fmt] || 'Shared note';
   stopTotp();
   $('#paste-msg').hidden = true;
   if (result.fmt === 'url' || result.fmt === 'secret') {
@@ -406,9 +408,11 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   timer = setInterval(tick, 1000);
 
   const filesBar = progressBar();
-  clear($('#files-progress')).appendChild(filesBar.el);
   const previewBar = progressBar();
   clear($('#preview-progress')).appendChild(previewBar.el);
+  // The preview card is hidden until a View press: keep its live status line
+  // outside it, so the region exists before its first announcement.
+  clear($('#files-progress')).append(filesBar.el, previewBar.live);
   const errMsg = $('#files-msg');
   let busy = false;
   /** Run a download or preview with a progress bar (bytes fetched and decrypted, in %). */
@@ -434,14 +438,23 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   const preview = $('#files-preview');
   const previewBody = $('#preview-body');
   let previewCleanup = null;
-  const closePreview = () => { if (previewCleanup) previewCleanup(); previewCleanup = null; previewBar.hide(); preview.hidden = true; };
+  let previewOpener = null;
+  const closePreview = () => {
+    const hadFocus = preview.contains(document.activeElement);
+    if (previewCleanup) previewCleanup();
+    previewCleanup = null;
+    previewBar.hide();
+    preview.hidden = true;
+    // Closing from inside the card: back to the View button that opened it.
+    if (hadFocus && previewOpener && previewOpener.isConnected) previewOpener.focus();
+  };
   $('#preview-close').onclick = closePreview;
 
   const fileButtons = (entry) => {
     const out = [h('button.btn', { type: 'button', text: 'Download', on: { click: () => run(`Downloading ${basename(entry.path)}`, entry.size, (p) => saveFile(reader, entry, p)) } })];
     const renderer = allowedRenderer(entry, manifest.view, viewerCfg);
     if (renderer) {
-      out.unshift(h('button.btn', {
+      const viewBtn = h('button.btn', {
         type: 'button', text: 'View',
         on: {
           click: () => {
@@ -450,6 +463,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
             // The preview opens at once with its own bar: bytes (fetch +
             // decrypt) as a percentage, then a busy bar while it renders.
             closePreview();
+            previewOpener = viewBtn;
             $('#preview-title').textContent = entry.path;
             clear(previewBody);
             preview.hidden = false;
@@ -467,7 +481,8 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
             }, previewBar);
           },
         },
-      }));
+      });
+      out.unshift(viewBtn);
     }
     return out;
   };

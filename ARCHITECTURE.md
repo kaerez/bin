@@ -9,7 +9,7 @@ administration, backed by KV, R2 and five Durable Object classes. One deploy, on
 
 ```
                   ┌────────────────────────────── Cloudflare Worker ──────────────────────────────┐
- GET /, /p/<id>   │ run_worker_first = ["/api/*", "/dashboard", "/dashboard/*"]                   │
+ GET /, /p/<id>   │ run_worker_first = /, /index.html, /api/*, /dashboard, /dashboard/*           │
  GET /js /css …   │   ├─ anything else ──────────▶ Static Assets (public/), SPA fallback           │
                   │   │                                                                            │
  /dashboard*      │   ├─ /dashboard* ─▶ session check (Directory) ─▶ assets + security headers    │
@@ -25,6 +25,35 @@ administration, backed by KV, R2 and five Durable Object classes. One deploy, on
 - `public/_headers` applies the strict CSP to static assets; `src/lib/http.js` applies the same
   headers (plus `no-store`) to everything the Worker serves, including dashboard pages.
 - The Worker makes no outbound requests; pages load nothing from other origins.
+
+## Placement and caching
+
+- **Smart Placement** (`[placement] mode = "smart"`): Cloudflare runs the fetch handler where
+  the request completes fastest, which for secbin is usually near the `Directory` Durable
+  Object that almost every API call reaches. Static assets served without the Worker are
+  still answered from the location nearest the visitor; `/`, `/index.html` and `/dashboard*`
+  (read through the `ASSETS` binding) come from wherever the Worker runs. Durable Objects
+  place themselves.
+- **Workers Caching** (`[cache] enabled = true`): Cloudflare consults its cache before invoking
+  the fetch handler. secbin stores **nothing** there. The fetch handler in `src/index.js` passes
+  every response, errors and exceptions included, through `withCachePolicy`
+  (`src/lib/http.js`), which sets `Cloudflare-CDN-Cache-Control: no-store` (read by
+  Cloudflare's cache first, stripped before the browser) and `Cache-Control: no-store` when a
+  response has no Cache-Control of its own.
+
+| Response | Cache-Control (browser) | Edge cache |
+|---|---|---|
+| `/api/*` JSON (success and error), redirects, `/dashboard*` pages, chunk downloads, 404 / 405, 5xx | `no-store` | never |
+| `/` and `/index.html` served to an anonymous visitor | the asset server's (`public, max-age=0, must-revalidate`; the service worker keeps it as the offline shell) | never |
+| `GET /api/public/t` (tracker) | `private, no-cache, max-age=31536000` (the browser keeps the ETag copy) | never |
+| Static assets not routed through the Worker (`/js`, `/css`, `/fonts`, `/p/*`…) | `public/_headers` and the asset server | not a fetch-handler response |
+
+No Worker response is cached at the edge because none is the same for everyone at every moment:
+the home page depends on the session cookie (a signed-in visitor is redirected) and on the
+owner's Turnstile and anonymous-sharing settings (its CSP), and `/api/config` depends on the
+manual IP block rules and must follow the owner's changes at once (the viewer policy, for one).
+It is already cached per isolate for 30 seconds, and the isolate cache is dropped on every
+admin change.
 
 ## Storage routing
 

@@ -100,11 +100,60 @@ describe('gated buttons', () => {
     expect(note.hidden).toBe(false);
   });
 
+  it('can be any form control, and can join after the check is mounted', async () => {
+    config = { turnstile: '0x4AAAAAAAsitekey' };
+    const w = fakeTurnstile();
+    const b = button();
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    document.body.append(radio);
+    const c = await humanCheck(document.createElement('div'), 'account', { gate: [b, radio] });
+    expect(radio.disabled).toBe(true);
+    // A row's button made after the check was mounted.
+    const later = button();
+    c.gate(later);
+    expect(later.disabled).toBe(true);
+    expect(later.getAttribute('aria-describedby')).toBe(b.nextElementSibling.id);
+    w.solve('tok-1');
+    expect([b.disabled, radio.disabled, later.disabled]).toEqual([false, false, false]);
+    // The page's own wish still counts (e.g. a radio that needs a passkey first).
+    radio.disabled = true;
+    expect(radio.disabled).toBe(true);
+    radio.disabled = false;
+    // One widget, several buttons: each use spends the token and disables them all.
+    expect(await c.take()).toBe('tok-1');
+    expect([b.disabled, radio.disabled, later.disabled]).toEqual([true, true, true]);
+    const next = c.take();
+    w.solve('tok-2');
+    expect(await next).toBe('tok-2');
+    expect(w.resets).toBe(2);
+    expect(() => c.gate(document.createElement('div'))).toThrow(/form controls/);
+  });
+
+  it('can join at once, before the check is mounted', async () => {
+    config = { turnstile: '0x4AAAAAAAsitekey' };
+    const w = fakeTurnstile();
+    const b = button();
+    const pending = humanCheck(document.createElement('div'), 'account', { gate: [b] });
+    // A row's button made while the site key is still being fetched.
+    const row = button();
+    pending.gate(row);
+    expect([b.disabled, row.disabled]).toEqual([true, true]);
+    expect(row.getAttribute('aria-describedby')).toBe(b.nextElementSibling.id);
+    await pending;
+    expect(row.disabled).toBe(true);
+    w.solve('tok-1');
+    expect([b.disabled, row.disabled]).toEqual([false, false]);
+  });
+
   it('are left alone when the server has no human check', async () => {
     config = { turnstile: null };
     const b = button();
-    await humanCheck(document.createElement('div'), 'login', { gate: [b, null] });
+    const c = await humanCheck(document.createElement('div'), 'login', { gate: [b, null] });
     expect(b.disabled).toBe(false);
+    const later = button();
+    c.gate(later); // a no-op without a human check
+    expect(later.disabled).toBe(false);
     expect(b.nextElementSibling.hidden).toBe(true); // no human check: no note
     b.disabled = true;
     expect(b.disabled).toBe(true);

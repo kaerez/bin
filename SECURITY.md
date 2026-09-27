@@ -216,25 +216,49 @@ deployment's `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or by the owner in Admi
   because it needs the Directory.
 
 When on, it protects the
-forms automated attacks target: login, a signed-in password change (Account) and starting an
-anonymous share. Setup, admin password resets, recipients opening links, file chunks and
-API keys are never challenged.
+forms automated attacks target: login, starting an anonymous share and every change a
+signed-in browser session makes to its own account on the Account page:
+
+| Account page action | Route | Action name |
+|---|---|---|
+| Change password | `POST /api/private/me/password` | `password` |
+| Change username | `POST /api/private/me/username` | `account` |
+| Add a passkey | `POST /api/private/me/passkeys` (the step that stores it) | `account` |
+| Remove a passkey | `POST /api/private/me/passkeys/:id/remove` | `account` |
+| "Password and passkey" / "Password or passkey" | `POST /api/private/me/second-factor` | `account` |
+| New recovery codes | `POST /api/private/me/recovery-codes` | `account` |
+| Create an API key | `POST /api/private/me/keys` | `account` |
+| Change an API key (name, scopes) | `PATCH /api/private/me/keys/:id` | `account` |
+| Revoke an API key | `DELETE /api/private/me/keys/:id` | `account` |
+
+Asking for a challenge changes nothing and needs no token: the passkey registration options
+(`POST /api/private/me/passkeys/options`) and the passkey "confirm it's you" challenge
+(`POST /api/private/me/reauth`). The step each of them leads to is protected, and a challenge is
+not used up by a request that the human check refuses, so the check cannot be skipped by
+calling the steps in another order. Setup, admin password resets, the owner's changes in the
+admin panel (to other accounts or their own), recipients opening links, file chunks and API
+keys are never challenged; API keys cannot reach the account routes at all (`403
+api_key_not_allowed`).
 
 - **Client side** (`public/js/turnstile.js`). The protected buttons (log in, sign in with a
-  passkey, change password, create an anonymous share) stay disabled until the widget has issued
-  a token, and again after each token is used (one token per call) until the next one arrives; if
-  the widget cannot load they stay disabled and the page says why. This is a usability guard:
-  the server-side check below is what enforces it.
+  passkey, create an anonymous share, and every button in the table above) stay disabled until
+  the widget has issued a token, and again after each token is used (one token per call) until
+  the next one arrives; if the widget cannot load they stay disabled and the page says why. On
+  the Account page each card that changes something (username, password, passkeys and recovery
+  codes, API keys) has its own always-visible widget; one widget serves every button of its card,
+  including the Remove and Revoke buttons of each table row. This is a usability guard: the
+  server-side check below is what enforces it.
 - **Server-side verification** (`src/lib/turnstile.js`). Each protected call must carry
   `X-Secbin-Turnstile`, which is redeemed with Cloudflare's siteverify. The call passes only
   when the token:
   - succeeded;
   - was issued for the request's own hostname;
-  - was issued for that form's action (`login`, `password`, `public-share`), so a token from one
-    form cannot be replayed on another;
+  - was issued for that form's action (`login`, `password`, `account`, `public-share`), so a
+    token from one form cannot be replayed on another;
   - has not been used before (siteverify refuses a reused token).
 
-  The login token is checked before the password, so a bot learns nothing about the password.
+  The token is checked before the password (at login, and before the "confirm it's you" step of
+  an account change), so a bot learns nothing about the password and every guess costs a token.
   If siteverify cannot be reached the request is refused (`503`, fail closed). Cloudflare's
   published testing keys return no hostname or action, so their results are accepted as they
   come; never deploy with testing keys.
@@ -524,10 +548,12 @@ codes as safe as the password.
   works once. Registration and second-step challenges are stored, but only a signed-in user or
   someone with the right password can create one, and each account keeps at most 3 per purpose.
   A flood of requests therefore cannot push out anyone's pending sign-in.
-- **Step-up without Turnstile.** The confirmations above (except a password change) and log
-  clearing check the password or a passkey, but not Turnstile. They need a signed-in session,
-  wrong answers count toward the same limit as a password change (all sessions end after
-  `lockout.max`), and the IP login guard applies.
+- **Step-up and Turnstile.** When Turnstile is on, every confirmation above made from the
+  Account page also needs a fresh human-check token (see *Cloudflare Turnstile*). The owner's
+  confirmations in the admin panel (for example log clearing and the owner's own keys and
+  passkeys there) check the password or a passkey, but not Turnstile. All of them need a
+  signed-in session, wrong answers count toward the same limit as a password change (all
+  sessions end after `lockout.max`), and the IP login guard applies.
 - **Losing everything.**
   - The admin can remove any account's passkeys and codes, the owner's included (Users →
     Manage → Passkeys), after which the password alone signs in. This needs the acting
@@ -862,6 +888,48 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   - A purge never forgets a share whose chunks it could not delete; the alarm retries.
 - Missing or garbage environment variables never throw; the feature that needs them reports
   that it is unavailable.
+
+### Edge caching (Workers Caching)
+
+`wrangler.toml` turns on Workers Caching (`[cache] enabled = true`), so Cloudflare consults a
+shared cache before invoking the fetch handler. That cache follows RFC 9111: a response
+without `Cache-Control` is stored heuristically (a `200` for two hours, a `404` for three
+minutes), and the only automatic bypasses are an `Authorization` request header and a
+`Set-Cookie` response header. A GET authenticated by the session cookie is **not** bypassed,
+so a per-user page or JSON answer without an explicit policy could be served to the next
+visitor of the same URL.
+
+The rule: **nothing the Worker returns is stored in the edge cache.**
+
+- The top-level fetch handler (`src/index.js`) passes every response through
+  `withCachePolicy` (`src/lib/http.js`): route results, `HttpError`s, the `503` for a missing
+  binding, the `500` for an unexpected exception, and a route that returned nothing.
+- `withCachePolicy` sets `Cloudflare-CDN-Cache-Control: no-store` on every response.
+  Cloudflare's cache reads it before `Cache-Control` and strips it before the browser.
+- It sets `Cache-Control: no-store` on any response without a Cache-Control of its own
+  (the no-store fallback), so neither the browser nor any other cache keeps it either.
+- The routes already mark what they return: every JSON answer (`json` / `err`), redirect,
+  dashboard page and chunk download is `no-store`. That covers `/api/private/*`, `/api/auth/*`,
+  `/dashboard*`, share heads and opens (notes, burn notes, files), download grants and
+  ciphertext chunks, delete-by-token, `/api/config`, and every 404, 405 and error.
+- Two responses keep a browser policy of their own and still stay out of the edge cache:
+  - the anonymous home page (`/`, `/index.html` without a valid session) keeps the asset
+    server's `public, max-age=0, must-revalidate`, so the service worker can keep it as the
+    offline shell. A cached copy would skip the signed-in redirect and the owner's Turnstile
+    headers;
+  - the tracker (`GET /api/public/t`) keeps `private, no-cache`, so the browser holds the ETag
+    copy. It also sets a cookie, and `private` alone already keeps it out of shared caches.
+- No response is marked cacheable at the edge. `/api/config` is identical for everyone, but it
+  honours the manual IP block rules and must follow the owner's changes (the viewer policy,
+  Turnstile) at once. It is cached per isolate for 30 seconds instead, and that cache is
+  dropped on every admin change.
+- There is no per-entrypoint override (`[exports.<name>.cache]`): the default export is the
+  only fetch entrypoint, and Durable Object calls are never cached.
+- `test/cache-policy.test.js` walks the routes (anonymous and signed in, success and error,
+  404, 405, a thrown exception, a missing binding) and checks that every response has a
+  Cache-Control, carries the edge `no-store`, and is `no-store` unless it is one of the two
+  exceptions. `test-node/headers.test.js` checks the two config files and that the long-lived
+  rules in `public/_headers` cover only paths the Worker never runs for.
 
 ## 7. Cryptographic summary
 
