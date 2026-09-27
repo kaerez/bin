@@ -24,7 +24,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - log pruning never removes the owner's own actions or server-wide configuration changes,
     and it is cheaper (time indexes; only accounts with their own limits are visited);
   - a second preview can no longer render under the first one's title;
-  - a corrupt saved accessibility setting can no longer stop the widget from saving.
+  - a corrupt saved accessibility setting can no longer stop the widget from saving;
+  - opening an ended share (expired, used up, revoked or deleted) is exempt from the invalid-fetch
+    guard only with its correct link (`#` key); a wrong key is counted, as for a live share.
 - **Passkey and sign-in hardening** (from a review of the new features):
   - usernameless sign-in challenges are no longer stored, so a flood of requests cannot push out
     other people's pending sign-ins;

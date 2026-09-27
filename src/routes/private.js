@@ -262,7 +262,7 @@ export async function createNote(request, env, a) {
     throw e;
   }
   const kind = fmt === 'url' || fmt === 'secret' ? fmt : 'text';
-  await dir.recordShare({ id, uid: a.user.id, kind, label: a.noLabel ? '' : body.label, created, expires, views }, actorId(a));
+  await dir.recordShare({ id, uid: a.user.id, kind, label: a.noLabel ? '' : body.label, created, expires, views, lh: clean.acc.lh }, actorId(a));
   return json({ id, deletetoken: deleteToken, expires }, 201);
 }
 
@@ -341,7 +341,7 @@ export async function finalizeFile(request, env, a, id) {
   if (r.status === 'mismatch') return err(400, 'invalid_format', 'The manifest’s view limit, expiry and recipient-delete setting must match the upload.');
   if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
   if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
-  await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: a.noLabel ? '' : body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null }, actorId(a));
+  await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: a.noLabel ? '' : body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null, lh: clean.acc.lh }, actorId(a));
   return json({ ok: true, id, expires: r.expires });
 }
 

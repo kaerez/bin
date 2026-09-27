@@ -259,7 +259,9 @@ Common errors on any route:
 Every `404`/`410` for an id that was never a share, `bad_link`, `bad_password`, `bad_grant` and
 `bad_token` counts as an **invalid** failure for the caller's IP (§13). A `404`/`410` for a share
 that existed (still in the share index: expired, used up, revoked or deleted within the last 30
-days) is not counted.
+days) is not counted when the request's link proof matches the one the index kept (or it sent
+none, as `GET /api/paste/:id` does); a wrong link proof for such a share is counted. The answer
+is `gone` either way.
 
 ### Public creation (anonymous, off by default)
 

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts IN
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
   created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL,
-  locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER, opens_total INTEGER NOT NULL DEFAULT 0);
+  locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER, opens_total INTEGER NOT NULL DEFAULT 0, lh TEXT);
 CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id, created);
 CREATE TABLE IF NOT EXISTS ip_rules (id TEXT PRIMARY KEY, cidr TEXT NOT NULL, action TEXT NOT NULL, expires INTEGER,
   note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
@@ -140,6 +140,12 @@ const MIGRATIONS = [
     m.addColumn('shares', 'opens_total', 'INTEGER NOT NULL DEFAULT 0');
     m.sql.exec('CREATE INDEX IF NOT EXISTS opens_ts ON opens(ts)');
     m.sql.exec('CREATE INDEX IF NOT EXISTS activity_ts ON activity(ts)');
+  },
+  // 9: each share's link-proof hash, kept after its content is gone, so a late
+  // fetch with the right link is told apart from a guess (shares from before
+  // this have none and are never counted, as before)
+  (m) => {
+    m.addColumn('shares', 'lh', 'TEXT');
   },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -1350,14 +1356,14 @@ export class Directory extends DurableObject {
   }
 
   // ── shares index ("My shares") ───────────────────────────────────────────
-  async recordShare({ id, uid, kind, label, created, expires, views }, actorId = uid) {
+  async recordShare({ id, uid, kind, label, created, expires, views, lh = null }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
     // Upsert that never touches the lock columns: re-recording an id must not
     // silently unlock it.
-    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
       ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, kind = excluded.kind, label = excluded.label, created = excluded.created,
-        expires = excluded.expires, views_total = excluded.views_total, status = 'active'`,
-      id, uid, kind, l, created, expires, views ?? null);
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active', lh = excluded.lh`,
+      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null);
     this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
   }
 
@@ -1467,8 +1473,18 @@ export class Directory extends DurableObject {
    * or ended within the last SHARE_PRUNE_SEC). Fetches of such ids that find
    * nothing — expired, used up, revoked, deleted — are not "invalid".
    */
-  async isKnownShare(id) {
-    return this.sql.exec('SELECT 1 FROM shares WHERE id = ?', id).toArray().length > 0;
+  /**
+   * A fetch of a share whose content is gone (expired, used up, revoked or
+   * deleted): 'ok' when the id was a share and the request's link-proof hash
+   * `lh` (if it sent one) matches it, 'wrong_link' when it does not, and
+   * 'unknown' when the id was never a share. Shares recorded before link
+   * hashes were kept answer 'ok'.
+   */
+  async goneShare(id, lh = null) {
+    const r = this.sql.exec('SELECT lh FROM shares WHERE id = ?', id).toArray()[0];
+    if (!r) return 'unknown';
+    if (typeof lh !== 'string' || typeof r.lh !== 'string') return 'ok';
+    return r.lh.length === lh.length && timingSafeEqualHex(r.lh, lh) ? 'ok' : 'wrong_link';
   }
 
   async isShareLocked(id) {
