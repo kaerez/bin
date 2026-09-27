@@ -25,7 +25,7 @@ import { genId, genToken, genDeleteToken, hashToken } from '../lib/ids.js';
 import { MAX_BODY, MAX_BURN_RECORD, driveStub, fileStub } from '../lib/store.js';
 import { validateCreate, FormatError, expireSeconds, MAX_VIEWS } from '../../public/js/format.js';
 import { MAX_CHUNK_CT } from '../../public/js/files.js';
-import { utf8, bytesFromB64url, b64urlFromBytes } from '../../public/js/bytes.js';
+import { utf8, bytesFromB64url, b64urlFromBytes, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { binding } from '../lib/config.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { NODE_ID_RE, ROOT } from '../drive-do.js';
@@ -50,6 +50,10 @@ export const WRAP_KINDS = ['pw', 'recovery', 'passkey', 'escrow'];
 const OWN_KINDS = ['pw', 'recovery', 'passkey'];
 /** A raw P-256 ECDSA signature (r ‖ s, 64 bytes), base64url. */
 const SIG_RE = /^[A-Za-z0-9_-]{86}$/;
+/** The Drive key's check value (drivekeys.js keyCheckValue): an HMAC-SHA-256, base64url. */
+const KCV_RE = /^[A-Za-z0-9_-]{43}$/;
+/** Constant-time comparison of two check values. */
+const sameKcv = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
 const WRAP_REF_RE = /^[A-Za-z0-9_-]{1,1400}$/;
 /** A wrap's data (and escrowPriv): base64url segments joined by "." (docs/DRIVE.md §3). */
 const WRAP_DATA_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
@@ -169,12 +173,18 @@ export async function handleDrive(request, env, url) {
     const out = {
       enabled: true, capacity: pol.capacity, maxFile: pol.maxFile, used: s.used, driveSalt: s.driveSalt, wraps: s.wraps,
       escrowPub: escrowPub(), ...escrowSign(), escrowPin: s.escrowPin ? JSON.parse(s.escrowPin) : null, pwStale: s.pwStale,
+      ownerReset: pol.ownerReset ? JSON.parse(pol.ownerReset) : null,
     };
     if (a.actor) {
       // Impersonating: the escrow wrap only through the logged route below.
       out.wraps = s.wraps.map((w) => (w.kind === 'escrow' ? { kind: w.kind, ref: w.ref, data: null } : w));
     }
-    if (pol.owner) Object.assign(out, { escrowPriv: s.escrowPriv, escrowSignPriv: s.escrowSignPriv, escrowPrivOld: await oldEscrow(uid) });
+    if (pol.owner) {
+      Object.assign(out, {
+        escrowPriv: s.escrowPriv, escrowSignPriv: s.escrowSignPriv, escrowPrivOld: await oldEscrow(uid), escrowKids: await dir.escrowKidsInUse(),
+        escrowVersion: await escrowVersionOf(pol, s), kit: s.kit, archives: s.archives,
+      });
+    }
     if (s.used !== pol.used) await dir.setDriveUsed(uid, s.used);
     return withAuth(a, json(out));
   }
@@ -185,6 +195,16 @@ export async function handleDrive(request, env, url) {
     if (request.method !== 'PUT') return methodNotAllowed('PUT');
     const body = await readJsonBody(request);
     return withAuth(a, await setKeys(request, env, url, dir, a, pol, body));
+  }
+
+  // The owner's recovery kit (docs/DRIVE.md §3, "Owner recovery kit"): made,
+  // opened and checked only in the owner's browser; nothing of it is ever sent.
+  // The owner's own, never while acting as a user; the admin audit records
+  // each download, use and check.
+  if (p === '/api/private/drive/kit' || p.startsWith('/api/private/drive/kit/') || p === '/api/private/drive/start-over' || p.startsWith('/api/private/drive/archive/')) {
+    if (a.actor) return err(403, 'impersonating', 'The recovery kit is the owner’s own: return to your account first.');
+    if (!pol.owner) return err(403, 'owner_only', 'Only the administrator has this recovery kit.');
+    return withAuth(a, await kitRoute(request, env, url, dir, uid, pol, a.user.username));
   }
 
   // The owner, acting as this user: the user's escrow wrap with the owner's
@@ -368,7 +388,7 @@ async function setKeys(request, env, url, dir, a, pol, body) {
     }
   }
   const ownerKeys = ['escrowPriv', 'escrowPub', 'escrowSignPriv', 'escrowSignPub', 'escrowSig'].filter((k) => body[k] !== undefined);
-  if (ownerKeys.length && !pol.owner) return err(403, 'owner_only', 'Only the owner holds the escrow key.');
+  if (ownerKeys.length && !pol.owner) return err(403, 'owner_only', 'Only the administrator holds the escrow key.');
   for (const k of ['escrowPriv', 'escrowSignPriv']) {
     if (body[k] === undefined) continue;
     out[k] = wrapData(body[k]);
@@ -389,16 +409,24 @@ async function setKeys(request, env, url, dir, a, pol, body) {
     out.escrowPin = encField(body.escrowPin, MAX_PIN_CT);
     if (!out.escrowPin) return invalid('escrowPin must be {iv, ct}.');
   }
+  // A user's browser moved the Drive to an owner reset's escrow key by itself
+  // (`escrowReset`: that reset's epoch): recorded once the wrap is stored.
+  let resetRewrap = null;
+  if (body.escrowReset !== undefined) {
+    const rec = pol.ownerReset ? JSON.parse(pol.ownerReset) : null;
+    if (pol.owner || a.actor || !rec || body.escrowReset !== rec.epoch || !out.set.some((w) => w.kind === 'escrow')) return invalid('escrowReset names the current owner reset, with the escrow wrap for its key.');
+    resetRewrap = rec;
+  }
   if (out.driveSalt === undefined && !out.set.length && !out.remove.length && !ownerKeys.length && out.escrowPin === undefined) return invalid('Nothing to change.');
   const cur = await driveStub(env, uid).summary(uid);
   const existing = new Set(cur.wraps.map(wrapKey));
   const first = cur.wraps.length === 0;
   // The owner's escrow key: every user's Drive has an escrow wrap for the current one.
   if (!pol.owner) {
-    if (out.remove.some((w) => w.kind === 'escrow')) return err(403, 'escrow_required', 'The escrow wrap cannot be removed: the owner keeps access to every Drive.');
+    if (out.remove.some((w) => w.kind === 'escrow')) return err(403, 'escrow_required', 'The escrow wrap cannot be removed: the administrator keeps access to every Drive.');
     const escrow = out.set.find((w) => w.kind === 'escrow');
     if (first && !a.actor) {
-      if (!pol.escrowPub) return err(409, 'escrow_not_ready', 'The Drive is not ready yet: the owner must sign in once first.');
+      if (!pol.escrowPub) return err(409, 'escrow_not_ready', 'The Drive is not ready yet: the administrator must sign in once first.');
       if (!escrow) return invalid('A new Drive needs its escrow wrap.');
       if (!out.set.some((w) => OWN_KINDS.includes(w.kind))) return invalid('A new Drive needs a password, passkey or recovery-code wrap.');
     }
@@ -447,8 +475,17 @@ async function setKeys(request, env, url, dir, a, pol, body) {
     const r = await dir.verifyCurrent(uid, step.current, { reauth: step.reauth, origin: step.origin, rpId: step.rpId, lockoutOff: g.off.all });
     if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
   }
+  // The Drive key's check value: a password wrap is accepted after the first
+  // set-up only as a wrap of the same DK (the value kept since then); a Drive
+  // without one keeps the first value it is given.
+  if (body.kcv !== undefined && (typeof body.kcv !== 'string' || !KCV_RE.test(body.kcv))) return invalid('kcv must be the Drive key’s check value (32 bytes, base64url).');
+  if (!first && out.set.some((w) => w.kind === 'pw') && body.kcv === undefined) return err(400, 'kcv_required', 'A new password key needs the Drive key’s check value.');
+  if (body.kcv !== undefined && cur.kcv && !sameKcv(body.kcv, cur.kcv)) return err(409, 'kcv_mismatch', 'That key is not this Drive’s key.');
+  if (body.kcv !== undefined && !cur.kcv) out.kcv = body.kcv;
   const oldKid = out.escrowPriv !== undefined && pol.escrowPub && jwk !== undefined ? await escrowKid(pol.escrowPub) : undefined;
-  const r = await driveStub(env, uid).setKeys(uid, { ...out, oldKid });
+  // A new escrow key pair (the first, or a rotation) moves the escrow key's version.
+  const newEscrowKid = out.escrowPriv !== undefined && jwk !== undefined ? await escrowKid(jwk) : undefined;
+  const r = await driveStub(env, uid).setKeys(uid, { ...out, oldKid, newEscrowKid, firstEscrow: !pol.escrowPub });
   if (!r.ok) return fromDir(r);
   if (jwk !== undefined || signJwk !== undefined || body.escrowSig !== undefined) {
     const e = await dir.setEscrowPub(uid, jwk, { signPub: signJwk, sig: body.escrowSig });
@@ -456,9 +493,300 @@ async function setKeys(request, env, url, dir, a, pol, body) {
   }
   const escrow = out.set.find((w) => w.kind === 'escrow');
   if (escrow) await dir.setEscrowKid(uid, escrowWrapKid(escrow.data));
+  if (resetRewrap && escrow) await dir.driveEscrowRewrapped(uid, short(escrowWrapKid(escrow.data)));
   const kinds = (l) => [...new Set(l.map((w) => w.kind))].join(', ');
   const what = [out.set.length ? `added ${kinds(out.set)}` : '', out.remove.length ? `removed ${kinds(out.remove)}` : '', out.driveSalt !== undefined ? 'salt' : ''].filter(Boolean);
   if (what.length) await dir.driveLog(actorId(a), uid, 'drive.keys_changed', what.join('; '));
+  return json({ ok: true });
+}
+
+// ── the owner's recovery kit (docs/DRIVE.md §3) ──────────────────────────
+const KIT_ISSUES = ['format', 'owner', 'auth', 'dk', 'current', 'signing', 'past', 'version', 'proof'];
+const kitVersionOf = (v) => (Number.isSafeInteger(v) && v >= 1 && v <= 1e6 ? v : null);
+/** A kid's short fingerprint, as the pages show it (driveclient.js kidFingerprint). */
+const short = (kid) => { const k = String(kid || ''); return k.length >= 8 ? `${k.slice(0, 4)}-${k.slice(4, 8)}` : k; };
+
+/**
+ * The escrow key's version (1 at the first creation, one more at each
+ * rotation; docs/DRIVE.md §3): `{ version, kid, created }` for the current
+ * escrow key, or null when there is none. A key made before versions were
+ * recorded is version 1 with no date; a record for another kid (the public key
+ * restored or replaced outside a rotation) gives no version.
+ */
+async function escrowVersionOf(pol, s) {
+  if (!pol.escrowPub) return null;
+  const kid = await escrowKid(pol.escrowPub);
+  const v = s.escrowVer;
+  if (!v) return { version: 1, kid, created: null };
+  return v.kid === kid ? { version: v.version, kid, created: v.created ?? null } : { version: null, kid, created: null };
+}
+
+/** The owner's password or a passkey (`current` / `reauth`), as for Account; → null or the refusal. */
+async function ownerStepUp(request, env, url, dir, uid, body) {
+  const g = await ipContext(env, request);
+  const step = await stepUpFrom(body, url); // 400 reauth_required without one
+  const r = await dir.verifyCurrent(uid, step.current, { reauth: step.reauth, origin: step.origin, rpId: step.rpId, lockoutOff: g.off.all });
+  return r.ok ? null : afterRefusal(env, g, r, fromDir(r));
+}
+
+/**
+ * /api/private/drive/kit… (the owner, not impersonating):
+ * - `POST …/kit` `{ event: 'exported', current | reauth }` — the owner's
+ *   browser gives the kit file out only after this: the step-up is checked,
+ *   the escrow key's version and kid are recorded (with the time) in the
+ *   owner's Drive and `drive.kit_exported` in the admin audit;
+ *   `{ event: 'used', version?, current | reauth }` — the kit opened the
+ *   owner's Drive (the step-up also proves the password the new `pw` wrap is
+ *   made with); `{ event: 'verified', verdict, issues?, version? }` — the
+ *   read-only check's verdict (`drive.kit_verified`), nothing else is written;
+ * - `GET …/kit/probe` — for the check: one user's escrow wrap per kid users'
+ *   wraps are made for (each recorded as `drive.escrow_used`, as the admin
+ *   escrow route), to be opened in the browser and discarded;
+ * - `PUT …/kit/keys` — restore sealed escrow keys (restoreKitKeys).
+ */
+async function kitRoute(request, env, url, dir, uid, pol, username) {
+  const p = url.pathname;
+  if (p === '/api/private/drive/kit') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertIntent(request);
+    const body = await readJsonBody(request);
+    const cur = await driveStub(env, uid).summary(uid);
+    const ver = await escrowVersionOf(pol, cur);
+    if (body.event === 'exported') {
+      if (!ver) return err(409, 'no_escrow', 'There is no escrow key to back up yet: open your Drive once first.');
+      const refused = await ownerStepUp(request, env, url, dir, uid, body);
+      if (refused) return refused;
+      const r = await driveStub(env, uid).recordKit(uid, { version: ver.version, kid: ver.kid });
+      await dir.driveOwnerLog(uid, 'drive.kit_exported', `version=${ver.version ?? '?'} key=${short(ver.kid)}`);
+      return json({ ok: true, kit: r.kit });
+    }
+    if (body.event === 'used') {
+      const refused = await ownerStepUp(request, env, url, dir, uid, body);
+      if (refused) return refused;
+      await dir.driveOwnerLog(uid, 'drive.kit_used', `kit version=${kitVersionOf(body.version) ?? '?'}`);
+      return json({ ok: true });
+    }
+    if (body.event === 'verified') {
+      if (!['complete', 'incomplete', 'failed'].includes(body.verdict)) return invalid('verdict must be "complete", "incomplete" or "failed".');
+      const issues = body.issues === undefined ? [] : body.issues;
+      if (!Array.isArray(issues) || issues.length > KIT_ISSUES.length || !issues.every((x) => KIT_ISSUES.includes(x))) return invalid(`issues lists at most: ${KIT_ISSUES.join(', ')}.`);
+      const v = kitVersionOf(body.version);
+      await dir.driveOwnerLog(uid, 'drive.kit_verified', [`verdict=${body.verdict}`, v ? `kit version=${v}` : '', issues.length ? `issues=${[...new Set(issues)].join(',')}` : ''].filter(Boolean).join(' '));
+      return json({ ok: true });
+    }
+    return invalid('Send { event: "exported" | "used" | "verified" }.');
+  }
+  if (p === '/api/private/drive/kit/probe') {
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    assertNotCrossSite(request); // it records escrow use
+    const probes = [];
+    for (const { kid, userId } of await dir.escrowKidUsers()) {
+      const v = await driveStub(env, userId).escrowView(userId);
+      if (!v.wrap) continue;
+      const logged = await dir.driveAdminAction(uid, userId, 'drive.escrow_used', 'reason=owner recovery kit check');
+      if (!logged.ok) continue;
+      probes.push({ kid, wrap: v.wrap });
+    }
+    return json({ probes });
+  }
+  if (p === '/api/private/drive/kit/keys') {
+    if (request.method !== 'PUT') return methodNotAllowed('PUT');
+    assertIntent(request);
+    return restoreKitKeys(request, env, url, dir, uid, pol, await readJsonBody(request));
+  }
+  if (p === '/api/private/drive/start-over') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertIntent(request);
+    return startOver(request, env, url, dir, uid, pol, username, await readJsonBody(request));
+  }
+  const am = p.match(/^\/api\/private\/drive\/archive\/([1-9][0-9]{0,5})(\/nodes|\/finish)?$/);
+  if (am) return archiveRoute(request, env, url, dir, uid, pol, username, Number(am[1]), am[2] || '');
+  return err(404, 'not_found', 'Not found.');
+}
+
+/**
+ * The owner's archived Drive `gen` (after starting over; docs/DRIVE.md §3):
+ * - `GET …/archive/<gen>?after=<id>` — its sealed escrow keys and a page of
+ *   its items, for the owner's browser to restore it with a recovery kit
+ *   made for its (old) DK;
+ * - `PUT …/archive/<gen>/nodes` `{ nodes: [{ id, name, meta?, fk? }], current
+ *   | reauth }` — items back into the Drive, re-sealed in the browser under
+ *   the Drive's DK now, folders first;
+ * - `POST …/archive/<gen>/finish` `{ escrowPrivOld?: { <kid>: { pub, data } },
+ *   current | reauth }` — once every item is back: its earlier escrow keys
+ *   (re-sealed under the Drive's DK) join the owner's, for the kids users'
+ *   wraps are still made for, and the archive goes (`drive.archive_restored`);
+ * - `DELETE …/archive/<gen>` `{ confirm: <username>, current | reauth }` —
+ *   the owner deletes it (its R2 objects included; the shares of its items
+ *   end): no kit can restore it afterwards (`drive.archive_deleted`).
+ * Nothing else deletes an archive.
+ */
+async function archiveRoute(request, env, url, dir, uid, pol, username, gen, sub) {
+  if (!sub) {
+    if (request.method === 'GET') {
+      assertNotCrossSite(request);
+      const after = url.searchParams.get('after') || '';
+      if (after && !NODE_ID_RE.test(after)) return invalid('after must be an item id.');
+      const r = await driveStub(env, uid).archiveView(uid, gen, { after, limit: 500 });
+      return r.ok ? json(r) : fromDir(r);
+    }
+    if (request.method !== 'DELETE') return methodNotAllowed('GET, DELETE');
+    assertIntent(request);
+    binding(env, 'FILES');
+    const body = await readJsonBody(request);
+    if (typeof body.confirm !== 'string' || !username || body.confirm !== username) return err(400, 'confirm_required', 'Type your username to confirm.');
+    const refused = await ownerStepUp(request, env, url, dir, uid, body);
+    if (refused) return refused;
+    const r = await driveStub(env, uid).deleteArchive(uid, gen);
+    if (!r.ok) return fromDir(r);
+    await endShares(env, dir, uid, r.shares, uid, 'drive item deleted');
+    await dir.setDriveUsed(uid, r.used);
+    await dir.driveOwnerLog(uid, 'drive.archive_deleted', `archive ${gen}; shares ended=${r.shares.length}`);
+    return json({ ok: true });
+  }
+  const body = await readJsonBody(request, MAX_BODY);
+  if (sub === '/nodes') {
+    if (request.method !== 'PUT') return methodNotAllowed('PUT');
+    assertIntent(request);
+    if (!Array.isArray(body.nodes) || !body.nodes.length || body.nodes.length > 500) return invalid('nodes must list 1–500 items.');
+    const list = [];
+    for (const n of body.nodes) {
+      if (!isObj(n) || typeof n.id !== 'string' || !NODE_ID_RE.test(n.id)) return invalid('Each item needs its id.');
+      const name = encField(n.name, MAX_NAME_CT);
+      const meta = n.meta === undefined ? undefined : n.meta === null ? null : encField(n.meta, MAX_META_CT);
+      const fk = n.fk === undefined ? undefined : encField(n.fk, MAX_FK_CT);
+      if (!name || meta === '' || (n.meta !== undefined && n.meta !== null && !meta) || (n.fk !== undefined && !fk)) return invalid('Each item needs name (and may have meta, fk) as {iv, ct}.');
+      list.push({ id: n.id, name, ...(meta === undefined ? {} : { meta }), ...(fk === undefined ? {} : { fk }) });
+    }
+    const refused = await ownerStepUp(request, env, url, dir, uid, body);
+    if (refused) return refused;
+    const r = await driveStub(env, uid).restoreArchiveNodes(uid, gen, list);
+    if (!r.ok) return fromDir(r);
+    await dir.setDriveUsed(uid, r.used);
+    return json({ ok: true, restored: r.restored, left: r.left });
+  }
+  if (request.method !== 'POST') return methodNotAllowed('POST');
+  assertIntent(request);
+  const old = {};
+  if (body.escrowPrivOld !== undefined) {
+    if (!isObj(body.escrowPrivOld) || Object.keys(body.escrowPrivOld).length > 64) return invalid('escrowPrivOld must be { kid: { pub, data } } (at most 64).');
+    const inUse = new Set(await dir.escrowKidsInUse());
+    const currentKid = pol.escrowPub ? await escrowKid(pol.escrowPub) : null;
+    for (const [kid, x] of Object.entries(body.escrowPrivOld)) {
+      const pub = isObj(x) ? escrowJwk(x.pub) : null;
+      const data = isObj(x) ? wrapData(x.data) : null;
+      if (!pub || !data || await escrowKid(pub) !== kid || kid === currentKid || !inUse.has(kid)) return err(400, 'key_mismatch', 'An earlier escrow key is not one a user’s Drive is still wrapped to.');
+      old[kid] = data;
+    }
+  }
+  const refused = await ownerStepUp(request, env, url, dir, uid, body);
+  if (refused) return refused;
+  const r = await driveStub(env, uid).finishArchive(uid, gen, { old });
+  if (!r.ok) return fromDir(r);
+  await dir.driveOwnerLog(uid, 'drive.archive_restored', `archive ${gen}; earlier escrow keys back: ${Object.keys(old).length}`);
+  return json({ ok: true });
+}
+
+/**
+ * POST /api/private/drive/start-over — the owner starts over without a
+ * recovery kit (after AUTHN recovery, docs/DRIVE.md §3): `{ confirm: <the
+ * owner's username>, driveSalt, set: [the new pw wrap], escrowPub, escrowPriv,
+ * escrowSignPub, escrowSignPriv, escrowSig, current | reauth }`, all made in
+ * the owner's browser under a new DK. Only when the owner's Drive has no wrap
+ * the owner's credentials can open now (no passkey or recovery-code wrap, and
+ * no password wrap or only a stale one), only with the typed username and the
+ * step-up. The owner's Drive as it was (items, R2 objects, wraps, sealed
+ * keys — all still sealed under the old DK) is kept as an archive that a kit
+ * for the old DK can restore later; the Drive is set up again with the new
+ * keys, and the new escrow pair counts as a rotation (the version goes up).
+ * The owner reset is recorded in the Directory (its epoch, the new kid and
+ * signing key): users' browsers move their Drives to the new key by
+ * themselves once per reset (docs/DRIVE.md §3; the maintainer's accepted
+ * exception to the signed-key pin). No user's Drive or wrap is touched here.
+ * Recorded as `drive.owner_reset`.
+ */
+async function startOver(request, env, url, dir, uid, pol, username, body) {
+  if (typeof body.confirm !== 'string' || !username || body.confirm !== username) return err(400, 'confirm_required', 'Type your username to confirm.');
+  const cur = await driveStub(env, uid).summary(uid);
+  if (!pol.escrowPub && typeof cur.escrowPriv !== 'string' && !pol.escrowSignPub) return err(409, 'nothing_to_reset', 'There is no escrow key yet: open your Drive to set it up.');
+  const usable = cur.wraps.some((w) => w.kind === 'passkey' || w.kind === 'recovery' || (w.kind === 'pw' && !cur.pwStale));
+  if (usable) return err(409, 'drive_unlockable', 'Your Drive can still be unlocked (a password, passkey or recovery-code key of yours opens it): unlock it instead.');
+  if (typeof body.driveSalt !== 'string' || !SALT_RE.test(body.driveSalt)) return invalid('driveSalt must be 16 bytes, base64url.');
+  const w = Array.isArray(body.set) && body.set.length === 1 && isObj(body.set[0]) ? body.set[0] : null;
+  const pwData = w && w.kind === 'pw' && w.ref === 'pw' ? wrapData(w.data) : null;
+  const jwk = escrowJwk(body.escrowPub);
+  const signJwk = escrowJwk(body.escrowSignPub);
+  const escrowPriv = wrapData(body.escrowPriv);
+  const escrowSignPriv = wrapData(body.escrowSignPriv);
+  if (!pwData || !jwk || !signJwk || !escrowPriv || !escrowSignPriv || typeof body.escrowSig !== 'string' || !SIG_RE.test(body.escrowSig) || typeof body.kcv !== 'string' || !KCV_RE.test(body.kcv)) {
+    return invalid('Send { confirm, driveSalt, set: [a pw wrap], escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv } made under the new Drive key.');
+  }
+  const newKid = await escrowKid(jwk);
+  if ((pol.escrowPub && newKid === await escrowKid(pol.escrowPub)) || (pol.escrowSignPub && signJwk === escrowJwk(JSON.parse(pol.escrowSignPub)))) return invalid('Starting over needs a new escrow key and a new signing key.');
+  if (!(await endorsed(signJwk, jwk, body.escrowSig))) return invalid('The new escrow key must be signed by the new signing key (escrowSig).');
+  const refused = await ownerStepUp(request, env, url, dir, uid, body);
+  if (refused) return refused;
+  const archived = await driveStub(env, uid).startOver(uid);
+  const r = await driveStub(env, uid).setKeys(uid, { driveSalt: body.driveSalt, set: [{ kind: 'pw', ref: 'pw', data: pwData }], escrowPriv, escrowSignPriv, newEscrowKid: newKid, firstEscrow: !pol.escrowPub, kcv: body.kcv });
+  if (!r.ok) return fromDir(r);
+  const e = await dir.setEscrowPub(uid, jwk, { signPub: signJwk, sig: body.escrowSig });
+  if (!e.ok) return fromDir(e);
+  const reset = await dir.recordOwnerReset(uid, { kid: newKid, signPub: signJwk });
+  const ver = await escrowVersionOf({ escrowPub: jwk }, await driveStub(env, uid).summary(uid));
+  await dir.driveOwnerLog(uid, 'drive.owner_reset', `new escrow key version=${ver?.version ?? '?'} key=${short(newKid)}; reset ${reset.reset?.epoch ?? '?'}; old Drive kept as archive ${archived.gen}`);
+  return json({ ok: true, escrowVersion: ver, archive: archived.gen, ownerReset: reset.reset ?? null });
+}
+
+/**
+ * PUT /api/private/drive/kit/keys — the owner's browser, having opened DK
+ * with the recovery kit, puts back sealed escrow keys from the kit's
+ * snapshot that the owner's Drive has lost (or holds in a form that does not
+ * open): `{ escrowPriv?: { pub, data }, escrowSignPriv?: { pub, data },
+ * escrowPrivOld?: { <kid>: { pub, data } }, current | reauth }` (`data`
+ * re-sealed under the owner's DK, `pub` the public key the browser derived
+ * from the snapshot's private key). Each is accepted only for the key it
+ * claims to be: the escrow key only when `pub` is the server's escrowPub, the
+ * signing key only when it is escrowSignPub, an earlier key only when its kid
+ * is one a user's escrow wrap is still for (drive.escrowKid:*). Always with
+ * the owner's password or a passkey, as any change of the escrow keys (H-1).
+ * Nothing else changes: not escrowPub, escrowSignPub, the version or a wrap.
+ */
+async function restoreKitKeys(request, env, url, dir, uid, pol, body) {
+  const out = {};
+  const one = (x) => {
+    if (!isObj(x)) return null;
+    const pub = escrowJwk(x.pub);
+    const data = wrapData(x.data);
+    return pub && data ? { pub, data } : null;
+  };
+  if (body.escrowPriv !== undefined) {
+    const k = one(body.escrowPriv);
+    if (!k || !pol.escrowPub || await escrowKid(k.pub) !== await escrowKid(pol.escrowPub)) return err(400, 'key_mismatch', 'That escrow key is not the current escrow key.');
+    out.escrowPriv = k.data;
+  }
+  if (body.escrowSignPriv !== undefined) {
+    const k = one(body.escrowSignPriv);
+    const sp = pol.escrowSignPub ? escrowJwk(JSON.parse(pol.escrowSignPub)) : null;
+    if (!k || !sp || k.pub !== sp) return err(400, 'key_mismatch', 'That signing key is not the current signing key.');
+    out.escrowSignPriv = k.data;
+  }
+  if (body.escrowPrivOld !== undefined) {
+    if (!isObj(body.escrowPrivOld) || Object.keys(body.escrowPrivOld).length > 64) return invalid('escrowPrivOld must be { kid: { pub, data } } (at most 64).');
+    const inUse = new Set(await dir.escrowKidsInUse());
+    const currentKid = pol.escrowPub ? await escrowKid(pol.escrowPub) : null;
+    out.old = {};
+    for (const [kid, x] of Object.entries(body.escrowPrivOld)) {
+      const k = one(x);
+      if (!k || await escrowKid(k.pub) !== kid || kid === currentKid || !inUse.has(kid)) return err(400, 'key_mismatch', 'An earlier escrow key is not one a user’s Drive is still wrapped to.');
+      out.old[kid] = k.data;
+    }
+  }
+  if (out.escrowPriv === undefined && out.escrowSignPriv === undefined && !Object.keys(out.old || {}).length) return invalid('Nothing to restore.');
+  const refused = await ownerStepUp(request, env, url, dir, uid, body);
+  if (refused) return refused;
+  const r = await driveStub(env, uid).restoreEscrowKeys(uid, out);
+  if (!r.ok) return fromDir(r);
+  await dir.driveOwnerLog(uid, 'drive.kit_keys_restored', [out.escrowPriv ? 'escrow' : '', out.escrowSignPriv ? 'signing' : '', Object.keys(out.old || {}).length ? `earlier: ${Object.keys(out.old).length}` : ''].filter(Boolean).join(', '));
   return json({ ok: true });
 }
 
@@ -621,22 +949,59 @@ export async function escrowRoute(request, env, ownerId, targetId) {
 }
 
 /**
- * The owner writes a user's new `pw` wrap after resetting their password
- * (made in the owner's browser from the escrow wrap): only a `pw` wrap and the
- * Drive salt; nothing else changes. Logged (drive.pw_rewrapped).
+ * PUT /api/private/admin/drive/keys/<userId> — the owner, from Admin → Users,
+ * for another user (never the owner's own Drive):
+ * - after resetting the user's password: `{ driveSalt, set: [{ kind: 'pw',
+ *   ref: 'pw', data }], kcv }` — a new `pw` wrap of the user's DK (opened in
+ *   the owner's browser through the escrow), only with the Drive's key check
+ *   value; nothing else changes (`drive.pw_rewrapped`);
+ * - for a user with no Drive yet (just created, or reset before their first
+ *   sign-in): `{ first: true, driveSalt, set: [pw, escrow], escrowPin, kcv }`
+ *   — the Drive set up in the owner's browser, which knows the password it
+ *   set: exactly one `pw` wrap and one `escrow` wrap for the current escrow
+ *   key, only while the user's Drive has no wrap at all
+ *   (`drive.created_by_owner`: admin audit; a system event for the user).
  */
 export async function adminSetUserKeys(request, env, ownerId, targetId) {
   if (request.method !== 'PUT') return methodNotAllowed('PUT');
+  assertIntent(request);
   const body = await readJsonBody(request);
   if (targetId === ownerId) return err(400, 'use_own_keys', 'Change your own Drive keys from your Drive.');
   if (typeof body.driveSalt !== 'string' || !SALT_RE.test(body.driveSalt)) return invalid('driveSalt must be 16 bytes, base64url.');
-  const set = Array.isArray(body.set) && body.set.length === 1 ? body.set[0] : null;
-  const data = set && isObj(set) && set.kind === 'pw' && set.ref === 'pw' ? wrapData(set.data) : null;
-  if (!data || (body.remove !== undefined && !(Array.isArray(body.remove) && body.remove.length === 0))) return invalid('Send { driveSalt, set: [{ kind: "pw", ref: "pw", data }] } (a password wrap only).');
+  if (body.remove !== undefined && !(Array.isArray(body.remove) && body.remove.length === 0)) return invalid('Nothing is removed here.');
   const dir = directory(env);
+  const refs = await dir.credentialRefs(targetId);
+  if (!refs) return err(404, 'not_found', 'User not found.');
+  if (!refs.drive) return err(409, 'drive_disabled', 'This user’s role has no Drive.');
+  const cur = await driveStub(env, targetId).summary(targetId);
+  const list = Array.isArray(body.set) ? body.set : [];
+  const pwW = list.find((w) => isObj(w) && w.kind === 'pw' && w.ref === 'pw');
+  const pwData = pwW ? wrapData(pwW.data) : null;
+  const kcvOk = typeof body.kcv === 'string' && KCV_RE.test(body.kcv);
+  if (body.first === true) {
+    if (cur.wraps.length) return err(409, 'drive_exists', 'This user already has a Drive: its keys are never replaced.');
+    const pol = await dir.driveAccess(targetId);
+    const esc = list.find((w) => isObj(w) && w.kind === 'escrow' && w.ref === 'escrow');
+    const escData = esc ? wrapData(esc.data) : null;
+    const pin = encField(body.escrowPin, MAX_PIN_CT);
+    if (list.length !== 2 || !pwData || !escData || !pin) return invalid('Send { first: true, driveSalt, set: [a pw wrap, the escrow wrap], escrowPin, kcv }.');
+    if (!kcvOk) return err(400, 'kcv_required', 'Send the Drive key’s check value (kcv).');
+    if (!pol.ok || !pol.escrowPub) return err(409, 'escrow_not_ready', 'There is no escrow key yet.');
+    if (escrowWrapKid(escData) !== await escrowKid(pol.escrowPub)) return invalid('The escrow wrap must be for the current escrow key.');
+    const r = await driveStub(env, targetId).setKeys(targetId, { driveSalt: body.driveSalt, set: [{ kind: 'pw', ref: 'pw', data: pwData }, { kind: 'escrow', ref: 'escrow', data: escData }], escrowPin: pin, kcv: body.kcv, onlyIfEmpty: true });
+    if (!r.ok) return fromDir(r);
+    await dir.setEscrowKid(targetId, escrowWrapKid(escData));
+    const logged = await dir.driveAdminAction(ownerId, targetId, 'drive.created_by_owner', 'with the password the owner set');
+    if (!logged.ok) return fromDir(logged);
+    return json({ ok: true, created: true });
+  }
+  if (list.length !== 1 || !pwData) return invalid('Send { driveSalt, set: [{ kind: "pw", ref: "pw", data }], kcv } (a password wrap only).');
+  if (!cur.wraps.length) return err(409, 'no_drive', 'This user has no Drive yet: set it up with { first: true }.');
+  if (!kcvOk) return err(400, 'kcv_required', 'Send the Drive key’s check value (kcv).');
+  if (cur.kcv && !sameKcv(body.kcv, cur.kcv)) return err(409, 'kcv_mismatch', 'That key is not this Drive’s key.');
   const logged = await dir.driveAdminAction(ownerId, targetId, 'drive.pw_rewrapped', 'after a password reset');
   if (!logged.ok) return fromDir(logged);
-  const r = await driveStub(env, targetId).setKeys(targetId, { driveSalt: body.driveSalt, set: [{ kind: 'pw', ref: 'pw', data }], remove: [] });
+  const r = await driveStub(env, targetId).setKeys(targetId, { driveSalt: body.driveSalt, set: [{ kind: 'pw', ref: 'pw', data: pwData }], remove: [], kcv: body.kcv });
   return r.ok ? json({ ok: true }) : fromDir(r);
 }
 
@@ -678,4 +1043,18 @@ export async function drivePasswordChanged(env, uid, { reset = false } = {}) {
   const c = await directory(env).credentialRefs(uid);
   if (!c || !c.drive) return null;
   return driveStub(env, uid).passwordChanged(uid, { reset });
+}
+
+/**
+ * AUTHN owner recovery (src/routes/auth.js): the owner's passkeys and recovery
+ * codes are gone, so their Drive wraps go too, and the password is new, so the
+ * `pw` wrap is marked stale: once the owner's recovery kit has opened the
+ * Drive, the browser writes the new one without a second confirmation. No key
+ * is created or changed here.
+ */
+export async function driveOwnerRecovered(env, ownerId) {
+  const c = await directory(env).credentialRefs(ownerId);
+  if (!c || !c.drive) return;
+  await syncCredentialWraps(env, ownerId);
+  await driveStub(env, ownerId).markPwStale(ownerId);
 }

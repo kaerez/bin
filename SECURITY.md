@@ -609,7 +609,9 @@ codes as safe as the password.
     change keep the passkeys and recovery codes, and an import never changes an existing
     account's password, recovery codes or passkeys (it can only add passkeys). After a takeover, remove them as well. After a user's own change, Account
     says how many still work and asks the user to remove any passkey they do not recognise.
-  - Owner recovery through `AUTHN` also removes the owner's passkeys.
+  - Owner recovery through `AUTHN` also removes the owner's passkeys and recovery codes (and
+    their Drive wraps); the owner's Drive then opens with the owner recovery kit (see "Drive
+    keys"), or the owner starts it over.
 - Passkeys and recovery codes leave the server only in an export where the owner ticked
   "Passkeys" or "Recovery codes" (separate parts) for that account, the owner's own row
   included. The file carries the public keys (useless without the authenticator), each with the
@@ -705,6 +707,49 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
     escrow wrap is still for it, and handed only to the owner's session; it opens only wraps
     made before the rotation, and only in a browser with the owner's DK, so it gives no one
     access they did not already have.
+- **The Drive key never changes.** A password change and an admin reset replace only the `pw`
+  wrap: the user's own change opens DK first (the current password through the old wrap, or the
+  step-up passkey's PRF) and writes the new wrap at once; an admin reset writes it through the
+  escrow when the owner unlocks their own Drive (inline on the reset form), else DK stays as it
+  is and the user opens it with a recovery code, a passkey or a kit. The browser proves a new
+  `pw` wrap is of the same DK with a key check value (HMAC-SHA-256 under DK's "files" sub-key
+  of a fixed label), which the server keeps from the first set-up and compares in constant time;
+  it reveals nothing about DK. No route replaces or removes DK.
+- **Drives the owner sets up.** When the owner creates an account (or resets the password of a
+  user with no Drive yet), the owner's browser, which knows that password, sets the user's Drive
+  up: a new DK, a `pw` wrap and the `escrow` wrap for the current key (after checking the
+  owner's own escrow key and signature), with the user's pin. The server accepts it only from
+  the owner (not impersonating), only for a Drive with no wrap, and only as exactly one `pw` and
+  one `escrow` wrap for the current key; it is in the admin audit and, as a system event, in the
+  user's activity. This is no new access: the owner already sets that password and holds the
+  escrow. Imported accounts and impersonation never create a Drive.
+- **Owner recovery kit.** A file with the owner's DK and a snapshot of the escrow keys (current,
+  signing, earlier), made and read only in the owner's browser (`public/js/drivekit.js`,
+  `secbin-owner-kit/1`), never sent to the server: Argon2id (the export's fixed parameters) over
+  an optional passphrase, AES-256-GCM, with the format, the owner's id and the origin in the AAD.
+  **It opens every user's Drive**: store it offline, like the AUTHN secret. Losing both the
+  owner's credentials (password, passkeys, recovery codes) and every kit loses the escrow: no
+  one can then open users' Drives through it. Downloading one needs the step-up and is
+  recorded (version, time) in the admin audit; the pages show the escrow key's version and the
+  latest kit, and ask for a fresh kit after a rotation. "Verify kit" checks a selected file in the
+  browser and writes nothing but its audit record (and the `drive.escrow_used` of the users'
+  wraps it opens as a live proof). A restore checks the password, confirms the kit's DK against
+  the server's sealed escrow key (or the snapshot against `escrowPub`), and puts back only
+  sealed keys that match the server's public keys and kids in use, always with the step-up;
+  it never changes a public key. AUTHN owner recovery marks the owner's Drive stale and changes
+  no key; no flow but an explicit, confirmed rotation (and the first creation, and starting
+  over) makes an escrow key or signing key.
+- **Starting over without a kit (a maintainer-accepted exception to the signed-key pin).** Only
+  when nothing the owner signs in with opens the owner's Drive, with the typed username and the
+  step-up: new DK, escrow pair and signing key; the old Drive is archived exactly as it was
+  (sealed under the old DK, restorable with a kit for it, deleted only by the owner with the
+  typed username and the step-up). The Directory records the owner reset (an epoch, the new kid
+  and signing key), and **users' browsers accept the new escrow key automatically**, once per
+  reset (the epoch one more than the pinned one, the escrow key signed by the reset's signing
+  key). During that window, anyone able to change the server's responses (a compromised
+  Cloudflare account, a malicious deploy or an insider) could substitute an escrow key and
+  receive users' Drive keys at their next unlock. In every other case the signed-key pin
+  applies: no reset, a skipped epoch or another signature gets the notice and no re-wrap.
 - **Impersonation.** While the owner acts as a user, the owner's tab opens the user's escrow wrap
   (handed out only by `POST /api/private/drive/escrow`, recorded in the admin audit) with the
   owner's escrow private key (or the earlier one the wrap is for), which it opens with the
@@ -951,7 +996,11 @@ under "Drive keys" above.
   revocation or deletion never touches the Drive's objects. Recipients get the share's own link
   key; each file's key travels inside the share's encrypted manifest.
 - **Not exported.** Export / import carries the Drive role options (with the roles), never Drive
-  content or keys.
+  content or keys; the owner recovery kit is a separate file, never part of an export.
+- **Archives.** The owner's archived Drive (after starting over) is stored like the Drive
+  (`archive_nodes`, `archive_wraps`, `archive_meta` in the owner's Drive object; its R2 objects
+  untouched), sealed under the old DK, counted in the owner's capacity, and reachable only by
+  the owner's archive routes (never as Drive items).
 
 ### API surface hardening
 

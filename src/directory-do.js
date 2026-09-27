@@ -283,6 +283,8 @@ const SQL_BATCH = 90;
  * (docs/DRIVE.md §9): as the user, or — the owner impersonating them — as the
  * user's own in their activity with the real actor in the admin audit.
  */
+/** The owner's own Drive recovery actions (admin audit only). */
+const OWNER_DRIVE_ACTIONS = ['drive.kit_exported', 'drive.kit_used', 'drive.kit_verified', 'drive.kit_keys_restored', 'drive.owner_reset', 'drive.archive_restored', 'drive.archive_deleted'];
 const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted'];
 // A user's own file reads (one row per opened file) are throttled so that they
 // cannot flood the log and push other entries out: one per file per minute, at
@@ -563,7 +565,7 @@ export class Directory extends DurableObject {
       }
       this.#setMeta(`authn_used:${authnHash}`, String(ts));
     });
-    return { ok: true, recovered };
+    return { ok: true, recovered, ...(recovered ? { ownerId: owner.id } : {}) };
   }
 
   // ── login / sessions ─────────────────────────────────────────────────────
@@ -1947,7 +1949,39 @@ export class Directory extends DurableObject {
       escrowPub: this.#meta('drive.escrowPub'),
       escrowSignPub: this.#meta('drive.escrowSignPub'),
       escrowSig: this.#meta('drive.escrowSig'),
+      ownerReset: this.#meta('drive.ownerReset'),
     };
+  }
+
+  /**
+   * The owner started over without a recovery kit (docs/DRIVE.md §3): a
+   * public record — the reset's epoch (one more than the last), the new
+   * escrow key's kid, the new signing public key and the time — that lets a
+   * user's browser move its Drive to the new escrow key by itself, once per
+   * reset (the maintainer's accepted exception to the signed-key pin).
+   */
+  async recordOwnerReset(ownerId, { kid, signPub }) {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner starts over.');
+    let prev;
+    try { prev = JSON.parse(this.#meta('drive.ownerReset') || 'null')?.epoch ?? 0; } catch { prev = 0; }
+    const rec = { epoch: prev + 1, kid, signPub: JSON.parse(signPub), at: now() };
+    this.#setMeta('drive.ownerReset', JSON.stringify(rec));
+    return { ok: true, reset: rec };
+  }
+
+  /**
+   * A user's browser moved their Drive to the escrow key of an owner reset by
+   * itself: a system event in the user's activity, and the same, naming the
+   * user, in the owner-only admin audit.
+   */
+  async driveEscrowRewrapped(userId, fingerprint) {
+    const u = this.#user(userId);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    const fp = String(fingerprint || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 16);
+    this.#log(null, userId, 'drive.escrow_rewrapped', `new escrow key ${fp}`);
+    this.#log({ id: null, adm: true }, userId, 'drive.escrow_rewrapped', `user=${u.username} new escrow key ${fp} (after the owner started over)`);
+    return { ok: true };
   }
 
   /**
@@ -2035,13 +2069,40 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
+  /** One user per kid users' escrow wraps are made for (the recovery kit's live check opens one wrap per kid). */
+  async escrowKidUsers() {
+    const seen = new Map();
+    for (const r of this.sql.exec("SELECT u.id AS id, m.v AS kid FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id ORDER BY u.created, u.id").toArray()) {
+      if (!seen.has(r.kid)) seen.set(r.kid, r.id);
+    }
+    return [...seen].map(([kid, userId]) => ({ kid, userId }));
+  }
+
+  /**
+   * The owner's own Drive recovery (docs/DRIVE.md §3), in the owner-only admin
+   * audit: a recovery kit downloaded (`drive.kit_exported`), used to restore
+   * the owner's Drive (`drive.kit_used`), checked (`drive.kit_verified`, with
+   * the verdict), or used to put back sealed escrow keys
+   * (`drive.kit_keys_restored`), and the owner's Drive started over without
+   * a kit (`drive.owner_reset`). Nothing of a kit reaches the server.
+   */
+  async driveOwnerLog(ownerId, action, detail = '') {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the administrator has this recovery kit.');
+    if (!OWNER_DRIVE_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    this.#log({ id: ownerId, adm: true }, ownerId, action, detail);
+    return { ok: true };
+  }
+
   async driveAdminAction(ownerId, userId, action, detail = '') {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
     const u = this.#user(userId);
     if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
-    if (!['drive.escrow_used', 'drive.pw_rewrapped'].includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    if (!['drive.escrow_used', 'drive.pw_rewrapped', 'drive.created_by_owner'].includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
     this.#log({ id: ownerId, adm: true }, userId, action, detail);
+    // The user's own activity: a Drive the owner set up for them is a system event, with no admin detail.
+    if (action === 'drive.created_by_owner') this.#log(null, userId, 'drive.created_by_owner', '');
     return { ok: true };
   }
 

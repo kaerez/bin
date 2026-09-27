@@ -146,11 +146,16 @@ describe('the owner’s escrow key and every Drive’s escrow wrap', () => {
     const oid = await ownerId();
     const b = await makeUser('esc-b');
     await enableDrive(b.id); // enabled, never set up
-    const allowedMeta = ['uid', 'driveSalt', 'pendingSec', 'escrowPin', 'pwStale', 'escrowPriv', 'escrowSignPriv', 'escrowPrivOld'];
+    // escrowVer, kit and archiveGen (the owner's only): the escrow key's version,
+    // the latest recovery kit's, the last archive's number — public numbers, kids and times.
+    const allowedMeta = ['uid', 'driveSalt', 'pendingSec', 'escrowPin', 'pwStale', 'escrowPriv', 'escrowSignPriv', 'escrowPrivOld', 'escrowVer', 'kit', 'archiveGen'];
     for (const uid of [oid, a.u.id, b.id]) {
       for (const k of await driveMeta(uid)) expect(allowedMeta, `${uid}: meta ${k}`).toContain(k);
       for (const k of await driveWrapKinds(uid)) expect(['pw', 'recovery', 'passkey', 'escrow'], `${uid}: wrap ${k}`).toContain(k);
     }
+    const ver = await runInDurableObject(driveOf(oid), (inst, state) => state.storage.sql.exec("SELECT v FROM meta WHERE k = 'escrowVer'").toArray()[0]?.v);
+    expect(Object.keys(JSON.parse(ver)).sort()).toEqual(['created', 'kid', 'version']);
+    for (const uid of [a.u.id, b.id]) for (const k of await driveMeta(uid)) expect(['escrowVer', 'kit', 'archiveGen']).not.toContain(k);
     // Only the owner's Drive holds (sealed) escrow keys.
     for (const k of await driveMeta(a.u.id)) expect(['escrowPriv', 'escrowSignPriv', 'escrowPrivOld']).not.toContain(k);
     // No other kind of wrap, and no hand-over key, is accepted or handed out.
@@ -166,7 +171,7 @@ describe('the owner’s escrow key and every Drive’s escrow wrap', () => {
     }
     // The Directory keeps only public escrow data for the Drive.
     const dirMeta = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT k FROM meta WHERE k LIKE 'drive.%'").toArray().map((r) => r.k));
-    for (const k of dirMeta) expect(k, k).toMatch(/^drive\.(escrowPub|escrowSignPub|escrowSig|escrowKid:.+)$/);
+    for (const k of dirMeta) expect(k, k).toMatch(/^drive\.(escrowPub|escrowSignPub|escrowSig|escrowKid:.+|ownerReset)$/);
     // And the Worker has no secret for the Drive.
     expect(Object.keys(env).filter((k) => /drive|handoff|escrow/i.test(k) && k !== 'DRIVE')).toEqual([]);
   });

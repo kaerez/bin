@@ -10,7 +10,7 @@ import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js'
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { requestOptions } from '../lib/webauthn.js';
-import { syncCredentialWraps } from './drive.js';
+import { syncCredentialWraps, driveOwnerRecovered } from './drive.js';
 
 const AUTH_LABEL = utf8('secbin-auth/v2');
 
@@ -91,6 +91,13 @@ export async function handleAuth(request, env, url) {
     if (!verifier) return err(400, 'invalid_credential', 'Invalid password proof.');
     const res = await directory(env).setup({ authnHash, username: body.username, salt: body.salt, t: body.t, verifier });
     if (!res.ok) return err(res.status, res.error, res.message);
+    if (res.recovered && res.ownerId) {
+      // The owner's passkeys and recovery codes are gone, so are their Drive
+      // wraps, and the password wrap is stale: the owner's recovery kit opens
+      // the Drive and the browser writes the new wrap (docs/DRIVE.md §3). No
+      // key is created or changed. The recovery itself never fails on this.
+      try { await driveOwnerRecovered(env, res.ownerId); } catch (e) { console.warn('secbin: owner Drive not marked after recovery', e && e.message ? e.message : e); }
+    }
     return json({ ok: true, recovered: res.recovered });
   }
 

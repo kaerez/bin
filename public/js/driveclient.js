@@ -15,11 +15,12 @@ import {
   createDriveKey, deriveSubkeys, sealField, openField, wrapPassword, unlockWithPassword, wrapRecovery, unlockWithRecovery,
   recoveryRef, DRIVE_PRF_SALT, wrapPrf, unlockWithPrf, createEscrowKeyPair, sealEscrowPriv, openEscrowKeyPair, sameEscrowKey,
   wrapEscrow, unlockWithEscrow, escrowKeyId, escrowWrapKeyId, sealEscrowPin, openEscrowPin, createSigningKeyPair, sealSigningKey,
-  openSigningKey, endorseEscrowKey, escrowKeyEndorsed, signingKeyId,
+  openSigningKey, endorseEscrowKey, escrowKeyEndorsed, signingKeyId, openPrivateKeyBytes, sealPrivateKeyBytes, privateKeyFromBytes, keyCheckValue,
   saveSessionKey, loadSessionKey, clearSessionKey, sessionKeyUser, saveImpersonationKey, loadImpersonationKey, clearImpersonationKey,
 } from './drivekeys.js';
 import { encryptPaste } from './crypto.js';
-import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from './bytes.js';
+import { randomBytes, utf8, fromUtf8, b64urlFromBytes, bytesFromB64url } from './bytes.js';
+import { sealDriveKit, parseDriveKit, openDriveKit, DriveKitError, kitKindFor } from './drivekit.js';
 import { CHUNK, encryptChunk, importFileKey, checkPath, MAX_ENTRIES, cleanName } from './files.js';
 import { detectMime, normalizeMime, OCTET } from './mime.js';
 import { RefsReader, saveFile, saveZip } from './downloads.js';
@@ -41,11 +42,18 @@ import { passkeyPrfOnly } from './passkeys.js';
  * Drive wrap, so a page can offer the passkey unlock only when one exists.
  */
 export class DriveLocked extends Error {
-  constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = []) {
+  constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = [], { ownerRecovery = false } = {}) {
     super(message);
     this.name = 'DriveLocked';
     this.reason = reason;
     this.credentialIds = credentialIds;
+    /**
+     * The owner's Drive, and nothing the owner can sign in with opens it (no
+     * passkey or recovery-code wrap; no password wrap, or only a stale one —
+     * e.g. after AUTHN recovery): the page offers the recovery kit, and
+     * starting over without one.
+     */
+    this.ownerRecovery = ownerRecovery;
   }
 }
 
@@ -114,6 +122,8 @@ const NOTICE_TEXT = {
   escrow_unsigned: 'Your escrow key is not signed by your escrow signing key on the server, so users’ Drives would not accept a new escrow key automatically.',
 };
 
+const NO_SIGNER = 'Your escrow signing key cannot be opened, so the escrow key cannot be signed: restore it from your owner recovery kit (Admin → Import / export), or replace the escrow key.';
+
 /** A sealed field as the server returns it (object, or its JSON text). */
 const sealed = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
 
@@ -140,7 +150,16 @@ async function loadState() {
 
 // ── unlocking ──────────────────────────────────────────────────────────────
 
-const NOT_READY = 'The Drive is not ready yet: the owner must sign in once. Try again later.';
+const NOT_READY = 'The Drive is not ready yet: the administrator must sign in once. Try again later.';
+const OWNER_LOST = 'Your Drive has no key you can open with your account now: restore it from your owner recovery kit, or start over.';
+
+/**
+ * Nothing the owner can sign in with opens the owner's Drive: no passkey or
+ * recovery-code wrap, and no password wrap or only a stale one (the password
+ * changed, e.g. by AUTHN recovery, and the wrap opens only with the old one).
+ * The server applies the same rule to starting over.
+ */
+const ownerCannotUnlock = (st) => !st.wraps.some((w) => w.kind === 'passkey' || w.kind === 'recovery' || (w.kind === 'pw' && !st.pwStale));
 
 /**
  * The Drive with this tab's DK → DriveClient. Throws DriveLocked when the tab
@@ -156,10 +175,13 @@ export async function openDrive({ user } = {}) {
   if (!st.wraps.length) {
     clearSessionKey();
     if (u.role !== 'owner' && !st.escrowPub) throw new DriveLocked(NOT_READY, 'not_ready');
+    // The owner's Drive with no key but an escrow key that some DK sealed: a
+    // new DK would lose it. The recovery kit (or starting over) instead.
+    if (u.role === 'owner' && !noOwnerKeys(st)) throw new DriveLocked(OWNER_LOST, 'locked', [], { ownerRecovery: true });
     throw new DriveLocked('Set up your Drive with your password.', 'setup');
   }
   const dk = loadSessionKey(u.id);
-  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st));
+  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st), { ownerRecovery: u.role === 'owner' && ownerCannotUnlock(st) });
   const client = await DriveClient.create(dk, u);
   await client.maintain(st).catch(() => {});
   return client;
@@ -187,6 +209,7 @@ export async function unlockDrive(creds = {}, { user, passwordVerified = false, 
   let via = null;
   if (!st.wraps.length) {
     if (u.role !== 'owner' && !st.escrowPub) throw new DriveLocked(NOT_READY, 'not_ready');
+    if (u.role === 'owner' && !noOwnerKeys(st)) throw new DriveLocked(OWNER_LOST, 'locked', [], { ownerRecovery: true });
     if (!creds.password && !(creds.prfOutput && creds.credentialId)) throw new DriveLocked('Set up your Drive with your password.', 'setup');
     dk = await setUp(u, st, creds);
     via = creds.password ? 'pw' : 'passkey';
@@ -195,7 +218,7 @@ export async function unlockDrive(creds = {}, { user, passwordVerified = false, 
     if (creds.password) { dk = await unlockWithPassword(creds.password, st.driveSalt, st.wraps); via = 'pw'; }
     if (!dk && creds.prfOutput && creds.credentialId) { dk = await unlockWithPrf(creds.prfOutput, creds.credentialId, st.wraps); via = 'passkey'; }
     if (!dk && creds.code) { dk = await unlockWithRecovery(creds.code, [...st.wraps, ...(Array.isArray(spentWraps) ? spentWraps : [])]); via = 'recovery'; }
-    if (!dk) throw new DriveLocked('That does not unlock your Drive.', 'wrong');
+    if (!dk) throw new DriveLocked('That does not unlock your Drive.', 'wrong', [], { ownerRecovery: u.role === 'owner' && ownerCannotUnlock(st) });
   }
   saveSessionKey(dk, u.id);
   const client = await DriveClient.create(dk, u);
@@ -219,11 +242,31 @@ export async function unlockDriveWithPasskey({ user } = {}) {
   return unlockDrive({ prfOutput: prf, credentialId }, { user });
 }
 
-/** The pin for the server's current escrow key: its kid, and the signing key's when that key signed it. */
+/** The pin for the server's current escrow key: its kid, the signing key's when that key signed it, and the latest owner reset's epoch. */
 async function pinFor(st) {
   const escrow = await escrowKeyId(st.escrowPub);
   const signed = st.escrowSignPub && st.escrowSig && await escrowKeyEndorsed(st.escrowSignPub, st.escrowPub, st.escrowSig);
-  return { escrow, sign: signed ? await signingKeyId(st.escrowSignPub) : null };
+  return { escrow, sign: signed ? await signingKeyId(st.escrowSignPub) : null, epoch: resetEpoch(st) };
+}
+
+const resetOf = (st) => (st.ownerReset && typeof st.ownerReset === 'object' && Number.isSafeInteger(st.ownerReset.epoch) && st.ownerReset.epoch > 0 ? st.ownerReset : null);
+const resetEpoch = (st) => (resetOf(st) ? resetOf(st).epoch : 0);
+
+/**
+ * The one case where a user's browser accepts an escrow key its pinned
+ * signing key did not sign (the maintainer's accepted exception, docs/DRIVE.md
+ * §3): the owner started over without a kit. Only when the server reports an
+ * owner reset exactly one epoch after the one pinned, whose new signing key is
+ * the server's signing key and signed the escrow key. Anything else (no reset,
+ * a signature that does not verify, a jump of more than one epoch) is the
+ * usual notice.
+ */
+async function resetApplies(st, pinned) {
+  const r = resetOf(st);
+  if (!r || !pinned || r.epoch !== (pinned.epoch ?? 0) + 1) return null;
+  if (!st.escrowSignPub || !sameEscrowKey(r.signPub, st.escrowSignPub)) return null;
+  if (!st.escrowSig || !(await escrowKeyEndorsed(r.signPub, st.escrowPub, st.escrowSig))) return null;
+  return r;
 }
 
 /**
@@ -248,11 +291,12 @@ async function setUp(u, st, creds) {
   }
   if (creds.prfOutput && creds.credentialId) set.push(await wrapPrf(dk, creds.prfOutput, creds.credentialId));
   if (u.role === 'owner') {
-    if (!st.escrowPub) Object.assign(body, await newOwnerKeys(dk));
+    if (noOwnerKeys(st)) Object.assign(body, await newOwnerKeys(dk));
   } else {
     set.push(await wrapEscrow(dk, st.escrowPub));
     body.escrowPin = await sealEscrowPin(dk, await pinFor(st));
   }
+  body.kcv = await keyCheckValue(dk);
   await api.setKeys(body);
   // Two tabs may set up at the same moment: the stored wraps decide.
   const after = await loadState();
@@ -263,6 +307,13 @@ async function setUp(u, st, creds) {
   if (other) return other;
   throw new DriveLocked('That does not unlock your Drive.', 'wrong');
 }
+
+/**
+ * No escrow key or signing key anywhere yet: only then are they created
+ * without the owner's say (the first set-up). Every later new pair or signing
+ * key is a rotation the owner confirms (rotateEscrowKey).
+ */
+const noOwnerKeys = (st) => !st.escrowPub && typeof st.escrowPriv !== 'string' && !st.escrowSignPub && typeof st.escrowSignPriv !== 'string';
 
 /** The owner's key material for a new escrow key: the pair, sealed, and signed (a new signing key unless `sign` is given). */
 async function newOwnerKeys(dk, sign = null) {
@@ -340,7 +391,7 @@ export async function unlockAtSignIn({ user, password, code, prfOutput, credenti
  * The owner acting as the user (`impersonating`) uses that user's own tab
  * slot, opened through the owner escrow when needed — never the owner's slot.
  */
-async function upkeepKey(userId, st, { password, impersonating = false } = {}) {
+async function upkeepKey(userId, st, { password, prfOutput, credentialId, impersonating = false } = {}) {
   if (impersonating) {
     const kept = loadImpersonationKey(userId);
     if (kept) return kept;
@@ -351,10 +402,10 @@ async function upkeepKey(userId, st, { password, impersonating = false } = {}) {
     }
   }
   let dk = loadSessionKey(userId);
-  if (!dk && password) {
-    dk = await unlockWithPassword(password, st.driveSalt, st.wraps);
-    if (dk) saveSessionKey(dk, userId);
-  }
+  if (!dk && password) dk = await unlockWithPassword(password, st.driveSalt, st.wraps);
+  // A step-up with a passkey that gave a PRF output (the Drive's salt) opens it too.
+  if (!dk && prfOutput && credentialId) dk = await unlockWithPrf(prfOutput, credentialId, st.wraps);
+  if (dk) saveSessionKey(dk, userId);
   return dk;
 }
 
@@ -377,15 +428,16 @@ async function withKey(userId, fn, opts) {
  * the user (`impersonating`): the server has dropped the old wrap (it opened
  * only with the old password), so the new one is added, not overwritten.
  */
-export async function updatePasswordWrap({ userId, newPassword, oldPassword, impersonating = false }) {
+export async function updatePasswordWrap({ userId, newPassword, oldPassword, prfOutput, credentialId, impersonating = false }) {
   let st;
   try { st = await loadState(); } catch { return 'off'; }
   if (!st.wraps.length) return 'off';
-  const dk = await upkeepKey(userId, st, { password: oldPassword, impersonating });
+  // The same DK, always: opened from the tab, the old password or the step-up's passkey (PRF).
+  const dk = await upkeepKey(userId, st, { password: oldPassword, prfOutput, credentialId, impersonating });
   if (!dk) return 'locked';
   if (impersonating && st.wraps.some((w) => w.kind === 'pw')) return 'kept';
   const { driveSalt, wrap } = await wrapPassword(dk, newPassword);
-  await api.setKeys({ driveSalt, set: [wrap], remove: [] });
+  await api.setKeys({ driveSalt, set: [wrap], remove: [], kcv: await keyCheckValue(dk) });
   return 'ok';
 }
 
@@ -434,13 +486,485 @@ export async function escrowPasswordReset({ ownerId, userId, newPassword, reason
   }
   const wraps = Array.isArray(r.wraps) ? r.wraps : [];
   const wrap = r.wrap || wraps.find((w) => w && w.kind === 'escrow');
+  // No Drive yet: the owner, who knows the new password, sets it up now.
+  if (!wrap && !wraps.length) return ownerSetsUpUserDrive({ ownerId, userId, password: newPassword });
   if (!wrap) return 'no_wrap';
   const priv = await escrowKeyFor(ownerDk, wrap, current, st.escrowPrivOld);
   const dk = priv ? await unlockWithEscrow(priv, wrap) : null;
   if (!dk) return 'failed';
+  // The same DK: only its password wrap is new (the server checks the key check value).
   const { driveSalt, wrap: pw } = await wrapPassword(dk, newPassword);
-  await api.setUserKeys(userId, { driveSalt, set: [pw] });
+  await api.setUserKeys(userId, { driveSalt, set: [pw], kcv: await keyCheckValue(dk) });
   return 'ok';
+}
+
+/**
+ * The owner sets up the Drive of a user who has none yet (an account just
+ * created, or reset before its first sign-in), knowing the password the
+ * owner set (docs/DRIVE.md §3): a new DK for the user, a `pw` wrap for that
+ * password, the `escrow` wrap for the current escrow key and the user's pin —
+ * only after the owner's own escrow key checks out (the private key opens and
+ * is the server's escrowPub, and the signing key signed it). → 'created' |
+ * 'locked' (the owner's Drive is locked here) | 'no_escrow' | 'mismatch' |
+ * 'exists' (the user has a Drive) | 'disabled' (their role has no Drive).
+ * The account never depends on it: without it, the user's first sign-in sets
+ * the Drive up.
+ */
+export async function ownerSetsUpUserDrive({ ownerId, userId, password }) {
+  const ownerDk = loadSessionKey(ownerId);
+  if (!ownerDk) return 'locked';
+  const st = await loadState().catch(() => null);
+  if (!st || typeof st.escrowPriv !== 'string' || !st.escrowPub) return 'no_escrow';
+  let pair;
+  try { pair = await openEscrowKeyPair(ownerDk, st.escrowPriv); } catch { return 'no_escrow'; }
+  if (!sameEscrowKey(pair.publicJwk, st.escrowPub)) return 'mismatch';
+  // As the owner's own unlock: the signing key opens, is the server's, and signed the escrow key.
+  if (st.escrowSignPub || typeof st.escrowSignPriv === 'string') {
+    const sign = typeof st.escrowSignPriv === 'string' ? await openSigningKey(ownerDk, st.escrowSignPriv).catch(() => null) : null;
+    if (!sign || !st.escrowSignPub || !sameEscrowKey(sign.publicJwk, st.escrowSignPub) || !(await escrowKeyEndorsed(st.escrowSignPub, st.escrowPub, st.escrowSig))) return 'mismatch';
+  }
+  const dk = createDriveKey();
+  try {
+    const { driveSalt, wrap } = await wrapPassword(dk, password);
+    await api.setUserKeys(userId, {
+      first: true, driveSalt, set: [wrap, await wrapEscrow(dk, st.escrowPub)], escrowPin: await sealEscrowPin(dk, await pinFor(st)), kcv: await keyCheckValue(dk),
+    });
+    return 'created';
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'drive_exists') return 'exists';
+    if (e instanceof ApiError && e.code === 'drive_disabled') return 'disabled';
+    if (e instanceof ApiError && e.code === 'escrow_not_ready') return 'no_escrow';
+    throw e;
+  } finally {
+    dk.fill(0); // the owner's browser keeps nothing of the user's DK
+  }
+}
+
+// ── the owner recovery kit (docs/DRIVE.md §3), for the export screen ──────
+//
+// A file the owner downloads and keeps offline: the owner's DK and a
+// snapshot of the escrow keys (the current one, the signing key, every
+// earlier one still kept), sealed with a passphrase (drivekit.js, kind 'owner'). It is made,
+// opened and checked only here; nothing of it reaches the server, which only
+// records that a kit was downloaded, used or checked (admin audit).
+
+/** A kid's short fingerprint: its first 8 characters, in two groups. */
+export const kidFingerprint = (kid) => (typeof kid === 'string' && kid.length >= 8 ? `${kid.slice(0, 4)}-${kid.slice(4, 8)}` : '—');
+
+async function ownerOnly(user) {
+  const u = await whoAmI(user);
+  if (u.role !== 'owner') throw new ApiError('Only the administrator has this recovery kit.', 403, 'owner_only');
+  if (u.impersonating) throw new ApiError('The recovery kit is the owner’s own: return to your account first.', 403, 'impersonating');
+  return u;
+}
+
+/**
+ * The kit status from the owner's Drive state → { state: 'fresh' | 'stale'
+ * (the escrow key was replaced since the latest kit) | 'none' (no kit yet) |
+ * 'no_escrow', version, kid, fingerprint, created, kit: { version, kid, at }
+ * | null } (times in seconds; `version` null when not recorded).
+ */
+export function kitStatusOf(st) {
+  const v = st && st.escrowVersion && typeof st.escrowVersion === 'object' ? st.escrowVersion : null;
+  const kit = st && st.kit && typeof st.kit === 'object' ? st.kit : null;
+  if (!v || typeof v.kid !== 'string') return { state: 'no_escrow', version: null, kid: null, fingerprint: '—', created: null, kit };
+  return {
+    state: kit && kit.kid === v.kid ? 'fresh' : kit ? 'stale' : 'none',
+    version: Number.isSafeInteger(v.version) ? v.version : null, kid: v.kid, fingerprint: kidFingerprint(v.kid), created: v.created ?? null, kit,
+  };
+}
+
+/** The owner's kit status (a fresh read of the Drive state). */
+export async function ownerKitStatus({ user } = {}) {
+  await ownerOnly(user);
+  return kitStatusOf(await loadState());
+}
+
+/** A sealed private key of the owner's Drive opened with `dk` → { privateKey, publicJwk, kid, pkcs8 }, or null. */
+async function serverKey(dk, kind, data) {
+  if (typeof data !== 'string') return null;
+  try {
+    const pkcs8 = await openPrivateKeyBytes(dk, kind, data);
+    return { ...(await privateKeyFromBytes(kind, pkcs8)), pkcs8 };
+  } catch {
+    return null;
+  }
+}
+
+const keyEntry = (k) => ({ kid: k.kid, pub: k.publicJwk, priv: b64urlFromBytes(k.pkcs8) });
+
+/**
+ * Build a kit with the owner's DK from this tab → { text, version, kit,
+ * unreadable } (`text`: the file; `kit`: what the server recorded;
+ * `unreadable`: fingerprints of earlier keys that did not open, left out).
+ * The server records the download (with the escrow key's version) only
+ * after the owner's password or a passkey (`step`); the file is given out
+ * only then. Each call makes a new file with the whole current snapshot.
+ */
+export async function buildOwnerKit({ user, passphrase = '', step } = {}) {
+  const u = await ownerOnly(user);
+  const dk = loadSessionKey(u.id);
+  if (!dk) throw new DriveLocked('Unlock your own Drive in this tab first (Drive), then download the kit.', 'owner_locked');
+  const st = await loadState();
+  if (!st.escrowPub || typeof st.escrowPriv !== 'string') throw new Error('Your Drive holds no escrow key yet: open your Drive once, then download the kit.');
+  const cur = await serverKey(dk, 'escrow', st.escrowPriv);
+  if (!cur) throw new Error('Your escrow private key does not open with the Drive key in this tab: fix it on the Drive page (or restore from a kit) first.');
+  if (!sameEscrowKey(cur.publicJwk, st.escrowPub)) throw new Error('The escrow public key on the server is not the one your escrow private key belongs to: review it on the Drive page first.');
+  let sign = null;
+  if (st.escrowSignPub || typeof st.escrowSignPriv === 'string') {
+    const k = await serverKey(dk, 'sign', st.escrowSignPriv);
+    if (!k || !st.escrowSignPub || !sameEscrowKey(k.publicJwk, st.escrowSignPub)) throw new Error('Your escrow signing key does not open, or is not the server’s: review it on the Drive page first.');
+    sign = keyEntry(k);
+  }
+  const old = [];
+  const unreadable = [];
+  for (const [kid, data] of Object.entries(st.escrowPrivOld && typeof st.escrowPrivOld === 'object' ? st.escrowPrivOld : {})) {
+    if (kid === cur.kid) continue;
+    const k = await serverKey(dk, 'escrow', data);
+    if (k && k.kid === kid) old.push(keyEntry(k)); else unreadable.push(kidFingerprint(kid));
+  }
+  const v = st.escrowVersion || {};
+  const payload = {
+    v: 1, ownerId: u.id, made: Math.floor(Date.now() / 1000),
+    version: Number.isSafeInteger(v.version) ? v.version : null, created: v.created ?? null, kid: cur.kid,
+    dk: b64urlFromBytes(dk), escrow: keyEntry(cur), sign, old,
+  };
+  const text = await sealDriveKit('owner', payload, { accountId: u.id, origin: location.origin, passphrase: String(passphrase ?? '') });
+  const r = await api.kit({ event: 'exported', ...(step || {}) });
+  return { text, version: payload.version, kit: r.kit ?? null, unreadable };
+}
+
+/**
+ * Open a kit file's text for `u` → { dk, keys: Map(kid → escrow key), sign,
+ * version, created, currentKid, made }. Every key's public key and kid are
+ * derived from its private key here, never taken from the file. Throws
+ * DriveKitError ('format' | 'kind' | 'owner' | 'auth' | 'payload').
+ */
+async function readKit(text, passphrase, u) {
+  const payload = await openDriveKit(parseDriveKit(text), { kind: kitKindFor(u.role), accountId: u.id, origin: location.origin, passphrase: String(passphrase ?? '') });
+  let dk;
+  try { dk = bytesFromB64url(payload.dk); } catch { dk = null; }
+  if (!dk || dk.length !== 32 || payload.ownerId !== u.id) throw new DriveKitError('The kit opened, but its content is not valid.', 'payload');
+  const load = async (kind, e) => {
+    if (!e || typeof e.priv !== 'string') return null;
+    try {
+      const pkcs8 = bytesFromB64url(e.priv);
+      return { ...(await privateKeyFromBytes(kind, pkcs8)), pkcs8 };
+    } catch {
+      return null;
+    }
+  };
+  const keys = new Map();
+  const current = await load('escrow', payload.escrow);
+  for (const k of [current, ...await Promise.all((Array.isArray(payload.old) ? payload.old : []).slice(0, 64).map((e) => load('escrow', e)))]) if (k) keys.set(k.kid, k);
+  return {
+    dk, keys, sign: await load('sign', payload.sign), currentKid: current ? current.kid : null,
+    version: Number.isSafeInteger(payload.version) ? payload.version : null, created: Number.isSafeInteger(payload.created) ? payload.created : null,
+    made: Number.isSafeInteger(payload.made) ? payload.made : null,
+  };
+}
+
+/** Overwrite a kit's key bytes once they are no longer needed (best effort). */
+function forget(kit, keepDk = false) {
+  if (!kit) return;
+  if (!keepDk && kit.dk) kit.dk.fill(0);
+  for (const k of kit.keys.values()) k.pkcs8.fill(0);
+  if (kit.sign) kit.sign.pkcs8.fill(0);
+}
+
+/**
+ * Restore the owner's Drive from a kit file's text (after AUTHN recovery, or
+ * when the owner's Drive lost an escrow key). `password` is the account's
+ * password now and `step` its confirmation ({ current }): the server checks
+ * it first (and records `drive.kit_used`), then the kit's DK is confirmed —
+ * the server's sealed escrow key must open with it and be the server's
+ * escrowPub, or, when that copy is missing or does not open, the kit's
+ * snapshot must hold the server's current escrow key — and any escrow key the
+ * server's copy of which is missing or wrong is re-sealed from the snapshot
+ * and put back (only for the server's own public keys and kids in use). Then
+ * DK goes into the tab's slot and a fresh `pw` wrap is written. Nothing new
+ * is created: no escrow key, no signing key. → { client, restored, missing }.
+ */
+export async function restoreOwnerKit({ user, text, passphrase = '', password, step } = {}) {
+  const u = await ownerOnly(user);
+  if (typeof password !== 'string' || !password || !step) throw new Error('Enter your account password: the Drive’s new password key is made with it.');
+  const kit = await readKit(text, passphrase, u);
+  let done = false;
+  try {
+    const st = await loadState();
+    if (!st.escrowPub) throw new DriveKitError('The server has no escrow public key, so this kit cannot be checked against it.', 'dk');
+    const currentKid = await escrowKeyId(st.escrowPub);
+    const cur = await serverKey(kit.dk, 'escrow', st.escrowPriv);
+    const curOk = !!cur && sameEscrowKey(cur.publicJwk, st.escrowPub);
+    const snapCur = kit.keys.get(currentKid) || null;
+    if (!curOk && !snapCur) {
+      // Not this Drive's DK: perhaps the Drive's before the owner started over (an archive).
+      const arch = cur ? null : await findArchive(kit, st);
+      if (arch) {
+        const r = await restoreArchive(u, kit, st, arch, password, step);
+        done = true;
+        return r;
+      }
+      throw new DriveKitError(cur
+        ? 'The escrow public key on the server is not the one your Drive and this kit hold: it may have been replaced. Nothing was changed.'
+        : 'This kit’s Drive key does not open your escrow key, and its snapshot does not hold the server’s current escrow key: it is not a kit of this Drive. Nothing was changed.', 'dk');
+    }
+    const body = {};
+    const missing = [];
+    if (!curOk) body.escrowPriv = { pub: snapCur.publicJwk, data: await sealPrivateKeyBytes(kit.dk, 'escrow', snapCur.pkcs8) };
+    if (st.escrowSignPub) {
+      const sk = await serverKey(kit.dk, 'sign', st.escrowSignPriv);
+      if (!sk || !sameEscrowKey(sk.publicJwk, st.escrowSignPub)) {
+        if (kit.sign && sameEscrowKey(kit.sign.publicJwk, st.escrowSignPub)) body.escrowSignPriv = { pub: kit.sign.publicJwk, data: await sealPrivateKeyBytes(kit.dk, 'sign', kit.sign.pkcs8) };
+        else missing.push('signing key');
+      }
+    }
+    const old = {};
+    const kept = st.escrowPrivOld && typeof st.escrowPrivOld === 'object' ? st.escrowPrivOld : {};
+    for (const kid of (Array.isArray(st.escrowKids) ? st.escrowKids : []).filter((x) => x !== currentKid)) {
+      const k = await serverKey(kit.dk, 'escrow', kept[kid]);
+      if (k && k.kid === kid) continue;
+      const s = kit.keys.get(kid);
+      if (s) old[kid] = { pub: s.publicJwk, data: await sealPrivateKeyBytes(kit.dk, 'escrow', s.pkcs8) };
+      else missing.push(`earlier escrow key ${kidFingerprint(kid)}`);
+    }
+    if (Object.keys(old).length) body.escrowPrivOld = old;
+    // The password first (the new pw wrap is made with it), and the record.
+    await api.kit({ event: 'used', ...(kit.version ? { version: kit.version } : {}), ...step });
+    if (Object.keys(body).length) await api.kitKeys({ ...body, ...step });
+    saveSessionKey(kit.dk, u.id);
+    const { driveSalt, wrap } = await wrapPassword(kit.dk, password);
+    await api.setKeys({ driveSalt, set: [wrap], remove: [], kcv: await keyCheckValue(kit.dk), ...step });
+    const client = await DriveClient.create(kit.dk, u);
+    await client.maintain(await loadState()).catch(() => {});
+    done = true;
+    return {
+      client, missing,
+      restored: { escrow: !!body.escrowPriv, signing: !!body.escrowSignPriv, earlier: Object.keys(old).length },
+    };
+  } finally {
+    forget(kit, done);
+  }
+}
+
+/** The archive (after starting over) whose sealed escrow key opens with the kit's DK → { gen, view }, or null. */
+async function findArchive(kit, st) {
+  for (const a of Array.isArray(st.archives) ? st.archives : []) {
+    const view = await api.archive(a.gen);
+    if (await serverKey(kit.dk, 'escrow', view.escrowPriv)) return { gen: a.gen, view };
+  }
+  return null;
+}
+
+/**
+ * Restore archive `arch` (the owner's Drive before starting over, under the
+ * kit's DK) into the Drive as it is now (under its own DK: this tab's, or
+ * opened with `password`): every item comes back, its name, metadata and file
+ * key re-sealed under the Drive's DK (content is untouched: each file has its
+ * own key); a top-level name the Drive already has gets " (2)"… (as uploads
+ * do); the archive's escrow keys that users' wraps are still made for join
+ * the owner's earlier keys, so those Drives open again. The kit's DK is not
+ * kept.
+ */
+async function restoreArchive(u, kit, st, arch, password, step) {
+  const dk = loadSessionKey(u.id) || await unlockWithPassword(password, st.driveSalt, st.wraps);
+  if (!dk) throw new DriveLocked('This kit is for your Drive before you started over. Unlock your Drive (with your password) first, then restore.', 'locked');
+  await api.kit({ event: 'used', ...(kit.version ? { version: kit.version } : {}), ...step });
+  const all = [];
+  for (let v = arch.view; ; v = await api.archive(arch.gen, v.next)) {
+    all.push(...(Array.isArray(v.nodes) ? v.nodes : []));
+    if (!v.next) break;
+  }
+  const byId = new Map(all.map((n) => [n.id, n]));
+  const depth = (n) => { let d = 0; for (let x = n; x && x.parent !== ROOT && byId.has(x.parent) && d < 70; x = byId.get(x.parent)) d++; return d; };
+  all.sort((a, b) => depth(a) - depth(b));
+  const from = await deriveSubkeys(kit.dk);
+  const to = await deriveSubkeys(dk);
+  const client = await DriveClient.create(dk, u);
+  const taken = (await client.names(ROOT)).names;
+  const reseal = async (key, field, n, v, name) => {
+    try {
+      const bytes = await openField(key.from, field, n.id, sealed(v));
+      return sealField(key.to, field, n.id, name ? name(fromUtf8(bytes)) : bytes);
+    } catch {
+      return v; // does not open: kept as it was (unreadable, as before)
+    }
+  };
+  const names = { from: from.names, to: to.names };
+  const files = { from: from.files, to: to.files };
+  const out = [];
+  for (const n of all) {
+    const top = n.parent === ROOT;
+    const x = { id: n.id, name: await reseal(names, 'name', n, n.name, (t) => (top ? uniqueName(taken, cleanName(t)) : t)) };
+    if (n.meta) x.meta = await reseal(names, 'meta', n, n.meta);
+    if (n.fk) x.fk = await reseal(files, 'fk', n, n.fk);
+    out.push(x);
+  }
+  for (let i = 0; i < out.length; i += 200) await api.archiveNodes(arch.gen, { nodes: out.slice(i, i + 200), ...step });
+  // The archive's escrow keys users are still on: back among the owner's earlier keys.
+  const pool = new Map(kit.keys);
+  for (const data of [arch.view.escrowPriv, ...Object.values(arch.view.escrowPrivOld || {})]) {
+    const k = await serverKey(kit.dk, 'escrow', data);
+    if (k && !pool.has(k.kid)) pool.set(k.kid, k);
+  }
+  const currentKid = st.escrowPub ? await escrowKeyId(st.escrowPub) : null;
+  const old = {};
+  const missing = [];
+  for (const kid of (Array.isArray(st.escrowKids) ? st.escrowKids : []).filter((x) => x !== currentKid)) {
+    const have = await serverKey(dk, 'escrow', st.escrowPrivOld && st.escrowPrivOld[kid]);
+    if (have && have.kid === kid) continue;
+    const k = pool.get(kid);
+    if (k) old[kid] = { pub: k.publicJwk, data: await sealPrivateKeyBytes(dk, 'escrow', k.pkcs8) }; else missing.push(`earlier escrow key ${kidFingerprint(kid)}`);
+  }
+  for (const k of pool.values()) if (!kit.keys.has(k.kid)) k.pkcs8.fill(0);
+  await api.archiveFinish(arch.gen, { ...(Object.keys(old).length ? { escrowPrivOld: old } : {}), ...step });
+  saveSessionKey(dk, u.id);
+  await client.maintain(await loadState()).catch(() => {});
+  return { client, missing, restored: { escrow: false, signing: false, earlier: Object.keys(old).length, archive: arch.gen, items: all.length } };
+}
+
+/**
+ * The owner deletes archive `gen` (the Drive before starting over): with the
+ * typed username (`confirm`) and the step-up. No kit can restore it after.
+ */
+export async function deleteOwnerArchive({ user, gen, confirm, step } = {}) {
+  await ownerOnly(user);
+  await api.archiveDelete(gen, { confirm, ...(step || {}) });
+}
+
+/**
+ * The owner starts over without a recovery kit (docs/DRIVE.md §3): only when
+ * nothing the owner can sign in with opens the owner's Drive, with the typed
+ * username (`confirm`) and the step-up of the account's password (`password`,
+ * `step`). A new DK, a new escrow pair and signing key and a `pw` wrap are
+ * made here; the server empties the owner's Drive (items, files, wraps, sealed
+ * keys; its shares end) and stores them. No user's Drive changes: each user's
+ * browser sees an escrow key its pinned signing key did not sign and asks the
+ * user ("Trust the new key") before re-wrapping. → a DriveClient.
+ */
+export async function startOverOwnerDrive({ user, confirm, password, step } = {}) {
+  const u = await ownerOnly(user);
+  if (typeof password !== 'string' || !password || !step) throw new Error('Enter your account password.');
+  const st = await loadState();
+  if (!ownerCannotUnlock(st) || (st.wraps.some((w) => w.kind === 'pw') && await unlockWithPassword(password, st.driveSalt, st.wraps))) {
+    throw new DriveLocked('Your Drive can still be unlocked: unlock it instead of starting over.', 'unlockable');
+  }
+  const dk = createDriveKey();
+  const { driveSalt, wrap } = await wrapPassword(dk, password);
+  const r = await api.startOver({ confirm, driveSalt, set: [wrap], ...(await newOwnerKeys(dk)), kcv: await keyCheckValue(dk), ...step });
+  saveSessionKey(dk, u.id);
+  const client = await DriveClient.create(dk, u);
+  await client.maintain(await loadState()).catch(() => {});
+  return { client, escrowVersion: r.escrowVersion ?? null };
+}
+
+/**
+ * The read-only check of a kit file's text (docs/DRIVE.md §3, "Verify kit"):
+ * nothing is written except the admin audit's `drive.kit_verified` (and the
+ * `drive.escrow_used` of each user's escrow wrap opened as a live proof).
+ * → { verdict: 'complete' | 'incomplete' | 'failed', checks: [{ id, status:
+ * 'pass' | 'warn' | 'fail' | 'skip', label, detail }], fixes: [text],
+ * version, logged }.
+ */
+export async function verifyOwnerKit({ user, text, passphrase = '' } = {}) {
+  const u = await ownerOnly(user);
+  const checks = [];
+  const issues = new Set();
+  const add = (id, status, label, detail, issue = id) => { checks.push({ id, status, label, detail }); if (status === 'fail' || status === 'warn') issues.add(issue); };
+  let kit = null;
+  const finish = async (verdict, fixes) => {
+    forget(kit);
+    let logged = true;
+    try { await api.kit({ event: 'verified', verdict, issues: [...issues], ...(kit && kit.version ? { version: kit.version } : {}) }); } catch { logged = false; }
+    return { verdict, checks, fixes, version: kit ? kit.version : null, logged };
+  };
+  const FRESH = 'Download a fresh kit (Download kit, above) and store it offline; then verify the new file.';
+  // 1. The format, and that it is this owner's kit (bound to this server).
+  let env;
+  try { env = parseDriveKit(text); } catch (e) { add('format', 'fail', 'Format and owner', e.message); return finish('failed', ['Choose the kit file you saved (secbin-owner-kit-….json).']); }
+  if (env.kind !== 'owner') { add('format', 'fail', 'Format and owner', 'This is a user’s Drive recovery kit, not an owner recovery kit.', 'format'); return finish('failed', ['Choose an owner recovery kit.']); }
+  if (env.accountId !== u.id) { add('format', 'fail', 'Format and owner', 'This kit belongs to another owner account.', 'owner'); return finish('failed', ['Choose a kit made by this owner account.']); }
+  add('format', 'pass', 'Format and owner', `An owner recovery kit for your account, for ${location.origin}.`);
+  // 2. It decrypts and its authentication tag is valid (the passphrase, this owner, this origin).
+  try {
+    kit = await readKit(text, passphrase, u);
+  } catch (e) {
+    add('auth', 'fail', 'Decrypts, authentication tag valid', e instanceof DriveKitError ? e.message : 'The kit could not be opened.');
+    return finish('failed', ['Check the passphrase. A kit opens only on the server it was made on, and a changed file never opens.']);
+  }
+  add('auth', 'pass', 'Decrypts, authentication tag valid', 'The passphrase is right and the file is unchanged.');
+  const st = await loadState();
+  const cv = st.escrowVersion && Number.isSafeInteger(st.escrowVersion.version) ? st.escrowVersion.version : null;
+  const currentKid = st.escrowPub ? await escrowKeyId(st.escrowPub) : null;
+  // 3. Its DK is the owner's DK: it opens the server's sealed escrow key, which is escrowPub.
+  const cur = await serverKey(kit.dk, 'escrow', st.escrowPriv);
+  const dkOk = !!cur && !!st.escrowPub && sameEscrowKey(cur.publicJwk, st.escrowPub);
+  if (dkOk) add('dk', 'pass', 'The Drive key is your Drive’s', 'It opens the server’s sealed escrow key, whose public key is the server’s escrow public key.');
+  else if (typeof st.escrowPriv !== 'string') add('dk', 'warn', 'The Drive key is your Drive’s', 'Not confirmed: the server holds no sealed escrow key to open (Restore puts it back from this kit).');
+  else add('dk', 'fail', 'The Drive key is your Drive’s', cur ? 'It opens the server’s sealed escrow key, but that key is not the server’s escrow public key.' : 'It does not open the server’s sealed escrow key: this kit cannot restore your Drive.');
+  // What the Drive key still reaches on the server (for keys the snapshot lacks).
+  const viaDk = async (kid) => {
+    if (kid === currentKid) return dkOk ? cur : null;
+    const k = await serverKey(kit.dk, 'escrow', st.escrowPrivOld && st.escrowPrivOld[kid]);
+    return k && k.kid === kid ? k : null;
+  };
+  // A snapshot that lacks something the Drive key still reaches is stale (a warning), else it fails.
+  const addStale = (id, label, detail, issue = id) => add(id, dkOk ? 'warn' : 'fail', label, dkOk ? `${detail} It still works through the Drive key.` : detail, issue);
+  // 4. The snapshot's current escrow key is the server's.
+  const snapCur = currentKid ? kit.keys.get(currentKid) : null;
+  if (!currentKid) add('current', 'fail', 'Current escrow key in the snapshot', 'The server has no escrow public key.');
+  else if (snapCur && sameEscrowKey(snapCur.publicJwk, st.escrowPub)) add('current', 'pass', 'Current escrow key in the snapshot', `Key ${kidFingerprint(currentKid)}${cv ? ` (version ${cv})` : ''}, the server’s escrow public key.`);
+  else addStale('current', 'Current escrow key in the snapshot', `The snapshot holds key ${kidFingerprint(kit.currentKid)}, not the server’s current key ${kidFingerprint(currentKid)}${cv ? ` (version ${cv})` : ''}.`);
+  // 5. The signing key is the server's, and its signature over escrowPub verifies.
+  if (!st.escrowSignPub) add('signing', 'skip', 'Signing key and signature', 'The server has no escrow signing key.');
+  else if (!kit.sign || !sameEscrowKey(kit.sign.publicJwk, st.escrowSignPub)) {
+    const sk = await serverKey(kit.dk, 'sign', st.escrowSignPriv);
+    if (sk && sameEscrowKey(sk.publicJwk, st.escrowSignPub)) addStale('signing', 'Signing key and signature', 'The snapshot does not hold the server’s signing key.');
+    else add('signing', 'fail', 'Signing key and signature', 'The snapshot does not hold the server’s signing key.');
+  } else if (!st.escrowPub || !(await escrowKeyEndorsed(st.escrowSignPub, st.escrowPub, st.escrowSig))) add('signing', 'fail', 'Signing key and signature', 'The snapshot’s signing key is the server’s, but the signature over the escrow public key does not verify.');
+  else add('signing', 'pass', 'Signing key and signature', `Key ${kidFingerprint(kit.sign.kid)}: the server’s, and its signature over the escrow public key verifies.`);
+  // 6. Every earlier key still in use is in the snapshot.
+  const past = [...new Set([...(Array.isArray(st.escrowKids) ? st.escrowKids : []), ...Object.keys(st.escrowPrivOld && typeof st.escrowPrivOld === 'object' ? st.escrowPrivOld : {})])].filter((k) => k && k !== currentKid);
+  const lacking = [];
+  const lost = [];
+  for (const kid of past) {
+    if (kit.keys.has(kid)) continue;
+    if (await viaDk(kid)) lacking.push(kidFingerprint(kid)); else lost.push(kidFingerprint(kid));
+  }
+  if (!past.length) add('past', 'pass', 'Earlier escrow keys still in use', 'None is in use: every user’s Drive is on the current key.');
+  else if (!lacking.length && !lost.length) add('past', 'pass', 'Earlier escrow keys still in use', `All ${past.length} in the snapshot: ${past.map(kidFingerprint).join(', ')}.`);
+  else if (lost.length) add('past', 'fail', 'Earlier escrow keys still in use', `Not in the snapshot: ${[...lost, ...lacking].join(', ')}.${lacking.length ? ` (${lacking.join(', ')} still work through the Drive key.)` : ''}`);
+  else add('past', 'warn', 'Earlier escrow keys still in use', `Not in the snapshot: ${lacking.join(', ')}. They still work through the Drive key.`);
+  // 7. The kit's version against the current one.
+  if (currentKid && kit.currentKid === currentKid) add('version', 'pass', 'Kit version', `Current${cv ? ` (version ${cv})` : ''}.`);
+  else if (dkOk) add('version', 'warn', 'Kit version', `Older version ${kit.version ?? '?'}${cv ? ` (the current one is ${cv})` : ''}: still works through the Drive key, but download a fresh kit for a complete snapshot.`);
+  else add('version', 'fail', 'Kit version', `Older version ${kit.version ?? '?'}${cv ? ` (the current one is ${cv})` : ''}, and its Drive key does not open your escrow key.`);
+  // 8. A live proof: one user's escrow wrap per kid in use opens (nothing is written; the DK found is discarded).
+  let probes;
+  try { probes = (await api.kitProbe()).probes || []; } catch { probes = null; }
+  if (probes === null) add('proof', 'fail', 'Users’ escrow wraps open', 'The users’ escrow wraps could not be fetched.');
+  else if (!probes.length) add('proof', 'skip', 'Users’ escrow wraps open', 'No user’s Drive has an escrow wrap yet.');
+  else {
+    const direct = [];
+    const through = [];
+    const failed = [];
+    for (const { kid, wrap } of probes) {
+      const s = kit.keys.get(kid);
+      let opened = s ? await unlockWithEscrow(s.privateKey, wrap) : null;
+      if (opened) { opened.fill(0); direct.push(kidFingerprint(kid)); continue; }
+      const k = await viaDk(kid);
+      opened = k ? await unlockWithEscrow(k.privateKey, wrap) : null;
+      if (opened) { opened.fill(0); through.push(kidFingerprint(kid)); } else failed.push(kidFingerprint(kid));
+    }
+    if (failed.length) add('proof', 'fail', 'Users’ escrow wraps open', `Not opened: a Drive wrapped to ${failed.join(', ')}.`);
+    else if (through.length) add('proof', 'warn', 'Users’ escrow wraps open', `Opened with the snapshot: ${direct.join(', ') || 'none'}; only through the Drive key: ${through.join(', ')}.`);
+    else add('proof', 'pass', 'Users’ escrow wraps open', `One user’s Drive per key opened with the snapshot: ${direct.join(', ')}.`);
+  }
+  const bad = checks.filter((c) => c.status === 'fail' || c.status === 'warn');
+  if (!bad.length) return finish('complete', []);
+  const fixes = [FRESH];
+  if (checks.some((c) => c.id === 'dk' && c.status === 'fail')) fixes.unshift('This kit’s Drive key does not open your escrow key: it cannot restore your Drive.');
+  return finish('incomplete', fixes);
 }
 
 // ── the client ─────────────────────────────────────────────────────────────
@@ -459,6 +983,10 @@ export class DriveClient {
      * (restoreEscrowKey / newEscrowKey, with the owner's confirmation).
      */
     this.notice = null;
+    /** The owner's recovery-kit status (kitStatusOf), after maintain(); null for users. */
+    this.kit = null;
+    /** The owner's archived Drives (after starting over): [{ gen, at, items, bytes }]. */
+    this.archives = [];
   }
 
   static async create(dk, user) {
@@ -477,6 +1005,8 @@ export class DriveClient {
     const body = { set: [], remove: [] };
     const wraps = st.wraps || [];
     if (this.user.role === 'owner') {
+      this.kit = kitStatusOf(st);
+      this.archives = Array.isArray(st.archives) ? st.archives : [];
       await this.#checkOwnerKeys(st, body);
     } else if (st.escrowPub) {
       const current = wraps.find((w) => w.kind === 'escrow');
@@ -490,12 +1020,21 @@ export class DriveClient {
       const ok = pinned
         ? pinned.escrow === kid || (!!pinned.sign && pinned.sign === next.sign)
         : !st.escrowPin && (wrapKid ?? kid) === kid; // a pin that does not open counts as changed
-      if (!ok) {
+      const reset = ok ? null : await resetApplies(st, pinned);
+      if (reset) {
+        // The owner started over: moved to the reset's key once, and the
+        // reset's epoch pinned so the same reset never applies twice.
+        body.set.push(await wrapEscrow(this.dk, st.escrowPub));
+        body.escrowPin = await sealEscrowPin(this.dk, { escrow: kid, sign: await signingKeyId(reset.signPub), epoch: reset.epoch });
+        body.escrowReset = reset.epoch;
+        this.notice = { kind: 'escrow_rotated', text: 'Your administrator rotated a security key; nothing for you to do.' };
+      } else if (!ok) {
         this.notice = { kind: 'escrow_changed', kid, text: 'The administrator’s escrow key has changed since your Drive last used it, and the change is not signed by the key your Drive trusts, so your Drive was not re-keyed for it.' };
       } else {
         if (wrapKid !== kid) body.set.push(await wrapEscrow(this.dk, st.escrowPub));
-        const pin = { escrow: kid, sign: (pinned && pinned.sign) || next.sign }; // a pinned signing key never changes silently
-        if (!pinned || pinned.escrow !== pin.escrow || pinned.sign !== pin.sign) body.escrowPin = await sealEscrowPin(this.dk, pin);
+        // A pinned signing key never changes silently; the pinned reset epoch stays.
+        const pin = { escrow: kid, sign: (pinned && pinned.sign) || next.sign, epoch: pinned ? (pinned.epoch ?? 0) : next.epoch };
+        if (!pinned || pinned.escrow !== pin.escrow || pinned.sign !== pin.sign || (pinned.epoch ?? 0) !== pin.epoch) body.escrowPin = await sealEscrowPin(this.dk, pin);
       }
     }
     if (prfOutput && credentialId && via !== 'passkey' && !wraps.some((w) => w.kind === 'passkey' && w.ref === credentialId)) {
@@ -506,6 +1045,7 @@ export class DriveClient {
       const { driveSalt, wrap } = await wrapPassword(this.dk, password);
       body.driveSalt = driveSalt;
       body.set.push(wrap);
+      body.kcv = await keyCheckValue(this.dk);
     }
     if (body.set.length || body.escrowPriv || body.escrowPin) await api.setKeys(body);
   }
@@ -518,7 +1058,7 @@ export class DriveClient {
    */
   async #checkOwnerKeys(st, body) {
     if (typeof st.escrowPriv !== 'string') {
-      if (st.escrowPub) { this.#warn('escrow_missing'); return; }
+      if (!noOwnerKeys(st)) { this.#warn('escrow_missing'); return; }
       Object.assign(body, await newOwnerKeys(this.dk));
       return;
     }
@@ -559,15 +1099,13 @@ export class DriveClient {
     const pair = await openEscrowKeyPair(this.dk, st.escrowPriv);
     const sign = typeof st.escrowSignPriv === 'string' ? await openSigningKey(this.dk, st.escrowSignPriv).catch(() => null) : null;
     const body = { escrowPub: pair.publicJwk, ...step };
+    // A restore never makes a new key: without the owner's own signing key it
+    // cannot sign (the recovery kit can put the signing key back; a new one
+    // comes only with "Replace the escrow key").
     if (sign) Object.assign(body, { escrowSignPub: sign.publicJwk, escrowSig: await endorseEscrowKey(sign.privateKey, pair.publicJwk) });
-    else Object.assign(body, await this.#newSigner(pair.publicJwk));
+    else if (st.escrowSignPub || typeof st.escrowSignPriv === 'string') throw new Error(NO_SIGNER);
     await api.setKeys(body);
     this.notice = null;
-  }
-
-  async #newSigner(escrowJwk) {
-    const sp = await createSigningKeyPair();
-    return { escrowSignPriv: await sealSigningKey(this.dk, sp.privateKey), escrowSignPub: sp.publicJwk, escrowSig: await endorseEscrowKey(sp.privateKey, escrowJwk) };
   }
 
   /**
@@ -583,6 +1121,7 @@ export class DriveClient {
     const signed = sign && st.escrowSignPub && sameEscrowKey(sign.publicJwk, st.escrowSignPub);
     await api.setKeys({ ...(await newOwnerKeys(this.dk, signed ? sign.privateKey : null)), ...step });
     this.notice = null;
+    this.kit = kitStatusOf(await loadState()); // the kit is stale now: the page says so
   }
 
   /** A new escrow key pair after the notice (the old key does not open): as rotateEscrowKey. */
