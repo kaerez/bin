@@ -12,7 +12,7 @@ import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib/turnstile.js';
 import { parseId } from '../lib/ids.js';
-import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
+import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
@@ -135,7 +135,9 @@ export async function handleAdmin(request, env, url) {
       // system: true (everything) or { settings, roles, ipRules, turnstile, public }.
       const sysSel = body.system === true ? true
         : body.system && typeof body.system === 'object' ? Object.fromEntries(SYSTEM_PARTS.map((k) => [k, body.system[k] === true])) : false;
-      const r = await dir.exportData({ system: sysSel, users, parts: partsOf(body.parts), ownerPasskeys: body.ownerPasskeys === true, origin: url.origin }, me);
+      // owner: the owner's row, its parts among passkeys and recoveryCodes.
+      const owner = Array.isArray(body.owner) ? OWNER_PARTS.filter((k) => body.owner.includes(k)) : [];
+      const r = await dir.exportData({ system: sysSel, users, parts: partsOf(body.parts), owner, origin: url.origin }, me);
       return r.ok ? json({ document: r.doc }) : fromDir(r);
     }
     let doc;

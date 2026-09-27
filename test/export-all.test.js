@@ -1,8 +1,9 @@
 // export-all.test.js — every part of an export is optional and chosen twice:
 // when exporting and again when importing. Parts: settings, roles (Default +
 // custom), IP rules, the panel's Turnstile keys, the public account; the
-// owner's passkeys; per user: credentials, role, API keys (they keep
-// working), passkeys (only on the same hostname) and recovery codes.
+// owner's row (its passkeys and recovery codes only); per user: credentials,
+// role, API keys (they keep working), passkeys (only on the same hostname) and
+// recovery codes.
 //
 // The import rule (AGENTS.md): an existing account, the owner included, never
 // has its password, recovery codes, API keys, passkeys or "Password and
@@ -202,6 +203,8 @@ describe('existing accounts: only the role and added passkeys', () => {
     const t = await register(dst.cookie, 'target-password-1', 'Target key');
     expect(t.auth.userHandle).not.toBe(s.auth.userHandle);
     const before = await detail(dst.id);
+    const snapshot = async () => (await exportDoc({ users: [dst.id], parts: ['credentials', 'apiKeys', 'passkeys', 'recoveryCodes'] })).users[0];
+    const was = await snapshot();
 
     const dec = { system: { roles: true }, users: { 'ea-src': { as: 'ea-dst', action: 'update' } } };
     const plan = (await (await importDoc(doc, dec)).json()).plan;
@@ -218,6 +221,15 @@ describe('existing accounts: only the role and added passkeys', () => {
 
     const after = await detail(dst.id);
     expect(after.role.name).toBe(`user ${src.id}`);
+    // Byte for byte: the same password verifier, API keys and recovery codes; its passkey kept, one added.
+    const now = await snapshot();
+    expect(now.credentials).toEqual(was.credentials);
+    expect(now.apiKeys).toEqual(was.apiKeys);
+    expect(now.recoveryCodes).toEqual(was.recoveryCodes);
+    expect(now.recoveryCodes.some((h) => doc.users[0].recoveryCodes.includes(h))).toBe(false);
+    expect(now.passkeys.mfa).toBe(was.passkeys.mfa);
+    expect(now.passkeys.keys.filter((k) => was.passkeys.keys.some((w) => w.id === k.id))).toEqual(was.passkeys.keys);
+    expect(now.passkeys.keys.map((k) => k.id).sort()).toEqual([...was.passkeys.keys.map((k) => k.id), s.auth.id].sort());
     expect(after.passkeys).toEqual({ count: 2, recoveryLeft: before.passkeys.recoveryLeft, mfa: false });
     expect(after.keys.map((k) => k.name)).toEqual(['dst-key']);
     expect((await fetchJson('/api/private/me', { cookie: dst.cookie })).status).toBe(200); // sessions stay
@@ -310,40 +322,87 @@ describe('existing accounts: only the role and added passkeys', () => {
 });
 
 describe('the owner', () => {
-  it('exports only the owner\'s passkeys (never its password or recovery codes), and adds them back to the current owner', async () => {
+  it('its row exports only its passkeys and/or recovery codes, each chosen separately (never its password, role or API keys)', async () => {
+    await register(oc, 'owner-password', 'Owner row key');
+    const pk = await exportDoc({ owner: ['passkeys'], users: [] });
+    expect(Object.keys(pk.owner)).toEqual(['passkeys']);
+    expect(Object.keys(pk.owner.passkeys)).toEqual(['keys']); // its "Password and passkey" choice never travels
+    expect(pk.owner.passkeys.keys.map((k) => k.name)).toContain('Owner row key');
+    const rc = await exportDoc({ owner: ['recoveryCodes'], users: [] });
+    expect(Object.keys(rc.owner)).toEqual(['recoveryCodes']);
+    const left = (await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json()).recoveryLeft;
+    expect(rc.owner.recoveryCodes).toHaveLength(left);
+    expect(rc.owner.recoveryCodes.every((h) => /^[0-9a-f]{64}$/.test(h))).toBe(true); // hashes only
+    const both = await exportDoc({ owner: ['passkeys', 'recoveryCodes', 'credentials', 'role', 'apiKeys'], users: [] });
+    expect(Object.keys(both.owner)).toEqual(['passkeys', 'recoveryCodes']);
+    expect(JSON.stringify(both)).not.toMatch(/verifier|salt|apiKeys|"role"/);
+    expect((await exportDoc({ users: [] })).owner).toBeUndefined(); // off unless asked
+    expect((await exportDoc({ owner: [], users: [] })).owner).toBeUndefined();
+    const audit = (await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json()).rows;
+    expect(audit.some((r) => r.action === 'export.created' && new RegExp(`owner=passkeys\\(\\d+\\)\\+recoveryCodes\\(${left}\\)`).test(r.detail))).toBe(true);
+  });
+
+  it('the owner gets passkeys added only: its password, recovery codes, passkeys and second-step choice stay', async () => {
     const one = await register(oc, 'owner-password', 'Owner one');
     const two = await register(oc, 'owner-password', 'Owner two');
-    const before = await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json();
-    const doc = await exportDoc({ ownerPasskeys: true, users: [] });
-    expect(Object.keys(doc.owner)).toEqual(['passkeys']);
-    expect(Object.keys(doc.owner.passkeys)).toEqual(['keys']);
-    expect(doc.owner.passkeys.keys.map((k) => k.name).sort()).toEqual(['Owner one', 'Owner two']);
-    expect(JSON.stringify(doc)).not.toMatch(/verifier|salt|recoveryCodes/);
-    expect((await exportDoc({ users: [] })).owner).toBeUndefined(); // off unless asked
+    const old = await (await post('/api/private/me/recovery-codes', { current: CURRENT })).json();
+    expect(old.codes).toHaveLength(20);
+    const doc = await exportDoc({ owner: ['passkeys', 'recoveryCodes'], users: [] });
+    expect(doc.owner.passkeys.keys.map((k) => k.name)).toEqual(expect.arrayContaining(['Owner one', 'Owner two']));
 
-    // Remove one, then import the file's owner passkeys: it comes back, the other is skipped.
+    // Remove "Owner two" and get new recovery codes: the file's codes are not the owner's any more.
     const rm = await post(`/api/private/me/passkeys/${two.auth.id}/remove`, { current: CURRENT });
     expect(rm.status).toBe(200);
     expect(await passkeyLogin(two.auth)).toBeNull();
-    const dec = { system: false, owner: { passkeys: true }, users: {} };
+    const fresh = await (await post('/api/private/me/recovery-codes', { current: CURRENT })).json();
+    expect(fresh.codes).toHaveLength(20);
+    const before = await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json();
+    const beforeIds = before.passkeys.map((k) => k.id).sort();
+    const hashesBefore = (await exportDoc({ owner: ['recoveryCodes'], users: [] })).owner.recoveryCodes;
+    expect(hashesBefore.some((h) => doc.owner.recoveryCodes.includes(h))).toBe(false);
+
+    const dec = { system: false, owner: { passkeys: true, recoveryCodes: true }, users: {} };
     const plan = (await (await importDoc(doc, dec)).json()).plan;
     expect(plan.errors).toEqual([]);
-    expect(plan.owner).toEqual({
-      as: 'owner',
-      changes: ['adds 1 passkey ("Owner two"); your passkeys, password and recovery codes stay'],
-      skipped: ['passkey "Owner one": already registered to this account'],
-    });
+    expect(plan.owner.as).toBe('owner');
+    expect(plan.owner.changes).toEqual(['adds 1 passkey ("Owner two"); your passkeys, password and recovery codes stay']);
+    expect(plan.owner.skipped).toContain('passkey "Owner one": already registered to this account');
+    expect(plan.owner.skipped).toContain('recovery codes: an existing account keeps its own');
     expect((await importDoc(doc, dec, false)).status).toBe(200);
+
+    // Passkeys: added, none removed.
+    const after = await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json();
+    expect(after.passkeys.map((k) => k.id).sort()).toEqual([...beforeIds, two.auth.id].sort());
     expect(await passkeyLogin(two.auth)).toBe('owner');
     expect(await passkeyLogin(one.auth)).toBe('owner');
-    const after = await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json();
-    expect(after.passkeys).toHaveLength(2);
+    // Recovery codes: exactly the owner's own, untouched; the file's do not work.
+    expect((await exportDoc({ owner: ['recoveryCodes'], users: [] })).owner.recoveryCodes).toEqual(hashesBefore);
     expect(after.recoveryLeft).toBe(before.recoveryLeft);
     expect(after.mfa).toBe(before.mfa);
+    expect(await recovery('owner', old.codes[0])).toBe(401);
+    expect(await recovery('owner', fresh.codes[0])).toBe(200);
+    // Password and role: unchanged.
+    expect((await login('owner', 'owner-password')).status).toBe(200);
+    expect((await (await fetchJson('/api/private/me', { cookie: oc })).json()).user.role).toBe('owner');
     const audit = (await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json()).rows;
-    expect(audit.some((r) => r.action === 'export.created' && /owner=passkeys\(2\)/.test(r.detail))).toBe(true);
     expect(audit.some((r) => r.action === 'passkeys.imported' && r.detail === 'import (owner passkeys): added 1: Owner two')).toBe(true);
-    expect(audit.some((r) => r.action === 'user.imported' && r.detail === 'owner passkeys: passkeys+1; skipped 1')).toBe(true);
+    expect(audit.some((r) => r.action === 'user.imported' && /^owner: passkeys\+1; skipped \d+$/.test(r.detail))).toBe(true);
+    expect(audit.some((r) => r.action === 'recovery.imported')).toBe(false);
+  });
+
+  it('the owner row with only recovery codes chosen changes nothing', async () => {
+    const doc = await exportDoc({ owner: ['recoveryCodes'], users: [] });
+    doc.owner.recoveryCodes = ['0'.repeat(64), '1'.repeat(64)]; // codes the owner does not have
+    const before = (await exportDoc({ owner: ['recoveryCodes'], users: [] })).owner.recoveryCodes;
+    const dec = { system: false, owner: { recoveryCodes: true }, users: {} };
+    const plan = (await (await importDoc(doc, dec)).json()).plan;
+    expect(plan.errors).toEqual([]);
+    expect(plan.owner).toEqual({ as: 'owner', changes: [], skipped: ['recovery codes: an existing account keeps its own'] });
+    expect((await importDoc(doc, dec, false)).status).toBe(200);
+    expect((await exportDoc({ owner: ['recoveryCodes'], users: [] })).owner.recoveryCodes).toEqual(before);
+    // A file without an owner row cannot be imported onto the owner.
+    expect((await importDoc({ ...doc, owner: undefined }, dec)).status).toBe(400);
+    expect((await importDoc(doc, { system: false, owner: { passkeys: true }, users: {} })).status).toBe(400); // not in the file
   });
 
   it('a user entry imported onto the owner never sets its role or password; it can add passkeys', async () => {

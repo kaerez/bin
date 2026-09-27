@@ -1,6 +1,6 @@
 // portable.test.js — the export document's validation (src/lib/portable.js),
 // directly: per-user parts (credentials, role, API keys, passkeys, recovery
-// codes), the owner's passkeys, and the import decisions (per-user action and
+// codes), the owner's row (passkeys, recovery codes), and the import decisions (per-user action and
 // parts, owner part). The Directory-side rules are covered in
 // test/export-all.test.js and test/import-export.test.js.
 import { describe, it, expect } from 'vitest';
@@ -14,7 +14,7 @@ const doc = () => ({
   format: EXPORT_FORMAT,
   created: 1,
   origin: 'https://bin.example',
-  owner: { passkeys: { keys: [key(K1)] } },
+  owner: { passkeys: { keys: [key(K1)] }, recoveryCodes: [H('d'), H('d'), H('e')] },
   users: [
     { username: 'alice', credentials: { salt: 'A'.repeat(22), t: 3, verifier: H('a'), disabled: false }, role: 'Editors', apiKeys: [], passkeys: { mfa: true, keys: [key(K2)] }, recoveryCodes: [H('b'), H('b'), H('c')] },
     { username: 'bob', role: 'Default' },
@@ -30,9 +30,9 @@ const bad = (mutate, re) => {
 describe('validateExport', () => {
   it('accepts the parts separately and returns a clean copy', () => {
     expect(USER_PARTS).toEqual(['credentials', 'role', 'apiKeys', 'passkeys', 'recoveryCodes']);
-    expect(OWNER_PARTS).toEqual(['passkeys']);
+    expect(OWNER_PARTS).toEqual(['passkeys', 'recoveryCodes']);
     const v = validateExport(doc());
-    expect(v.owner).toEqual({ passkeys: { keys: [key(K1)] } });
+    expect(v.owner).toEqual({ passkeys: { keys: [key(K1)] }, recoveryCodes: [H('d'), H('e')] }); // de-duplicated
     expect(v.users[0].passkeys).toEqual({ mfa: true, keys: [key(K2)] });
     expect(v.users[0].recoveryCodes).toEqual([H('b'), H('c')]); // de-duplicated
     expect(v.users[0].role).toBe('Editors');
@@ -47,8 +47,11 @@ describe('validateExport', () => {
     bad((d) => { d.users[0].passkeys.handle = 'x'; }, /unexpected field "handle"/);
     bad((d) => { delete d.users[0].passkeys.mfa; }, /missing "mfa"/);
     bad((d) => { d.owner.passkeys.mfa = false; }, /unexpected field "mfa"/);
-    bad((d) => { d.owner.recoveryCodes = []; }, /unexpected field "recoveryCodes"/);
+    bad((d) => { d.owner.recoveryCodes = ['x']; }, /owner.recoveryCodes: invalid code hash/);
+    bad((d) => { d.owner.recoveryCodes = 'x'; }, /owner.recoveryCodes/);
     bad((d) => { d.owner.credentials = {}; }, /unexpected field "credentials"/);
+    bad((d) => { d.owner.role = 'Default'; }, /unexpected field "role"/);
+    bad((d) => { d.owner.apiKeys = []; }, /unexpected field "apiKeys"/);
     bad((d) => { d.owner = {}; }, /owner: nothing to import/);
     bad((d) => { d.users[1] = { username: 'bob' }; }, /nothing to import/);
     bad((d) => { d.users[1].role = 'owner'; }, /Owner role/);
@@ -70,8 +73,9 @@ describe('validateDecisions', () => {
     expect(d.ownerParts.size).toBe(0);
     expect(d.users.get('alice')).toEqual({ as: 'alice', action: 'create', parts: new Set(['credentials', 'role', 'apiKeys', 'passkeys', 'recoveryCodes']) });
     expect(d.users.get('bob')).toEqual({ as: 'robert', action: 'update', parts: new Set(['role']) });
-    expect([...validateDecisions({ system: false, owner: true, users: {} }, v).ownerParts]).toEqual(['passkeys']);
+    expect([...validateDecisions({ system: false, owner: true, users: {} }, v).ownerParts]).toEqual(['passkeys', 'recoveryCodes']);
     expect([...validateDecisions({ system: false, owner: { passkeys: true }, users: {} }, v).ownerParts]).toEqual(['passkeys']);
+    expect([...validateDecisions({ system: false, owner: { passkeys: false, recoveryCodes: true }, users: {} }, v).ownerParts]).toEqual(['recoveryCodes']);
     expect(validateDecisions({ system: false, owner: false, users: {} }, v).ownerParts.size).toBe(0);
     // Per-user parts: only those chosen, in the canonical order.
     expect([...validateDecisions({ system: false, users: { alice: { parts: ['recoveryCodes', 'credentials'] } } }, v).users.get('alice').parts]).toEqual(['credentials', 'recoveryCodes']);
@@ -82,7 +86,9 @@ describe('validateDecisions', () => {
     const withoutOwner = validateExport({ ...doc(), owner: undefined });
     no({ system: false, owner: true, users: {} }, /no owner part/, withoutOwner);
     no({ system: false, owner: { passkeys: true }, users: {} }, /no "passkeys" part/, withoutOwner);
-    no({ system: false, owner: { recoveryCodes: true }, users: {} }, /unexpected field/);
+    no({ system: false, owner: { recoveryCodes: true }, users: {} }, /no "recoveryCodes" part/, withoutOwner);
+    no({ system: false, owner: { recoveryCodes: true }, users: {} }, /no "recoveryCodes" part/, validateExport({ ...doc(), owner: { passkeys: { keys: [] } } }));
+    no({ system: false, owner: { credentials: true }, users: {} }, /unexpected field/);
     no({ system: false, owner: 'yes', users: {} }, /decisions.owner must be/);
     no({ system: false, users: { alice: { action: 'overwrite' } } }, /action must be/);
     no({ system: false, users: { alice: { overwrite: true } } }, /unexpected field "overwrite"/);

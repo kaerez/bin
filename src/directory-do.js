@@ -23,7 +23,7 @@ import {
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
-import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS } from './lib/portable.js';
+import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
 import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
@@ -2284,10 +2284,11 @@ export class Directory extends DurableObject {
    * with the parts in `parts`), or a list of { id, parts } (parts chosen per
    * user): credentials, role, apiKeys (hashes: the keys keep working),
    * passkeys (public keys and the "Password and passkey" choice) and
-   * recoveryCodes (hashes). `ownerPasskeys`: the owner's passkeys; the
-   * owner's password and recovery codes are never exported.
+   * recoveryCodes (hashes). `owner`: the owner's row, the parts among
+   * passkeys and recoveryCodes; the owner's password, role and API keys are
+   * never exported.
    */
-  async exportData({ system = false, users = [], parts = [], ownerPasskeys = false, origin }, actorId) {
+  async exportData({ system = false, users = [], parts = [], owner: ownerParts = [], origin }, actorId) {
     const doc = { format: EXPORT_FORMAT, created: now(), users: [] };
     if (typeof origin === 'string') doc.origin = origin.slice(0, 200);
     const part = (k) => system === true || (system && typeof system === 'object' && system[k] === true);
@@ -2347,13 +2348,26 @@ export class Directory extends DurableObject {
           .map((k) => ({ hash: k.key_hash, name: k.name, created: k.created, expires: k.expires ?? null, lastUsed: k.last_used ?? null, scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) }));
       }
       if (P.includes('passkeys')) e.passkeys = { mfa: !!u.mfa, keys: this.#exportPasskeys(u) };
-      if (P.includes('recoveryCodes')) e.recoveryCodes = this.sql.exec('SELECT hash FROM recovery_codes WHERE user_id = ? ORDER BY created, hash', u.id).toArray().map((c) => c.hash);
+      if (P.includes('recoveryCodes')) e.recoveryCodes = this.#exportRecoveryCodes(u);
       doc.users.push(e);
     }
-    const owner = ownerPasskeys === true ? this.#owner() : null;
-    if (owner) doc.owner = { passkeys: { keys: this.#exportPasskeys(owner) } };
+    // The owner's row: its passkeys and/or recovery codes (hashes), when chosen.
+    const OP = OWNER_PARTS.filter((k) => Array.isArray(ownerParts) && ownerParts.includes(k));
+    const owner = OP.length ? this.#owner() : null;
+    const ownerLog = [];
+    if (owner) {
+      doc.owner = {};
+      if (OP.includes('passkeys')) {
+        doc.owner.passkeys = { keys: this.#exportPasskeys(owner) };
+        ownerLog.push(`passkeys(${doc.owner.passkeys.keys.length})`);
+      }
+      if (OP.includes('recoveryCodes')) {
+        doc.owner.recoveryCodes = this.#exportRecoveryCodes(owner);
+        ownerLog.push(`recoveryCodes(${doc.owner.recoveryCodes.length})`);
+      }
+    }
     const used = USER_PARTS.filter((k) => picks.some((x) => x.parts.includes(k)));
-    this.#log(actorId, null, 'export.created', `system=${sysParts.join('+') || 'none'} users=${doc.users.length} parts=${used.join('+') || 'none'}${owner ? ` owner=passkeys(${doc.owner.passkeys.keys.length})` : ''}`);
+    this.#log(actorId, null, 'export.created', `system=${sysParts.join('+') || 'none'} users=${doc.users.length} parts=${used.join('+') || 'none'}${owner ? ` owner=${ownerLog.join('+')}` : ''}`);
     // Which accounts left the system (and with what), in chunks that fit the audit detail field.
     const groups = new Map();
     for (const x of picks) {
@@ -2363,6 +2377,11 @@ export class Directory extends DurableObject {
     }
     for (const [k, names] of groups) this.#logChunks(actorId, null, 'export.users', `${k}: `, names);
     return { ok: true, doc };
+  }
+
+  /** An account's unused recovery codes as exported: their hashes only. */
+  #exportRecoveryCodes(u) {
+    return this.sql.exec('SELECT hash FROM recovery_codes WHERE user_id = ? ORDER BY created, hash', u.id).toArray().map((c) => c.hash);
   }
 
   /** An account's passkeys as exported: public keys, each with the user handle it was registered under. */
@@ -2580,16 +2599,21 @@ export class Directory extends DurableObject {
         passkeyWarnings(d.as, job.passkeys, lim);
       }
     }
-    // The file's owner passkeys, added to this server's owner (same rules).
-    if (decisions.ownerParts?.has('passkeys')) {
+    // The file's owner row, applied to this server's owner: an existing
+    // account, so its passkeys are added and its recovery codes never taken.
+    const OP = decisions.ownerParts ?? new Set();
+    if (OP.size) {
       const o = this.#owner();
       if (!o) plan.errors.push('this server has no owner yet');
       else {
         const entry = { as: o.username, changes: [], skipped: [] };
         const job = { u: null, entry, id: o.id, create: false, owner: true, role: null, apiKeys: [], passkeys: [], codes: [], mfa: false };
-        job.passkeys = takePasskeys(doc.owner.passkeys.keys, o.id, MAX_PASSKEYS, entry.skipped);
-        entry.changes.push(job.passkeys.length ? `adds ${plural(job.passkeys.length, 'passkey')} (${names(job.passkeys)}); your passkeys, password and recovery codes stay` : 'no passkeys to add');
-        passkeyWarnings(o.username, job.passkeys, null);
+        if (OP.has('passkeys')) {
+          job.passkeys = takePasskeys(doc.owner.passkeys.keys, o.id, MAX_PASSKEYS, entry.skipped);
+          entry.changes.push(job.passkeys.length ? `adds ${plural(job.passkeys.length, 'passkey')} (${names(job.passkeys)}); your passkeys, password and recovery codes stay` : 'no passkeys to add');
+          passkeyWarnings(o.username, job.passkeys, null);
+        }
+        if (OP.has('recoveryCodes')) entry.skipped.push('recovery codes: an existing account keeps its own');
         plan.owner = entry;
         jobs.push(job);
       }
@@ -2688,7 +2712,7 @@ export class Directory extends DurableObject {
           did.push(`recoveryCodes=${job.codes.length}`);
         }
         const from = u && entry.as !== u.username ? ` from=${u.username}` : '';
-        const what = u ? `${job.create ? 'create' : 'update'}${from}` : 'owner passkeys';
+        const what = u ? `${job.create ? 'create' : 'update'}${from}` : 'owner';
         this.#log(actorId, id, 'user.imported', `${what}: ${did.join(' ') || 'no changes'}${!job.create && entry.skipped.length ? `; skipped ${entry.skipped.length}` : ''}`);
       }
     });

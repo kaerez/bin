@@ -11,8 +11,12 @@
 //             channels, quotas, viewer rules) together with the custom roles;
 //             IP rules; the Turnstile keys set in the admin panel (site key
 //             and secret); the public account's own limits, quotas and rules;
-//   owner   — `passkeys` only ({ keys }: the owner's passkeys, public keys).
-//             Never the owner's password or recovery codes;
+//   owner   — the owner's row, each part independent: `passkeys` ({ keys }:
+//             public keys, each with its user handle; the owner's
+//             "Password and passkey" choice never travels) and
+//             `recoveryCodes` (the code hashes). Never the owner's password,
+//             role or API keys. On import the owner always exists, so only
+//             its passkeys can be added; its recovery codes are never taken;
 //   users[] — per user, each part independent (username is always present):
 //             `credentials` (salt, t, verifier, disabled), `role` (the role's
 //             name, "Default" for the Default role), `apiKeys` (the stored
@@ -101,10 +105,8 @@ function ipRule(r, where) {
 export const MAX_ROLES = 200;
 /** The parts of a user entry, each independent. */
 export const USER_PARTS = ['credentials', 'role', 'apiKeys', 'passkeys', 'recoveryCodes'];
-/** The parts of the owner entry (never its password or recovery codes). */
-export const OWNER_PARTS = ['passkeys'];
-/** The only parts an import can change on an account that already exists. */
-export const EXISTING_PARTS = ['role', 'passkeys'];
+/** The parts of the owner's row (never its password, role or API keys). */
+export const OWNER_PARTS = ['passkeys', 'recoveryCodes'];
 export const MAX_FILE_PASSKEYS = 10;
 export const MAX_FILE_RECOVERY_CODES = 20;
 const ROLE_NAME_MAX = 64;
@@ -270,6 +272,7 @@ function ownerEntry(v) {
   keys(v, 'owner', [], OWNER_PARTS);
   const out = {};
   if (v.passkeys !== undefined) out.passkeys = passkeyBlock(v.passkeys, 'owner.passkeys', true);
+  if (v.recoveryCodes !== undefined) out.recoveryCodes = recoveryCodes(v.recoveryCodes, 'owner.recoveryCodes');
   if (!OWNER_PARTS.some((k) => out[k] !== undefined)) throw new PortableError('owner: nothing to import');
   return out;
 }
@@ -313,11 +316,13 @@ function chosenParts(v, where, all, inDoc, what) {
 
 /**
  * Validate the import decisions:
- *   { system: bool | { part: bool }, owner?: bool | { passkeys: bool },
+ *   { system: bool | { part: bool }, owner?: bool | { passkeys?, recoveryCodes? },
  *     users: { [username]: { as?, action?: "create" | "update", parts? } } }.
  * A user absent from `users` is skipped. `action` is what the owner expects:
  * "create" (the default) a new account, or "update" one that exists (its role
  * and added passkeys only); the plan refuses a mismatch with what is there.
+ * `owner` applies the file's owner row to this server's owner: its passkeys
+ * are added; its recovery codes, if chosen, are listed as skipped.
  */
 export function validateDecisions(d, doc) {
   keys(d, 'decisions', ['system', 'users'], ['owner']);

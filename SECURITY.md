@@ -508,15 +508,16 @@ codes as safe as the password.
     Manage → Passkeys), after which the password alone signs in. This needs the acting
     admin's own current password, so a stolen admin session alone cannot strip anyone's
     second factor; wrong passwords count as for a password change.
-  - Passwords and passkeys are separate. An admin password reset, an import that overwrites an
-    account's credentials, and a user's own password change all keep the passkeys and
-    recovery codes. After a takeover, remove them as well. After a user's own change, Account
+  - Passwords and passkeys are separate. An admin password reset and a user's own password
+    change keep the passkeys and recovery codes, and an import never changes an existing
+    account's password, recovery codes or passkeys (it can only add passkeys). After a takeover, remove them as well. After a user's own change, Account
     says how many still work and asks the user to remove any passkey they do not recognise.
   - Owner recovery through `AUTHN` also removes the owner's passkeys.
-- Passkeys and recovery codes leave the server only in an export where the owner chose
-  "Passkeys and recovery codes". The file carries the public keys (useless without the
-  authenticator) and the recovery-code hashes. Passkeys work only under the same hostname
-  (WebAuthn binds them to it); recovery codes work anywhere.
+- Passkeys and recovery codes leave the server only in an export where the owner ticked
+  "Passkeys" or "Recovery codes" (separate parts) for that account, the owner's own row
+  included. The file carries the public keys (useless without the authenticator), each with the
+  WebAuthn user handle it was registered under, and the recovery-code hashes. Passkeys work only
+  under the same hostname (WebAuthn binds them to it); recovery codes work anywhere.
 
 ### Read receipts
 
@@ -588,12 +589,24 @@ codes as safe as the password.
   server) and again when importing (only what is ticked is applied).
   - System parts: settings; roles; IP rules; Turnstile keys, off by default because they
     include the secret; the public account.
-  - User parts: credentials; role; API keys; passkeys and recovery codes.
+  - User parts, per user (a table of users × parts, with Select all / Deselect all): credentials;
+    role; API keys; passkeys; recovery codes. The owner's row holds only its passkeys and
+    recovery codes.
 - **API keys** travel as their stored hashes, so the same keys keep working on the target, and
   revoking a key on one server does not revoke it on the other. The import preview says so,
-  and refuses a key or passkey that already belongs to another account on the target.
-- Never exported: the owner account, sessions, shares, usage counters and the activity log. An
-  import can never create or replace an owner; the accounts it creates are plain users.
+  and refuses a key that already belongs to another account on the target; a passkey (credential
+  id) or recovery code that already belongs to an account there is skipped, never moved.
+- **Imports never remove or overwrite an existing account's credentials** (a maintainer rule).
+  An account that already exists, the owner included, only gets its role set (if chosen; never
+  the owner's, which is always Owner) and the file's passkeys added (if chosen, within the role's
+  passkey limit). Its password verifier, disabled flag, recovery codes, API keys, existing
+  passkeys, "Password and passkey" choice and sessions are left untouched, so a crafted or stale
+  file cannot lock anyone out or replace a credential; the worst it can do to an existing
+  account is add a passkey, which the owner sees in the preview (by name) and which is logged.
+  New accounts are created from the chosen parts.
+- Never exported: the owner's password, role and API keys, sessions, shares, usage counters and
+  the activity log. An import can never create or replace an owner; the accounts it creates are
+  plain users.
 - **Treat an export as a credential store.** One that holds verifiers, API key hashes and the
   Turnstile secret is as sensitive as the database. Keep the file and its passphrase apart,
   export only the parts you need, and delete files you no longer need (recommendation). Where

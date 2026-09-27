@@ -198,7 +198,8 @@ describe('admin import', () => {
       (d) => { d.users[0].owner = true; },
       (d) => { d.owner = {}; },
       (d) => { d.owner = { passkeys: { keys: [] }, password: 'x' }; },
-      (d) => { d.owner = { recoveryCodes: [] }; },
+      (d) => { d.owner = { recoveryCodes: ['nope'] }; },
+      (d) => { d.owner = { passkeys: { keys: [] }, credentials: d.users[0].credentials }; }, // never the owner's password
     ];
     for (const [i, mutate] of variants.entries()) {
       const d = structuredClone(base);
