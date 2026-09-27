@@ -138,7 +138,7 @@ function wireTypedPanels() {
       const d = describeHost(parseShareUrl(link.value, { rules: urlRules() }));
       link.removeAttribute('aria-invalid');
       const notes = [];
-      if (d.external) notes.push(`opens another app (${d.scheme}:)`);
+      if (d.external) notes.push(d.openable ? `opens another app (${d.scheme}:)` : `a ${d.scheme}: link: recipients can copy it but not open it from the page`);
       if (d.idn) notes.push(`shown to the recipient as ${d.ascii} — international characters can imitate another site`);
       if (d.insecure) notes.push('not HTTPS');
       clear(hostHint).append('Destination: ', h('bdi', { dir: 'ltr', text: d.unicode }), notes.length ? ` (${notes.join('; ')})` : '');
