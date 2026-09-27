@@ -126,8 +126,12 @@ export async function handleAdmin(request, env, url) {
     }
     if (!isImport) {
       const users = body.users === 'all' ? 'all' : Array.isArray(body.users) ? body.users.filter((u) => ID_RE.test(String(u))).slice(0, MAX_EXPORT_USERS) : [];
+      // system: true (everything) or { settings, roles, ipRules, turnstile, public }.
+      const sysSel = body.system === true ? true
+        : body.system && typeof body.system === 'object' ? Object.fromEntries(['settings', 'roles', 'ipRules', 'turnstile', 'public'].map((k) => [k, body.system[k] === true])) : false;
       const r = await dir.exportData({
-        system: body.system === true, users, credentials: body.credentials === true, config: body.config === true, origin: url.origin,
+        system: sysSel, users, credentials: body.credentials === true, config: body.config === true,
+        apiKeys: body.apiKeys === true, passkeys: body.passkeys === true, origin: url.origin,
       }, me);
       return r.ok ? json({ document: r.doc }) : fromDir(r);
     }
@@ -140,9 +144,9 @@ export async function handleAdmin(request, env, url) {
       if (e instanceof PortableError) return err(400, 'invalid_import', e.message);
       throw e;
     }
-    const r = await dir.importData(doc, decisions, { dryRun: body.dryRun !== false, callerIp: g.ip }, me);
+    const r = await dir.importData(doc, decisions, { dryRun: body.dryRun !== false, callerIp: g.ip, host: url.hostname }, me);
     if (!r.ok) return json({ error: r.error, message: r.message, plan: r.plan }, r.status);
-    if (r.applied) invalidateGuardCaches();
+    if (r.applied) { invalidateGuardCaches(); invalidateTurnstileCache(); }
     return json(r);
   }
 

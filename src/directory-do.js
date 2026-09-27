@@ -2217,16 +2217,35 @@ export class Directory extends DurableObject {
    * The plaintext export document. `users` is 'all' or a list of user ids;
    * the owner is never included. The caller encrypts it before it is stored.
    */
-  async exportData({ system = false, users = [], credentials = false, config = false, origin }, actorId) {
+  /**
+   * Build an export. `system`: true (every part) or { settings, roles,
+   * ipRules, turnstile, public } booleans. Per user: credentials, config (the
+   * role), apiKeys (hashes: the keys keep working), passkeys (public keys and
+   * recovery-code hashes).
+   */
+  async exportData({ system = false, users = [], credentials = false, config = false, apiKeys = false, passkeys = false, origin }, actorId) {
     const doc = { format: EXPORT_FORMAT, created: now(), users: [] };
     if (typeof origin === 'string') doc.origin = origin.slice(0, 200);
-    if (system) {
-      doc.system = {
-        settings: this.#settings(),
+    const part = (k) => system === true || (system && typeof system === 'object' && system[k] === true);
+    const sysParts = ['settings', 'roles', 'ipRules', 'turnstile', 'public'].filter(part);
+    if (sysParts.length) {
+      doc.system = {};
+      if (part('settings')) doc.system.settings = this.#settings();
+      if (part('ipRules')) doc.system.ipRules = (await this.ipRules()).map((r) => ({ cidr: r.cidr, action: r.action, expires: r.expires ?? null, note: r.note || '' }));
+      if (part('turnstile')) doc.system.turnstile = await this.turnstileKeys();
+      if (part('public')) {
+        doc.system.public = {
+          limits: { all: this.#limitRows(PUBLIC_ID, 'all'), api: this.#limitRows(PUBLIC_ID, 'api') },
+          quotas: this.#quotaRows(PUBLIC_ID),
+          viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', PUBLIC_ID).toArray(),
+        };
+      }
+    }
+    if (part('roles')) {
+      Object.assign(doc.system, {
         limits: { all: this.#limitRows('', 'all'), api: this.#limitRows('', 'api') },
         quotas: this.#quotaRows(''),
         viewerRules: this.sql.exec("SELECT match, value, renderer FROM viewer_rules WHERE user_id = '' ORDER BY id").toArray(),
-        ipRules: (await this.ipRules()).map((r) => ({ cidr: r.cidr, action: r.action, expires: r.expires ?? null, note: r.note || '' })),
         roles: this.sql.exec('SELECT * FROM roles ORDER BY name COLLATE NOCASE').toArray().map((r) => {
           const sc = roleScope(r.id);
           return {
@@ -2237,29 +2256,44 @@ export class Directory extends DurableObject {
             viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', sc).toArray(),
           };
         }),
-      };
+      });
     }
     const rows = users === 'all'
       ? this.sql.exec("SELECT * FROM users WHERE role = 'user' ORDER BY username LIMIT ?", MAX_EXPORT_USERS + 1).toArray()
       : (Array.isArray(users) ? users : []).slice(0, MAX_EXPORT_USERS + 1).map((id) => this.#user(id)).filter((u) => u && u.role === 'user');
     // Never produce a file that the import would refuse.
-    if (rows.length > MAX_EXPORT_USERS && (credentials || config)) {
+    const anyUser = credentials || config || apiKeys || passkeys;
+    if (rows.length > MAX_EXPORT_USERS && anyUser) {
       return fail(413, 'too_many_users', `An export holds at most ${MAX_EXPORT_USERS} users — export them in parts.`);
     }
-    if (credentials || config) {
+    if (anyUser) {
       for (const u of rows) {
         const e = { username: u.username };
         if (credentials) e.credentials = { salt: u.pw_salt, t: u.pw_t, verifier: u.pw_verifier, disabled: !!u.disabled };
         // A user's configuration is their role (by name; the role itself travels in `system`).
         if (config) e.config = { role: this.#role(u.role_id)?.name ?? 'Default' };
+        if (apiKeys) {
+          e.apiKeys = this.sql.exec('SELECT key_hash, name, created, expires, last_used, scopes FROM api_keys WHERE user_id = ? ORDER BY created', u.id).toArray()
+            .map((k) => ({ hash: k.key_hash, name: k.name, created: k.created, expires: k.expires ?? null, lastUsed: k.last_used ?? null, scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) }));
+        }
+        if (passkeys) {
+          e.passkeys = {
+            mfa: !!u.mfa,
+            handle: u.webauthn_handle || null,
+            keys: this.sql.exec('SELECT * FROM passkeys WHERE user_id = ? ORDER BY created', u.id).toArray().map((k) => ({
+              id: k.id, name: k.name, publicKey: k.public_key, alg: k.alg, signCount: k.sign_count, transports: k.transports ? k.transports.split(',') : [],
+              backupEligible: !!k.backup_eligible, backedUp: !!k.backed_up, created: k.created, lastUsed: k.last_used ?? null,
+            })),
+            recoveryCodes: this.sql.exec('SELECT hash FROM recovery_codes WHERE user_id = ?', u.id).toArray().map((c) => c.hash),
+          };
+        }
         doc.users.push(e);
       }
     }
-    this.#log(actorId, null, 'export.created',
-      `system=${system ? 1 : 0} users=${doc.users.length} credentials=${credentials ? 1 : 0} config=${config ? 1 : 0}`);
-    // Which accounts left the system (and whether with verifiers), in chunks
-    // that fit the audit detail field.
-    this.#logChunks(actorId, null, 'export.users', `${[credentials ? 'credentials' : null, config ? 'config' : null].filter(Boolean).join('+')}: `, doc.users.map((e) => e.username));
+    const userParts = [credentials ? 'credentials' : null, config ? 'config' : null, apiKeys ? 'apiKeys' : null, passkeys ? 'passkeys' : null].filter(Boolean);
+    this.#log(actorId, null, 'export.created', `system=${sysParts.join('+') || 'none'} users=${doc.users.length} parts=${userParts.join('+') || 'none'}`);
+    // Which accounts left the system (and with what), in chunks that fit the audit detail field.
+    this.#logChunks(actorId, null, 'export.users', `${userParts.join('+')}: `, doc.users.map((e) => e.username));
     return { ok: true, doc };
   }
 
@@ -2280,54 +2314,76 @@ export class Directory extends DurableObject {
 
   /**
    * Plan (dryRun) or apply an import of a validated document with validated
-   * decisions (portable.js). Applying is all-or-nothing: one storage
-   * transaction, and any planning error refuses the whole import.
+   * decisions (portable.js): the system parts and, per user, the parts chosen.
+   * Applying is all-or-nothing: one storage transaction, and any planning
+   * error refuses the whole import. `host` is this server's hostname (passkeys
+   * work only where they were registered).
    */
-  async importData(doc, decisions, { dryRun = true, callerIp = null } = {}, actorId) {
+  async importData(doc, decisions, { dryRun = true, callerIp = null, host = '' } = {}, actorId) {
     const plan = { system: null, users: [], errors: [], warnings: [] };
-    if (decisions.system) {
-      const cur = this.#settings();
-      const existingRules = new Set((await this.ipRules()).map((r) => `${r.action} ${r.cidr}`));
-      const ts = now();
-      const ipAdd = doc.system.ipRules.filter((r) => (r.expires === null || r.expires > ts) && !existingRules.has(`${r.action} ${r.cidr}`));
-      const merged = { ...cur, ...doc.system.settings };
-      if (merged['session.idleSec'] > merged['session.absSec']) plan.errors.push('system: the idle timeout would exceed the absolute timeout');
-      // Never lock out the owner who is importing: a new block rule covering
-      // the caller (with no allow rule for it) refuses the import.
-      const me = parseIp(callerIp ?? '');
-      if (me) {
-        const after = [...(await this.ipRules()), ...ipAdd].map((r) => ({ action: r.action, c: parseRule(r.cidr) }));
-        const allowed = after.some((r) => r.action === 'allow' && ruleContains(r.c, me));
-        const blocking = ipAdd.find((r) => r.action === 'block' && ruleContains(parseRule(r.cidr), me));
-        if (blocking && !allowed) plan.errors.push(`system: the IP rule "block ${blocking.cidr}" would block your own address — remove it from the file or add an allow rule for yourself first`);
+    const S = decisions.systemParts ?? new Set();
+    const sys = doc.system ?? { parts: [] };
+    const ts = now();
+    let ipAdd = [];
+    if (S.size) {
+      plan.system = { parts: [...S] };
+      if (S.has('settings')) {
+        const cur = this.#settings();
+        const merged = { ...cur, ...sys.settings };
+        if (merged['session.idleSec'] > merged['session.absSec']) plan.errors.push('system: the idle timeout would exceed the absolute timeout');
+        // Security-relevant changes are called out in the preview.
+        for (const [k, v] of Object.entries(sys.settings)) {
+          if (/^(guard|lockout|public)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
+        }
+        plan.system.settings = Object.entries(sys.settings).filter(([k, v]) => cur[k] !== v).map(([key, to]) => ({ key, from: cur[key], to }));
       }
-      // Security-relevant changes are called out in the preview.
-      for (const [k, v] of Object.entries(doc.system.settings)) {
-        if (/^(guard|lockout|public)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
+      if (S.has('roles')) {
+        plan.system.roles = sys.roles.map((r) => ({ name: r.name, action: this.sql.exec('SELECT 1 FROM roles WHERE name = ?', r.name).toArray().length ? 'replace' : 'create' }));
+        plan.system.limits = { all: Object.keys(sys.limits.all).length, api: Object.keys(sys.limits.api).length };
+        plan.system.quotas = sys.quotas.length;
+        plan.system.viewerRules = sys.viewerRules.length;
       }
-      for (const r of ipAdd) if (r.action === 'allow') plan.warnings.push(`adds an allow rule (exempts ${r.cidr} from brute-force protection and blocks)`);
-      plan.system = {
-        roles: doc.system.roles.map((r) => ({ name: r.name, action: this.sql.exec('SELECT 1 FROM roles WHERE name = ?', r.name).toArray().length ? 'replace' : 'create' })),
-        settings: Object.entries(doc.system.settings).filter(([k, v]) => cur[k] !== v).map(([key, to]) => ({ key, from: cur[key], to })),
-        limits: { all: Object.keys(doc.system.limits.all).length, api: Object.keys(doc.system.limits.api).length },
-        quotas: doc.system.quotas.length,
-        viewerRules: doc.system.viewerRules.length,
-        ipRulesAdded: ipAdd.map((r) => `${r.action} ${r.cidr}`),
-        ipRulesSkipped: doc.system.ipRules.length - ipAdd.length,
-      };
-      plan.system._ipAdd = ipAdd;
+      if (S.has('ipRules')) {
+        const existingRules = new Set((await this.ipRules()).map((r) => `${r.action} ${r.cidr}`));
+        ipAdd = sys.ipRules.filter((r) => (r.expires === null || r.expires > ts) && !existingRules.has(`${r.action} ${r.cidr}`));
+        // Never lock out the owner who is importing: a new block rule covering
+        // the caller (with no allow rule for it) refuses the import.
+        const me = parseIp(callerIp ?? '');
+        if (me) {
+          const after = [...(await this.ipRules()), ...ipAdd].map((r) => ({ action: r.action, c: parseRule(r.cidr) }));
+          const allowed = after.some((r) => r.action === 'allow' && ruleContains(r.c, me));
+          const blocking = ipAdd.find((r) => r.action === 'block' && ruleContains(parseRule(r.cidr), me));
+          if (blocking && !allowed) plan.errors.push(`system: the IP rule "block ${blocking.cidr}" would block your own address — remove it from the file or add an allow rule for yourself first`);
+        }
+        for (const r of ipAdd) if (r.action === 'allow') plan.warnings.push(`adds an allow rule (exempts ${r.cidr} from brute-force protection and blocks)`);
+        plan.system.ipRulesAdded = ipAdd.map((r) => `${r.action} ${r.cidr}`);
+        plan.system.ipRulesSkipped = sys.ipRules.length - ipAdd.length;
+      }
+      if (S.has('turnstile')) {
+        plan.system.turnstile = sys.turnstile ? `site key ${sys.turnstile.sitekey} (and its secret)` : 'none (the panel keys are removed)';
+        plan.warnings.push('the Turnstile keys set in the admin panel are replaced (the deployment\'s own keys, if any, still win); the widget must allow this hostname');
+      }
+      if (S.has('public')) plan.system.public = { limits: Object.keys(sys.public.limits.all).length, quotas: sys.public.quotas.length, viewerRules: sys.public.viewerRules.length };
     }
+    const fileHost = (() => { try { return doc.origin ? new URL(doc.origin).hostname : ''; } catch { return ''; } })();
+    const hashOwner = (hash) => this.sql.exec('SELECT user_id FROM api_keys WHERE key_hash = ?', hash).toArray()[0]?.user_id;
+    const passkeyOwner = (id) => this.sql.exec('SELECT user_id FROM passkeys WHERE id = ?', id).toArray()[0]?.user_id;
+    const seenHashes = new Set();
+    const seenPasskeys = new Set();
     for (const u of doc.users) {
       const d = decisions.users.get(u.username);
       if (!d) { plan.users.push({ username: u.username, action: 'skip' }); continue; }
+      const P = d.parts;
       const existing = this.#userByName(d.as);
-      const parts = [u.credentials ? 'credentials' : null, u.config && !u.config.legacy ? 'config' : null].filter(Boolean);
+      const parts = [P.has('credentials') ? 'credentials' : null, P.has('config') && !u.config.legacy ? 'config' : null,
+        P.has('apiKeys') ? `${u.apiKeys.length} API key${u.apiKeys.length === 1 ? '' : 's'}` : null,
+        P.has('passkeys') ? `${u.passkeys.keys.length} passkey${u.passkeys.keys.length === 1 ? '' : 's'} + ${u.passkeys.recoveryCodes.length} recovery code${u.passkeys.recoveryCodes.length === 1 ? '' : 's'}` : null].filter(Boolean);
       const entry = { username: u.username, as: d.as, parts };
-      if (u.config?.legacy) plan.warnings.push(`"${u.username}": per-user settings in the file are ignored (roles replace them)`);
-      if (u.config?.role && u.config.role.toLowerCase() !== 'default') {
+      if (P.has('config') && u.config.legacy) plan.warnings.push(`"${u.username}": per-user settings in the file are ignored (roles replace them)`);
+      if (P.has('config') && u.config.role && u.config.role.toLowerCase() !== 'default') {
         const here = this.sql.exec('SELECT 1 FROM roles WHERE name = ?', u.config.role).toArray().length;
-        const coming = decisions.system && doc.system.roles.some((r) => r.name.toLowerCase() === u.config.role.toLowerCase());
-        if (!here && !coming) plan.errors.push(`"${u.username}": the role "${u.config.role}" does not exist here — import the system part too, or create the role first`);
+        const coming = S.has('roles') && sys.roles.some((r) => r.name.toLowerCase() === u.config.role.toLowerCase());
+        if (!here && !coming) plan.errors.push(`"${u.username}": the role "${u.config.role}" does not exist here — import the roles too, or create the role first`);
         entry.role = u.config.role;
       }
       if (existing && existing.role !== 'user') {
@@ -2336,23 +2392,35 @@ export class Directory extends DurableObject {
       } else if (existing && !d.overwrite) {
         entry.action = 'conflict';
         plan.errors.push(`"${d.as}" already exists — choose overwrite, another name, or skip`);
-      } else if (!existing && !u.credentials) {
+      } else if (!existing && !P.has('credentials')) {
         entry.action = 'refused';
-        plan.errors.push(`"${d.as}" does not exist here and the export has no credentials for it — it cannot be created`);
+        plan.errors.push(`"${d.as}" does not exist here and no credentials are imported for it — it cannot be created`);
       } else {
         entry.action = existing ? 'overwrite' : 'create';
-        if (existing && u.credentials) entry.note = 'ends its sessions and revokes its API keys and passkeys; its shares stay';
+        if (existing && P.has('credentials')) entry.note = `ends its sessions${P.has('apiKeys') ? '' : ' and revokes its API keys'}; its shares stay`;
+      }
+      if (P.has('apiKeys')) {
+        for (const k of u.apiKeys) {
+          const owner = hashOwner(k.hash);
+          if (seenHashes.has(k.hash) || (owner && owner !== existing?.id)) plan.errors.push(`"${u.username}": the API key "${k.name}" already belongs to another account here`);
+          seenHashes.add(k.hash);
+        }
+        if (u.apiKeys.length) plan.warnings.push(`"${u.username}": ${u.apiKeys.length} API key${u.apiKeys.length === 1 ? '' : 's'} will work here as on the old server — revoke on either side separately`);
+      }
+      if (P.has('passkeys')) {
+        for (const k of u.passkeys.keys) {
+          const owner = passkeyOwner(k.id);
+          if (seenPasskeys.has(k.id) || (owner && owner !== existing?.id)) plan.errors.push(`"${u.username}": the passkey "${k.name}" is already registered to another account here`);
+          seenPasskeys.add(k.id);
+        }
+        if (u.passkeys.keys.length && fileHost && host && fileHost !== host) plan.warnings.push(`"${u.username}": passkeys were registered for ${fileHost} and will not work on ${host} (recovery codes do)`);
       }
       plan.users.push(entry);
     }
-    const out = (applied) => {
-      const { _ipAdd, ...system } = plan.system ?? {};
-      return { ok: true, applied, plan: { system: plan.system ? system : null, users: plan.users, errors: plan.errors, warnings: plan.warnings } };
-    };
+    const out = (applied) => ({ ok: true, applied, plan: { system: plan.system, users: plan.users, errors: plan.errors, warnings: plan.warnings } });
     if (dryRun) return out(false);
     if (plan.errors.length) return fail(409, 'import_conflicts', `The import was not applied: ${plan.errors.length} problem${plan.errors.length === 1 ? '' : 's'} (run the preview).`, { plan: out(false).plan });
 
-    const ts = now();
     const replaceScope = (userId, limits, quotas, rules) => {
       this.sql.exec('DELETE FROM limits WHERE user_id = ?', userId);
       for (const ch of ['all', 'api']) {
@@ -2365,13 +2433,19 @@ export class Directory extends DurableObject {
       for (const r of rules) this.sql.exec('INSERT INTO viewer_rules (user_id, match, value, renderer) VALUES (?, ?, ?, ?)', userId, r.match, r.value, r.renderer);
     };
     this.ctx.storage.transactionSync(() => {
-      if (plan.system) {
-        const s = doc.system;
-        for (const [k, v] of Object.entries(s.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
-        replaceScope('', s.limits, s.quotas, s.viewerRules);
+      if (S.has('settings')) {
+        for (const [k, v] of Object.entries(sys.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
+        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${JSON.stringify(c.to)}`));
+      }
+      if (S.has('roles')) {
+        replaceScope('', sys.limits, sys.quotas, sys.viewerRules);
         materializeDefaultRole(this.sql); // the Default role keeps a value for every option
-        for (const r of s.roles) {
+        for (const ch of ['all', 'api']) this.#logChunks(actorId, null, 'limits.updated', `import Default role ${ch}: `, Object.entries(sys.limits[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`).concat(Object.keys(sys.limits[ch]).length ? [] : ['none']));
+        this.#logChunks(actorId, null, 'quotas.updated', 'import Default role: ', sys.quotas.length ? sys.quotas.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`) : ['none']);
+        this.#log(actorId, null, 'viewer_rules.updated', `import Default role: ${sys.viewerRules.length} rules`);
+        for (const r of sys.roles) {
           let row = this.sql.exec('SELECT * FROM roles WHERE name = ?', r.name).toArray()[0];
+          const created = !row;
           if (!row) {
             this.sql.exec('INSERT INTO roles (id, name, own_quotas, created, updated) VALUES (?, ?, ?, ?, ?)', newId(), r.name, r.ownQuotas ? 1 : 0, ts, ts);
             row = this.sql.exec('SELECT * FROM roles WHERE name = ?', r.name).toArray()[0];
@@ -2379,21 +2453,32 @@ export class Directory extends DurableObject {
             this.sql.exec('UPDATE roles SET own_quotas = ?, updated = ? WHERE id = ?', r.ownQuotas ? 1 : 0, ts, row.id);
           }
           replaceScope(roleScope(row.id), r.limits, r.quotas, r.viewerRules);
-          this.#log(actorId, null, row.created === ts ? 'role.created' : 'role.updated', `import: name=${r.name}`);
+          this.#log(actorId, null, created ? 'role.created' : 'role.updated', `import: name=${r.name}`);
         }
-        for (const r of plan.system._ipAdd) this.sql.exec('INSERT INTO ip_rules (id, cidr, action, expires, note, created) VALUES (?, ?, ?, ?, ?, ?)', newId(), r.cidr, r.action, r.expires, r.note, ts);
-        // The same entries the admin API writes, so an import is as visible as
-        // the equivalent manual changes.
-        this.#log(actorId, null, 'import.system', `settings=${plan.system.settings.length} ipRules+${plan.system._ipAdd.length}`);
-        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${JSON.stringify(c.to)}`));
-        for (const ch of ['all', 'api']) this.#logChunks(actorId, null, 'limits.updated', `import global ${ch}: `, Object.entries(s.limits[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`).concat(Object.keys(s.limits[ch]).length ? [] : ['none']));
-        this.#logChunks(actorId, null, 'quotas.updated', 'import global: ', s.quotas.length ? s.quotas.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`) : ['none']);
-        this.#log(actorId, null, 'viewer_rules.updated', `import global: ${s.viewerRules.length} rules`);
-        for (const r of plan.system._ipAdd) this.#log(actorId, null, 'iprule.added', `import: ${r.action} ${r.cidr}${r.note ? ` (${r.note})` : ''}`);
       }
+      if (S.has('ipRules')) {
+        for (const r of ipAdd) {
+          this.sql.exec('INSERT INTO ip_rules (id, cidr, action, expires, note, created) VALUES (?, ?, ?, ?, ?, ?)', newId(), r.cidr, r.action, r.expires, r.note, ts);
+          this.#log(actorId, null, 'iprule.added', `import: ${r.action} ${r.cidr}${r.note ? ` (${r.note})` : ''}`);
+        }
+      }
+      if (S.has('turnstile')) {
+        this.sql.exec("DELETE FROM meta WHERE k IN ('turnstile.sitekey', 'turnstile.secret')");
+        if (sys.turnstile) {
+          this.#setMeta('turnstile.sitekey', sys.turnstile.sitekey);
+          this.#setMeta('turnstile.secret', sys.turnstile.secret);
+        }
+        this.#log(actorId, null, sys.turnstile ? 'turnstile.updated' : 'turnstile.cleared', sys.turnstile ? `import: sitekey=${sys.turnstile.sitekey}` : 'import');
+      }
+      if (S.has('public')) {
+        replaceScope(PUBLIC_ID, sys.public.limits, sys.public.quotas, sys.public.viewerRules);
+        this.#log(actorId, PUBLIC_ID, 'limits.updated', `import public account: ${Object.keys(sys.public.limits.all).length} limits, ${sys.public.quotas.length} quotas`);
+      }
+      if (S.size) this.#log(actorId, null, 'import.system', `parts=${[...S].join('+')}`);
       for (const [i, u] of doc.users.entries()) {
         const e = plan.users[i];
         if (e.action !== 'create' && e.action !== 'overwrite') continue;
+        const P = decisions.users.get(u.username).parts;
         let id;
         if (e.action === 'create') {
           id = newId();
@@ -2402,10 +2487,10 @@ export class Directory extends DurableObject {
             id, e.as, c.salt, c.t, c.verifier, c.disabled ? 1 : 0, ts, ts);
         } else {
           id = this.#userByName(e.as).id;
-          if (u.credentials) {
+          if (P.has('credentials')) {
             const c = u.credentials;
             // New credentials end every existing session, revoke the account's
-            // API keys (they are not tied to the password) and clear lockouts.
+            // API keys (unless the file brings them) and clear lockouts.
             this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, disabled = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?',
               c.salt, c.t, c.verifier, c.disabled ? 1 : 0, ts, id);
             this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
@@ -2413,12 +2498,31 @@ export class Directory extends DurableObject {
             this.sql.exec('DELETE FROM api_keys WHERE user_id = ?', id);
           }
         }
-        if (u.config?.role) {
+        if (P.has('config') && u.config.role) {
           const r = u.config.role.toLowerCase() === 'default' ? null : this.sql.exec('SELECT id, name FROM roles WHERE name = ?', u.config.role).toArray()[0];
           this.sql.exec('UPDATE users SET role_id = ?, updated = ? WHERE id = ?', r ? r.id : null, ts, id);
           this.#log(actorId, id, 'role.assigned', `import: role=${r ? r.name : 'Default'}`);
         }
-        this.#log(actorId, id, 'user.imported', `${e.action}${e.as !== u.username ? ` from=${u.username}` : ''} parts=${e.parts.join('+')}`);
+        if (P.has('apiKeys')) {
+          this.sql.exec('DELETE FROM api_keys WHERE user_id = ?', id);
+          for (const k of u.apiKeys) {
+            this.sql.exec('INSERT INTO api_keys (key_hash, id, user_id, name, created, last_used, expires, scopes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+              k.hash, newId(), id, k.name, k.created, k.lastUsed, k.expires, k.scopes.join(','));
+          }
+          this.#log(actorId, id, 'apikey.imported', `count=${u.apiKeys.length}`);
+        }
+        if (P.has('passkeys')) {
+          this.#dropPasskeys(id);
+          const pk = u.passkeys;
+          for (const k of pk.keys) {
+            this.sql.exec('INSERT INTO passkeys (id, user_id, name, public_key, alg, sign_count, transports, backup_eligible, backed_up, created, last_used) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+              k.id, id, k.name, k.publicKey, k.alg, k.signCount, k.transports.join(','), k.backupEligible ? 1 : 0, k.backedUp ? 1 : 0, k.created, k.lastUsed);
+          }
+          for (const h of pk.recoveryCodes) this.sql.exec('INSERT OR IGNORE INTO recovery_codes (hash, user_id, created) VALUES (?, ?, ?)', h, id, ts);
+          this.sql.exec('UPDATE users SET mfa = ?, webauthn_handle = COALESCE(?, webauthn_handle) WHERE id = ?', pk.mfa && pk.keys.length ? 1 : 0, pk.handle, id);
+          this.#log(actorId, id, 'passkeys.imported', `passkeys=${pk.keys.length} codes=${pk.recoveryCodes.length}`);
+        }
+        this.#log(actorId, id, 'user.imported', `${e.action}${e.as !== u.username ? ` from=${u.username}` : ''} parts=${[...P].join('+')}`);
       }
     });
     return out(true);
