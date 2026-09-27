@@ -15,6 +15,26 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Reverse shares, security audit round 4** (docs/REVERSE.md §3, §4, §5; SECURITY.md
+  "Reverse shares"):
+  - an upload session's deadline slides both ways: once nothing is unfinished (a file finished
+    or cancelled) it is idle again and lapses after 10 minutes, giving its per-network slot back
+    (it used to stay open for the role's `filePendingSec` after its first file); still at most 24
+    hours in all;
+  - lowering a role's `reverseMaxBytes` applies to existing links (the smaller of the link's own
+    limit and the role's current one);
+  - a reverse-share id is never claimed again, even after its index row is pruned or its account
+    deleted (a permanent SHA-256 tombstone of the id), so an old link never opens a later share;
+  - taking received files into the Drive, marking them failed and putting them back are logged
+    as Drive actions (`drive.received_taken_in`, `drive.received_failed`,
+    `drive.received_retried`; one entry per link, per actor, per hour); creating, revoking and
+    all three while the owner acts as the user are logged exactly like the Drive actions (the
+    user's own in their activity, the owner as the real actor in the admin audit: `imp`, not
+    `adm`); a reverse share needs a set-up Drive (`409 drive_not_set_up`), and follows the
+    Drive's rules (no hand-over wrap; the escrow wrap always present);
+  - documented: one network can keep a password-gated link locked (the lockout is per link on
+    purpose), and uploaders of a limited link can infer other uploads from `filesLeft` /
+    `bytesLeft`.
 - **Reverse shares, security audit round 3** (docs/REVERSE.md §3, §4, §6, §7; SECURITY.md
   "Reverse shares"):
   - a link's id is claimed in the share index before anything else, in one step with the role's

@@ -377,7 +377,10 @@ stand-in. What each side relies on:
   - the user's own activity (`GET /api/private/me/activity`) lists their Drive actions —
     `drive.keys_changed` (wraps added or removed, the salt), `drive.folder_created`,
     `drive.file_uploaded`, `drive.file_read` (a file opened: its first chunk read),
-    `drive.item_changed` (renamed, moved), `drive.item_deleted` — and their Drive shares
+    `drive.item_changed` (renamed, moved), `drive.item_deleted`, and for received files of a
+    reverse share `drive.received_taken_in`, `drive.received_failed`, `drive.received_retried`
+    (one row per link, per actor, per hour, adding up the files; [`REVERSE.md`](./REVERSE.md)
+    §7) — and their Drive shares
     (`share.created`, `share.updated`, `share.revoked`). Node ids only, never names. A user's own
     file reads are throttled in the log (one row per file per minute, at most 30 a minute), so
     they cannot push other entries out;

@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEX
   exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -205,7 +206,11 @@ const MIGRATIONS = [
   // 14: reverse shares (docs/REVERSE.md): their role options join the Default
   // role (reverseEnabled off, 10 active, 1 GiB each). The shares themselves
   // live in the user's Drive DO; the index row is an ordinary shares row.
-  (m) => materializeDefaultRole(m.sql),
+  // reverse_ids: a hash of every reverse-share id ever created, kept for good.
+  (m) => {
+    m.sql.exec('CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY)');
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -283,6 +288,11 @@ const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
 /** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
 const PENDING_REVERSE_SEC = 600;
+/**
+ * The tombstone of a reverse-share id (reverse_ids): a hash, so the ids of
+ * links that ended and were pruned are not kept, only whether one existed.
+ */
+const reverseIdHash = async (id) => b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(`secbin/reverse-id\0${id}`))));
 /** `reverse.received` log entries of one link are added up over this long (one entry per link per hour). */
 const RECEIVED_LOG_SEC = 3600;
 /** Bound parameters per `IN (…)` query: SQLite in a Durable Object allows about 100. */
@@ -292,7 +302,14 @@ const SQL_BATCH = 90;
  * (docs/DRIVE.md §9): as the user, or — the owner impersonating them — as the
  * user's own in their activity with the real actor in the admin audit.
  */
-const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted'];
+// Received files (reverse shares, docs/REVERSE.md §7) taken in, marked as not
+// taken in, or put back to try again: one row per link, per actor, per
+// RECEIVED_LOG_SEC that adds up the files. Anonymous uploaders decide how many
+// files arrive, so one row per file could push the user's other entries out.
+const RECEIVED_ACTIONS = ['drive.received_taken_in', 'drive.received_failed', 'drive.received_retried'];
+const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted',
+  ...RECEIVED_ACTIONS];
+const RECEIVED_DETAIL_RE = /^(id=r[A-Za-z0-9_-]{22} )files=([1-9]\d{0,8})$/;
 // A user's own file reads (one row per opened file) are throttled so that they
 // cannot flood the log and push other entries out: one per file per minute, at
 // most DRIVE_READS_PER_MINUTE a minute. The owner's rows are never dropped.
@@ -2034,6 +2051,18 @@ export class Directory extends DurableObject {
         WHERE action = 'drive.file_read' AND actor_id = ? AND imp = 0 AND ts >= ?`, userId, userId, now() - DRIVE_READ_DEDUPE_SEC).toArray();
       if (recent.length >= DRIVE_READS_PER_MINUTE || recent.some((r) => r.detail === d)) return { ok: true, logged: false };
     }
+    if (RECEIVED_ACTIONS.includes(action)) {
+      const m = RECEIVED_DETAIL_RE.exec(d);
+      if (!m) return fail(400, 'invalid', 'Invalid detail.');
+      const [, head, files] = m;
+      const open = this.sql.exec(`SELECT id, detail FROM activity WHERE subject_id = ? AND action = ? AND actor_id = ? AND imp = ? AND adm = 0
+        AND ts > ? AND substr(detail, 1, ?) = ? ORDER BY id DESC LIMIT 1`, userId, action, imp ? actor.id : userId, imp ? 1 : 0, now() - RECEIVED_LOG_SEC, head.length, head).toArray()[0];
+      const prev = open && RECEIVED_DETAIL_RE.exec(open.detail);
+      if (prev) {
+        this.sql.exec('UPDATE activity SET detail = ? WHERE id = ?', `${head}files=${Number(prev[2]) + Number(files)}`, open.id);
+        return { ok: true, logged: true };
+      }
+    }
     this.#log(imp ? { id: actor.id, imp: true } : userId, userId, action, d);
     return { ok: true, logged: true };
   }
@@ -2092,11 +2121,15 @@ export class Directory extends DurableObject {
    * step, so concurrent creates cannot exceed the limit, and an id anyone
    * holds (any kind, any account, any status) is refused with 409 `exists`.
    * The row is `pending` (not listed, no uploads) until activateReverse; a
-   * claim the Worker never completes lapses after PENDING_REVERSE_SEC.
+   * claim the Worker never completes lapses after PENDING_REVERSE_SEC. An id
+   * that was ever a reverse share (reverse_ids, kept after its row is pruned
+   * or its account deleted) is refused too: an old link never opens a later
+   * share.
    * → { ok, maxBytes (the share's effective limit, null: none) }.
    */
   async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null }) {
     if (typeof id !== 'string' || !/^r[A-Za-z0-9_-]{22}$/.test(id)) return fail(400, 'invalid', 'Invalid reverse-share id.');
+    const h = await reverseIdHash(id); // before any check: nothing below awaits
     const u = this.#user(uid);
     if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
     if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
@@ -2110,6 +2143,7 @@ export class Directory extends DurableObject {
     if (roleMax !== null && maxBytes !== null && maxBytes > roleMax) {
       return fail(403, 'reverse_too_large', `A reverse share may receive at most ${roleMax} bytes.`, { max: roleMax });
     }
+    if (this.sql.exec('SELECT 1 FROM reverse_ids WHERE h = ?', h).toArray().length) return fail(409, 'exists', 'A share with this id already exists.');
     const ts = now();
     this.sql.exec("DELETE FROM shares WHERE status = 'pending' AND created < ?", ts - PENDING_REVERSE_SEC);
     const active = this.sql.exec(`SELECT COUNT(*) AS c FROM shares WHERE user_id = ? AND kind = 'reverse'
@@ -2123,11 +2157,16 @@ export class Directory extends DurableObject {
     return { ok: true, maxBytes: maxBytes ?? roleMax };
   }
 
-  /** The Drive holds the claimed reverse share now: it is listed and takes uploads (logged as created). */
+  /**
+   * The Drive holds the claimed reverse share now: it is listed and takes
+   * uploads (logged as created), and its id can never be claimed again.
+   */
   async activateReverse(uid, id, { created, expires }, actorId = uid) {
+    const h = typeof id === 'string' ? await reverseIdHash(id) : ''; // before the update: nothing below awaits
     const w = this.sql.exec("UPDATE shares SET status = 'active', created = ?, expires = ? WHERE id = ? AND user_id = ? AND kind = 'reverse' AND status = 'pending'",
       created, expires, id, uid).rowsWritten;
     if (!w) return fail(409, 'exists', 'This reverse share is no longer being created.');
+    this.sql.exec('INSERT OR IGNORE INTO reverse_ids (h) VALUES (?)', h);
     this.#log(actorId, uid, 'share.created', `id=${id} kind=reverse`);
     return { ok: true };
   }

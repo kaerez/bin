@@ -3,8 +3,8 @@
 // and the anonymous uploader's requests (open, begin, reserve, chunks,
 // finalize) with the real client crypto.
 import { env, SELF, runInDurableObject } from 'cloudflare:test';
-import { makeUser, fetchJson, intent, ORIGIN, proofFor, USER_PW } from './helpers.js';
-import { enableDrive } from './drive-helpers.js';
+import { makeUser, fetchJson, intent, ORIGIN, proofFor, USER_PW, salt16 } from './helpers.js';
+import { enableDrive, escrowWrap } from './drive-helpers.js';
 import {
   setReverseStretcher, createReverseKey, sealReversePriv, linkProof, linkHash, passwordGate, passwordProof,
   sealNote, sealUpload, newReverseId, newNodeId,
@@ -26,9 +26,20 @@ export const errorOf = async (r) => (await r.json()).error;
 export async function receiver(name, limits = {}, { keys = true } = {}) {
   const u = await makeUser(name);
   await enableDrive(u.id, { reverseEnabled: true, ...limits });
-  // A Drive that is set up (it has a key wrap): a link's private key is sealed with its key.
-  if (keys) await runInDurableObject(driveOf(u.id), (inst, state) => state.storage.sql.exec("INSERT INTO wraps (kind, ref, data) VALUES ('pw', 'pw', 'test-wrap')"));
+  // A Drive that is set up (a link's private key is sealed with its key).
+  if (keys) await setUpDrive(u.cookie);
   return u;
+}
+
+/**
+ * Set up the Drive as the user's browser does at sign-in (docs/DRIVE.md §3):
+ * the salt, a password wrap and the escrow wrap for the owner's current key
+ * (opaque stand-ins: the server only checks their form).
+ */
+export async function setUpDrive(cookie) {
+  const pw = { kind: 'pw', ref: 'pw', data: `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}` };
+  const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie, headers: intent, body: { driveSalt: salt16(), set: [pw, await escrowWrap()] } });
+  if (r.status !== 200) throw new Error(`drive set-up: ${r.status} ${await r.text()}`);
 }
 
 /**

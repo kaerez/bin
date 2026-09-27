@@ -91,6 +91,8 @@ const REVERSE_KEEP_SEC = 30 * 86400;
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
+/** The smaller of two byte limits (null: none). */
+const capBytes = (a, b) => (a === null || a === undefined ? b ?? null : b === null || b === undefined ? a : Math.min(a, b));
 
 /** Chunks of a Drive file of `size` plaintext bytes (an empty file has none). */
 export const driveChunks = (size) => Math.ceil(size / CHUNK);
@@ -803,12 +805,13 @@ export class Drive extends DurableObject {
    * against `lh`): the sealed note, the password parameters and the limits
    * left. 'gone' unless active.
    */
-  async reverseOpen(uid, id) {
+  async reverseOpen(uid, id, { roleMaxBytes = null } = {}) {
     this.#bind(uid);
     const r = this.#reverse(id);
     const st = this.#reverseState(r);
     if (st !== 'active') return { status: st === 'gone' ? 'unknown' : 'gone', lh: r ? r.lh : null };
     const o = this.#reverseOut(r, { priv: false });
+    o.maxBytes = capBytes(o.maxBytes, roleMaxBytes);
     return {
       status: 'ok', lh: r.lh, ph: r.ph,
       head: {
@@ -864,11 +867,19 @@ export class Drive extends DurableObject {
     const x = this.sql.exec('SELECT * FROM rsessions WHERE hash = ?', hash).toArray()[0];
     return x && x.rid === id && x.expires > nowSec() ? x : null;
   }
-  /** Keep session `x` open for `ttl` more seconds: never past the link's expiry, or RECEIVE_MAX_SEC after it started. */
+  /**
+   * Session `x` now ends `ttl` seconds from now: later (a file reserved, a
+   * chunk received) or sooner (nothing left unfinished: idle again), never
+   * past the link's expiry or RECEIVE_MAX_SEC after it started.
+   */
   #touch(x, ttl) {
     const r = this.#reverse(x.rid);
     const cap = Math.min(r.expires, (x.started ?? nowSec()) + RECEIVE_MAX_SEC);
-    this.sql.exec('UPDATE rsessions SET expires = ? WHERE hash = ?', Math.min(cap, Math.max(x.expires, nowSec() + ttl)), x.hash);
+    this.sql.exec('UPDATE rsessions SET expires = ? WHERE hash = ?', Math.min(cap, nowSec() + ttl), x.hash);
+  }
+  /** Session `x` after a file finished or was cancelled: open for pendingSec while it has another unfinished file, else idle. */
+  #settle(x, pendingSec) {
+    this.#touch(x, this.#sessionBusy(x.hash) ? pendingSec : Math.min(pendingSec, SESSION_IDLE_SEC));
   }
   /** Does session `hash` still have a file reserved and not finished? */
   #sessionBusy(hash) {
@@ -881,13 +892,15 @@ export class Drive extends DurableObject {
    * checked by the Worker), the Drive's capacity and largest file, and the
    * tree's ceilings.
    */
-  async reverseCreateFile(uid, id, hash, { node, name, meta, size, wrap, uploadHash, capacity, maxFile, pendingSec }) {
+  async reverseCreateFile(uid, id, hash, { node, name, meta, size, wrap, uploadHash, capacity, maxFile, pendingSec, roleMaxBytes = null }) {
     this.#bind(uid);
     const r = this.#reverse(id);
     if (this.#reverseState(r) !== 'active') return fail(410, 'gone', 'This link no longer accepts files.');
     const x = this.#session(id, hash);
     if (!x) return fail(403, 'bad_grant', 'This upload session has ended. Reload the page to start again.');
     const opts = JSON.parse(r.opts);
+    // The link's byte limit, or the role's current one when that is smaller (lowered since the link was made).
+    const maxBytes = capBytes(opts.maxBytes, roleMaxBytes);
     if (opts.maxFiles !== null && opts.maxFiles !== undefined && r.files + 1 > opts.maxFiles) return fail(409, 'too_many_files', `This link accepts at most ${opts.maxFiles} files.`, { max: opts.maxFiles });
     if (r.files + 1 > MAX_REVERSE_FILES) return fail(409, 'too_many_files', `A link accepts at most ${MAX_REVERSE_FILES} files.`, { max: MAX_REVERSE_FILES });
     if (opts.maxFileBytes !== null && opts.maxFileBytes !== undefined && size > opts.maxFileBytes) return fail(413, 'file_too_large', `Each file may be at most ${opts.maxFileBytes} bytes.`, { max: opts.maxFileBytes });
@@ -895,8 +908,8 @@ export class Drive extends DurableObject {
     const fk = JSON.stringify({ kind: 'rs', data: wrap });
     // The sealed path, metadata and wrap count towards the link's bytes too (an empty file is not free).
     const sealed = name.length + meta.length + fk.length;
-    if (opts.maxBytes !== null && opts.maxBytes !== undefined && this.#bytesUsed(r) + size + sealed > opts.maxBytes) {
-      return fail(413, 'share_full', 'This link has no room left for that file.', { max: opts.maxBytes, used: this.#bytesUsed(r) });
+    if (maxBytes !== null && this.#bytesUsed(r) + size + sealed > maxBytes) {
+      return fail(413, 'share_full', 'This link has no room left for that file.', { max: maxBytes, used: this.#bytesUsed(r) });
     }
     const bad = this.#checkNew(node) || this.#checkParent(r.folder);
     if (bad) return bad.error === 'exists' ? bad : fail(bad.status === 404 ? 410 : bad.status, bad.status === 404 ? 'gone' : bad.error, bad.message);
@@ -972,7 +985,7 @@ export class Drive extends DurableObject {
     this.sql.exec('UPDATE nodes SET rsess = NULL WHERE id = ?', node);
     this.sql.exec('UPDATE rsessions SET files = files + 1, bytes = bytes + ? WHERE hash = ?', n.size, hash);
     // With nothing left unfinished, the session is idle again.
-    this.#touch(x, this.#sessionBusy(hash) ? pendingSec : Math.min(pendingSec, SESSION_IDLE_SEC));
+    this.#settle(x, pendingSec);
     return { status: 'ok' };
   }
 
@@ -987,6 +1000,9 @@ export class Drive extends DurableObject {
       if (!safeEq(uploadHash, n.upload_hash)) return { status: 'forbidden' };
       await this.#deleteObjects(uid, [n]);
       this.ctx.storage.transactionSync(() => this.#dropPending(n));
+      // Nothing left unfinished: idle again (a reserve-and-cancel does not keep the session open).
+      const x = this.#session(id, hash);
+      if (x) this.#settle(x, Number(this.#meta('pendingSec')) || 3600);
       await this.#reportUsage();
       return { status: 'ok' };
     });
@@ -1043,7 +1059,7 @@ export class Drive extends DurableObject {
     if (!n || !n.rs || n.state !== 'ready') return fail(409, 'not_received', 'This is not a received file waiting to be added.');
     if (failed) this.sql.exec('UPDATE nodes SET rfail = ?, rwhy = ? WHERE id = ?', nowSec(), RECEIVED_FAIL_REASONS.includes(reason) ? reason : 'unreadable', node);
     else this.sql.exec('UPDATE nodes SET rfail = NULL, rwhy = NULL WHERE id = ?', node);
-    return { ok: true, received: this.#receivedCount(), failed: this.#receivedFailedCount() };
+    return { ok: true, received: this.#receivedCount(), failed: this.#receivedFailedCount(), rs: n.rs };
   }
 
   /** A received file re-wrapped by the user's browser: from now on an ordinary Drive file (in `parent`). */
@@ -1057,7 +1073,7 @@ export class Drive extends DurableObject {
     }
     this.sql.exec('UPDATE nodes SET parent = ?, name = ?, meta = ?, fk = ?, rs = NULL, rfail = NULL, rwhy = NULL, updated = ? WHERE id = ?', parent, name, meta, fk, nowSec(), node);
     this.#dropEndedReverse();
-    return { ok: true, used: this.#used() };
+    return { ok: true, used: this.#used(), rs: n.rs };
   }
 
   // ── pending-upload purge ──────────────────────────────────────────────────

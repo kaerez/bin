@@ -131,6 +131,8 @@ export async function handleReverseOwner(request, env, url, a) {
       } else assertIntent(request);
       const r = await drive().markReceived(uid, node, { failed: request.method === 'POST', reason });
       if (!r.ok) return fromDo(r);
+      // Drive actions: the user's own, or the owner's while acting as the user (imp).
+      await dir.driveLog(actorId(a), uid, request.method === 'POST' ? 'drive.received_failed' : 'drive.received_retried', `id=${r.rs} files=1`);
       return json({ ok: true, received: r.received, failed: r.failed });
     }
     if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -143,6 +145,7 @@ export async function handleReverseOwner(request, env, url, a) {
     const r = await drive().acceptReceived(uid, node, { parent, name, meta, fk });
     if (!r.ok) return fromDo(r);
     await dir.setDriveUsed(uid, r.used);
+    await dir.driveLog(actorId(a), uid, 'drive.received_taken_in', `id=${r.rs} files=1`);
     return json({ ok: true });
   }
   return null;
@@ -275,7 +278,7 @@ export async function handleReversePublic(request, env, url) {
 
   if (action === 'open') {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
-    const r = await drive.reverseOpen(uid, id);
+    const r = await drive.reverseOpen(uid, id, { roleMaxBytes: tg.roleMaxBytes });
     if (r.status !== 'ok') return err(410, 'gone', GONE);
     return json(r.head);
   }
@@ -379,7 +382,7 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
   if (!node || !name || !meta || !wrap) return invalid('Send { id, name, meta, size, wrap, types? } (encrypted as the uploader page does).');
   if (!Number.isSafeInteger(body.size) || body.size < 0 || body.size > HARD_MAX_DRIVE_BYTES) return err(400, 'invalid_size', 'size must be the file’s size in bytes.');
   // The share's file types: declared by the uploader's browser (names are encrypted), as for file shares.
-  const o = await drive.reverseOpen(uid, id);
+  const o = await drive.reverseOpen(uid, id, { roleMaxBytes: tg.roleMaxBytes });
   if (o.status !== 'ok') return err(410, 'gone', GONE);
   const rules = o.head.limits.types;
   if (rules) {
@@ -393,6 +396,7 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
   const r = await drive.reverseCreateFile(uid, id, await hashToken(grant), {
     node, name, meta, size: body.size, wrap, uploadHash: await hashToken(uploadToken),
     capacity: tg.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: tg.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: tg.pendingSec,
+    roleMaxBytes: tg.roleMaxBytes, // the role's current cap applies to existing links too
   });
   if (!r.ok) return r.error === 'bad_grant' ? failed(env, g, fromDo(r)) : fromDo(r);
   await directory(env).setDriveUsed(uid, r.used);

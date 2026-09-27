@@ -35,7 +35,10 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   (87 characters). The browser chooses `id` (`r` + 16 random bytes, 23 characters), so the sealed
   values below can be bound to it. The server claims the id in the share index before anything
   else (§6.1): an id that any account already holds is refused (`409 exists`), and an index row
-  never moves to another account.
+  never moves to another account. An id that was ever a reverse share stays refused for good,
+  also after its index row is pruned or its account deleted: the Directory keeps
+  `SHA-256("secbin/reverse-id\0" ‖ id)` of every reverse share it activates (`reverse_ids`,
+  nothing else), so an old link never opens a later share.
 - **Private key:** PKCS#8, sealed with DK's **`files`** sub-key (docs/DRIVE.md §3) as a sealed
   field `{ iv, ct }` with field `reversePriv` and node id `<id>` (AAD
   `secbin-drive/v1\nreversePriv\n<id>\n`). Only the user's unlocked Drive opens it. The user's
@@ -131,7 +134,9 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 - A session with no unfinished file lapses **10 minutes** after its last activity; while it has a
   file reserved and not finished it lasts the role's `filePendingSec` from its last activity (the
   file reserved, a chunk of it), never past the share's expiry and never more than **24 hours**
-  after it began. A reserved file must be finished within 24 hours of its reservation, however
+  after it began. The deadline slides both ways: once nothing is unfinished (its last file
+  finished or was cancelled) the session is idle again and lapses 10 minutes later, giving its
+  per-network slot back. A reserved file must be finished within 24 hours of its reservation, however
   often its chunks are re-sent; the alarm purges it after that and gives its reservation back.
 - Hard ceilings: 1 000 reverse shares per Drive (an ended one is dropped 30 days after it ended —
   as long as the share index keeps its row — once all its received files are re-wrapped or
@@ -150,7 +155,9 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   `reverseEnabled` (bool, default **false**; also needs `driveEnabled`), `reverseMaxActive`
   (active reverse shares at once, default 10, null = no limit up to 1 000), `reverseMaxBytes`
   (maximum total bytes per reverse share, default 1 GiB, null = no limit; a share's `maxBytes`
-  may not exceed it and defaults to it). The owner: allowed, no limits. The public account: none.
+  may not exceed it and defaults to it; lowering it applies to existing shares at once: each is
+  held to the smaller of its own `maxBytes` and the role's current value, and `open` reports that
+  value). The owner: allowed, no limits. The public account: none.
 - **Always:** the user's Drive capacity (`driveMaxBytes`) and largest file (`driveMaxFileBytes`),
   and the Drive's hard ceilings, apply to every upload.
 - File types are declared by the uploader's browser (`declare()`), checked by the server against
@@ -165,8 +172,8 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 | `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 drive_not_set_up` when the Drive has no key yet (the link's private key is sealed with it). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
 | `GET /api/private/drive/received` | received files waiting to be re-wrapped, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv }], more, next }`; `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
-| `POST /api/private/drive/received/<nodeId>` | re-wrapped: `{ parent, name, meta, fk }` (normal sealed fields; `parent` a folder) → `{ ok }` |
-| `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again) |
+| `POST /api/private/drive/received/<nodeId>` | re-wrapped: `{ parent, name, meta, fk }` (normal sealed fields; `parent` a folder) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
+| `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
 | `DELETE /api/private/drive/nodes/<nodeId>` | discard a received file (as any Drive item) |
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares); `PATCH /api/private/shares/<id>` changes the label or extends the expiry |
 
@@ -211,9 +218,11 @@ By the maintainer's rule, the owner impersonating a user can do everything the u
 reverse shares: create (without a confirmation, as for every other change to the account), list
 them with their sealed keys, take in received files, extend and revoke. In the Drive page this
 works exactly as for the user once the impersonating tab holds the user's Drive key (docs/DRIVE.md
-§3). The user's own activity shows these actions as theirs (`share.created`, `share.revoked`, no
-actor); the owner-only admin audit keeps the real actor (`imp = 1`), as for every other action
-taken while impersonating.
+§3). The user's own activity shows these actions as theirs (`share.created`,
+`drive.received_taken_in`, `drive.received_failed`, `drive.received_retried`, `share.revoked`,
+no actor); the owner-only admin audit keeps the real
+actor (`imp = 1`, not `adm`), exactly as for the Drive actions taken while impersonating
+(docs/DRIVE.md §9).
 
 The server cannot tell whether a new link's `priv` is sealed with the user's Drive key. So the
 owner acting as the user (or anyone holding that impersonation session) can also create, through
@@ -230,7 +239,12 @@ In the user's activity log (and the admin's audit): `share.created` (`kind=rever
 only), for the sessions that end (`done`) or lapse with unlogged uploads — **one entry per link
 per hour**, which adds up the files and bytes of every session in that hour, so anonymous uploads
 cannot push other entries out of the log; `reverse.bad_password` (`id`; at most one entry per
-share per minute).
+share per minute); the Drive actions on received files, `drive.received_taken_in` (taken into
+the Drive), `drive.received_failed` (could not be taken in) and `drive.received_retried` (put
+back to try again), each with the link's `id` and `files`, logged like the other Drive actions
+(docs/DRIVE.md §9: the user's own, or the owner's while acting as the user with `imp = 1`) —
+**one entry per link, per actor, per hour**, adding up the files, since the uploaders decide how
+many files arrive.
 
 ## 8. UI
 

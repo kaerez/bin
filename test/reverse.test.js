@@ -25,7 +25,7 @@ import { deriveSubkeys, sealField, openField } from '../public/js/drivekeys.js';
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, decryptChunk, importFileKey } from '../public/js/files.js';
 import {
-  DK, dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, putChunk, reserve, send, received, overhead, ownSealed,
+  DK, dirStub, driveOf, errorOf, receiver, setUpDrive, newReverse, rv, openLink, begin, grantOf, putChunk, reserve, send, received, overhead, ownSealed,
 } from './reverse-helpers.js';
 
 let oc;
@@ -65,7 +65,7 @@ describe('role options and migration 14', () => {
     r = await newReverse(u.cookie);
     expect([r.res.status, await errorOf(r.res)]).toEqual([409, 'drive_not_set_up']);
     expect(await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec('SELECT COUNT(*) AS c FROM shares WHERE id = ?', r.id).one().c)).toBe(0);
-    await runInDurableObject(driveOf(u.id), (inst, state) => state.storage.sql.exec("INSERT INTO wraps (kind, ref, data) VALUES ('pw', 'pw', 'test-wrap')"));
+    await setUpDrive(u.cookie);
     expect((await newReverse(u.cookie)).res.status).toBe(201);
     // The owner: allowed; the public account: the options cannot be set.
     expect((await (await fetchJson('/api/private/me', { cookie: oc })).json()).caps.reverseEnabled).toBe(true);
@@ -581,7 +581,7 @@ describe('isolation and the account', () => {
     // The user's own activity shows the actions as theirs; the owner-only audit keeps the real actor.
     const mine = (await (await fetchJson('/api/private/me/activity', { cookie: u.cookie })).json()).rows;
     const log = await audit(u.id);
-    for (const [action, detail] of [['share.created', `id=${r.id} kind=reverse`], ['share.revoked', `id=${r.id}`]]) {
+    for (const [action, detail] of [['share.created', `id=${r.id} kind=reverse`], ['drive.received_taken_in', `id=${r.id} files=1`], ['share.revoked', `id=${r.id}`]]) {
       const own = mine.find((e) => e.action === action && e.detail.startsWith(detail));
       expect(own, action).toBeTruthy();
       expect(Object.keys(own).sort()).toEqual(['action', 'detail', 'id', 'ts']);

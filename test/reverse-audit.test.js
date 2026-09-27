@@ -15,7 +15,7 @@ import { env, runDurableObjectAlarm, runInDurableObject, createExecutionContext,
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import worker from '../src/index.js';
 import { owner, fetchJson, intent, freshIp, ORIGIN, proofFor, USER_PW, cookieOf } from './helpers.js';
-import { node, drive } from './drive-helpers.js';
+import { node, drive, enc } from './drive-helpers.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
 import { MAX_SESSIONS_PER_NET, SESSION_IDLE_SEC, PW_MAX_FAILS, PW_LOCK_SEC, RECEIVE_MAX_SEC } from '../src/drive-do.js';
 import {
@@ -281,6 +281,49 @@ describe('L-4: reverse.received entries add up per link per hour', () => {
     expect((await rv(r.id, '/done', { headers: { 'x-reverse-grant': g }, ip })).status).toBe(200);
     expect((await audit(u.id)).filter((e) => e.action === 'reverse.received').map((e) => e.detail))
       .toEqual([`id=${r.id} files=1 bytes=11`, `id=${r.id} files=${N} bytes=${(N * (N - 1)) / 2}`]);
+  }, 120000);
+});
+
+describe('L-4: take-ins are logged like Drive actions and add up per link, per actor, per hour', () => {
+  it('the user\'s own take-ins make one entry per link; the owner acting as the user gets its own (imp); the next hour a new one', async () => {
+    const u = await receiver('r3-l4-take');
+    const r = await newReverse(u.cookie);
+    const r2 = await newReverse(u.cookie);
+    const nodes = [];
+    for (const [link, n] of [[r, 3], [r2, 1]]) {
+      const ip = freshIp();
+      const g = await grantOf(link, { ip });
+      for (let k = 0; k < n; k++) nodes.push((await send(link, g, { path: `f${k}.txt`, ip })).node);
+      expect((await rv(link.id, '/done', { headers: { 'x-reverse-grant': g }, ip })).status).toBe(200);
+    }
+    const take = (cookie, id) => fetchJson(`/api/private/drive/received/${id}`, { method: 'POST', cookie, headers: intent, body: { parent: 'root', name: enc(), meta: enc(), fk: enc(32) } });
+    for (const id of [nodes[0], nodes[1], nodes[3]]) expect((await take(u.cookie, id)).status).toBe(200);
+    const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
+    expect((await take(ic, nodes[2])).status).toBe(200);
+    // Taken in once only: a second take-in is refused and logs nothing.
+    expect((await take(u.cookie, nodes[0])).status).toBe(409);
+    const rows = (await audit(u.id)).filter((e) => e.action === 'drive.received_taken_in');
+    const pick = ({ detail, imp, adm, actor_id: actor }) => ({ detail, imp, adm, own: actor === u.id });
+    expect(rows.map(pick)).toEqual([
+      { detail: `id=${r.id} files=1`, imp: 1, adm: 0, own: false },
+      { detail: `id=${r2.id} files=1`, imp: 0, adm: 0, own: true },
+      { detail: `id=${r.id} files=2`, imp: 0, adm: 0, own: true },
+    ]);
+    // The user's own activity shows all three as theirs, with no actor.
+    const mine = (await (await fetchJson('/api/private/me/activity', { cookie: u.cookie })).json()).rows.filter((e) => e.action === 'drive.received_taken_in');
+    expect(mine.map((e) => e.detail).sort()).toEqual([`id=${r.id} files=1`, `id=${r.id} files=2`, `id=${r2.id} files=1`].sort());
+    for (const e of mine) expect(Object.keys(e).sort()).toEqual(['action', 'detail', 'id', 'ts']);
+    // An hour later: a new entry.
+    const ip = freshIp();
+    const g = await grantOf(r, { ip });
+    const late = (await send(r, g, { ip })).node;
+    vi.useFakeTimers({ now: Date.now() + 3601 * 1000, toFake: ['Date'] });
+    expect((await take(u.cookie, late)).status).toBe(200);
+    expect((await audit(u.id)).filter((e) => e.action === 'drive.received_taken_in' && e.imp === 0 && e.detail.startsWith(`id=${r.id} `)).map((e) => e.detail))
+      .toEqual([`id=${r.id} files=1`, `id=${r.id} files=2`]);
+    // The detail is checked: nothing else can be written under this action.
+    const bad = await runInDurableObject(dirStub(), (inst) => inst.driveLog(u.id, u.id, 'drive.received_taken_in', 'id=x files=1'));
+    expect(bad).toMatchObject({ ok: false, status: 400 });
   }, 120000);
 });
 

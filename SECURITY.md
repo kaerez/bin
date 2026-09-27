@@ -980,7 +980,12 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - **Link ids.** The browser chooses a link's id; the server claims it in the share index first,
   in one step with the role's checks and the count of active links (so `reverseMaxActive` holds
   under concurrent creates), and refuses an id any account already holds (`409`). An index row
-  never moves to another account and its link hash is never replaced (for every share kind).
+  never moves to another account and its link hash is never replaced (for every share kind). An
+  id that was ever a reverse share is never claimed again, even after its index row is pruned
+  (30 days after it ended) or its account is deleted: the Directory keeps a SHA-256 of every
+  created reverse-share id for good (`reverse_ids`; a hash only, not the id, the account or the
+  link), so an old link never opens a later share or shows a later note. A claim that never
+  became a link (its confirmation refused) leaves no tombstone.
 - **Creating a link** adds key material to the Drive (a key pair that can place files in it), so
   the user confirms it with the account password or a passkey, as for API keys: a stolen session
   alone cannot create one. Failed confirmations count like every other failed confirmation. The
@@ -1027,15 +1032,25 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   password, so no password guess is answered without one (the uploader page shows the widget and
   keeps Send disabled until it passes; it gets the Turnstile CSP, and the strict one otherwise).
   Besides the per-network Guard, each link has its own lockout: 10 wrong passwords within 15
-  minutes, from any networks, lock its password for 15 minutes (the right one too). An upload
-  session with nothing unfinished lapses after 10 minutes idle, and a network may hold at most 5
-  open sessions per link (counted by 24 bits of a hash of the link id and the network; no key,
-  and the address itself is not stored), besides 100 per link, so idle sessions cannot easily
-  lock a link for everyone else.
+  minutes, from any networks, lock its password for 15 minutes (the right one too). The lockout
+  is per link on purpose, so that guesses spread over many networks are stopped too; the
+  consequence is that one network holding the link can keep its password locked for everyone:
+  10 wrong guesses every 15 minutes are well under the Guard's per-network limit (60 invalid
+  requests per 10 minutes), so that network is not blocked, and with Turnstile on each guess costs
+  one solved challenge. An upload session's deadline slides: while it has a file reserved and
+  not finished it stays open for the role's `filePendingSec` after its last progress; as soon as
+  nothing is unfinished (the file finished or was cancelled) it is idle again and lapses 10
+  minutes later, and it never lasts more than 24 hours after it began. A network may hold at most
+  5 open sessions per link (counted by 24 bits of a hash of the link id and the network; no key,
+  and the address itself is not stored), besides 100 per link, so idle sessions give their slots
+  back and cannot easily lock a link for everyone else.
 - **Limits.** Per link: expiry (at most the role's `maxExpireSec`), files, total bytes, largest
   file, file types; per role: `reverseEnabled` (with `driveEnabled`), `reverseMaxActive`,
-  `reverseMaxBytes`; always the Drive's capacity and largest file. A file's sealed path, metadata
-  and wrap count towards the link's bytes, so empty files are not free. Every limit is checked
+  `reverseMaxBytes`; always the Drive's capacity and largest file. The role's current
+  `reverseMaxBytes` applies to existing links too: a link is held to the smaller of its own
+  byte limit and the role's (lowering the role's cap takes effect at once; raising it does not
+  raise a link's own). A file's sealed path, metadata and wrap count towards the link's bytes, so
+  empty files are not free. Every limit is checked
   atomically in the user's Drive object when a file is reserved; chunk sizes are checked exactly.
   Only the session that reserved a file may finalize or cancel it, and a reservation must finish
   within 24 hours however often its chunks are re-sent (a session, too, ends 24 hours after it
@@ -1051,7 +1066,19 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   received stay. Deleting the account deletes everything.
 - **Audit.** `share.created` (`kind=reverse`) and `share.revoked`, `reverse.received` (count and
   bytes only; one entry per link per hour adding up that hour's sessions, so uploads cannot flood
-  the user's log or the server-wide log limit), `reverse.bad_password`.
+  the user's log or the server-wide log limit), `reverse.bad_password`, and
+  the Drive actions on received files: `drive.received_taken_in` (taken into the Drive),
+  `drive.received_failed` (could not be taken in) and `drive.received_retried` (put back to try
+  again), each one entry per link, per actor, per hour adding up the files, for the same reason.
+  Creating, revoking, taking in, marking failed and retrying while the owner acts as the user are
+  logged as the Drive actions are: as the user's own in their activity, with the owner as the
+  real actor in the owner-only admin audit (`imp`, not `adm`).
+- **What uploaders can see of each other.** `open` returns a limited link's `filesLeft` and
+  `bytesLeft` to anyone with the link, before any session or human check. Every uploader of a
+  link with a file or byte limit can therefore poll it and see when other uploads are reserved,
+  and how large they are: a file's exact size plus the length of its sealed path, metadata and
+  wrap (which grows with the length of its path). Names, types and content are not revealed. A
+  link without limits returns `null` for both.
 - **The uploader page** (`/r/<id>`) is built with DOM calls only (no `innerHTML`), shows the
   user's note as text, and is never cached by the service worker.
 
