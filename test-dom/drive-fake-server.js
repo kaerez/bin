@@ -40,6 +40,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     ownerId: 'owner1',
     ownerEscrowPriv: null, // the owner's sealed escrow key (for the impersonation escrow route)
     escrowUses: 0,
+    busyFinalize: 0, // answer finalize "busy" this many times
   };
   const ok = (data, status = 200) => ({ ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) });
   const bin = (bytes) => ({ ok: true, status: 200, type: 'basic', json: async () => null, arrayBuffer: async () => bytes.slice().buffer });
@@ -186,6 +187,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     }
     if ((m = p.match(/^\/api\/private\/drive\/files\/([^/]+)\/finalize$/))) {
       const n = S.nodes.get(m[1]);
+      if (S.busyFinalize > 0) { S.busyFinalize--; return fail(409, 'busy'); } // a chunk write still in flight
       for (let i = 0; i < n.chunks; i++) if (!S.chunks.has(`${n.id}/${i}`)) return fail(409, 'incomplete');
       n.state = 'ready';
       return ok({ ok: true });

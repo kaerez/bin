@@ -154,6 +154,20 @@ describe('L-2: many shares of one item', () => {
   });
 });
 
+describe('audit round 3: a share id never changes hands', () => {
+  it('recordShare refuses an id another account holds (the row stays theirs); the same account may re-record it', async () => {
+    const a = await makeUser('aud-rec-a');
+    const b = await makeUser('aud-rec-b');
+    const id = genId('f');
+    const t = Math.floor(Date.now() / 1000);
+    expect(await dirStub().recordShare({ id, uid: a.id, kind: 'drive', label: 'mine', created: t, expires: t + 60, views: null })).toMatchObject({ ok: true });
+    expect(await dirStub().recordShare({ id, uid: b.id, kind: 'drive', label: 'taken', created: t, expires: t + 60, views: null })).toMatchObject({ ok: false, status: 409 });
+    const row = await runInDurableObject(dirStub(), (i, st) => st.storage.sql.exec('SELECT user_id, label FROM shares WHERE id = ?', id).one());
+    expect(row).toEqual({ user_id: a.id, label: 'mine' });
+    expect(await dirStub().recordShare({ id, uid: a.id, kind: 'drive', label: 'again', created: t, expires: t + 60, views: null })).toMatchObject({ ok: true });
+  });
+});
+
 describe('L-3: sealed names and metadata', () => {
   it('are capped (512 / 1024 characters) and count towards the capacity', async () => {
     const u = await makeUser('aud-meta');

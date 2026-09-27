@@ -532,7 +532,13 @@ async function createShare(request, env, dir, a) {
     await dir.refund(uid, auth.refund);
     return err(400, 'invalid_format', 'The manifest’s view limit, expiry and recipient-delete setting must match the request.');
   }
-  await dir.recordShare({ id, uid, kind: 'drive', label: body.label, created: r.created, expires: r.expires, views, lh: clean.acc.lh }, driveActor(a));
+  const rec = await dir.recordShare({ id, uid, kind: 'drive', label: body.label, created: r.created, expires: r.expires, views, lh: clean.acc.lh }, driveActor(a));
+  if (rec && rec.ok === false) {
+    // The (server-chosen) id is someone else's: never take it over.
+    await fileStub(env, id).revoke();
+    await dir.refund(uid, auth.refund);
+    return fromDir(rec);
+  }
   const added = await driveStub(env, uid).addRefs(uid, id, body.nodes);
   if (!added.ok) {
     // An item was deleted between the check and now: the share must not outlive it.

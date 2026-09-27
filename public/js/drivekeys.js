@@ -497,12 +497,13 @@ export function clearImpersonationKey() {
 }
 
 /**
- * Pages that load third-party script (the Turnstile widget on login and
- * Account) call this before it loads: the tab's Drive keys move out of
- * sessionStorage into this module's memory, where other script on the page
- * cannot read them, and are gone when the page is left (the Drive page asks
- * again). `releaseSessionKeys()` puts them back when the page ends up not
- * loading such script. See SECURITY.md (Drive keys, in the tab).
+ * Called right before third-party script (the Turnstile widget on login,
+ * Account and the public composer; public/js/turnstile.js) is added to the
+ * page: the tab's Drive keys move out of sessionStorage into this module's
+ * memory, where other script on the page cannot read them, and are gone when
+ * the page is left (the Drive page asks again). `releaseSessionKeys()` writes
+ * them back (the sign-in does, as it leaves the page). See SECURITY.md (Drive
+ * keys, in the tab).
  */
 export function holdSessionKeys() {
   if (held) return;

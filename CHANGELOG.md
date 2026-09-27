@@ -15,6 +15,38 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Drive, security audit round 2** (docs/DRIVE.md §3, §6, §10; SECURITY.md "Drive keys"):
+  - the owner's escrow key pair changes only with the owner's password or a passkey (the first
+    one excepted); the owner's browser checks the server's escrow public key against its own
+    private key and alerts on a mismatch; each user's browser pins the escrow key and shows a
+    notice ("Trust the new key") instead of re-wrapping to a new one;
+  - removing a key wrap, replacing the password wrap or the Drive salt needs the password or a
+    passkey (not for the first set-up or a stale password wrap), and no change leaves a Drive
+    with content and no wrap;
+  - a recovery code spent at sign-in loses its Drive wrap on the server; a password change marks
+    the old password wrap stale, and an admin reset removes it when another wrap remains;
+  - finalize waits for chunk writes in flight (`409 busy`), so a late retry can no longer delete
+    a chunk of a finished file;
+  - an item with 100 or more shares lists them again (batched lookups), and ended shares leave
+    the Drive's share records;
+  - sealed names and metadata are capped at 512 / 1024 characters and count towards the
+    capacity;
+  - a file whose sealed metadata is missing or disagrees with the server's size is unreadable,
+    never an empty file;
+  - deleting an account removes its Drive and ends its shares first, retried, and keeps the
+    account if that fails;
+  - the Account page keeps the tab's Drive key out of `sessionStorage` while the Turnstile
+    script may load; login and the public composer clear it first.
+- **File and folder names without bidi or invisible characters:** file shares, the viewer, the
+  CLI and the Drive refuse names carrying bidi controls, zero-width characters or U+0085 / U+2028
+  / U+2029 (`files.js` `checkPath`, the Drive's `checkName`), so `invoice<U+202E>fdp.exe` can no
+  longer pose as a PDF. A share id is never moved to another account when it is recorded again.
+- **Log in as: the user's whole Drive.** The owner acting as a user opens that user's Drive with
+  the owner escrow (the owner's own Drive unlocked in the tab) and can browse, upload, download,
+  move, rename, delete, share and revoke; the user's key stays in its own tab slot and goes when
+  the impersonation ends. A user without a Drive gets one, finished by their next sign-in. The
+  user's own key wraps are never removed or replaced then. All of it is in the owner-only admin
+  audit with the owner as the real actor, and none of it in the user's own activity.
 - **The user's own activity no longer lists the start and end of an impersonation**
   (`impersonate.start`, `impersonate.end`); they stay in the owner-only admin audit.
 - **Nothing the Worker serves is stored in Cloudflare's cache** (with Workers Caching on, see

@@ -127,6 +127,20 @@ describe('H-1: a user’s browser pins the escrow key', () => {
   }, 60000);
 });
 
+describe('L-1: finalize while a chunk write is in flight', () => {
+  it('the client finalizes again after "busy" instead of failing the upload', async () => {
+    install();
+    const dk = createDriveKey();
+    saveSessionKey(dk, 'u1');
+    S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
+    const c = await openDrive({ user: S.user });
+    S.busyFinalize = 2;
+    const id = await c.upload('root', fakeFile('late.txt', enc('written late')));
+    expect(S.nodes.get(id).state).toBe('ready');
+    expect(S.requests.filter((r) => r.path.endsWith('/finalize'))).toHaveLength(3);
+  }, 30000);
+});
+
 describe('L-6: a file needs its sealed metadata', () => {
   it('missing metadata or a size that disagrees makes it unreadable, never an empty file', async () => {
     install();
@@ -151,6 +165,25 @@ describe('L-6: a file needs its sealed metadata', () => {
     await c.list();
     expect(loadSessionKey('u1')).toEqual(dk);
   }, 30000);
+});
+
+describe('names: no bidi or invisible characters (audit round 3, L-5)', () => {
+  it('checkPath, the client’s checkName and the page’s checkName refuse them; ordinary names pass', async () => {
+    const { checkPath } = await import('../public/js/files.js');
+    const { checkName } = await import('../public/js/driveclient.js');
+    const page = await import('../public/dashboard/js/drive-app.js');
+    for (const bad of ['invoice\u202efdp.exe', 'a\u200bb.txt', 'x\u2028y', 'nel\u0085.txt', 'rtl\u2067x', 'b\ufeffom', 'lrm\u200e.txt']) {
+      expect(() => checkPath(bad), JSON.stringify(bad)).toThrow();
+      expect(() => checkPath(`dir/${bad}`)).toThrow();
+      expect(() => checkName(bad)).toThrow(/invisible/);
+      expect(page.checkName(bad).error).toMatch(/invisible/);
+    }
+    for (const ok of ['report.pdf', 'café résumé.txt', 'עברית.txt', '日本語.md']) {
+      expect(checkPath(ok)).toBe(ok);
+      expect(checkName(ok)).toBe(ok);
+      expect(page.checkName(ok)).toEqual({ name: ok });
+    }
+  });
 });
 
 describe('DK exposure: pages with third-party script', () => {
