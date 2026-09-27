@@ -183,7 +183,8 @@ export function mount(root = document.body) {
 }
 
 // Fixed elements that stay on screen while the page scrolls under them.
-const FIXED = '#a11y-btn, #toast.show, .pwa-banner:not([hidden]), .kdf-progress:not([hidden])';
+// (.imp-banner is sticky at the top while the owner acts as a user: top-anchored once stuck.)
+const FIXED = '#a11y-btn, #toast.show, .pwa-banner:not([hidden]), .kdf-progress:not([hidden]), .imp-banner:not([hidden])';
 const GAP = 8;
 
 /**

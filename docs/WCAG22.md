@@ -9,7 +9,8 @@ minimum for every page and state, and level AAA is met wherever possible.
 composer, the share viewer (password, note, link, credential, files, preview, gone), log in, owner
 setup, the dashboard composer, My shares, Account, every Admin tab and the role editor, the
 accessibility statement (with its site map and glossary), the accessibility settings widget
-(English and Hebrew), and the Drive (folder tree, table, dialogs, upload, unlock). Content that
+(English and Hebrew), and the Drive (folder tree, table, dialogs, upload, unlock, the automatic
+set-up at sign-in, "Drive is not ready yet", and the owner's notice for a user with no Drive). Content that
 users share (notes, files, PDFs, images, audio and video) is theirs, not secbin's: this report
 covers how secbin presents it, not the content itself.
 
@@ -23,7 +24,7 @@ covers how secbin presents it, not the content itself.
 - *The accessibility tree* that Chromium passes to screen readers: names, roles, states,
   landmarks, headings, live regions, dialogs, form errors, the Drive's tree (`a11y-tree` suite).
 - *The criteria automation cannot judge*, measured by `wcag22.mjs` (a scratch suite kept with
-  the audit, see "Tests" below) on 42 states at 1280×900, at 320×640 (320 CSS px) and at 320×256
+  the audit, see "Tests" below) on 45 states at 1280×900, at 320×640 (320 CSS px) and at 320×256
   (400 % zoom of 1280×1024):
   - reflow (no horizontal page scroll, nothing cut off);
   - text spacing, with the WCAG 1.4.12 values injected as a user style sheet;
@@ -52,7 +53,7 @@ in scope that the criterion is about.
 **Pages** (last column): **All** every page; **Land** landing page and public composer; **View**
 share viewer; **Login**; **Setup**; **Comp** dashboard composer; **Shares** My shares; **Acct**
 Account; **Admin** every Admin tab and the role editor; **Stmt** accessibility statement;
-**Widget** accessibility settings; **Drive** tree, table, dialogs, upload, unlock.
+**Widget** accessibility settings; **Drive** tree, table, dialogs, upload, unlock, notices.
 
 **WCAG 2.1** column: the level the criterion has in WCAG 2.1, or *2.2 only* for the criteria
 WCAG 2.2 added (six at A/AA: 2.4.11, 2.5.7, 2.5.8, 3.2.6, 3.3.7, 3.3.8; three at AAA).
@@ -78,7 +79,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 1.2.1 Audio-only and Video-only (Prerecorded) | A | Not applicable | secbin has no audio or video of its own. Audio and video that users share are their content; the viewer plays them with the browser's own controls (`public/js/viewer.js:164`) and always offers the download. | View |
 | 1.2.2 Captions (Prerecorded) | A | Not applicable | As 1.2.1. | View |
 | 1.2.3 Audio Description or Media Alternative (Prerecorded) | A | Not applicable | As 1.2.1. | View |
-| 1.3.1 Info and Relationships | A | Supports | Landmarks, one `h1` per view, `h2` sections; tables with `th` and a caption (`public/dashboard/js/drive-app.js:514`); fieldsets and legends for radio groups (`public/dashboard/account/index.html:252`); the Drive tree is an ARIA tree (`public/js/tree.js:44`). **Fixed:** fields labelled only by a placeholder now have a `<label>` (see 3.3.2); duration and quota fields in the role editor are named in context instead of "Amount"/"Unit" (`public/dashboard/js/admin.js:703`, `public/dashboard/js/admin.js:393`). axe and the `a11y-tree` suite: 0 violations. | All |
+| 1.3.1 Info and Relationships | A | Supports | Landmarks, one `h1` per view, `h2` sections; tables with `th` and a caption (`public/dashboard/js/drive-app.js:514`); fieldsets and legends for radio groups (`public/dashboard/account/index.html:252`); the Drive tree is an ARIA tree (`public/js/tree.js:44`). **Fixed:** fields labelled only by a placeholder now have a `<label>` (see 3.3.2); duration and quota fields in the role editor are named in context instead of "Amount"/"Unit" (`public/dashboard/js/admin.js:703`, `public/dashboard/js/admin.js:393`). **Fixed:** the Drive page's footer was inside `<main>` (no contentinfo landmark); it now follows `<main>` as on every other page (`public/dashboard/drive/index.html`). axe and the `a11y-tree` suite: 0 violations. | All |
 | 1.3.2 Meaningful Sequence | A | Supports | The DOM order is the reading order; the only positioned content (dialogs, the widget panel, the toast) is announced or takes focus. Right-to-left text in the widget and statement carries `dir` (`public/js/a11y.js:108`). | All |
 | 1.3.3 Sensory Characteristics | A | Supports | Instructions name the control, not only its place or shape ("Drop files here" always comes with "Add files" / "Add folder" buttons: `public/index.html:343`). | Comp, Land, Drive |
 | 1.4.1 Use of Color | A | Supports | Links in text are underlined (`public/css/styles.css:1070`); errors are text (and `aria-invalid`); pressed and selected states have a check mark, weight or position as well as colour (`public/css/styles.css:1020`, `public/css/styles.css:1163`). | All |
@@ -103,7 +104,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 3.2.6 Consistent Help | 2.2 only | Supports | Every page has the same footer in the same order: Source code, Threat model, Accessibility statement (the contact), Glossary (checked for every page by `test-dom/wcag22.test.js` "in every page footer"). The accessibility settings button is in the same place on every page. | All |
 | 3.3.1 Error Identification | A | Supports | Errors are text in an alert region, tied to the field (`aria-invalid`, `aria-describedby`) and focused (`public/dashboard/js/drive-app.js:177`, `public/js/setup.js:47`). | All |
 | 3.3.2 Labels or Instructions | A | Supports | **Fixed:** every field now has a visible label: the share password fields (`public/index.html:126`, `public/index.html:553`), the repeat-password fields on setup and account, passkey and API key names, API key lifetime, the My shares filters (`public/dashboard/shares/index.html:113`), and the admin panel's fields through one helper that shows the field's name above it (`public/js/common.js:57`). `wcag22.mjs` "3.3.2 no visible label": 0. | All |
-| 3.3.7 Redundant Entry | 2.2 only | Supports | Nothing already entered in a process is asked again, except where it is essential or for security: a new password is typed twice; your password confirms changes to your own account (step-up); the Drive unlocks at sign-in from what was used to sign in (`public/js/login.js:13`). | Login, Acct, Comp, Drive |
+| 3.3.7 Redundant Entry | 2.2 only | Supports | Nothing already entered in a process is asked again, except where it is essential or for security: a new password is typed twice; your password confirms changes to your own account (step-up); the Drive unlocks at sign-in from what was used to sign in, and the first time is set up there with no prompt (`public/js/login.js:13`, `public/js/driveclient.js` `unlockAtSignIn`). | Login, Acct, Comp, Drive |
 | 4.1.1 Parsing (obsolete in 2.2) | A | Supports | WCAG 2.2 removed this criterion (always satisfied). Verified anyway: the HTML the server sends has balanced tags, no duplicate attributes and unique ids (`wcag22.mjs` "4.1.1 served HTML", 10 pages), and the DOM built at runtime has no duplicate ids in any of the 42 states. **Fixed:** two admin renders could run at once and duplicate a panel's content and ids (`user-detail`); renders of a panel are now queued (`public/dashboard/js/admin.js:163`). | All |
 | 4.1.2 Name, Role, Value | A | Supports | Native controls first; ARIA where needed (tabs, switches, tree, dialogs, `aria-pressed`, `aria-expanded`, `aria-current`). axe and `a11y-tree`: names, roles and states on every page. | All |
 
@@ -125,7 +126,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 2.4.5 Multiple Ways | AA | Supports | The navigation on every dashboard page, the links between related pages, and (**added**) a site map on the accessibility statement, linked from every footer (`public/accessibility/index.html:104`). Share links are the result of a process. | All |
 | 2.4.6 Headings and Labels | AA | Supports | Headings name their sections; labels name their fields (see 3.3.2); duration fields in the role editor now say what they are for (see 1.3.1). | All |
 | 2.4.7 Focus Visible | AA | Supports | Every Tab stop draws a ring (`wcag22.mjs` "2.4.7 no focus ring": 0; the Drive tree draws it on its row). **Fixed:** in forced colours (Windows High Contrast) the box-shadow rings were dropped; a system-coloured outline replaces them (`public/css/styles.css:1186`). | All |
-| 2.4.11 Focus Not Obscured (Minimum) | 2.2 only | Supports | **Fixed:** the fixed accessibility button no longer covers what has focus: the page scrolls it clear, the toast moves to the top, the panel closes when focus leaves it, and the button sits below dialogs (`public/js/a11y.js:196`, `public/css/styles.css:986`, `public/js/a11y.js:172`). `wcag22.mjs` "2.4.11 focus obscured" (Tab through every page at 1280×900 and 320×256): 0. | All |
+| 2.4.11 Focus Not Obscured (Minimum) | 2.2 only | Supports | **Fixed:** the fixed accessibility button no longer covers what has focus: the page scrolls it clear, the toast moves to the top, the panel closes when focus leaves it, and the button sits below dialogs (`public/js/a11y.js:196`, `public/css/styles.css:986`, `public/js/a11y.js:172`). **Fixed** (found on the owner's view of a user with no Drive): the impersonation banner, sticky at the top, covered the focused theme button at 320×256; it no longer sticks on short viewports, and focus is scrolled clear of it elsewhere (`public/css/styles.css` `.imp-banner`, `public/js/a11y.js` `FIXED`). `wcag22.mjs` "2.4.11 focus obscured" (Tab through every page at 1280×900 and 320×256): 0. | All |
 | 2.5.7 Dragging Movements | 2.2 only | Supports | Nothing needs dragging: files dropped onto the composer or the Drive can also be chosen with "Add files" / "Upload"; items move with "Move" and a folder picker (`public/dashboard/js/drive-app.js:697`). | Comp, Land, Drive |
 | 2.5.8 Target Size (Minimum) | 2.2 only | Supports | `wcag22.mjs` "2.5.8 target size": every target ≥24×24 or spaced; 0 on every state. **Fixed:** the widget's statement link, and the Drive's selection boxes, whose `<label>` is now the target (24 px, 44 px on phones: `public/css/styles.css:1171`). | All |
 | 3.1.2 Language of Parts | AA | Supports | Hebrew in the widget and a second-language statement carry `lang` and `dir` (`public/js/a11y.js:116`). Shared notes are the sender's content. | Widget, Stmt |
@@ -134,7 +135,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 3.3.3 Error Suggestion | AA | Supports | Messages say how to fix it ("Passwords do not match — repeat the same password in both fields."; the password policy is spelled out). | All |
 | 3.3.4 Error Prevention (Legal, Financial, Data) | AA | Supports | Deleting asks for a second press (`public/js/common.js:146`); an import is shown as a plan before it runs; a share can be deleted at once after creation. | Comp, Shares, Acct, Admin, Drive |
 | 3.3.8 Accessible Authentication (Minimum) | 2.2 only | Supports | No step of signing in or confirming it is you asks for a cognitive function test. Passwords and recovery codes can be pasted and filled in by password managers: they carry the right `autocomplete` tokens and nothing blocks paste (`test-dom/wcag22.test.js:251`) — the criterion's *mechanism* alternative. A passkey signs in without any password. The human check, when the owner turns it on, is Cloudflare Turnstile: it asks no puzzle, no transcription and no object recognition (usually it passes on its own, at most it asks for a box to be ticked), so it is not a cognitive function test either, and every sign-in (password, passkey, recovery code) and every account change goes through it. For someone who cannot complete the widget itself, the way through is the contact: the note under each protected button links to it (`public/js/turnstile.js:58`). The widget's own operability is third-party content: see “The human check (third-party)” below. Share passwords (a secret between two people, not a login) can be pasted; password managers are kept from saving them as the site's login. | Login, Acct, Land, View, Drive |
-| 4.1.3 Status Messages | AA | Supports | Saves, copies and errors are announced (`role="status"` toast, alert regions, progress live regions, the human-check note); the new warnings are an alert dialog (session) and an alert (download window). | All |
+| 4.1.3 Status Messages | AA | Supports | Saves, copies and errors are announced (`role="status"` toast, alert regions, progress live regions, the human-check note); the new warnings are an alert dialog (session) and an alert (download window). **Fixed:** the sign-in's "Signing in…" (while it, and the Drive's unlock or automatic set-up, run) was only a button label; it is now also said by a status line that is in the page from the start (`public/dashboard/login/index.html`, `public/js/login.js` `busy`). The Drive page's notices ("Drive is not ready yet", the owner's "The user hasn’t signed in since the Drive was enabled", "not enabled") were a live region inserted together with its text, which screen readers often do not read; the page's own "Opening your Drive…" status line now says the notice's title, and the notice is content with its heading (`public/dashboard/js/drive-app.js` `startDrive`). | Login, Drive, All |
 
 ## Level AAA
 
@@ -159,11 +160,11 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 2.4.8 Location | AAA | Supports | Page titles, `aria-current` in the navigation (`public/dashboard/js/nav.js:44`), the Drive's folder path (`public/dashboard/js/drive-app.js:508`). | All |
 | 2.4.9 Link Purpose (Link Only) | AAA | Supports | **Fixed:** link texts that needed context now stand alone: "Source code", "Threat model", "Accessibility statement", "new share", "Create another share", "API documentation (docs/API.md)", and links opening a new tab say so (`public/index.html:711`). Links inside shared notes are the sender's text (they too say they open a new tab: `public/js/markdown.js:187`). | All |
 | 2.4.10 Section Headings | AAA | Supports | Sections have headings (account cards, admin panels, statement, glossary, site map, Drive panes, dialogs); views without a visible heading have a hidden one (`public/index.html:202`). | All |
-| 2.4.12 Focus Not Obscured (Enhanced) | 2.2 only | Supports | As 2.4.11, for any part of the focused control: `wcag22.mjs` "2.4.12 partly covered": 0. **Fixed:** the note editor is shorter on short screens, so it fits between the edges (`public/css/styles.css:257`). | All |
+| 2.4.12 Focus Not Obscured (Enhanced) | 2.2 only | Supports | As 2.4.11, for any part of the focused control: `wcag22.mjs` "2.4.12 partly covered": 0 in the audit's run. **Fixed:** the note editor is shorter on short screens, so it fits between the edges (`public/css/styles.css:257`). **Open:** the runs after the Drive integration's merge each recorded one partial overlap at 320×256, in a different state each time (the role editor's file type list; the note editor with the Hebrew settings panel), under the accessibility button; it is intermittent and not yet explained. | All |
 | 2.4.13 Focus Appearance | 2.2 only | Supports | The focus indicator is a 2 px ring with a 2 px gap (`public/css/styles.css:119`, `public/css/styles.css:308`): at least a 2 px perimeter, ≥3:1 against the unfocused state (the ring is ≥7:1 on every surface). | All |
 | 2.5.5 Target Size (Enhanced) | AAA | Supports | **Added:** the widget's "Large buttons and links" mode makes every target at least 44×44 (`public/css/styles.css:1194`; inline links in text are exempt). Measured: `wcag22.mjs --aaa` "2.5.5": 0 on 23 states. The accessibility button itself is 44×44 on every page. | All |
 | 2.5.6 Concurrent Input Mechanisms | AAA | Supports | Keyboard, mouse, touch and pen all work together; nothing is restricted to one input. | All |
-| 3.1.3 Unusual Words | AAA | Supports | **Added:** a glossary of the technical words (`public/accessibility/index.html:120`), linked from every page's footer. | All |
+| 3.1.3 Unusual Words | AAA | Supports | **Added:** a glossary of the technical words (`public/accessibility/index.html:120`), linked from every page's footer; its "Drive" and "Escrow key" say that the administrator can open every Drive with the escrow key. What a user reads in the Drive calls the owner "the administrator" everywhere ("Drive is not ready yet" included). | All |
 | 3.1.4 Abbreviations | AAA | Supports | **Added:** the glossary expands every abbreviation the interface uses (AES-256-GCM, API, CIDR, CLI, HKDF, IP, KB/MB/GB, m/h/d, PDF, QR, TOTP, URL, WCAG). | All |
 | 3.1.5 Reading Level | AAA | Does not support | The interface text is short and plain, but its subject (encryption, access keys, administration) needs words beyond lower-secondary reading level, and there is no simplified version. The glossary explains the terms. Shared notes are the senders' own text. | All |
 | 3.1.6 Pronunciation | AAA | Not applicable | No words whose meaning depends on their pronunciation in context. | — |
@@ -264,6 +265,15 @@ Level A and AA failures (all fixed):
 - **4.1.1** (verified although obsolete) two admin renders could duplicate a panel and its ids
   → renders of a panel are queued.
 - **1.1.1** (improvement) a PDF preview page is now named and its text given as text.
+- **2.4.11** (found on the owner's view of a user with no Drive) the sticky impersonation banner
+  covered the focused control at 400 % zoom → it stays at the top of the page on short
+  viewports, and focus is scrolled clear of it.
+- **1.3.1** (found by the accessibility-tree suite's new Drive states) the Drive page's footer was
+  inside `<main>`, so the page had no contentinfo landmark → it follows `<main>`, as on every
+  other page (checked for every page by `test-dom/wcag22.test.js`).
+- **4.1.3** (after the Drive integration's automatic set-up) the sign-in's "Signing in…" was
+  only a button label, and the Drive's new notices were live regions inserted with their text →
+  a status line on the login page, and the Drive page's own status line says each notice's title.
 
 AAA criteria implemented: 1.4.6 (7:1 palette, both themes), 1.4.8 (Text spacing mode), 2.2.5
 (sign in again in a new tab without losing work), 2.2.6 (session length stated on login and
@@ -348,7 +358,10 @@ Note anything that is not announced, announced wrongly, hard to reach or hard to
    "Keep downloads open" work?
 6. **Drive.** Unlock it, create a folder, upload files, select items (by the whole row checkbox
    target), move them with the folder picker, share, see the shares of an item, delete. Walk the
-   folder tree with the arrow keys and type-ahead.
+   folder tree with the arrow keys and type-ahead. As a new user, sign in before the owner has
+   ever signed in (is "Drive is not ready yet" announced when the Drive page opens?), then after
+   (is "Signing in…" announced, and does the Drive open with no prompt?). As the owner, log in as
+   a user who has never signed in and open Drive: is the notice announced?
 7. **My shares and Account.** Filter shares, extend one, revoke one. Change your password
    (paste), add a passkey, make recovery codes, create an API key.
 8. **Admin.** Create a user and a role, edit the Default role's session timeouts, open every tab.
@@ -363,14 +376,30 @@ Note anything that is not announced, announced wrongly, hard to reach or hard to
   new-tab links, labels and autocomplete on the static pages, no paste blocking, the human-check
   help, and the palette (7:1 text, 3:1 field boundaries) in both themes.
 - `test/files.test.js` "extending a download window": ten extensions and no more, no view
-  spent, never past the share's expiry, the purge waits for an extended window.
+  spent, never past the share's expiry, the purge waits for an extended window; an id that was
+  never a share counts as invalid (as on the chunk route), a share that ended does not.
+- `test-dom/drive.test.js` "a notice instead of the Drive": the page's status line (the same
+  node, in the page from the start) says the notice's title for "not ready yet", the owner's
+  no-Drive notice and "not enabled"; the notice has no live role; the user's text says "the
+  administrator".
 - `test/turnstile.test.js` (unchanged): every sign-in, the passkey included, needs a token when
   the human check is on.
 - `wcag22.mjs` (scratch Playwright suite used for this report; it is not part of CI): the probes
   described above, on every page and state, at three viewports, and `--aaa`.
 
-Results of the final run (2026-09-27, this branch after merging `main` 986d6cb and the Drive
-integration 87e2d74): `npm test` 383 + 116 + 237 + 261 passed, `npm run lint` and
+Results of the final run after merging the Drive integration cdcc5c7 (with `main` 6c5e2fc):
+`npm test` 393 + 116 + 246 + 261 passed, `npm run lint` and `sync-shared --check` clean; end to
+end: `wcag22 --aaa` 27/27 with 0 AAA findings and 0 A/AA findings (45 states, the Drive
+integration's three included), `axe-audit` 0 violations (the three new states in both themes at
+desktop and phone widths: 12/12 reached), `a11y` 30/30, the accessibility-tree suite 220/220 (the
+copy updated for the merged UI, with the new states), `run` 39/39, `drive-int` 104/104 and
+`drive-impersonate` 36/36 (the branch's own `test-e2e/`). One earlier `wcag22` attempt failed its
+download-window check on timing (the suite's 300 s window equals the 5-minute warning, so an
+extension one second later is rightly warned about again); the check now waits past a second and
+asserts that the end moved.
+
+Results of the previous final run (2026-09-27, this branch after merging `main` 986d6cb and the
+Drive integration 87e2d74): `npm test` 383 + 116 + 237 + 261 passed, `npm run lint` and
 `sync-shared --check` clean; end to end: `wcag22 --aaa` 17/17 with 0 findings (A/AA probes, the
 time-limit checks and AAA), `axe-audit` 0 violations, `a11y` 30/30, `run` 39/39 (one earlier
 attempt timed out on a click while another suite loaded the machine; the rerun passed), and

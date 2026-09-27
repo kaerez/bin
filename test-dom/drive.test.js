@@ -125,6 +125,48 @@ describe('startDrive states', () => {
     expect(mount.textContent).toMatch(/Drive is not enabled for your account/);
   });
 
+  it('a notice instead of the Drive (not ready yet, a user with no Drive while impersonating, disabled): the page’s status line announces its title (WCAG 4.1.3); the notice is content with a heading', async () => {
+    const withStatusLine = () => {
+      const mount = mountPoint();
+      const live = document.createElement('p');
+      live.className = 'msg';
+      live.setAttribute('role', 'status');
+      live.textContent = 'Opening your Drive…';
+      mount.append(live); // as in /dashboard/drive/: in the page from the start
+      return { mount, live };
+    };
+    const cases = [
+      ['not_ready', () => { S = fakeServer(); }, {}, '#drive-not-ready', 'Drive is not ready yet'],
+      ['impersonating', () => { S = fakeServer(); S.impersonatedBy = 'owner'; }, { impersonating: true }, '#drive-impersonating', 'The user hasn’t signed in since the Drive was enabled'],
+      ['disabled', () => { S = fakeServer({ enabled: false }); }, {}, '#drive-disabled', 'Drive is not enabled for your account'],
+    ];
+    for (const [state, make, user, sel, said] of cases) {
+      make();
+      globalThis.fetch = S.fetch;
+      const { mount, live } = withStatusLine();
+      const r = await startDrive(mount, deps({ user: { ...S.user, ...user } }));
+      expect(r.state).toBe(state);
+      // The same live region (never replaced), now visually hidden, says the notice's title.
+      expect(mount.querySelector('[role="status"]')).toBe(live);
+      expect(live.isConnected && live.className).toBe('sr-only');
+      expect(live.textContent).toBe(said);
+      const card = mount.querySelector(sel);
+      expect(card.getAttribute('role')).toBeNull();
+      expect(card.querySelector('h2').textContent).toBe(said);
+      expect(S.requests.some((x) => x.method !== 'GET')).toBe(false); // nothing is created
+    }
+    // What a user reads calls the owner "the administrator", as the other notices do.
+    {
+      S = fakeServer();
+      globalThis.fetch = S.fetch;
+      const mount = mountPoint();
+      await startDrive(mount, deps());
+      const text = mount.querySelector('#drive-not-ready').textContent;
+      expect(text).toMatch(/The administrator must sign in once/);
+      expect(text).not.toMatch(/\bowner\b/);
+    }
+  });
+
   it('other errors are shown as an alert', async () => {
     S = fakeServer();
     globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, type: 'basic', json: async () => ({ error: 'boom', message: 'boom' }) }));

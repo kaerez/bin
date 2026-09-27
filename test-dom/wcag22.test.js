@@ -1,7 +1,7 @@
 // wcag22.test.js (DOM) — the WCAG 2.2 audit's fixes (docs/WCAG22.md):
 //   2.2.1 / 2.2.6  the warning before a session times out, with "Stay signed in";
 //   2.2.2          the "Stop the countdown" switch;
-//   2.4.11 / 12    fixed elements never cover the focused control;
+//   2.4.11 / 12    fixed (and the sticky impersonation banner) never cover the focused control;
 //   2.4.2          the title names the view; focus the person placed stays;
 //   3.2.5          links that open a new tab say so;
 //   3.3.2 / 2.5.3  every credential field on the static pages has a visible
@@ -165,6 +165,25 @@ describe('unobscure', () => {
     expect(unobscure(field)).toBe(0);
     spy.mockRestore();
   });
+  it('scrolls a control out from under the impersonation banner (sticky at the top)', () => {
+    Object.defineProperty(window, 'innerHeight', { value: 256, configurable: true });
+    const banner = Object.assign(document.createElement('div'), { id: 'imp-banner', className: 'imp-banner' });
+    const ret = document.createElement('button');
+    banner.append(ret);
+    const theme = document.createElement('button');
+    document.body.append(banner, theme);
+    box(banner, { left: 0, right: 320, top: 0, bottom: 90 });
+    box(ret, { left: 100, right: 220, top: 40, bottom: 84 });
+    box(theme, { left: 260, right: 304, top: 30, bottom: 74 }); // under the banner
+    const spy = vi.spyOn(window, 'scrollBy').mockImplementation(() => {});
+    expect(unobscure(theme)).toBe(30 - (90 + 8));
+    // The banner's own button is never scrolled away from it.
+    expect(unobscure(ret)).toBe(0);
+    // Hidden (not acting as a user): nothing to do.
+    banner.hidden = true;
+    expect(unobscure(theme)).toBe(0);
+    spy.mockRestore();
+  });
   it('moves the toast to the top instead of scrolling', () => {
     const toast = Object.assign(document.createElement('div'), { id: 'toast', className: 'show' });
     const b = document.createElement('button');
@@ -216,6 +235,11 @@ describe('links that open a new tab say so', () => {
       const links = [...doc.querySelectorAll('footer .foot-links a')];
       for (const a of links.filter((x) => x.target === '_blank')) expect(a.querySelector('.sr-only')?.textContent, p).toBe(' (opens in a new tab)');
       foots.add(links.map((a) => `${a.getAttribute('href')}|${a.textContent.trim()}`).join(' '));
+      // The footer is the page's contentinfo landmark: a child of <body>, never inside <main> (1.3.1).
+      const f = doc.querySelectorAll('footer');
+      expect(f.length, p).toBe(1);
+      expect(f[0].parentElement.tagName, p).toBe('BODY');
+      expect(f[0].querySelector('[aria-label]:not(nav, [role])'), p).toBeNull(); // no name on a plain paragraph
     }
     expect(foots.size).toBe(1);
     expect([...foots][0]).toMatch(/\/accessibility\/\|Accessibility statement.*\/accessibility\/#glossary\|Glossary/);
@@ -254,6 +278,21 @@ describe('credential fields on the static pages', () => {
         expect(readFileSync(join(ROOT, dir, f), 'utf8'), `${dir}/${f}`).not.toMatch(/addEventListener\(\s*['"]paste['"]|onpaste/);
       }
     }
+  });
+});
+
+// ── 4.1.3: status lines that are in the page before they speak ───────────────
+describe('status lines in the page from the start', () => {
+  it('the sign-in (and the Drive set-up or unlock after it) has one, outside both forms; the Drive page has "Opening your Drive…"', () => {
+    const login = page('dashboard/login/index.html');
+    const s = login.getElementById('login-status');
+    expect(s.getAttribute('role')).toBe('status');
+    expect(s.textContent).toBe('');
+    expect(s.closest('form, [hidden]')).toBeNull();
+    expect(readFileSync(join(ROOT, 'public/js/login.js'), 'utf8')).toMatch(/#login-status'\)\.textContent = on \? 'Signing in…'/);
+    const drive = page('dashboard/drive/index.html');
+    const d = drive.querySelector('#drive-root > p.msg[role="status"]');
+    expect(d.textContent).toBe('Opening your Drive…');
   });
 });
 

@@ -562,6 +562,9 @@ button.back { cursor: pointer; }
 .imp-banner { position: sticky; top: 0; z-index: 20; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 1rem; flex-wrap: wrap;
   padding: .55rem 1rem; background: color-mix(in oklab, var(--paper), var(--warn) 18%); border-bottom: 1px solid color-mix(in oklab, var(--rule-2), var(--warn) 45%);
   font-size: .82rem; color: var(--ink); }
+/* On short viewports (400 % zoom and up) a stuck banner would cover most of the page and the
+   focused control (WCAG 2.4.11): it stays at the top of the page instead. */
+@media (max-height: 480px) { .imp-banner { position: static; } }
 .banner { border: 1px solid var(--rule-2); border-radius: 4px; padding: .7rem 1rem; margin-bottom: 1rem; font-size: .85rem; }
 .banner.warn { border-color: color-mix(in oklab, var(--rule-2), var(--warn) 55%); background: color-mix(in oklab, var(--paper), var(--warn) 8%); }
 .section-title { font-family: var(--serif); font-weight: 500; font-size: 1.25rem; letter-spacing: -.01em; }

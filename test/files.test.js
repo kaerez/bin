@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
 import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent } from './helpers.js';
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
 import { layout, buildManifest, importFileKey, encryptChunk, decryptChunk, readStreamChunk, validateManifest, CHUNK } from '../public/js/files.js';
-import { utf8 } from '../public/js/bytes.js';
+import { utf8, randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -262,6 +262,37 @@ describe('extending a download window (WCAG 2.2.1)', () => {
     }
     expect(last.status).toBe(429);
   });
+
+  // Audit round 4, R4-L4: an unknown id answered 410 uncounted (a Directory
+  // call and a new FileShare object each, never blocked); the chunk route
+  // blocks the same pattern at guard.invalid.max.
+  it('an id that was never a share counts as invalid, as on the chunk route; a known share that ended does not (R4-L4)', async () => {
+    const unknown = () => `f${b64urlFromBytes(randomBytes(16))}`; // well-formed, never created
+    const ip = freshIp();
+    let last;
+    let n = 0;
+    for (; n < 80; n++) { // guard.invalid.max defaults to 60
+      last = await extend(unknown(), 'C'.repeat(43), ip);
+      if (last.status === 429) break;
+      expect(last.status).toBe(410);
+    }
+    expect(last.status).toBe(429);
+    expect(n).toBeLessThanOrEqual(60);
+    // The same pattern on the chunk route, for comparison: blocked too.
+    const ip2 = freshIp();
+    let c;
+    for (let i = 0; i < 80; i++) { c = await getChunk(unknown(), 0, 'C'.repeat(43), ip2); if (c.status === 429) break; }
+    expect(c.status).toBe(429);
+    // A share that existed and ended (its only view spent, then purged): a late
+    // extend from the viewer's tab is a plain 410, never counted.
+    const s = await upload(oc, [{ path: 'ended.txt', bytes: utf8('gone') }], { views: 1, expire: '1d' });
+    const { grant } = await (await openShare(s.id, s.fragment)).res.json();
+    vi.useFakeTimers({ now: Date.now() + 70 * 60 * 1000, toFake: ['Date'] }); // past the only window
+    await runDurableObjectAlarm(env.FILESHARE.get(env.FILESHARE.idFromName(s.id)));
+    expect(await env.FILES.get(`f/${s.id}/0`)).toBeNull();
+    const ip3 = freshIp();
+    for (let i = 0; i < 70; i++) expect((await extend(s.id, grant, ip3)).status).toBe(410);
+  }, 120000);
 
   it('after the last view, the purge waits for the extended window', async () => {
     const s = await upload(oc, [{ path: 'once.txt', bytes: utf8('last') }], { views: 1, expire: '1d' });

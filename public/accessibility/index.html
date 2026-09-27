@@ -131,9 +131,11 @@
                     <dt>CLI</dt>
                     <dd>Command-line interface: a program you run by typing commands in a terminal.</dd>
                     <dt>Drive</dt>
-                    <dd>Your encrypted file storage in secbin, with folders. Only you can read it.</dd>
+                    <dd>Your encrypted file storage in secbin, with folders. It is set up in your browser when you sign in. You can read it, and so can the administrator, with the escrow key.</dd>
                     <dt>End-to-end encrypted</dt>
                     <dd>Encrypted on the sender’s device and decrypted only on the recipient’s. The server stores only data it cannot read.</dd>
+                    <dt>Escrow key</dt>
+                    <dd>The administrator’s key that opens every user’s Drive. The server cannot use it: it opens only in the administrator’s browser. If it is replaced without the administrator’s signature, your Drive asks you before it trusts the new one.</dd>
                     <dt>Fragment (#fragment)</dt>
                     <dd>The part of a link after the # sign. Browsers never send it to the server, so the key kept there stays with you.</dd>
                     <dt>HKDF-SHA256</dt>

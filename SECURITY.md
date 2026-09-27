@@ -966,6 +966,15 @@ under "Drive keys" above.
     `Retry-After`.
   - So repeated opens cannot break a share. Keeping one busy takes at least 100 distinct
     networks, a residual risk for unlimited-view shares shared very widely.
+  - The viewer's tab may extend a live grant's download window (`POST /api/file/:id/extend`,
+    for WCAG 2.2.1). The grant is the only credential (a custom header; cross-site requests are
+    refused). A bad grant, and an id that was never a share, count as invalid; an unknown id is
+    answered from the share index without creating a FileShare object. Each extension ends the
+    window the role's download window from now, at most 10 times per grant, never past the
+    share's expiry, and spends no view.
+  - After a file share's last view its ciphertext is purged when the last live grant ends. So
+    extensions keep a one-view share's encrypted data in R2, and downloadable with that grant,
+    for up to 10 more windows after the only view, never past the share's expiry.
 - A missing or invalid binding (KV, R2, a Durable Object namespace) answers a generic
   `503 not_configured`. The binding's name goes to the Worker logs, not to the caller.
   - Uploads, revokes and deletes of file shares check the R2 binding first.

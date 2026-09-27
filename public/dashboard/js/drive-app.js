@@ -228,17 +228,29 @@ function nameDialog({ title, sub, value = '', action, submit, fallback }) {
  * app once unlocked).
  */
 export async function startDrive(mount, deps) {
-  mount.replaceChildren(h('p.msg', { role: 'status', text: 'Opening your Drive…' }));
+  // The page's status line (in the page from the start: a live region that
+  // appears together with its text is often not read) says "Opening…", then,
+  // when the page shows a notice instead of the Drive, that notice's title
+  // (WCAG 4.1.3); the notice itself is content, with its heading.
+  const status = mount.querySelector(':scope > p.msg[role="status"]') || h('p.msg', { role: 'status' });
+  status.textContent = 'Opening your Drive…';
+  if (status.parentNode !== mount || mount.children.length !== 1) mount.replaceChildren(status);
+  const notice = (card) => {
+    status.className = 'sr-only';
+    mount.append(card);
+    const t = card.querySelector('h2');
+    status.textContent = t ? t.textContent : '';
+  };
   let client;
   try {
     client = await deps.drive.openDrive({ user: deps.user });
   } catch (e) {
-    if (deps.drive.DriveDisabled && e instanceof deps.drive.DriveDisabled) { mount.replaceChildren(disabledNotice()); return { state: 'disabled' }; }
+    if (deps.drive.DriveDisabled && e instanceof deps.drive.DriveDisabled) { notice(disabledNotice()); return { state: 'disabled' }; }
     if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
       // The owner acting as a user: what is missing to open their Drive.
-      if (deps.user && deps.user.impersonating) { mount.replaceChildren(impersonatingNotice(e.reason, deps)); return { state: 'impersonating', reason: e.reason }; }
+      if (deps.user && deps.user.impersonating) { notice(impersonatingNotice(e.reason, deps)); return { state: 'impersonating', reason: e.reason }; }
       // No owner escrow key yet: the Drive is set up (at sign-in) once there is one.
-      if (e.reason === 'not_ready') { mount.replaceChildren(notReadyNotice()); return { state: 'not_ready' }; }
+      if (e.reason === 'not_ready') { notice(notReadyNotice()); return { state: 'not_ready' }; }
       return { state: 'locked', unlocked: unlockView(mount, deps, e) };
     }
     mount.replaceChildren(h('div.card.drive-notice', {}, h('p.msg.error', { role: 'alert', text: `The Drive could not be opened: ${friendlyError(e)}` })));
@@ -272,9 +284,11 @@ function impersonatingNotice(reason, deps) {
 }
 
 function notReadyNotice() {
-  return h('div.card.drive-notice', { id: 'drive-not-ready', role: 'status' },
+  // Content, not a live region: the page's status line announces its title.
+  // "The administrator", as in every other notice a user sees.
+  return h('div.card.drive-notice', { id: 'drive-not-ready' },
     h('h2.section-title', { text: 'Drive is not ready yet' }),
-    h('p.modal-sub', { text: 'The owner must sign in once before Drives can be set up. Your Drive is then set up the next time you sign in (or open this page).' }));
+    h('p.modal-sub', { text: 'The administrator must sign in once before Drives can be set up. Your Drive is then set up the next time you sign in (or open this page).' }));
 }
 
 function disabledNotice() {

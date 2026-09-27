@@ -257,12 +257,17 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
 
 /**
  * Keep a download window open longer (WCAG 2.2.1): the grant itself is the
- * credential (as for chunks); the window is the sender's role's, now.
+ * credential (as for chunks); the window is the sender's role's, now. An id
+ * that was never a share counts as invalid (as on the chunk route) and is
+ * answered from the Directory's index alone, without creating a FileShare
+ * object; a known share that ended is a plain "gone", not counted (goneFor's
+ * rule: the viewer's tab arriving late).
  */
 async function extendGrant(request, env, g, id) {
   const grant = request.headers.get('x-download-grant') || '';
   if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) return failed(env, g, err(403, 'bad_grant', 'A valid X-Download-Grant header is required.'));
   const policy = await directory(env).shareOpenPolicy(id);
+  if (!policy.known) return failed(env, g, err(410, 'gone', GONE));
   const r = await fileStub(env, id).extendGrant(await hashToken(grant), policy.grantSec);
   if (r.status === 'ok') return json({ grantExpires: r.grantExpires, extensionsLeft: r.extensionsLeft });
   if (r.status === 'limit') return err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires });

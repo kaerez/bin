@@ -147,7 +147,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - a warning five minutes before a file share's download window closes, with "Keep downloads
     open": `POST /api/file/:id/extend` with the download grant moves the window's end by the
     role's window from now, at most ten times per grant, never past the share's expiry, spending
-    no view; after the last view the purge waits for an extended window (2.2.1);
+    no view; after the last view the purge waits for an extended window (2.2.1), so a one-view
+    share's ciphertext can stay up to ten more windows after its only view (SECURITY.md); an id
+    that was never a share counts as invalid, as on the chunk route, and is answered from the
+    share index without creating a FileShare object;
   - "Stop the countdown" on every per-second countdown; toasts stay until the next key press or
     click (2.2.2);
   - wherever the Turnstile human check is used, the note under its button links to the
@@ -164,6 +167,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - the widget's "Large buttons and links" (44 px) and "Text spacing" modes (2.5.5, 1.4.8);
   - a glossary and a site map on the accessibility page, self-describing link texts and "opens
     in a new tab" notices (3.1.3, 3.1.4, 2.4.5, 2.4.9, 3.2.5); a PDF preview page gives its text.
+  - the Drive's notices ("Drive is not ready yet", the owner's "hasn't signed in since the Drive
+    was enabled", "not enabled") are announced through the page's status line, which is in the
+    page from the start, and the sign-in says "Signing in…" to screen readers while it (and the
+    Drive's automatic set-up or unlock) runs (4.1.3); the glossary's "Drive" and "Escrow key"
+    say that the administrator can open every Drive with the escrow key (3.1.3);
+  - the impersonation banner no longer covers the focused control at 400 % zoom (2.4.11); the
+    Drive page's footer is its contentinfo landmark, as on every other page (1.3.1).
 
 
 - **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the

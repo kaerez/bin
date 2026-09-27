@@ -2495,10 +2495,12 @@ export class Directory extends DurableObject {
     const s = this.#settings();
     const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
     const u = row && this.#user(row.user_id);
-    if (!u) return { grantSec: s['files.grantSec'], viewer: { enabled: false, maxBytes: 0, rules: [] } };
+    // `known`: the index has (or had, until pruned) this share; the extend
+    // route counts an unknown id as invalid without asking a FileShare object.
+    if (!u) return { known: !!row, grantSec: s['files.grantSec'], viewer: { enabled: false, maxBytes: 0, rules: [] } };
     const L = this.#effective(u).all;
     const c = this.#caps(u, L, s);
-    return { grantSec: c.grantSec, viewer: { enabled: c.viewerEnabled, maxBytes: c.viewerMaxBytes, rules: c.viewerEnabled ? this.#viewerRules(u, L) : [] } };
+    return { known: true, grantSec: c.grantSec, viewer: { enabled: c.viewerEnabled, maxBytes: c.viewerMaxBytes, rules: c.viewerEnabled ? this.#viewerRules(u, L) : [] } };
   }
 
   // ── admin: IP rules ──────────────────────────────────────────────────────
