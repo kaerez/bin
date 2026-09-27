@@ -109,6 +109,15 @@ describe('every page', () => {
     }
   });
 
+  it('has exactly one footer and no duplicate ids', () => {
+    for (const p of pages()) {
+      const s = read(p);
+      expect(s.match(/<footer\b/g) || [], p).toHaveLength(1);
+      const ids = [...s.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+      expect(ids.filter((id, i) => ids.indexOf(id) !== i), p).toEqual([]);
+    }
+  });
+
   it('the statement is bilingual and claims only partial conformance', () => {
     const s = read('public/accessibility/index.html');
     expect(s).toMatch(/lang="he" dir="rtl"/);
