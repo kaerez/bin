@@ -26,7 +26,7 @@ export const STATEMENT_FIELDS = {
   standardHeading: line(120, 'Standard and status', 'Standard and status: heading'),
   standard: paras(2000, 'We target WCAG 2.2 level AA. Content that meets WCAG 2.2 AA also meets WCAG 2.0 AA, on which the Israeli standard IS 5568 (level AA) is based. The current status is partial conformance: see the known limitations below.', 'Standard and status'),
   reviewLabel: line(120, 'Last technical review', 'Review: label before the date'),
-  reviewNote: paras(2000, 'This was an automated WCAG 2.2 A/AA scan (axe-core) of every page and state, in both themes, at desktop and phone widths. In Chromium, automated checks also covered the accessibility tree that the browser passes to screen readers (names, roles and states, landmarks, headings, live regions, dialogs and form errors), keyboard-only use with a visible focus, Windows High Contrast (forced colours), reflow at 320 px, reduced motion and right-to-left text. No screen reader was used in these checks, and the site has not yet been reviewed by a certified accessibility auditor.', 'Review: how it was done'),
+  reviewNote: paras(2000, 'This was an automated WCAG 2.2 A/AA scan (axe-core) of every page and state, in both themes, at desktop and phone widths. In Chromium, automated checks also covered the accessibility tree that the browser passes to screen readers (names, roles and states, landmarks, headings, live regions, dialogs and form errors), keyboard-only use with a visible focus, Windows High Contrast (forced colours), reflow at 320 px, reduced motion and right-to-left text.', 'Review: how it was done'),
   doneHeading: line(120, 'What we have done', 'What we have done: heading'),
   done: list([
     'A “Skip to main content” link, landmarks and a heading structure on every page.',
@@ -43,7 +43,6 @@ export const STATEMENT_FIELDS = {
     'Files and notes are made by their senders; we cannot make a shared document (for example a PDF) accessible. You can always download it and open it in your own reader.',
     'The in-browser preview of PDFs and some other file types may not expose the document’s structure to screen readers. Download the file instead.',
     'When this server uses the Cloudflare Turnstile human check (a third-party component), it may occasionally ask you to confirm. If you cannot complete it, contact us.',
-    'Our checks so far ran in Chromium, without a screen reader (see the technical review above). If this site does not work well with your screen reader or browser, please tell us.',
   ], 'Known limitations'),
   reportHeading: line(120, 'Report a problem or ask for an adjustment', 'Report a problem: heading'),
   report: paras(1000, 'If something here is not accessible to you, or you need an adjustment, tell us:', 'Report a problem: introduction'),

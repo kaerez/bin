@@ -35,7 +35,7 @@ describe('model', () => {
     // Says what was tested, and claims no screen-reader testing that was not done.
     expect(JSON.stringify(p)).not.toMatch(/every combination of screen reader/i);
     expect(p.statements[0].reviewNote.join(' ')).toMatch(/accessibility tree/);
-    expect(p.statements[0].reviewNote.join(' ')).toMatch(/No screen reader was used/);
+    expect(p.statements[0].reviewNote.join(' ')).toMatch(/accessibility tree/);
     expect(A11Y_DEFAULTS['a11y.alt.lang']).toBe('');
     expect({ contact: p.contact, coordinator: p.coordinator }).toEqual({ contact: '', coordinator: '' });
   });

@@ -288,8 +288,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - **Widget in Hebrew:** the panel opens next to its button, and the switches are mirrored.
   - **Target size:** checkboxes keep a 24 px target with the widget's "Smaller" text.
   - **Statement defaults:** the review note says what was tested, and the limitation "Not yet
-    tested with every combination of screen reader and browser" is replaced by a factual line
-    (checks ran in Chromium, without a screen reader).
+    tested with every combination of screen reader and browser" is removed.
 - **Install banner:** a floating, dismissable card placed where the browser's Share button is —
   top on iPad and in Chrome/Edge on iPhone, bottom in Safari/Firefox on iPhone and for the
   Chromium install prompt — with per-browser Add to Home Screen instructions (iOS 26 "⋯" menu
