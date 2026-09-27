@@ -141,13 +141,17 @@ describe('capability limits and quotas', () => {
 
 describe('settings validation', () => {
   it('bounds every value and keeps idle ≤ absolute', async () => {
-    const bad = [{ 'session.idleSec': 1 }, { 'files.maxShareBytes': 3 * 1024 ** 3 }, { 'viewer.enabled': 'yes' }, { nope: 1 },
+    // The retired server-wide keys (now role options) are refused like unknown ones.
+    const bad = [{ 'session.idleSec': 1 }, { 'files.grantSec': 8 * 86400 }, { 'public.enabled': 'yes' }, { nope: 1 },
+      { 'files.maxShareBytes': 2 * 1024 ** 3 }, { 'viewer.enabled': true }, { 'viewer.maxBytes': 1024 ** 2 },
       { 'session.idleSec': 86400 * 30, 'session.absSec': 86400 }];
     for (const b of bad) expect((await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: b })).status).toBe(400);
-    const ok = await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'files.maxShareBytes': 2 * 1024 ** 3 } });
+    const ok = await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'files.grantSec': 7200 } });
     expect(ok.status).toBe(200);
     const ov = await (await fetchJson('/api/private/admin/overview', { cookie: oc })).json();
-    expect(ov.settings['files.maxShareBytes']).toBe(2 * 1024 ** 3);
+    expect(ov.settings['files.grantSec']).toBe(7200);
+    expect(ov.settings['viewer.enabled']).toBeUndefined();
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'files.grantSec': 3600 } });
     expect(ov.env).toMatchObject({ sessionKeys: true, bfpDisabled: false });
   });
 });

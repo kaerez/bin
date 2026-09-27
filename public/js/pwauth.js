@@ -10,6 +10,7 @@ import { ARGON2 } from './format.js';
 import { utf8, b64urlFromBytes, bytesFromB64url, randomBytes } from './bytes.js';
 import { prelogin } from './api.js';
 
+/** The built-in minimum (new installs); a role may set any minimum from 1. */
 export const MIN_PASSWORD = 12;
 export const MAX_PASSWORD = 256;
 
@@ -26,16 +27,18 @@ const CLASSES = [
 /** A policy from limits (missing or invalid keys fall back to the defaults). */
 export function policyOf(limits) {
   const l = limits && typeof limits === 'object' ? limits : {};
-  const min = Number.isInteger(l.pwMinLength) ? Math.min(Math.max(l.pwMinLength, MIN_PASSWORD), MAX_PASSWORD) : MIN_PASSWORD;
+  const min = Number.isInteger(l.pwMinLength) ? Math.min(Math.max(l.pwMinLength, 1), MAX_PASSWORD) : MIN_PASSWORD;
   return { pwMinLength: min, pwUpper: l.pwUpper === true, pwLower: l.pwLower === true, pwDigit: l.pwDigit === true, pwSymbol: l.pwSymbol === true };
 }
+
+const chars = (n) => `${n} character${n === 1 ? '' : 's'}`;
 
 /** "At least 14 characters, including an upper-case letter and a digit." */
 export function describePolicy(policy = DEFAULT_POLICY) {
   const p = policyOf(policy);
   const need = CLASSES.filter(([k]) => p[k]).map(([, , t]) => t);
   const list = need.length > 1 ? `${need.slice(0, -1).join(', ')} and ${need.at(-1)}` : need[0];
-  return `At least ${p.pwMinLength} characters${list ? `, including ${list}` : ''}.`;
+  return `At least ${chars(p.pwMinLength)}${list ? `, including ${list}` : ''}.`;
 }
 
 /**
@@ -62,7 +65,7 @@ export function checkNewPassword(pw, confirm, policy = DEFAULT_POLICY) {
   const p = policyOf(policy);
   if (typeof pw !== 'string') return describePolicy(p);
   const len = passwordLength(pw);
-  if (len < p.pwMinLength) return `Use at least ${p.pwMinLength} characters.`;
+  if (len < p.pwMinLength) return `Use at least ${chars(p.pwMinLength)}.`;
   if (len > MAX_PASSWORD) return `Use at most ${MAX_PASSWORD} characters.`;
   const missing = CLASSES.filter(([k, re]) => p[k] && !re.test(pw)).map(([, , t]) => t);
   if (missing.length) return `The password needs ${missing.join(', ')}. ${describePolicy(p)}`;

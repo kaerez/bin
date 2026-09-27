@@ -185,6 +185,14 @@ const MIGRATIONS = [
       m.sql.exec("UPDATE limits SET value = ? WHERE user_id = ? AND channel = ? AND key = 'urlRules'", JSON.stringify(list), r.user_id, r.channel);
     }
   },
+  // 12: the server-wide share-size cap, viewer switch and largest previewable
+  // file are role options now: drop the old settings; the Default role gets a
+  // value for every option (the download window and upload deadline start
+  // from the current settings, which stay the owner's own).
+  (m) => {
+    for (const k of ['files.maxShareBytes', 'viewer.enabled', 'viewer.maxBytes']) m.sql.exec('DELETE FROM settings WHERE key = ?', k);
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -211,7 +219,8 @@ function materializeDefaultRole(sql) {
   const st = {};
   for (const r of sql.exec('SELECT key, value FROM settings').toArray()) { try { st[r.key] = JSON.parse(r.value); } catch { /* default applies */ } }
   const settings = settingsWithDefaults(st);
-  const start = { sessionIdleSec: settings['session.idleSec'], sessionAbsSec: settings['session.absSec'], viewerMaxBytes: settings['viewer.maxBytes'] };
+  const start = { sessionIdleSec: settings['session.idleSec'], sessionAbsSec: settings['session.absSec'],
+    fileGrantSec: settings['files.grantSec'], filePendingSec: settings['files.pendingSec'] };
   // The file-type mode and list go together: set both or neither.
   if (!('fileTypeMode' in rows) || !('fileTypeRules' in rows)) { delete rows.fileTypeMode; delete rows.fileTypeRules; }
   for (const [k, spec] of Object.entries(LIMITS)) {
@@ -224,7 +233,7 @@ function materializeDefaultRole(sql) {
 /** The storage scope of a role's limits, quotas and viewer rules. */
 const roleScope = (id) => `r:${id}`;
 const ROLE_ID_RE = /^[A-Za-z0-9_-]{16}$/;
-const RESERVED_ROLE_NAMES = ['owner', 'default'];
+const RESERVED_ROLE_NAMES = ['owner', 'default', 'public'];
 const TURNSTILE_KEY_RE = /^[A-Za-z0-9_-]{10,100}$/; // as src/lib/turnstile.js
 /** A key's scopes in canonical order, or null unless a non-empty list of known scopes. */
 const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x) => API_SCOPES.includes(x)) ? API_SCOPES.filter((x) => list.includes(x)) : null);
@@ -465,9 +474,12 @@ export class Directory extends DurableObject {
   #caps(u, L, s) {
     const owner = u.role === 'owner';
     return {
-      maxShareBytes: owner ? HARD_MAX_SHARE_BYTES : Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity),
-      viewerEnabled: owner ? true : s['viewer.enabled'] && L.viewer,
-      viewerMaxBytes: owner ? SETTINGS['viewer.maxBytes'].max : (L.viewerMaxBytes ?? s['viewer.maxBytes']),
+      // Per role now (migration 12 folded the old server-wide cap and switch in).
+      maxShareBytes: owner ? HARD_MAX_SHARE_BYTES : Math.min(HARD_MAX_SHARE_BYTES, L.maxShareBytes ?? HARD_MAX_SHARE_BYTES),
+      viewerEnabled: owner ? true : !!L.viewer,
+      viewerMaxBytes: owner ? LIMITS.viewerMaxBytes.max : (L.viewerMaxBytes ?? LIMITS.viewerMaxBytes.max),
+      grantSec: L.fileGrantSec ?? s['files.grantSec'],
+      pendingSec: L.filePendingSec ?? s['files.pendingSec'],
     };
   }
 
@@ -659,7 +671,7 @@ export class Directory extends DurableObject {
       apiLimits: eff.api,
       caps: {
         maxShareBytes: caps.maxShareBytes,
-        grantSec: s['files.grantSec'],
+        grantSec: caps.grantSec,
       },
       viewer: {
         enabled: caps.viewerEnabled,
@@ -1320,7 +1332,7 @@ export class Directory extends DurableObject {
         return fail(403, 'folder_too_deep', `Folders may be nested at most ${L.maxFolderDepth} levels deep${via}.`, { max: L.maxFolderDepth });
       }
     }
-    if (u.role === 'owner') return { ok: true, refund: [] };
+    if (u.role === 'owner') return { ok: true, refund: [], pendingSec: s['files.pendingSec'] };
 
     const ts = now();
     const applicable = this.#applicableQuotas(uid).filter((q) => (q.kind === 'all' || q.kind === req.kind) && (q.channel === 'all' || ch === 'api'));
@@ -1348,7 +1360,7 @@ export class Directory extends DurableObject {
           h.quota_id, h.key, h.bucket, ts);
       }
     });
-    return { ok: true, refund: hits };
+    return { ok: true, refund: hits, pendingSec: this.#caps(u, eff.all, s).pendingSec };
   }
 
   async refund(uid, hits) {
@@ -1371,8 +1383,8 @@ export class Directory extends DurableObject {
       tracking: s['public.tracking'],
       notice: s['public.notice'] ? s['public.noticeText'] : null,
       limits: { ...L, apiEnabled: false },
-      caps: { maxShareBytes: Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity), grantSec: s['files.grantSec'] },
-      viewer: { enabled: s['viewer.enabled'] && L.viewer, maxBytes: s['viewer.maxBytes'], rules: s['viewer.enabled'] && L.viewer ? this.#viewerRules(u, L) : [] },
+      caps: { maxShareBytes: this.#caps(u, L, s).maxShareBytes, grantSec: this.#caps(u, L, s).grantSec },
+      viewer: { enabled: !!L.viewer, maxBytes: this.#caps(u, L, s).viewerMaxBytes, rules: L.viewer ? this.#viewerRules(u, L) : [] },
       quotas: this.#applicableQuotas(PUBLIC_ID).map((q) => ({ kind: q.kind, n: q.n, unit: q.unit, max: q.max })),
     };
   }
@@ -2014,8 +2026,12 @@ export class Directory extends DurableObject {
     const users = this.sql.exec("SELECT COUNT(*) AS c FROM users WHERE role = 'user'").one().c;
     return {
       roles: [
+        // Owner: everything allowed, no limits; only the owner's own session
+        // timeouts and file-share windows can be changed. Public: the public
+        // (anonymous) account's; cannot be renamed, deleted or assigned.
         { id: 'owner', name: 'Owner', builtin: true, locked: true, users: this.#owner() ? 1 : 0 },
         { id: 'default', name: 'Default', builtin: true, users: users - assigned },
+        { id: 'public', name: 'Public', builtin: true, fixed: true, users: 0 },
         ...custom.map((r) => ({ id: r.id, name: r.name, builtin: false, ownQuotas: !!r.own_quotas, users: counts[r.id] || 0, created: r.created, updated: r.updated })),
       ],
     };
@@ -2123,8 +2139,9 @@ export class Directory extends DurableObject {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'owner') return fail(403, 'owner_role', 'The owner always has the Owner role.');
-    if (u.role !== 'user') return fail(403, 'forbidden', 'The public account has no role: set it under Public access.');
+    if (u.role !== 'user') return fail(403, 'forbidden', 'The public account always has the Public role.');
     if (roleId === 'owner') return fail(403, 'owner_role', 'The Owner role belongs to the owner only.');
+    if (roleId === 'public') return fail(403, 'public_role', 'The Public role belongs to the public (anonymous) account only.');
     let next = null;
     let label = 'Default';
     if (roleId !== 'default' && roleId !== null && roleId !== '') {
@@ -2179,10 +2196,23 @@ export class Directory extends DurableObject {
   /** Public, non-secret viewer policy (the recipient page intersects with it). */
   async publicConfig() {
     const s = this.#settings();
-    return {
-      viewer: { enabled: s['viewer.enabled'], maxBytes: s['viewer.maxBytes'], rules: s['viewer.enabled'] ? this.sql.exec("SELECT match, value, renderer FROM viewer_rules WHERE user_id = '' ORDER BY id").toArray() : [] },
-      accessibility: { contact: s['a11y.contact'], coordinator: s['a11y.coordinator'] },
-    };
+    return { accessibility: { contact: s['a11y.contact'], coordinator: s['a11y.coordinator'] } };
+  }
+
+  /**
+   * What opening a file share needs from its sender's role, now: the download
+   * window, and the viewer policy the recipient's page intersects with the
+   * share's own (so turning the viewer off in a role stops it for existing
+   * links at once).
+   */
+  async shareOpenPolicy(id) {
+    const s = this.#settings();
+    const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
+    const u = row && this.#user(row.user_id);
+    if (!u) return { grantSec: s['files.grantSec'], viewer: { enabled: false, maxBytes: 0, rules: [] } };
+    const L = this.#effective(u).all;
+    const c = this.#caps(u, L, s);
+    return { grantSec: c.grantSec, viewer: { enabled: c.viewerEnabled, maxBytes: c.viewerMaxBytes, rules: c.viewerEnabled ? this.#viewerRules(u, L) : [] } };
   }
 
   // ── admin: IP rules ──────────────────────────────────────────────────────

@@ -25,7 +25,8 @@ if (new URLSearchParams(location.search).get('disabled') === '1') {
 })();
 
 wirePeek(['#login-pass', '#login-pass-peek']);
-const check = humanCheck($('#login-turnstile'), 'login');
+// Sign-in buttons stay disabled until the human check (when on) has passed.
+const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'), $('#passkey-btn')] });
 
 /** Signed in: to the dashboard, or to Account when a recovery code was spent. */
 function done(r) {

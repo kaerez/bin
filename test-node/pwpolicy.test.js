@@ -12,6 +12,14 @@ describe('password policy', () => {
     expect(policyOf(undefined)).toEqual(DEFAULT_POLICY);
   });
 
+  it('allows a role minimum below the default, down to 1', () => {
+    expect(policyOf({ pwMinLength: 4 }).pwMinLength).toBe(4);
+    expect(checkNewPassword('abcd', undefined, policyOf({ pwMinLength: 4 }))).toBeNull();
+    expect(checkNewPassword('abc', undefined, policyOf({ pwMinLength: 4 }))).toMatch(/at least 4/);
+    expect(policyOf({ pwMinLength: 0 }).pwMinLength).toBe(1);
+    expect(describePolicy(policyOf({ pwMinLength: 1 }))).toBe('At least 1 character.');
+  });
+
   it('enforces every required class and names what is missing', () => {
     expect(checkNewPassword('abcdefghijklmn', undefined, strict)).toMatch(/upper-case letter, a digit, a symbol/);
     expect(checkNewPassword('Abcdefghijkl1!', undefined, strict)).toBeNull();
@@ -41,8 +49,7 @@ describe('password policy', () => {
     expect(checkOwnerPassword('a'.repeat(1025))).toMatch(/at most/);
   });
 
-  it('never goes below the built-in minimum, and checks the confirmation last', () => {
-    expect(policyOf({ pwMinLength: 4 }).pwMinLength).toBe(12);
+  it('checks the confirmation last', () => {
     expect(checkNewPassword('abcdefghijklm', 'different', DEFAULT_POLICY)).toMatch(/do not match/);
   });
 });

@@ -300,7 +300,7 @@ export async function initFile(request, env, a) {
       id = genId('f');
       const ok = await fileStub(env, id).init({
         id, uid: a.user.id, uth: await hashToken(uploadToken), dth: await hashToken(deleteToken),
-        padded, views, expire, ttl, pendingSec: settings['files.pendingSec'], deletable: body.deletable === true,
+        padded, views, expire, ttl, pendingSec: auth.pendingSec ?? settings['files.pendingSec'], deletable: body.deletable === true,
       });
       if (ok) break;
       if (attempt >= 4) throw new Error('id allocation failed');

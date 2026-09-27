@@ -62,6 +62,66 @@ describe('humanCheck', () => {
   });
 });
 
+describe('gated buttons', () => {
+  const button = () => { const b = document.createElement('button'); document.body.append(b); return b; };
+
+  it('stay disabled until the check passes, and again after each token is used', async () => {
+    config = { turnstile: '0x4AAAAAAAsitekey' };
+    const w = fakeTurnstile();
+    const b = button();
+    const pending = humanCheck(document.createElement('div'), 'login', { gate: [b] });
+    expect(b.disabled).toBe(true); // before the site key is even known
+    const c = await pending;
+    expect(b.disabled).toBe(true);
+    expect(b.title).toMatch(/human check/);
+    w.solve('tok-1');
+    expect(b.disabled).toBe(false);
+    expect(b.hasAttribute('title')).toBe(false);
+    // The page disables the button while it works and re-enables it after:
+    // the button still waits for the next token.
+    b.disabled = true;
+    expect(await c.take()).toBe('tok-1');
+    b.disabled = false;
+    expect(b.disabled).toBe(true);
+    w.solve('tok-2');
+    expect(b.disabled).toBe(false);
+    // The page's own "disabled" wins while the check has a token.
+    b.disabled = true;
+    expect(b.disabled).toBe(true);
+    b.disabled = false;
+    expect(b.disabled).toBe(false);
+    // An expired token disables them again.
+    w.renders.at(-1).opts['expired-callback']();
+    expect(b.disabled).toBe(true);
+  });
+
+  it('are left alone when the server has no human check', async () => {
+    config = { turnstile: null };
+    const b = button();
+    b.title = 'Send';
+    await humanCheck(document.createElement('div'), 'login', { gate: [b, null] });
+    expect(b.disabled).toBe(false);
+    expect(b.title).toBe('Send');
+    b.disabled = true;
+    expect(b.disabled).toBe(true);
+  });
+
+  it('stay disabled, with the reason shown, when the widget cannot load', async () => {
+    config = { turnstile: '0x4AAAAAAAsitekey' };
+    const b = button();
+    const el = document.createElement('div');
+    document.body.append(el);
+    // No window.turnstile: the script tag is added and fails.
+    const p = humanCheck(el, 'login', { gate: [b] });
+    await Promise.resolve(); await new Promise((r) => setTimeout(r, 0));
+    document.querySelector('script')?.dispatchEvent(new Event('error'));
+    const c = await p;
+    expect(b.disabled).toBe(true);
+    expect(el.querySelector('[role="alert"]').textContent).toMatch(/could not load/);
+    await expect(c.take()).rejects.toThrow(/could not load/);
+  });
+});
+
 describe('Trusted Types policy', () => {
   it('allows the exact Turnstile script and nothing else from that origin', () => {
     expect(String(scriptURL(TURNSTILE_SCRIPT))).toBe(TURNSTILE_SCRIPT);

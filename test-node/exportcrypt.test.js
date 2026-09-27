@@ -18,8 +18,12 @@ describe('export envelope', () => {
     expect(await openExport(t2, 'café-passphrase')).toEqual(DOC);
   }, 60000);
 
-  it('refuses a short passphrase, a wrong one, tampering and foreign KDF parameters', async () => {
-    await expect(sealExport(DOC, 'short')).rejects.toThrow(ExportCryptError);
+  it('accepts any passphrase, empty included, and refuses a wrong one, tampering and foreign KDF parameters', async () => {
+    const none = await sealExport(DOC, '');
+    expect(await openExport(none, '')).toEqual(DOC);
+    await expect(openExport(none, 'x')).rejects.toThrow(/Wrong passphrase/);
+    await expect(sealExport(DOC, null)).rejects.toThrow(ExportCryptError);
+    expect(await openExport(await sealExport(DOC, 'x'), 'x')).toEqual(DOC);
     const text = await sealExport(DOC, PASS);
     await expect(openExport(text, 'wrong passphrase!')).rejects.toThrow(/Wrong passphrase/);
     const env = JSON.parse(text);

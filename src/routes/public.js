@@ -194,13 +194,14 @@ async function openPaste(env, g, id, info, { lh, kh }) {
 }
 
 async function openFile(env, g, id, { lh, kh }) {
-  const settings = g.settings;
   const grant = genToken();
   const client = (await hashToken(`grant-client:${g.key}`)).slice(0, 16);
-  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), settings['files.grantSec'], client);
+  // The sender's role decides the download window and the viewer policy, now.
+  const policy = await directory(env).shareOpenPolicy(id);
+  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client);
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
-    return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded });
+    return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded, viewer: policy.viewer });
   }
   if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
   if (r.status === 'busy') {

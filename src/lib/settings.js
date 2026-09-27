@@ -19,11 +19,11 @@ export const DEFAULT_PUBLIC_NOTICE = 'Anonymous sharing is limited. To enforce t
 export const SETTINGS = {
   'session.idleSec':     { type: 'int', min: 5 * MIN, max: 90 * DAY, def: 12 * HOUR },
   'session.absSec':      { type: 'int', min: 5 * MIN, max: 365 * DAY, def: 7 * DAY },
-  'files.maxShareBytes': { type: 'int', min: 1 * MiB, max: HARD_MAX_SHARE_BYTES, def: 100 * MiB },
+  // The owner's own session timeouts and file-share windows (edited on the
+  // Owner role); every other account takes its role's values, which start
+  // from these.
   'files.grantSec':      { type: 'int', min: 5 * MIN, max: 7 * DAY, def: HOUR },
   'files.pendingSec':    { type: 'int', min: 5 * MIN, max: DAY, def: HOUR },
-  'viewer.enabled':      { type: 'bool', def: false },
-  'viewer.maxBytes':     { type: 'int', min: 64 * 1024, max: 500 * MiB, def: 50 * MiB },
   'guard.login.max':     { type: 'int', min: 1, max: 100000, def: 10 },
   'guard.login.windowSec': { type: 'int', min: 1, max: 30 * DAY, def: 10 * MIN },
   'guard.login.blockSec':  { type: 'int', min: 1, max: 365 * DAY, def: 15 * MIN },
@@ -116,7 +116,7 @@ export const LIMITS = {
   allowUnlimitedViews: { type: 'bool', def: true },
   maxExpireSec:        { type: 'int', min: 60, max: MAX_TTL, nullable: true, def: null },
   maxFilesPerShare:    { type: 'int', min: 1, max: 10000, nullable: true, def: null },
-  maxShareBytes:       { type: 'int', min: 1, max: HARD_MAX_SHARE_BYTES, nullable: true, def: null },
+  maxShareBytes:       { type: 'int', min: 1, max: HARD_MAX_SHARE_BYTES, nullable: true, def: 100 * MiB },
   maxFileBytes:        { type: 'int', min: 1, max: HARD_MAX_SHARE_BYTES, nullable: true, def: null },
   viewer:              { type: 'bool', def: false },
   viewerCustomRules:   { type: 'bool', def: false },
@@ -146,7 +146,8 @@ export const LIMITS = {
   // Password policy (public/js/pwauth.js). Enforced by the browser only: the
   // server receives an Argon2id proof, never the password. `owner` is what
   // applies to the owner (global settings never do): the built-in minimum.
-  pwMinLength:         { type: 'int', min: 12, max: 128, nullable: false, def: 12, owner: 12 },
+  // Any minimum from 1 (the admin's call); new installs start at 12.
+  pwMinLength:         { type: 'int', min: 1, max: 128, nullable: false, def: 12, owner: 12 },
   pwUpper:             { type: 'bool', def: false, owner: false },
   pwLower:             { type: 'bool', def: false, owner: false },
   pwDigit:             { type: 'bool', def: false, owner: false },
@@ -162,7 +163,12 @@ export const LIMITS = {
   // value applies). The owner always has the server-wide values.
   sessionIdleSec:      { type: 'int', min: SETTINGS['session.idleSec'].min, max: SETTINGS['session.idleSec'].max, nullable: true, def: null, owner: null },
   sessionAbsSec:       { type: 'int', min: SETTINGS['session.absSec'].min, max: SETTINGS['session.absSec'].max, nullable: true, def: null, owner: null },
-  viewerMaxBytes:      { type: 'int', min: SETTINGS['viewer.maxBytes'].min, max: SETTINGS['viewer.maxBytes'].max, nullable: true, def: null },
+  viewerMaxBytes:      { type: 'int', min: 64 * 1024, max: 500 * MiB, nullable: true, def: 50 * MiB },
+  // File shares sent by the role's users: how long recipients may download
+  // after opening, and how long an unfinished upload is kept (null: the
+  // server-wide value, which is also the owner's).
+  fileGrantSec:        { type: 'int', min: SETTINGS['files.grantSec'].min, max: SETTINGS['files.grantSec'].max, nullable: true, def: null, owner: null },
+  filePendingSec:      { type: 'int', min: SETTINGS['files.pendingSec'].min, max: SETTINGS['files.pendingSec'].max, nullable: true, def: null, owner: null },
 };
 
 /** The password-policy keys of the limits (see public/js/pwauth.js). */
