@@ -65,7 +65,7 @@ flowchart TD
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, label shares, and see **read receipts** — every open with its time (and, if the admin allows, the opener's address, location, browser, system and languages). |
 | Admin | Users, roles (limits, quotas, session timeouts, file-size caps, viewer policy), impersonation ("log in as"), password resets, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
-| Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. Needs Legal/Compliance review before use — see SECURITY.md. |
+| Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. See SECURITY.md. |
 | CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete, and list, show, read receipts of, label, extend and revoke your shares — with API keys. |
 | Installable | A PWA: install from the banner (or the browser menu; on iOS, Share → Add to Home Screen). The service worker caches only the static shell — never shares or API responses. |
 | Minimal surface | Strict CSP, self-hosted fonts, no third-party scripts, no analytics, no outbound requests. |
@@ -184,14 +184,13 @@ working.
   localStorage and IndexedDB, self-healing; unresolvable conflicts are blocked), per network, or
   both (permissive or restrictive). The composer shows an editable notice. Admin → Public access
   only turns it on or off; the limits, quotas, viewer rules, counting mode, notice and browser ids
-  are on the Public role (Admin → Roles). **Get Legal / Compliance sign-off first**
-  (ePrivacy/GDPR); see [SECURITY.md](./SECURITY.md).
+  are on the Public role (Admin → Roles); see [SECURITY.md](./SECURITY.md).
 - **Activity log** — kept for at most a set age and number of entries (defaults 365 days and
   500 000), with per-role limits. Entries about the owner and the owner's own actions
   (impersonation included) follow the owner's limits instead (Owner role; kept until cleared by
   default); server-wide configuration changes are never deleted automatically. The owner can
   clear everything, one account's entries or entries older than a date (password required; no
-  record is kept of the clearing — check retention duties with Legal / Compliance first).
+  record is kept of the clearing).
 - **Passkeys:** each account can add passkeys (Account) and sign in with one instead of the
   password, or require one after the password; 20 one-time recovery codes stand in for a lost
   passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
@@ -226,9 +225,6 @@ labelled fields, AA contrast in both themes, reduced-motion support, reflow down
   Untranslated headings fall back to the main language's. Without JavaScript the page shows a
   short note instead. The statement is part of the Settings part of an export. "Restore the
   default statement" puts the English-only default back in the form (save to publish it).
-- **Before publishing.** Have the statement reviewed by an accessibility professional (in
-  Israel, a מורשה לנגישות השירות) or by Legal. This project does not decide whether a
-  deployment is obliged, exempt or conformant.
 
 ## Installing as an app (PWA)
 
