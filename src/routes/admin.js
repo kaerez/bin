@@ -173,7 +173,9 @@ export async function handleAdmin(request, env, url) {
 
   if (p === '/api/private/admin/settings') {
     if (request.method !== 'PATCH') return methodNotAllowed('PATCH');
-    const body = await readJsonBody(request);
+    // Room for the whole accessibility statement (A11Y_MAX_TOTAL characters,
+    // up to 4 bytes each in UTF-8) in one save.
+    const body = await readJsonBody(request, 256 * 1024);
     const r = await dir.setSettings(body, me);
     invalidateGuardCaches();
     return r.ok ? json(r) : fromDir(r);

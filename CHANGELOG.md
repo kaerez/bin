@@ -128,8 +128,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     secret boxes on setup, 24 px checkboxes, a darker "ok" colour, and underlined links in text.
   - A **Hebrew/English accessibility preferences widget**: high contrast, text size, readable
     font, stop animations, focus highlight, and mark headings or links.
-  - A bilingual **accessibility statement** at `/accessibility/`, with the reporting contact and
-    coordinator set by the admin.
+  - An **accessibility statement** at `/accessibility/`, edited as a whole under Admin →
+    Settings → Accessibility (title, commitment, standard and status, review date, what has
+    been done, known limitations, reporting contact, coordinator): plain-text, validated
+    settings, English only by default, with an optional second language (code and direction).
+    It travels in the Settings part of an export.
 - **Passkeys:** sign in with a passkey instead of a password (no username needed), or require one
   after the password; up to 10 per account. The first passkey comes with 20 one-time recovery
   codes that work wherever a passkey does. The admin decides per user or globally whether passkeys
@@ -265,6 +268,15 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **The accessibility statement is admin-edited and English only by default** (#35): the text
+  moved from `public/accessibility/index.html` into settings (Admin → Settings →
+  Accessibility, which also holds the contact and coordinator); the built-in Hebrew version
+  is gone (add Hebrew, or any language, as the second language). `/api/config` serves the
+  whole statement, which the page renders as text only (no HTML). The statement travels in
+  the settings part of an export / import (re-validated there), and "Restore the default
+  statement" puts the English-only default back (second language off and cleared; the
+  contact and coordinator stay). Settings changes are logged per changed key, long text by
+  its length.
 - **Role editors:** the Sessions, File shares and Activity log sections carry the same kind of
   explanation as the Owner role, and log retention says "keep forever" rather than "no limit".
 - **Admin UI:** the Legal / Compliance warnings are removed from every admin screen.
