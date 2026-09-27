@@ -276,7 +276,7 @@
 
                 <div class="card stack reveal d3" id="keys-card">
                     <h2 class="section-title">API keys</h2>
-                    <p class="subtitle" id="keys-sub">Keys let the <code class="mono">secbin</code> CLI create shares for you (and nothing else). Use them via <code class="mono">SECBIN_API_KEY</code> or <code class="mono">--api-key-file</code>.</p>
+                    <p class="subtitle" id="keys-sub">Keys let scripts and the <code class="mono">secbin</code> CLI create shares for you and, if you allow it, list, label, extend and revoke your shares. They never sign in or reach your account settings. Use them via <code class="mono">SECBIN_API_KEY</code> or <code class="mono">--api-key-file</code>.</p>
                     <div class="stack" id="key-confirm">
                         <label class="field-label" for="key-current" id="key-current-label">Your password (asked again for every change)</label>
                         <input type="password" class="input" id="key-current" autocomplete="current-password" />
@@ -294,6 +294,8 @@
                             <label class="inline"><input type="checkbox" name="key-scope" value="notes" checked /> create notes</label>
                             <label class="inline"><input type="checkbox" name="key-scope" value="files" checked /> upload files</label>
                             <label class="inline"><input type="checkbox" name="key-scope" value="policy" checked /> read my policy</label>
+                            <label class="inline"><input type="checkbox" name="key-scope" value="read" /> list my shares &amp; receipts</label>
+                            <label class="inline"><input type="checkbox" name="key-scope" value="manage" /> label, extend &amp; revoke my shares</label>
                         </fieldset>
                         <button type="submit" class="btn" id="key-create">Create key</button>
                     </form>
@@ -303,10 +305,10 @@
                     <p class="msg" id="keys-msg" role="alert" hidden></p>
                     <details class="api-help" id="api-help">
                         <summary>Using the API (REST)</summary>
-                        <p>Send the key as <code>Authorization: Bearer &lt;key&gt;</code>. A key can only create shares (and read your policy); it can never sign in, list or change anything else. Give each key only the scopes it needs.</p>
-                        <p>Content is encrypted <strong>before</strong> it is sent, exactly as this site does it, so plain <code>curl</code> can only call the endpoints that carry no content, for example:</p>
-                        <pre class="mono api-example" id="api-example-policy"></pre>
-                        <p>To create shares from a script, use the <code>secbin</code> command-line tool, or the ready-made Node.js and Python examples in the repository (<a href="https://github.com/kaerez/bin/blob/main/docs/API.md" rel="noopener noreferrer" target="_blank">docs/API.md</a>, <a href="https://github.com/kaerez/bin/tree/main/examples/api" rel="noopener noreferrer" target="_blank">examples/api</a>).</p>
+                        <p>Send the key as <code>Authorization: Bearer &lt;key&gt;</code>. What a key may do is set by its scopes: <code>notes</code> and <code>files</code> create shares, <code>policy</code> reads what your client must check first, <code>read</code> lists your shares and their read receipts, and <code>manage</code> labels, extends and revokes them. A key only ever sees your own shares; it can never sign in, reach your account settings, your keys or the admin panel. Give each key only the scopes it needs.</p>
+                        <p>Content is encrypted <strong>before</strong> it is sent, exactly as this site does it, so creating a share needs a client that encrypts: the <code>secbin</code> command-line tool, or the Node.js and Python examples in the repository (<a href="https://github.com/kaerez/bin/blob/main/docs/API.md" rel="noopener noreferrer" target="_blank">docs/API.md</a>, <a href="https://github.com/kaerez/bin/tree/main/examples/api" rel="noopener noreferrer" target="_blank">examples/api</a>). Everything else works with plain <code>curl</code>. The examples read the key from <code>SECBIN_API_KEY</code> and a share id from <code>SHARE_ID</code>.</p>
+                        <div class="toolbar"><label class="field-label" for="api-lang">Examples in</label><select class="input" id="api-lang"></select></div>
+                        <div class="stack" id="api-examples"></div>
                     </details>
                 </div>
 

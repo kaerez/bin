@@ -67,13 +67,29 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **API key scopes `read` and `manage`** (#31): besides creating (`notes`, `files`, `policy`),
+  a key can list the user's shares, one share and its read receipts (`read`: `GET
+  /api/private/shares`, `GET …/shares/:id` — new — and `GET …/shares/:id/opens`) and label,
+  extend and revoke them (`manage`: `PATCH …/shares/:id`, `POST …/shares/:id/revoke`) — only
+  the key user's own shares, under the owner's share locks and, for extensions, the account's
+  API limits; changes made with a key are logged with its id. Both are opt-in: a key created
+  without a choice still gets the creation scopes only. Account → API keys and Admin → Users
+  offer and list the new scopes; exports and imports carry them. `docs/API.md` and the
+  Account page's "Using the API" help document every endpoint a key can use, with examples for
+  every use case in curl, Node.js and Python (new `examples/api/create-files.mjs` /
+  `create_files.py` for the file upload flow, `--encrypt-only` modes for curl, and
+  `shares.mjs` / `shares.py` for list, show, receipts, label, extend, revoke, policy and delete;
+  the Python examples use `requests`). The CLI gains `secbin list`, `show`, `receipts` (`read`)
+  and `label`, `extend`, `revoke` (`manage`). Existing keys keep exactly the creation scopes
+  they had. A `read` key can fetch read receipts, which include the recipients' network
+  addresses and locations when the owner enables those details.
+
 - **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
   `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
   owner made (admin actions, impersonation). Both default to keep forever, as before. Server-wide
   configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile,
   the public account's configuration) are still never deleted automatically; clearing by hand is
   unchanged. The settings travel in the settings part of an export and are validated on import.
-  Check audit-trail retention duties (e.g. SOX) with Legal / Compliance before setting them.
 - **Export / import everything, part by part.**
   - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
     default) and the public account.
@@ -137,8 +153,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     secret boxes on setup, 24 px checkboxes, a darker "ok" colour, and underlined links in text.
   - A **Hebrew/English accessibility preferences widget**: high contrast, text size, readable
     font, stop animations, focus highlight, and mark headings or links.
-  - A bilingual **accessibility statement** at `/accessibility/`, with the reporting contact and
-    coordinator set by the admin.
+  - An **accessibility statement** at `/accessibility/`, edited as a whole under Admin →
+    Settings → Accessibility (title, commitment, standard and status, review date, what has
+    been done, known limitations, reporting contact, coordinator): plain-text, validated
+    settings, English only by default, with an optional second language (code and direction).
+    It travels in the Settings part of an export.
 - **Passkeys:** sign in with a passkey instead of a password (no username needed), or require one
   after the password; up to 10 per account. The first passkey comes with 20 one-time recovery
   codes that work wherever a passkey does. The admin decides per user or globally whether passkeys
@@ -174,8 +193,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   default); a composer on the home page with an editable notice and the delete token on
   success; counting per browser tracker (cookie + ETag + localStorage + IndexedDB, self-healing,
   blocked on unresolvable conflicts, new senders rate-limited per network on first
-  creation), per network, or both (permissive / restrictive); tracker administration (unblock, block, forget). Requires Legal /
-  Compliance review before it is enabled.
+  creation), per network, or both (permissive / restrictive); tracker administration (unblock, block, forget).
 - **Works without WebAssembly** (iOS/macOS Lockdown Mode, including Chrome on iOS): Argon2id
   falls back to a pure-JavaScript build (@noble/hashes, pinned) with the same output, and a
   progress bar shows slow derivations.
@@ -274,9 +292,18 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **The accessibility statement is admin-edited and English only by default** (#35): the text
+  moved from `public/accessibility/index.html` into settings (Admin → Settings →
+  Accessibility, which also holds the contact and coordinator); the built-in Hebrew version
+  is gone (add Hebrew, or any language, as the second language). `/api/config` serves the
+  whole statement, which the page renders as text only (no HTML). The statement travels in
+  the settings part of an export / import (re-validated there), and "Restore the default
+  statement" puts the English-only default back (second language off and cleared; the
+  contact and coordinator stay). Settings changes are logged per changed key, long text by
+  its length.
 - **Role editors:** the Sessions, File shares and Activity log sections carry the same kind of
   explanation as the Owner role, and log retention says "keep forever" rather than "no limit".
-- **Admin UI:** the Legal / Compliance warnings are removed from every admin screen.
+- **No Legal / Compliance notes:** removed from every admin screen and from the docs (README, SECURITY, CHANGELOG); `AGENTS.md` now says not to add them.
 - **Human check:** while the check is pending, "Waiting for the human check…" is shown under the
   protected button (and linked to it for screen readers) instead of only in a tooltip.
 - **Everything an account may do is on its role** (migration 12):

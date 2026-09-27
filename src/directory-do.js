@@ -19,7 +19,7 @@ import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, timingSafeEqualHex
 import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn.js';
 import { ARGON2 } from '../public/js/format.js';
 import {
-  SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, PASSWORD_POLICY_KEYS,
+  SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
@@ -27,6 +27,7 @@ import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
 import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
+import { publicStatement } from '../public/js/a11ystatement.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -116,7 +117,7 @@ const MIGRATIONS = [
     m.sql.exec('CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id)');
     m.sql.exec('CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts)');
   },
-  // 5: per-key API scopes (existing keys keep every scope) — see API_SCOPES
+  // 5: per-key API scopes (existing keys keep the creation scopes) — see API_SCOPES
   (m) => m.addColumn('api_keys', 'scopes', "TEXT NOT NULL DEFAULT 'notes,files,policy'"),
   // 6: passkeys, recovery codes, WebAuthn challenges; users.webauthn_handle, users.mfa
   (m) => {
@@ -261,12 +262,6 @@ const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
-/**
- * What an API key may do (chosen when it is created; every scope by default):
- * notes — create notes (all formats), files — upload file shares, policy —
- * read the account's policy (GET /api/private/policy, used by the CLI).
- */
-export const API_SCOPES = ['notes', 'files', 'policy'];
 const MAX_OPENS_PER_SHARE = 1000;
 // Read receipts are throttled so that a link holder cannot flood this object
 // or push the genuine receipts out: one per share and address per window, at
@@ -870,7 +865,7 @@ export class Directory extends DurableObject {
     if (label === null || label === '') return fail(400, 'invalid_name', 'Give the key a name (up to 100 characters).');
     if (typeof hash !== 'string' || !HEX64_RE.test(hash)) return fail(400, 'invalid_key', 'invalid key');
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
-    let sc = API_SCOPES;
+    let sc = DEFAULT_KEY_SCOPES;
     if (scopes !== undefined) {
       sc = keyScopes(scopes);
       if (!sc) return fail(400, 'invalid_scopes', `Choose one or more scopes: ${API_SCOPES.join(', ')}.`);
@@ -924,7 +919,7 @@ export class Directory extends DurableObject {
     if (u.disabled) return { disabled: true };
     if (!this.#effective(u).all.apiEnabled) return null; // disallowing API use stops existing keys at once
     if (!k.last_used || ts - k.last_used > 60) this.sql.exec('UPDATE api_keys SET last_used = ? WHERE key_hash = ?', ts, hash);
-    return { user: this.#publicUser(u), scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) };
+    return { user: this.#publicUser(u), keyId: k.id, scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) };
   }
 
   // ── passkeys (WebAuthn) and recovery codes ───────────────────────────────
@@ -1570,17 +1565,22 @@ export class Directory extends DurableObject {
     return { ok: true, url: L.url, urlRules: L.urlRules };
   }
 
-  /** Limits check for raising views/expiry on an existing share (no quota use). */
-  async authorizeIncrease(uid, { views, expireAt }) {
+  /**
+   * Limits check for raising views/expiry on an existing share (no quota use),
+   * for the channel the change comes through (an API key gets the API limits).
+   */
+  async authorizeIncrease(uid, { views, expireAt }, channel = 'all') {
     const u = this.#user(uid);
     if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
-    const L = this.#effective(u).all;
+    const eff = this.#effective(u);
+    const L = channel === 'api' ? eff.api : eff.all;
+    const via = channel === 'api' ? ' via the API' : '';
     if (views !== undefined) {
-      if (views === null && !L.allowUnlimitedViews) return fail(403, 'unlimited_views_disabled', 'Unlimited views are not allowed for this account.');
-      if (views !== null && L.maxViews !== null && views > L.maxViews) return fail(403, 'too_many_views', `At most ${L.maxViews} views are allowed.`, { max: L.maxViews });
+      if (views === null && !L.allowUnlimitedViews) return fail(403, 'unlimited_views_disabled', `Unlimited views are not allowed for this account${via}.`);
+      if (views !== null && L.maxViews !== null && views > L.maxViews) return fail(403, 'too_many_views', `At most ${L.maxViews} views are allowed${via}.`, { max: L.maxViews });
     }
     if (expireAt !== undefined && L.maxExpireSec !== null && expireAt > now() + L.maxExpireSec) {
-      return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds from now.`, { max: L.maxExpireSec });
+      return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds from now${via}.`, { max: L.maxExpireSec });
     }
     return { ok: true };
   }
@@ -1613,7 +1613,8 @@ export class Directory extends DurableObject {
   }
 
   async getShare(uid, id) {
-    return this.sql.exec('SELECT id, user_id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND id = ?', uid, id).toArray()[0] || null;
+    return this.sql.exec(`SELECT id, user_id, kind, label, created, expires, views_total, status, locked,
+      MAX(shares.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id)) AS opens FROM shares WHERE user_id = ? AND id = ?`, uid, id).toArray()[0] || null;
   }
 
   /** Any user's share, for the admin (no owner scoping). */
@@ -1727,7 +1728,7 @@ export class Directory extends DurableObject {
    * { admin: ownerId } instead, which bypasses the owner scope and the lock and
    * logs the action as a direct admin action (hidden from the user's log).
    */
-  async updateShare(uid, id, { label, expires, views, status }, actorId = uid, { admin = null } = {}) {
+  async updateShare(uid, id, { label, expires, views, status }, actorId = uid, { admin = null, keyId = null } = {}) {
     if (admin) {
       const o = this.#user(admin);
       if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can change other users’ shares.');
@@ -1747,6 +1748,8 @@ export class Directory extends DurableObject {
     if (expires !== undefined) { this.sql.exec('UPDATE shares SET expires = ? WHERE id = ?', expires, id); parts.push(`expires=${expires}`); }
     if (views !== undefined) { this.sql.exec('UPDATE shares SET views_total = ? WHERE id = ?', views, id); parts.push(`views=${views ?? 'unlimited'}`); }
     if (status !== undefined) { this.sql.exec('UPDATE shares SET status = ? WHERE id = ?', status, id); parts.push(`status=${status}`); }
+    // A change made with an API key names the key (its id, never the secret).
+    if (keyId && !admin) parts.push(`apikey=${String(keyId).slice(0, 16)}`);
     this.#log(actor, subject, status === 'revoked' ? 'share.revoked' : 'share.updated', `id=${id} ${parts.join(' ')}`);
     return { ok: true };
   }
@@ -2199,19 +2202,23 @@ export class Directory extends DurableObject {
     } catch (e) {
       return fail(400, 'invalid_setting', e.message);
     }
-    const merged = { ...this.#settings(), ...Object.fromEntries(ops) };
-    if (merged['session.idleSec'] > merged['session.absSec']) return fail(400, 'invalid_setting', 'The idle timeout cannot exceed the absolute timeout.');
+    const cur = this.#settings();
+    const merged = { ...cur, ...Object.fromEntries(ops) };
+    const bad = crossCheckSettings(merged);
+    if (bad) return fail(400, 'invalid_setting', bad);
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
     });
-    this.#log(actorId, null, 'settings.updated', ops.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', '));
+    // Every change is logged (long text by its length), in entries that fit.
+    const changed = ops.filter(([k, v]) => cur[k] !== v);
+    this.#logChunks(actorId, null, 'settings.updated', '', changed.length ? changed.map(([k, v]) => `${k}=${logValue(v)}`) : ['no changes']);
     return { ok: true, settings: this.#settings() };
   }
 
   /** Public, non-secret viewer policy (the recipient page intersects with it). */
   async publicConfig() {
     const s = this.#settings();
-    return { accessibility: { contact: s['a11y.contact'], coordinator: s['a11y.coordinator'] } };
+    return { accessibility: publicStatement(s) };
   }
 
   /**
@@ -2381,8 +2388,8 @@ export class Directory extends DurableObject {
       plan.system = { parts: [...S] };
       if (S.has('settings')) {
         const cur = this.#settings();
-        const merged = { ...cur, ...sys.settings };
-        if (merged['session.idleSec'] > merged['session.absSec']) plan.errors.push('system: the idle timeout would exceed the absolute timeout');
+        const bad = crossCheckSettings({ ...cur, ...sys.settings });
+        if (bad) plan.errors.push(`system: ${bad}`);
         // Security-relevant changes are called out in the preview.
         for (const [k, v] of Object.entries(sys.settings)) {
           if (/^(guard|lockout|public)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
@@ -2487,7 +2494,7 @@ export class Directory extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       if (S.has('settings')) {
         for (const [k, v] of Object.entries(sys.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
-        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${JSON.stringify(c.to)}`));
+        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${logValue(c.to)}`));
       }
       if (S.has('roles')) {
         replaceScope('', sys.limits, sys.quotas, sys.viewerRules);
