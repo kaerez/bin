@@ -6,7 +6,7 @@ is encrypted here, before anything is sent; the server only ever sees
 ciphertext. The printed link carries the key in its #fragment — anyone with
 the link (and the password, if you set one) can open the note.
 
-    pip install cryptography argon2-cffi      # argon2-cffi only for --password
+    pip install requests cryptography argon2-cffi   # argon2-cffi only for a password
     export SECBIN_API_KEY=sbk_...             # an API key with the "notes" scope
     echo "the secret" | python3 create_note.py https://bin.example.com --views 1 --expire 24h
 
@@ -20,9 +20,8 @@ import json
 import os
 import sys
 import unicodedata
-import urllib.error
-import urllib.request
 
+import requests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -96,19 +95,12 @@ def main() -> int:
         return 2
     body, fragment = encrypt_note(text, os.environ.get("SECBIN_NOTE_PASSWORD", ""), args.views, args.expire)
     server = args.server.rstrip("/")
-    req = urllib.request.Request(f"{server}/api/private/paste", method="POST",
-                                 data=json.dumps({"paste": body, "label": args.label}).encode(),
-                                 headers={"authorization": f"Bearer {key}", "content-type": "application/json",
-                                          "user-agent": "secbin-example-python/1"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as res:
-            out = json.load(res)
-    except urllib.error.HTTPError as e:
-        try:
-            err = json.load(e)
-        except Exception:
-            err = {"message": e.reason}
-        print(f"error {e.code}: {err.get('message') or err.get('error')}", file=sys.stderr)
+    res = requests.post(f"{server}/api/private/paste", json={"paste": body, "label": args.label}, timeout=30,
+                        headers={"Authorization": f"Bearer {key}", "User-Agent": "secbin-example-python/1"},
+                        allow_redirects=False)  # a redirect would replay the key elsewhere
+    out = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
+    if res.status_code != 201:
+        print(f"error {res.status_code}: {out.get('message') or out.get('error') or res.reason}", file=sys.stderr)
         return 1
     print(f"{server}/p/{out['id']}#{fragment}")
     print(f"delete token: {out['deletetoken']}", file=sys.stderr)

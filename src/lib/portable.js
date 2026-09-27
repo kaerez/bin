@@ -11,17 +11,31 @@
 //             channels, quotas, viewer rules) together with the custom roles;
 //             IP rules; the Turnstile keys set in the admin panel (site key
 //             and secret); the public account's own limits, quotas and rules;
-//   users[] — per user: `credentials` (username is always present; salt, t,
-//             verifier, disabled) and/or `config` ({ role }: the role's name,
-//             "Default" for the Default role), `apiKeys` (the stored hashes,
-//             names, scopes and dates: the keys keep working) and `passkeys`
-//             (public keys, the second-step choice, recovery-code hashes;
-//             passkeys work only under the same hostname). Files from before
-//             roles carry per-user limits in `config`; they are accepted and
-//             ignored.
-// Never: the owner account, sessions, shares, usage counters or the activity log.
+//   owner   — the owner's row, each part independent: `passkeys` ({ keys }:
+//             public keys, each with its user handle; the owner's
+//             "Password and passkey" choice never travels) and
+//             `recoveryCodes` (the code hashes). Never the owner's password,
+//             role or API keys. On import the owner always exists, so only
+//             its passkeys can be added; its recovery codes are never taken;
+//   users[] — per user, each part independent (username is always present):
+//             `credentials` (salt, t, verifier, disabled), `role` (the role's
+//             name, "Default" for the Default role), `apiKeys` (the stored
+//             hashes, names, scopes and dates: the keys keep working),
+//             `passkeys` ({ mfa: the "Password and passkey" choice, keys:
+//             public keys, each with the WebAuthn user handle it was
+//             registered under }) and `recoveryCodes` (the code hashes).
+//             Passkeys work only under the same hostname; recovery codes
+//             work anywhere.
+// Never: sessions, shares, usage counters or the activity log.
+//
+// Import rule (confirmed by the maintainer): an import never removes or
+// overwrites an existing account's credentials. An account that already
+// exists (the owner included) only gets its role set (if chosen; never for
+// the owner, who always has the Owner role) and the imported passkeys added
+// (if chosen); new accounts are created from the chosen parts. The rules are
+// applied in Directory.importData (src/directory-do.js).
 
-import { checkSetting, checkLimit, checkQuota, checkViewerRule } from './settings.js';
+import { checkSetting, checkLimit, checkQuota, checkViewerRule, API_SCOPES } from './settings.js';
 import { upgradeUrlRules } from '../../public/js/sharetypes.js';
 import { normalizeRule } from './ip.js';
 import { ARGON2 } from '../../public/js/format.js';
@@ -89,8 +103,12 @@ function ipRule(r, where) {
 }
 
 export const MAX_ROLES = 200;
-/** The parts of a user entry. */
-export const USER_PARTS = ['credentials', 'config', 'apiKeys', 'passkeys'];
+/** The parts of a user entry, each independent. */
+export const USER_PARTS = ['credentials', 'role', 'apiKeys', 'passkeys', 'recoveryCodes'];
+/** The parts of the owner's row (never its password, role or API keys). */
+export const OWNER_PARTS = ['passkeys', 'recoveryCodes'];
+export const MAX_FILE_PASSKEYS = 10;
+export const MAX_FILE_RECOVERY_CODES = 20;
 const ROLE_NAME_MAX = 64;
 
 function role(v, i) {
@@ -166,7 +184,6 @@ function system(v) {
 // ── per-user API keys and passkeys ───────────────────────────────────────────
 const HEX64 = /^[0-9a-f]{64}$/;
 const B64URL = /^[A-Za-z0-9_-]+$/;
-const API_SCOPES = ['notes', 'files', 'policy'];
 const intOrNull = (x) => x === null || Number.isSafeInteger(x);
 function labelOf(v, where) {
   // eslint-disable-next-line no-control-regex
@@ -182,26 +199,32 @@ function apiKey(k, where) {
   return { hash: k.hash, name: labelOf(k.name, where), created: k.created, expires: k.expires, lastUsed: k.lastUsed, scopes: API_SCOPES.filter((x) => k.scopes.includes(x)) };
 }
 
-function passkeyBlock(v, where) {
-  keys(v, where, ['mfa', 'handle', 'keys', 'recoveryCodes']);
-  if (typeof v.mfa !== 'boolean') throw new PortableError(`${where}: mfa must be true or false`);
-  if (v.handle !== null && (typeof v.handle !== 'string' || v.handle.length > 64 || !B64URL.test(v.handle))) throw new PortableError(`${where}: invalid user handle`);
-  const ks = list(v.keys, `${where}.keys`, 10).map((p, i) => {
-    const w = `${where}.keys[${i}]`;
-    keys(p, w, ['id', 'name', 'publicKey', 'alg', 'signCount', 'transports', 'backupEligible', 'backedUp', 'created', 'lastUsed']);
-    if (typeof p.id !== 'string' || p.id.length < 16 || p.id.length > 1400 || !B64URL.test(p.id)) throw new PortableError(`${w}: invalid credential id`);
-    if (typeof p.publicKey !== 'string' || p.publicKey.length > 2000 || !B64URL.test(p.publicKey)) throw new PortableError(`${w}: invalid public key`);
-    if (![-7, -8, -257].includes(p.alg)) throw new PortableError(`${w}: unsupported algorithm`);
-    if (!Number.isSafeInteger(p.signCount) || p.signCount < 0) throw new PortableError(`${w}: invalid counter`);
-    if (!Array.isArray(p.transports) || p.transports.length > 10 || p.transports.some((t) => typeof t !== 'string' || !/^[a-z-]{1,20}$/.test(t))) throw new PortableError(`${w}: invalid transports`);
-    if (typeof p.backupEligible !== 'boolean' || typeof p.backedUp !== 'boolean') throw new PortableError(`${w}: invalid flags`);
-    if (!Number.isSafeInteger(p.created) || !intOrNull(p.lastUsed)) throw new PortableError(`${w}: invalid dates`);
-    return { id: p.id, name: labelOf(p.name, w), publicKey: p.publicKey, alg: p.alg, signCount: p.signCount, transports: p.transports, backupEligible: p.backupEligible, backedUp: p.backedUp, created: p.created, lastUsed: p.lastUsed };
-  });
-  const codes = list(v.recoveryCodes, `${where}.recoveryCodes`, 20);
-  if (codes.some((c) => typeof c !== 'string' || !HEX64.test(c))) throw new PortableError(`${where}.recoveryCodes: invalid code hash`);
+function passkeyKey(p, w) {
+  keys(p, w, ['id', 'handle', 'name', 'publicKey', 'alg', 'signCount', 'transports', 'backupEligible', 'backedUp', 'created', 'lastUsed']);
+  if (typeof p.id !== 'string' || p.id.length < 16 || p.id.length > 1400 || !B64URL.test(p.id)) throw new PortableError(`${w}: invalid credential id`);
+  if (p.handle !== null && (typeof p.handle !== 'string' || p.handle.length > 64 || !B64URL.test(p.handle))) throw new PortableError(`${w}: invalid user handle`);
+  if (typeof p.publicKey !== 'string' || p.publicKey.length > 2000 || !B64URL.test(p.publicKey)) throw new PortableError(`${w}: invalid public key`);
+  if (![-7, -8, -257].includes(p.alg)) throw new PortableError(`${w}: unsupported algorithm`);
+  if (!Number.isSafeInteger(p.signCount) || p.signCount < 0) throw new PortableError(`${w}: invalid counter`);
+  if (!Array.isArray(p.transports) || p.transports.length > 10 || p.transports.some((t) => typeof t !== 'string' || !/^[a-z-]{1,20}$/.test(t))) throw new PortableError(`${w}: invalid transports`);
+  if (typeof p.backupEligible !== 'boolean' || typeof p.backedUp !== 'boolean') throw new PortableError(`${w}: invalid flags`);
+  if (!Number.isSafeInteger(p.created) || !intOrNull(p.lastUsed)) throw new PortableError(`${w}: invalid dates`);
+  return { id: p.id, handle: p.handle, name: labelOf(p.name, w), publicKey: p.publicKey, alg: p.alg, signCount: p.signCount, transports: p.transports, backupEligible: p.backupEligible, backedUp: p.backedUp, created: p.created, lastUsed: p.lastUsed };
+}
+
+/** A user's passkeys ({ mfa, keys }) or the owner's ({ keys }: its second-step choice never travels). */
+function passkeyBlock(v, where, owner = false) {
+  keys(v, where, owner ? ['keys'] : ['mfa', 'keys']);
+  if (!owner && typeof v.mfa !== 'boolean') throw new PortableError(`${where}: mfa must be true or false`);
+  const ks = list(v.keys, `${where}.keys`, MAX_FILE_PASSKEYS).map((p, i) => passkeyKey(p, `${where}.keys[${i}]`));
   if (new Set(ks.map((p) => p.id)).size !== ks.length) throw new PortableError(`${where}.keys: a passkey appears twice`);
-  return { mfa: v.mfa, handle: v.handle, keys: ks, recoveryCodes: [...new Set(codes)] };
+  return owner ? { keys: ks } : { mfa: v.mfa, keys: ks };
+}
+
+function recoveryCodes(v, where) {
+  const codes = list(v, where, MAX_FILE_RECOVERY_CODES);
+  if (codes.some((c) => typeof c !== 'string' || !HEX64.test(c))) throw new PortableError(`${where}: invalid code hash`);
+  return [...new Set(codes)];
 }
 
 function uniqueRoles(roles) {
@@ -214,9 +237,17 @@ function uniqueRoles(roles) {
   return roles;
 }
 
+/** A user's role, by name ("Default" for the Default role; never the Owner role). */
+function roleName(v, where) {
+  // eslint-disable-next-line no-control-regex
+  if (typeof v !== 'string' || !v.trim() || v.length > ROLE_NAME_MAX || /[\u0000-\u001f\u007f]/.test(v)) throw new PortableError(`${where}: invalid role`);
+  if (v.trim().toLowerCase() === 'owner') throw new PortableError(`${where}: the Owner role belongs to the owner only`);
+  return v.trim();
+}
+
 function user(v, i) {
   const where = `users[${i}]`;
-  keys(v, where, ['username'], ['credentials', 'config', 'apiKeys', 'passkeys']);
+  keys(v, where, ['username'], USER_PARTS);
   if (typeof v.username !== 'string' || !USERNAME_RE.test(v.username)) throw new PortableError(`${where}: invalid username`);
   const out = { username: v.username };
   if (v.credentials !== undefined) {
@@ -228,29 +259,26 @@ function user(v, i) {
     if (typeof c.disabled !== 'boolean') throw new PortableError(`${where}.credentials: disabled must be true or false`);
     out.credentials = { salt: c.salt, t: c.t, verifier: c.verifier, disabled: c.disabled };
   }
-  if (v.config !== undefined) {
-    if (isObj(v.config) && Object.prototype.hasOwnProperty.call(v.config, 'role')) {
-      keys(v.config, `${where}.config`, ['role']);
-      if (typeof v.config.role !== 'string' || !v.config.role.trim() || v.config.role.length > ROLE_NAME_MAX) throw new PortableError(`${where}.config: invalid role`);
-      out.config = { role: v.config.role.trim() };
-    } else {
-      // Before roles: per-user limits, quotas and viewer rules. Checked, then ignored.
-      keys(v.config, `${where}.config`, ['limits', 'quotas', 'viewerRules']);
-      limitsBlock(v.config.limits, `${where}.config.limits`);
-      quotas(v.config.quotas, `${where}.config.quotas`);
-      viewerRules(v.config.viewerRules, `${where}.config.viewerRules`);
-      out.config = { legacy: true };
-    }
-  }
+  if (v.role !== undefined) out.role = roleName(v.role, `${where}.role`);
   if (v.apiKeys !== undefined) out.apiKeys = list(v.apiKeys, `${where}.apiKeys`, 1000).map((k, j) => apiKey(k, `${where}.apiKeys[${j}]`));
   if (v.passkeys !== undefined) out.passkeys = passkeyBlock(v.passkeys, `${where}.passkeys`);
-  if (!out.credentials && !out.config && !out.apiKeys && !out.passkeys) throw new PortableError(`${where}: nothing to import`);
+  if (v.recoveryCodes !== undefined) out.recoveryCodes = recoveryCodes(v.recoveryCodes, `${where}.recoveryCodes`);
+  if (!USER_PARTS.some((k) => out[k] !== undefined)) throw new PortableError(`${where}: nothing to import`);
+  return out;
+}
+
+function ownerEntry(v) {
+  keys(v, 'owner', [], OWNER_PARTS);
+  const out = {};
+  if (v.passkeys !== undefined) out.passkeys = passkeyBlock(v.passkeys, 'owner.passkeys', true);
+  if (v.recoveryCodes !== undefined) out.recoveryCodes = recoveryCodes(v.recoveryCodes, 'owner.recoveryCodes');
+  if (!OWNER_PARTS.some((k) => out[k] !== undefined)) throw new PortableError('owner: nothing to import');
   return out;
 }
 
 /** Validate an untrusted export document → a clean copy, or throw PortableError. */
 export function validateExport(doc) {
-  keys(doc, 'document', ['format', 'created', 'users'], ['system', 'origin']);
+  keys(doc, 'document', ['format', 'created', 'users'], ['system', 'origin', 'owner']);
   if (doc.format !== EXPORT_FORMAT) throw new PortableError(`not a ${EXPORT_FORMAT} document`);
   if (!Number.isSafeInteger(doc.created) || doc.created < 0) throw new PortableError('document: invalid creation time');
   if (doc.origin !== undefined && (typeof doc.origin !== 'string' || doc.origin.length > 200)) throw new PortableError('document: invalid origin');
@@ -264,37 +292,52 @@ export function validateExport(doc) {
   const out = { format: EXPORT_FORMAT, created: doc.created, users };
   if (doc.origin !== undefined) out.origin = doc.origin;
   if (doc.system !== undefined) out.system = system(doc.system);
+  if (doc.owner !== undefined) out.owner = ownerEntry(doc.owner);
+  return out;
+}
+
+/** true / false / { part: bool } → the chosen parts, each of which the document must hold. */
+function chosenParts(v, where, all, inDoc, what) {
+  const out = new Set();
+  if (v === true) {
+    if (!inDoc.length) throw new PortableError(`the document has no ${what}`);
+    for (const k of inDoc) out.add(k);
+  } else if (isObj(v)) {
+    keys(v, where, [], all);
+    for (const [k, on] of Object.entries(v)) {
+      if (typeof on !== 'boolean') throw new PortableError(`${where}.${k} must be true or false`);
+      if (on && !inDoc.includes(k)) throw new PortableError(`the document has no "${k}" part`);
+      if (on) out.add(k);
+    }
+  } else if (v !== false && v !== undefined) throw new PortableError(`${where} must be true, false or a list of parts`);
   return out;
 }
 
 /**
- * Validate the import decisions: { system: bool, users: { [username]: { as?, overwrite? } } }.
- * A user absent from `users` is skipped.
+ * Validate the import decisions:
+ *   { system: bool | { part: bool }, owner?: bool | { passkeys?, recoveryCodes? },
+ *     users: { [username]: { as?, action?: "create" | "update", parts? } } }.
+ * A user absent from `users` is skipped. `action` is what the owner expects:
+ * "create" (the default) a new account, or "update" one that exists (its role
+ * and added passkeys only); the plan refuses a mismatch with what is there.
+ * `owner` applies the file's owner row to this server's owner: its passkeys
+ * are added; its recovery codes, if chosen, are listed as skipped.
  */
 export function validateDecisions(d, doc) {
-  keys(d, 'decisions', ['system', 'users']);
-  // system: true (every part in the file), false, or { part: bool } for some.
-  let sysParts = [];
-  if (d.system === true) sysParts = doc.system ? doc.system.parts : [];
-  else if (isObj(d.system)) {
-    keys(d.system, 'decisions.system', [], SYSTEM_PARTS);
-    for (const [k, on] of Object.entries(d.system)) {
-      if (typeof on !== 'boolean') throw new PortableError(`decisions.system.${k} must be true or false`);
-      if (on && !(doc.system && doc.system.parts.includes(k))) throw new PortableError(`the document has no "${k}" part`);
-      if (on) sysParts.push(k);
-    }
-  } else if (d.system !== false) throw new PortableError('decisions.system must be true, false or a list of parts');
-  if (d.system === true && !doc.system) throw new PortableError('the document has no system configuration');
+  keys(d, 'decisions', ['system', 'users'], ['owner']);
+  const systemParts = chosenParts(d.system, 'decisions.system', SYSTEM_PARTS, doc.system ? doc.system.parts : [], 'system configuration');
+  const ownerParts = chosenParts(d.owner, 'decisions.owner', OWNER_PARTS, OWNER_PARTS.filter((k) => doc.owner?.[k] !== undefined), 'owner part');
   keys(d.users, 'decisions.users', [], Object.keys(d.users ?? {}));
   const names = new Set(doc.users.map((u) => u.username));
-  const out = { system: sysParts.length > 0, systemParts: new Set(sysParts), users: new Map() };
+  const out = { system: systemParts.size > 0, systemParts, ownerParts, users: new Map() };
   const targets = new Set();
   for (const [name, choice] of Object.entries(d.users)) {
     if (!names.has(name)) throw new PortableError(`decisions.users: "${name.slice(0, 64)}" is not in the document`);
-    keys(choice, `decisions.users.${name}`, [], ['as', 'overwrite', 'parts']);
+    keys(choice, `decisions.users.${name}`, [], ['as', 'action', 'parts']);
     const as = choice.as === undefined ? name : choice.as;
     if (typeof as !== 'string' || !USERNAME_RE.test(as)) throw new PortableError(`decisions.users.${name}: invalid target username`);
-    if (choice.overwrite !== undefined && typeof choice.overwrite !== 'boolean') throw new PortableError(`decisions.users.${name}: overwrite must be true or false`);
+    const action = choice.action === undefined ? 'create' : choice.action;
+    if (action !== 'create' && action !== 'update') throw new PortableError(`decisions.users.${name}: action must be "create" or "update"`);
     if (targets.has(as.toLowerCase())) throw new PortableError(`two users would be imported as "${as}"`);
     targets.add(as.toLowerCase());
     // parts: which of the user's parts to take (default: all of them).
@@ -306,7 +349,7 @@ export function validateDecisions(d, doc) {
       parts = inDoc.filter((k) => choice.parts.includes(k));
     }
     if (!parts.length) throw new PortableError(`decisions.users.${name}: nothing chosen to import`);
-    out.users.set(name, { as, overwrite: choice.overwrite === true, parts: new Set(parts) });
+    out.users.set(name, { as, action, parts: new Set(parts) });
   }
   return out;
 }

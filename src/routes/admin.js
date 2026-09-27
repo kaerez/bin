@@ -12,7 +12,7 @@ import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib/turnstile.js';
 import { parseId } from '../lib/ids.js';
-import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS } from '../lib/portable.js';
+import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
 import { escrowRoute, adminSetUserKeys, syncCredentialWraps, destroyDrive } from './drive.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
@@ -117,10 +117,11 @@ export async function handleAdmin(request, env, url) {
   if (p === '/api/private/admin/export' || p === '/api/private/admin/import') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const isImport = p.endsWith('import');
-    const body = await readJsonBody(request, isImport ? MAX_IMPORT_BYTES : 64 * 1024);
+    // An export request lists the users, each with its parts (up to MAX_EXPORT_USERS).
+    const body = await readJsonBody(request, isImport ? MAX_IMPORT_BYTES : 1024 * 1024);
     const g = await ipContext(env, request);
     // Step-up: an export can hold password verifiers and an import can
-    // replace credentials, so a session alone (e.g. a stolen cookie) is not
+    // create accounts and add passkeys, so a session alone (e.g. a stolen cookie) is not
     // enough. A wrong password counts like a wrong current password.
     const current = await verifierFrom(body.current);
     const step = current ? await dir.verifyCurrent(me, current, { lockoutOff: g.off.all }) : { ok: false, status: 400, error: 'invalid_credential', message: 'Re-enter your password to continue.' };
@@ -131,14 +132,18 @@ export async function handleAdmin(request, env, url) {
       return res;
     }
     if (!isImport) {
-      const users = body.users === 'all' ? 'all' : Array.isArray(body.users) ? body.users.filter((u) => ID_RE.test(String(u))).slice(0, MAX_EXPORT_USERS) : [];
+      // users: "all" or [id…] (each with the parts in `parts`), or [{id, parts}] (parts per user).
+      const partsOf = (v) => (Array.isArray(v) ? USER_PARTS.filter((k) => v.includes(k)) : []);
+      const users = body.users === 'all' ? 'all' : Array.isArray(body.users)
+        ? body.users.slice(0, MAX_EXPORT_USERS + 1).map((u) => (typeof u === 'string' ? u : u && typeof u === 'object' ? { id: String(u.id), parts: partsOf(u.parts) } : null))
+          .filter((u) => u !== null && ID_RE.test(typeof u === 'string' ? u : u.id))
+        : [];
       // system: true (everything) or { settings, roles, ipRules, turnstile, public }.
       const sysSel = body.system === true ? true
-        : body.system && typeof body.system === 'object' ? Object.fromEntries(['settings', 'roles', 'ipRules', 'turnstile', 'public'].map((k) => [k, body.system[k] === true])) : false;
-      const r = await dir.exportData({
-        system: sysSel, users, credentials: body.credentials === true, config: body.config === true,
-        apiKeys: body.apiKeys === true, passkeys: body.passkeys === true, origin: url.origin,
-      }, me);
+        : body.system && typeof body.system === 'object' ? Object.fromEntries(SYSTEM_PARTS.map((k) => [k, body.system[k] === true])) : false;
+      // owner: the owner's row, its parts among passkeys and recoveryCodes.
+      const owner = Array.isArray(body.owner) ? OWNER_PARTS.filter((k) => body.owner.includes(k)) : [];
+      const r = await dir.exportData({ system: sysSel, users, parts: partsOf(body.parts), owner, origin: url.origin }, me);
       return r.ok ? json({ document: r.doc }) : fromDir(r);
     }
     let doc;

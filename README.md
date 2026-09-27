@@ -68,7 +68,7 @@ flowchart TD
 | Admin | Users, roles (limits, quotas, session timeouts, file-size caps, viewer policy), impersonation ("log in as"), password resets, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
 | Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. See SECURITY.md. |
-| CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
+| CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete, and list, show, read receipts of, label, extend and revoke your shares — with API keys. |
 | Installable | A PWA: install from the banner (or the browser menu; on iOS, Share → Add to Home Screen). The service worker caches only the static shell — never shares or API responses. |
 | Minimal surface | Strict CSP, self-hosted fonts, no third-party scripts, no analytics, no outbound requests. |
 
@@ -184,11 +184,15 @@ working.
   accessibility statement. Everything an account may do is on its role.
 - **Security** — current blocks and tracked IPs per scope, manual allow/block rules for IPv4/IPv6
   addresses, CIDR blocks and ranges such as `10.0.0.5-10.0.0.20` (allow beats block).
-- **Import / export** — the owner exports the system configuration and/or some or all users
-  (credentials and/or configuration; never the owner, sessions, API keys or shares) to a file
-  **encrypted in the browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a
-  file after decrypting it locally: a preview (dry run) first, per-user skip/create/overwrite
-  or rename, then an all-or-nothing import. Both need the owner's password again.
+- **Import / export** — the owner exports the system configuration and/or some or all users,
+  part by part (a table of users × parts with Select all / Deselect all: credentials, role, API
+  keys, passkeys, recovery codes; the owner is a row too, with only its passkeys and recovery
+  codes; never the owner's password, sessions or shares) to a file **encrypted in the
+  browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a file after
+  decrypting it locally: the parts chosen again per user, a preview (dry run), per-user
+  skip/create/update or rename, then an all-or-nothing import. An import never removes or
+  overwrites an existing account's credentials: an existing account (the owner included) only
+  gets its role set and the imported passkeys added. Both need the owner's password again.
 - **Public access** (off by default) — a built-in `(public)` account that cannot sign in,
   be deleted or hold API keys. When enabled, the home page shows a composer limited to that
   account's limits and quotas (seeded conservatively: notes only, ≤ 10 views, ≤ 7 days, 10 per
@@ -275,7 +279,10 @@ secbin get 'https://bin.example.com/p/f…#…' --out ./downloads
 ```
 
 See [`cli/README.md`](./cli/README.md). To call the REST API directly (curl, Python, Node), see
-[`docs/API.md`](./docs/API.md) and [`examples/api/`](./examples/api/).
+[`docs/API.md`](./docs/API.md) and [`examples/api/`](./examples/api/). Each API key has scopes:
+`notes`, `files` and `policy` to create (the default), and, when chosen, `read` (list your shares
+and their read receipts) and `manage` (label, extend and revoke them) — only ever your own
+shares, never the account or the admin panel.
 
 ## Architecture
 

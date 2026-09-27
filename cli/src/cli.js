@@ -13,6 +13,7 @@ import { cmdCreate } from './commands/create.js';
 import { cmdDelete } from './commands/delete.js';
 import { cmdGet } from './commands/get.js';
 import { cmdSend } from './commands/send.js';
+import { cmdExtend, cmdLabel, cmdList, cmdReceipts, cmdRevoke, cmdShow } from './commands/shares.js';
 import { cmdUpdate, cmdVersion } from './commands/update.js';
 import { AbortError, UsageError } from './errors.js';
 import { UnsafePathError } from './extract.js';
@@ -38,6 +39,12 @@ Usage:
   secbin view <share-url | ->        alias for get
   secbin delete <share-url | id>     delete a share with its delete token
   secbin delete --now <share-url|->  as a recipient, delete a share whose sender allows it
+  secbin list [--status <s>] [-j]    list your shares (API key with the "read" scope)
+  secbin show <share-url | id>       one of your shares: views left, expiry, opens ("read")
+  secbin receipts <share-url | id>   who opened one of your shares, and when ("read")
+  secbin label <share-url | id> <t>  set ("" clears) a share's label ("manage")
+  secbin extend <share-url | id> …   more views and/or a later expiry ("manage")
+  secbin revoke <share-url | id>     revoke one of your shares ("manage")
   secbin update                      update the global npm installation
   secbin version, -v                 show the version and check for updates
 
@@ -78,14 +85,21 @@ delete flags:
   --token-env <VAR>      read the delete token from an environment variable
   --now                  recipient delete (see above); --password-env <VAR> for
                          a password-protected share
+list / show / receipts flags:
+  --status <s>           list: active | revoked | expired | consumed | deleted | ended
+  -j, --json             print the server's JSON ({total, rows} / the share / receipts)
+extend flags:
+  --views <n|unlimited>  the new view limit (view-limited shares; it only grows)
+  --expire <n>m|h|d      the new expiry, counted from now (it only grows; ≤ 365d)
+label: the label is NOT ENCRYPTED (visible to the server and its administrators)
 Global:
-  -s, --server <url>     server origin for create/send, and delete by bare id
+  -s, --server <url>     server origin for create/send/list, and delete/show/… by id
                          (default $SECBIN_SERVER — required, there is no built-in
                          server); get/delete take it from the share URL
   -h, --help             show this help (also after a command)
   -V, --version          print the version
 
-Creating shares needs an account API key (Dashboard → Account → API keys):
+Creating shares and managing your own need an account API key (Dashboard → Account → API keys):
   export SECBIN_SERVER=https://secbin.example.com SECBIN_API_KEY=sbk_…
 "create" is assumed when stdin is piped with no command, or when --text is given:
   git diff | secbin
@@ -193,6 +207,12 @@ async function dispatch(argv, io) {
     case 'get':
     case 'view': return cmdGet(rest, io);
     case 'delete': return cmdDelete(rest, io);
+    case 'list': return cmdList(rest, io);
+    case 'show': return cmdShow(rest, io);
+    case 'receipts': return cmdReceipts(rest, io);
+    case 'label': return cmdLabel(rest, io);
+    case 'extend': return cmdExtend(rest, io);
+    case 'revoke': return cmdRevoke(rest, io);
     case 'update': return cmdUpdate(rest, io);
     case 'version': return cmdVersion(rest, io);
     case '-v': return cmdVersion(rest, io);
@@ -209,7 +229,7 @@ async function dispatch(argv, io) {
       if (command === undefined) {
         return runWizard(io);
       }
-      throw new UsageError(`unknown command "${String(command).slice(0, 40)}" (expected create, send, get/view, delete, update, or version)`);
+      throw new UsageError(`unknown command "${String(command).slice(0, 40)}" (expected create, send, get/view, delete, list, show, receipts, label, extend, revoke, update, or version)`);
     }
   }
 }

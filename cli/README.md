@@ -44,7 +44,7 @@ secbin is self-hosted, so **there is no built-in default server**.
 | Setting | Meaning |
 | --- | --- |
 | `SECBIN_SERVER` / `-s, --server <origin>` | The server origin, e.g. `https://secbin.example.com`. **Required** for `create`, `send`, and `delete <bare-id>`. `get` and `delete <url>` take the origin from the share URL. |
-| `SECBIN_API_KEY` / `--api-key-file <path>` | Your account API key (`sbk_…`), **required** to create shares. Get one from **Dashboard → Account → API keys**; this is only available if your admin enabled API access. The key file must not be accessible to other users (`chmod 600`). The key is never accepted as a plain flag value, and it is sent only as `Authorization: Bearer …` to the creation endpoints. |
+| `SECBIN_API_KEY` / `--api-key-file <path>` | Your account API key (`sbk_…`), **required** to create shares (scopes `notes` / `files`; `policy` for link rules) and for `list`, `show` and `receipts` (`read`) and `label`, `extend` and `revoke` (`manage`). Get one from **Dashboard → Account → API keys**; this is only available if your admin enabled API access. The key file must not be accessible to other users (`chmod 600`). The key is never accepted as a plain flag value, and it is sent only as `Authorization: Bearer …` to the account endpoints (never to a share link or delete endpoint). |
 | `SECBIN_NO_ANIMATION=1` | Disables non-essential TUI motion (intro, shine, spinner) while keeping colors. `NO_COLOR` disables colors. |
 
 ```bash
@@ -217,6 +217,26 @@ a URL. A bare id needs `--server` or `SECBIN_SERVER`.
 allowed it (`--recipient-can-delete`): no token, but the full link and, if set, the password
 (`--password-env <VAR>` or a prompt). It spends no view.
 
+### Your own shares: `list`, `show`, `receipts`, `label`, `extend`, `revoke`
+
+These are the dashboard's **My shares** page from the command line. They use `SECBIN_SERVER`
+(or `--server`) and your API key, and reach only your own shares, never another user's. A
+share is named by its link or its bare id; the link's `#fragment` is never sent.
+
+| Command | Scope | Does |
+| --- | --- | --- |
+| `secbin list [--status <s>] [-j]` | `read` | every page of your shares (id, kind, status, views left, opens, expiry, label); `--status active\|revoked\|expired\|consumed\|deleted\|ended` filters; `-j` prints `{total, rows}` |
+| `secbin show <share-url \| id> [-j]` | `read` | one share: status, views left, opens, created, expiry, label, and whether the administrator locked it |
+| `secbin receipts <share-url \| id> [-j]` | `read` | who opened it and when: the time always, and the details (address, location, browser, system, languages) your administrator lets your account see |
+| `secbin label <share-url \| id> <text>` | `manage` | set the label (`""` clears it). The label is **not encrypted**: the server and its administrators can read it |
+| `secbin extend <share-url \| id> [--views <n\|unlimited>] [--expire <n>m\|h\|d]` | `manage` | a larger view limit (view-limited shares) and/or a later expiry counted from now (up to 365 days); both only grow, within your account's API limits |
+| `secbin revoke <share-url \| id>` | `manage` | destroy the content at once, like **Revoke** on the dashboard; the share stays in your list as `revoked` |
+
+Shares the administrator has locked cannot be labelled, extended or revoked. A key without the
+scope a command needs is refused with `403 scope_denied`; give each key only the scopes it
+needs (Dashboard → Account → API keys). The same calls are documented for scripts in
+[`docs/API.md`](https://github.com/kaerez/bin/blob/main/docs/API.md).
+
 ### `secbin update` / `secbin version`
 
 These commands only trust an npm release that meets all three conditions:
@@ -253,7 +273,7 @@ pulling the repository and re-running `npm install -g ./cli`.
 - **Passwords, delete tokens and API keys are never accepted as plain flag values.** They
   come only from a hidden prompt, an environment variable or a `0600` key file.
 - `--text` puts the note itself in argv. Pipe stdin or use `--file` for anything sensitive.
-- Server error messages are stripped of control characters before they are printed, so a
+- Server error messages and share labels are stripped of control characters before they are printed, so a
   hostile server cannot inject terminal escapes.
 - See the project's [`SECURITY.md`](https://github.com/kaerez/bin/blob/main/SECURITY.md)
   for the full threat model.
