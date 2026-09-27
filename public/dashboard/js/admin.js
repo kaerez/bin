@@ -983,8 +983,8 @@ async function renderPublic() {
 
 // ── security ─────────────────────────────────────────────────────────────────
 /**
- * Cloudflare Turnstile (the human check on login, password change and public
- * sharing): keys entered here apply when the deployment sets none. The secret
+ * Cloudflare Turnstile (the human check on login, the Account page's changes
+ * and public sharing): keys entered here apply when the deployment sets none. The secret
  * is write-only: never shown again, only replaced or removed.
  */
 async function turnstileCard() {
@@ -994,7 +994,7 @@ async function turnstileCard() {
   const state = st.active === 'env' ? 'On, with the deployment\'s keys (TURNSTILE_SITEKEY and TURNSTILE_SECRET).'
     : st.active === 'admin' ? 'On, with the keys set here.' : 'Off: no keys are set.';
   card.appendChild(h('p', { text: state }));
-  card.appendChild(h('p.mono.muted', { text: 'When on, login, a password change and anonymous sharing ask for a Turnstile check. Create a widget in the Cloudflare dashboard (Turnstile → Add widget) for this hostname, then paste its site key and secret key. The deployment\'s keys (Worker variables or secrets) always win over the ones set here; a Worker secret is the safer place for the secret key.' }));
+  card.appendChild(h('p.mono.muted', { text: 'When on, login, every change on the Account page (password, username, passkeys, recovery codes, API keys) and anonymous sharing ask for a Turnstile check. Create a widget in the Cloudflare dashboard (Turnstile → Add widget) for this hostname, then paste its site key and secret key. The deployment\'s keys (Worker variables or secrets) always win over the ones set here; a Worker secret is the safer place for the secret key.' }));
   if (st.deployment) {
     card.appendChild(h('p.mono.muted', { text: 'Set by the deployment: change or remove the keys there (wrangler secret put TURNSTILE_SECRET, TURNSTILE_SITEKEY in wrangler.toml or the dashboard).' }));
     return card;

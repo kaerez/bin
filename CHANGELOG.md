@@ -15,6 +15,15 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Human check on every Account change:** with Turnstile on, changing the username, adding or
+  removing a passkey, the "password and passkey" choice, new recovery codes, and creating,
+  changing or revoking an API key now need a fresh Turnstile token (action `account`), like the
+  password change already did (`password`). Each card of the Account page has its own
+  always-visible widget; its buttons (the table rows' Remove and Revoke included) stay disabled
+  until the check passes, and again after each use. The token is checked before the password or
+  passkey confirmation; adding a passkey is checked on the step that stores it. API-key calls,
+  the owner's admin panel and challenge requests need no token; nothing changes while Turnstile
+  is off.
 - **Security audit fixes** (OWASP-style review of the whole code base; no Critical or High
   findings):
   - cross-site requests to the public share routes are refused before any Guard accounting

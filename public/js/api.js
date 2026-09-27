@@ -93,18 +93,19 @@ export const changePassword = (body, turnstile) => request('/api/private/me/pass
 export const myActivity = (before) => request(`/api/private/me/activity${before ? `?before=${enc(before)}` : ''}`);
 export const listKeys = () => request('/api/private/me/keys');
 // Changes to one's own account carry a confirmation `step`: { current } (a
-// password proof) or { reauth: { challengeId, credential } } (a passkey).
+// password proof) or { reauth: { challengeId, credential } } (a passkey), and
+// a Turnstile token (one per request) when the server has the human check on.
 export const reauthOptions = () => request('/api/private/me/reauth', { method: 'POST', body: {} });
-export const changeUsername = (username, step) => request('/api/private/me/username', { method: 'POST', body: { username, ...step } });
-export const createKey = (name, expiresInSec, scopes, step) => request('/api/private/me/keys', { method: 'POST', body: { name, expiresInSec, scopes, ...step } });
-export const updateKey = (id, patch, step) => request(`/api/private/me/keys/${enc(id)}`, { method: 'PATCH', body: { ...patch, ...step } });
-export const revokeKey = (id, step) => request(`/api/private/me/keys/${enc(id)}`, { method: 'DELETE', headers: INTENT, body: { ...step } });
+export const changeUsername = (username, step, turnstile) => request('/api/private/me/username', { method: 'POST', headers: human(turnstile), body: { username, ...step } });
+export const createKey = (name, expiresInSec, scopes, step, turnstile) => request('/api/private/me/keys', { method: 'POST', headers: human(turnstile), body: { name, expiresInSec, scopes, ...step } });
+export const updateKey = (id, patch, step, turnstile) => request(`/api/private/me/keys/${enc(id)}`, { method: 'PATCH', headers: human(turnstile), body: { ...patch, ...step } });
+export const revokeKey = (id, step, turnstile) => request(`/api/private/me/keys/${enc(id)}`, { method: 'DELETE', headers: { ...INTENT, ...human(turnstile) }, body: { ...step } });
 export const myPasskeys = () => request('/api/private/me/passkeys');
 export const passkeyRegisterOptions = () => request('/api/private/me/passkeys/options', { method: 'POST', body: {} });
-export const addPasskey = (body) => request('/api/private/me/passkeys', { method: 'POST', body });
-export const removePasskey = (id, step) => request(`/api/private/me/passkeys/${enc(id)}/remove`, { method: 'POST', body: { ...step } });
-export const regenerateRecoveryCodes = (step) => request('/api/private/me/recovery-codes', { method: 'POST', body: { ...step } });
-export const setSecondFactor = (on, step) => request('/api/private/me/second-factor', { method: 'POST', body: { on, ...step } });
+export const addPasskey = (body, turnstile) => request('/api/private/me/passkeys', { method: 'POST', headers: human(turnstile), body });
+export const removePasskey = (id, step, turnstile) => request(`/api/private/me/passkeys/${enc(id)}/remove`, { method: 'POST', headers: human(turnstile), body: { ...step } });
+export const regenerateRecoveryCodes = (step, turnstile) => request('/api/private/me/recovery-codes', { method: 'POST', headers: human(turnstile), body: { ...step } });
+export const setSecondFactor = (on, step, turnstile) => request('/api/private/me/second-factor', { method: 'POST', headers: human(turnstile), body: { on, ...step } });
 
 export async function createNote(paste, label) {
   const d = await request('/api/private/paste', { method: 'POST', body: { paste, label } });

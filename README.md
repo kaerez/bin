@@ -211,8 +211,9 @@ working.
   password, or require one after the password; 20 one-time recovery codes stand in for a lost
   passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
   none. The admin can remove a user's passkeys if they lose them all.
-- **Human check (optional):** Cloudflare Turnstile on login, password changes and anonymous
-  share creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
+- **Human check (optional):** Cloudflare Turnstile on login, every change on the Account page
+  (password, username, passkeys, recovery codes, sign-in steps, API keys) and anonymous share
+  creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
   disabled until the check has passed, and again after each use until the next one passes.
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup
