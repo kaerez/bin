@@ -48,8 +48,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 ### Added
 
 - **Account:** change your username; edit an API key's name and scopes; confirm changes with a
-  passkey instead of the password; the second step is a choice under Passkeys ("password
-  alone" by default).
+  passkey instead of the password; how you sign in is a choice under Passkeys: "Password or
+  Passkey" (default) or "Password and passkey". A recovery code always signs in on its own.
 - **Admin → Users:** the owner creates, edits and revokes a user's API keys (a new key is shown
   once).
 - **Passwords the owner sets** (setup, the owner's own, a new user's, a reset) no longer follow the

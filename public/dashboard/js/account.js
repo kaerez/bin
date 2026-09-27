@@ -255,8 +255,8 @@ async function renderKeys() {
 
 // ── passkeys and recovery codes ────────────────────────────────────────────
 const MODE_TEXT = {
-  any: 'Sign in with a passkey alone, or require it after your password.',
-  second: 'The administrator allows passkeys only as a second step: once you add one, every password login asks for it.',
+  any: 'Sign in with your password or a passkey, or require both. A recovery code always signs you in on its own.',
+  second: 'The administrator allows passkeys only as a second step: once you add one, you sign in with your password and a passkey. A recovery code always signs you in on its own.',
 };
 
 
@@ -314,7 +314,7 @@ async function renderPasskeys() {
   $('#mfa-on').disabled = !has;
   $(st.mfa ? '#mfa-on' : '#mfa-off').checked = true;
   $('#recovery-status').textContent = has
-    ? `${st.recoveryLeft} of 20 recovery codes left.${st.required ? ' Password logins ask for a passkey or a code.' : ''}`
+    ? `${st.recoveryLeft} of 20 recovery codes left.${st.required ? ' You sign in with your password and a passkey (or a code).' : ''}`
     : 'Adding your first passkey gives you 20 one-time recovery codes.';
   $('#recovery-regen').hidden = !has;
   $('#passkey-add').disabled = st.passkeys.length >= st.max;
@@ -354,7 +354,7 @@ function wirePasskeys() {
     $(radio).addEventListener('change', (e) => {
       if (!e.target.checked) return;
       const on = e.target.value === 'on';
-      passkeyAction((step) => setSecondFactor(on, step), () => toast(on ? 'Password logins now also need a passkey.' : 'A password alone signs you in again.'))
+      passkeyAction((step) => setSecondFactor(on, step), () => toast(on ? 'You now sign in with your password and a passkey.' : 'Your password or a passkey signs you in again.'))
         .finally(() => renderPasskeys());
     });
   }
