@@ -17,7 +17,7 @@
 //   both-restrictive — both; refused when either is over a quota.
 
 import { json, err, methodNotAllowed, decodePathSegment, assertNotCrossSite } from '../lib/http.js';
-import { directory, ipContext, isBlocked, recordFailure } from '../lib/guard.js';
+import { directory, ipContext, isBlocked, recordFailure, cachedSettings } from '../lib/guard.js';
 import { parseId } from '../lib/ids.js';
 import { createNote, initFile, putChunk, finalizeFile } from './private.js';
 import { PUBLIC_ID } from '../directory-do.js';
@@ -62,6 +62,9 @@ export async function handlePublicApi(request, env, url) {
 
   if (p === '/api/public/profile') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
+    // Off (the default): answered from the isolate's settings cache, without
+    // reaching the Directory.
+    if ((await cachedSettings(env))['public.enabled'] !== true) return json({ enabled: false });
     const prof = await dir.publicProfile();
     if (!prof.enabled) return json({ enabled: false });
     return json(prof);

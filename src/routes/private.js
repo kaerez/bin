@@ -331,9 +331,16 @@ export async function putChunk(request, env, a, id, i) {
   if (auth.status === 'bad_index') return err(400, 'bad_index', 'No such chunk index.');
   if (auth.status === 'bad_size') return err(400, 'bad_size', `Chunk ${i} must be exactly ${auth.expected} bytes.`);
   if (auth.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
-  await binding(env, 'FILES').put(r2Key(id, i), bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
+  const files = binding(env, 'FILES');
+  await files.put(r2Key(id, i), bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
   const c = await stub.commitChunk(a.user.id, uth, i, bytes.length);
-  if (c.status !== 'ok') return err(410, 'gone', 'This upload has expired.');
+  if (c.status !== 'ok') {
+    // The upload ended (deadline, revoke, purge) between the check and the
+    // write: its purge may already have run, so remove the chunk just written
+    // rather than leave ciphertext in R2 that nothing refers to.
+    await files.delete(r2Key(id, i));
+    return err(410, 'gone', 'This upload has expired.');
+  }
   return json({ ok: true });
 }
 

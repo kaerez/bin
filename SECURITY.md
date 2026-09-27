@@ -402,10 +402,18 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking;
   - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges
-    (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard);
+    (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard). A block rule
+    that covers the owner's own address is refused unless an allow rule covers them first;
   - account lockout after X failed logins (owner exempt — recover via setup if needed). Per-IP
     protection and account lockout are complementary: the first stops one source guessing
-    (any account), the second stops many sources guessing one account;
+    (any account), the second stops many sources guessing one account. Usernames that do not
+    exist are counted and locked the same way (under a keyed hash of the name), so "locked"
+    versus "wrong password" does not reveal which accounts exist. Anyone can still lock a
+    known account by failing its logins (that is what a lockout is); Turnstile and the per-IP
+    guard limit how cheaply;
+  - **cross-site requests** to the public share routes (`/api/paste/…`, `/api/file/…`) are
+    refused before any failure is counted, so another site cannot make a visitor's browser
+    spend their "invalid fetch" budget and get their network blocked;
   - **the owner and global settings:** limits, quotas, the global share-size cap, the viewer
     switch and size, and lockout never apply to the owner. Security controls that protect the
     owner do: session timeouts, per-IP brute-force protection and IP rules (so an owner with no
