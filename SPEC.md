@@ -240,10 +240,15 @@ Common errors on any route:
   cleared.
 - **Human check (Cloudflare Turnstile)**, only when a site key and a secret key are configured
   (`TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or else the keys set with
-  `PUT /api/private/admin/turnstile`): `POST /api/auth/login`, `POST /api/private/me/password` and
+  `PUT /api/private/admin/turnstile`): `POST /api/auth/login`, `POST /api/private/me/password`,
+  every other change to one's own account (`POST /api/private/me/username`,
+  `POST /api/private/me/passkeys`, `POST /api/private/me/passkeys/:id/remove`,
+  `POST /api/private/me/recovery-codes`, `POST /api/private/me/second-factor`,
+  `POST /api/private/me/keys`, `PATCH` / `DELETE /api/private/me/keys/:id`) and
   `POST /api/public/paste` / `POST /api/public/file` need `X-Secbin-Turnstile: <token>`, issued
-  for the action `login`, `password` or `public-share` respectively on this hostname. Each token
-  is accepted once. Errors: `403 turnstile_required` (no token), `403 turnstile_failed` (rejected,
+  for the action `login`, `password`, `account` or `public-share` respectively on this hostname.
+  Each token is accepted once; the challenge requests (`…/passkeys/options`, `…/me/reauth`) need
+  none. Errors: `403 turnstile_required` (no token), `403 turnstile_failed` (rejected,
   expired, reused, or for another action or hostname), `503 turnstile_unavailable` (siteverify
   unreachable; fails closed). Setup, admin resets, file chunks/finalize and API keys are exempt.
 - `403 scope_denied`: an API key without the scope the route needs (`notes` for

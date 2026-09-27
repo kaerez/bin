@@ -116,11 +116,18 @@ export async function handlePrivate(request, env, url, ctx) {
     return withAuth(a, json({ rows: await dir.activity(a.user.id, { before, limit: 50 }) }));
   }
 
+  // Every change below (like the password above) is a browser session's own:
+  // these routes never accept an API key. With Turnstile on, each change also
+  // needs a fresh human-check token for "account", checked before the step-up
+  // so that guessing the password costs a token per attempt.
+  const human = () => requireTurnstile(env, request, TURNSTILE_ACTIONS.account);
+
   // API keys: every change needs the password or a passkey.
   if (p === '/api/private/me/keys') {
     if (request.method === 'GET') return withAuth(a, json({ keys: await dir.listKeys(a.user.id) }));
     if (request.method === 'POST') {
       if (a.actor) return err(403, 'impersonating', 'API keys cannot be created while impersonating.');
+      await human();
       const body = await readJsonBody(request);
       const g = await ipContext(env, request);
       const step = await stepUpFrom(body, url);
@@ -134,6 +141,7 @@ export async function handlePrivate(request, env, url, ctx) {
     if (request.method !== 'DELETE' && request.method !== 'PATCH') return methodNotAllowed('PATCH, DELETE');
     if (a.actor) return err(403, 'impersonating', 'API keys cannot be changed while impersonating (use Admin → Users).');
     if (request.method === 'DELETE') assertIntent(request);
+    await human();
     const body = await readJsonBody(request);
     const g = await ipContext(env, request);
     const step = { ...(await stepUpFrom(body, url)), lockoutOff: g.off.all };
@@ -155,6 +163,7 @@ export async function handlePrivate(request, env, url, ctx) {
   if (p === '/api/private/me/username') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     if (a.actor) return err(403, 'impersonating', 'The username cannot be changed while impersonating.');
+    await human();
     const body = await readJsonBody(request);
     const g = await ipContext(env, request);
     const step = await stepUpFrom(body, url);
@@ -175,6 +184,9 @@ export async function handlePrivate(request, env, url, ctx) {
       const r = await dir.passkeyRegisterOptions(a.user.id);
       return r.ok ? json({ challengeId: r.challengeId, publicKey: creationOptions(r, url.hostname) }) : fromDir(r);
     }
+    // The human check sits here, on the step that changes something (adding
+    // the passkey, not asking for its challenge): no change skips it.
+    await human();
     const g = await ipContext(env, request);
     const body = await readJsonBody(request);
     const step = { ...(await stepUpFrom(body, url)), lockoutOff: g.off.all };

@@ -471,6 +471,8 @@ html.dark .theme-toggle .ico-moon { display: block; }
 
 /* ── messages / toast / footer ───────────────────────────────────────────── */
 .human-wait { margin: .4rem 0 0; font-size: .78rem; text-align: center; }
+/* Under its button, also in a row of controls. */
+.toolbar > .human-wait, .btn-row > .human-wait { flex-basis: 100%; }
 .msg { font-family: var(--mono); font-size: .8125rem; color: var(--ink-2); letter-spacing: .01em; padding: 1.25rem 0; text-align: center; }
 .msg.error { color: var(--seal); }
 #toast { position: fixed; left: 50%; bottom: calc(2rem + env(safe-area-inset-bottom, 0px)); z-index: 50; transform: translateX(-50%) translateY(12px);
@@ -613,7 +615,7 @@ button.back { cursor: pointer; }
 .linkbtn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--ring); border-radius: 2px; }
 .login-alt { display: flex; flex-direction: column; align-items: stretch; gap: .5rem; }
 .recovery-codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(12.5rem, 1fr)); gap: .35rem 1rem; margin: 0; padding: .75rem 1rem; list-style: none; background: var(--sheet-2); border-radius: 4px; font-size: .85rem; }
-/* Cloudflare Turnstile: usually invisible; shows itself only when it needs the visitor. */
+/* Cloudflare Turnstile: always shown, so the visitor sees the check pass. */
 .turnstile { display: flex; justify-content: center; max-width: 100%; }
 .turnstile[hidden] { display: none; }
 .api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
