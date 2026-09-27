@@ -9,7 +9,7 @@ import { passkeysSupported, createPasskey } from '../../js/passkeys.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
-import { copyText, flashCopied, toast } from '../../js/ui.js';
+import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { humanCheck } from '../../js/turnstile.js';
 
@@ -210,23 +210,26 @@ function editKeyRow(k, tr) {
     if (!scopes.length) return showMsg($('#keys-msg'), 'Choose at least one thing the key may do.');
     return keyChange((step) => updateKey(k.id, { name: name.value.trim(), scopes }, step), 'API key updated.');
   };
-  tr.after(h('tr.key-edit-row', {}, h('td.cell-full', { colspan: '6' }, h('div.toolbar', {}, name,
+  tr.after(h('tr.key-edit-row', { dataset: { focusKey: `key:${k.id}:edit` } }, h('td.cell-full', { colspan: '6' }, h('div.toolbar', {}, name,
     h('fieldset.key-scopes', { 'aria-label': 'What the key may do' }, ...boxes.map((b, i) => h('label.inline', {}, b, ` ${KEY_SCOPES[i][1]}`))), save))));
 }
 
 async function renderKeys() {
+  // A revoke or an edit re-renders the table: focus goes back to the key's
+  // row, or to the card's heading when the row is gone.
+  const refocus = keepFocus($('#keys-body'), { fallback: $('#keys-card .section-title') });
   const body = clear($('#keys-body'));
   try {
     const { keys } = await listKeys();
     for (const k of keys) {
       const actions = h('div.btn-row.row-actions');
-      const tr = h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
+      const tr = h('tr', { dataset: { focusKey: `key:${k.id}` } }, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
         h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
         h('td.mono', { dataset: { label: 'Expires' }, text: k.expires ? formatDate(k.expires) : 'never' }),
         h('td.mono', { dataset: { label: 'Scopes' }, text: (k.scopes || []).join(', ') || '—' }), h('td.cell-actions', {}, actions));
       if (!profile.impersonatedBy) {
-        actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', on: { click: () => editKeyRow(k, tr) } }));
-        const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
+        actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', dataset: { focusKey: `key:${k.id}:edit` }, on: { click: () => editKeyRow(k, tr) } }));
+        const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `key:${k.id}:revoke` } });
         armConfirm(rv, 'Revoke?', () => keyChange((step) => revokeKey(k.id, step), 'API key revoked.'));
         actions.appendChild(rv);
       }
@@ -235,6 +238,7 @@ async function renderKeys() {
   } catch (e) {
     showMsg($('#keys-msg'), friendlyError(e));
   }
+  refocus();
 }
 
 // ── passkeys and recovery codes ────────────────────────────────────────────
@@ -276,9 +280,10 @@ async function passkeyAction(fn, done) {
 }
 
 async function renderPasskeys() {
+  const refocus = keepFocus($('#passkeys-body'), { fallback: $('#passkeys-card .section-title') });
   const body = clear($('#passkeys-body'));
   let st;
-  try { st = await myPasskeys(); } catch (e) { showMsg($('#passkeys-msg'), friendlyError(e)); return; }
+  try { st = await myPasskeys(); } catch (e) { showMsg($('#passkeys-msg'), friendlyError(e)); refocus(); return; }
   for (const p of st.passkeys) {
     const rm = h('button.btn.danger', { type: 'button', text: 'Remove' });
     armConfirm(rm, st.passkeys.length === 1 ? 'Remove (and its recovery codes)?' : 'Remove?', () => passkeyAction(
@@ -302,6 +307,7 @@ async function renderPasskeys() {
     : 'Adding your first passkey gives you 20 one-time recovery codes.';
   $('#recovery-regen').hidden = !has;
   $('#passkey-add').disabled = st.passkeys.length >= st.max;
+  refocus();
 }
 
 function wirePasskeys() {

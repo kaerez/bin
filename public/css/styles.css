@@ -472,6 +472,8 @@ html.dark .theme-toggle .ico-moon { display: block; }
 /* ── messages / toast / footer ───────────────────────────────────────────── */
 .msg { font-family: var(--mono); font-size: .8125rem; color: var(--ink-2); letter-spacing: .01em; padding: 1.25rem 0; text-align: center; }
 .msg.error { color: var(--seal); }
+/* Always in the page (a live region must exist before it speaks); no box while empty. */
+#upload-progress:empty { padding: 0; }
 #toast { position: fixed; left: 50%; bottom: calc(2rem + env(safe-area-inset-bottom, 0px)); z-index: 50; transform: translateX(-50%) translateY(12px);
   background: var(--accent-fill); color: var(--accent-fg); font-family: var(--sans); font-size: .875rem; font-weight: 500; letter-spacing: .01em;
   padding: .7rem 1.1rem; border-radius: 3px; max-width: calc(100vw - 2rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)); text-align: center; overflow-wrap: anywhere; box-shadow: var(--shadow-overlay);
@@ -482,6 +484,10 @@ html.dark .theme-toggle .ico-moon { display: block; }
 html.pwa-banner-open:not(.pwa-banner-top) #toast { bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); }
 
 .foot { margin-top: auto; padding-top: 3rem; text-align: center; }
+/* The footer follows <main> (so it is the page's contentinfo landmark); the
+   same column as .wrap. main grows (flex: 1), keeping it at the bottom. */
+body > .foot { position: relative; z-index: 10; width: 100%; max-width: 680px; margin: 0 auto; padding: 1rem 1.5rem 2rem; }
+@media (max-width: 768px) { body > .foot { padding: 1rem 1rem 2rem; } }
 .foot p { font-family: var(--sans); font-size: .78rem; color: var(--ink-3); letter-spacing: .01em; }
 .foot .foot-crypto { font-family: var(--mono); font-size: .7rem; letter-spacing: .04em; color: var(--ink-3); margin-top: .3rem; }
 .foot-crypto .foot-frag { color: var(--accent); }

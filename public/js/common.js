@@ -96,6 +96,25 @@ export function showMsg(el, message, isError = true) {
 }
 
 /**
+ * Tie a field to the error it caused: aria-invalid="true" and the message
+ * element's id added to aria-describedby (so the error is read with the
+ * field); `on` false undoes both. Other descriptions (hints) are kept.
+ */
+export function markInvalid(input, msgEl, on = true) {
+  if (!input) return;
+  const id = msgEl && msgEl.id;
+  const ids = (input.getAttribute('aria-describedby') || '').split(/\s+/).filter((x) => x && x !== id);
+  if (on) {
+    input.setAttribute('aria-invalid', 'true');
+    if (id) ids.push(id);
+  } else {
+    input.removeAttribute('aria-invalid');
+  }
+  if (ids.length) input.setAttribute('aria-describedby', ids.join(' '));
+  else input.removeAttribute('aria-describedby');
+}
+
+/**
  * Two-step confirmation for irreversible actions: the first activation arms the
  * button (label names the effect), a second within 5 s confirms; disarms on
  * timeout or blur.
