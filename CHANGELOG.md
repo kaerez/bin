@@ -15,6 +15,17 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Security audit fixes** (OWASP-style review of the whole code base; no Critical or High
+  findings):
+  - cross-site requests to the public share routes are refused before any Guard accounting
+    (another site could get a visitor's network blocked); the passkey challenge POSTs refuse
+    cross-site callers like every other POST;
+  - the account lockout no longer reveals which usernames exist: unknown names lock the same way;
+  - an IP block rule covering the owner's own address is refused unless an allow rule covers them;
+  - a chunk written to R2 for an upload that ended meanwhile is deleted instead of left orphaned;
+  - `/api/config` is cached per isolate, and `/api/public/profile` answers "off" without reaching
+    the Directory, so anonymous floods do not all land on the single Directory object;
+  - the CLI escapes C1 control characters in sender-chosen file names before printing them.
 - **Link, receipt and log hardening** (from a review of the new features):
   - recipients can open only web, mail, phone and SMS links; any other app link a sender's rules
     allow (`vscode:`, `ssh:`, `smb:`…) is shown in full with Copy only;

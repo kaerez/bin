@@ -6,7 +6,7 @@
 
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
-import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig } from '../lib/guard.js';
 import { parseUserAgent, parseLanguages } from '../lib/ua.js';
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
@@ -111,7 +111,7 @@ export async function handlePublic(request, env, url) {
   if (pathname === '/api/config') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     // The site key is public by design; null means no human check anywhere.
-    return json({ ...(await directory(env).publicConfig()), turnstile: (await turnstileKeys(env))?.sitekey ?? null });
+    return json({ ...(await cachedPublicConfig(env)), turnstile: (await turnstileKeys(env))?.sitekey ?? null });
   }
 
   if (pathname === '/api/paste') {
@@ -124,6 +124,11 @@ export async function handlePublic(request, env, url) {
   const [, kind, rawId, action, idx] = m;
   const id = decodePathSegment(rawId);
 
+  // Before any Guard accounting: another site can make a visitor's browser
+  // send simple GETs here (<img src>, no preflight). Counted as "invalid",
+  // they would get the visitor's network blocked from opening shares. The
+  // app only ever calls these from its own pages; the CLI sends no header.
+  assertNotCrossSite(request);
   const g = await ipContext(env, request);
   const blocked = await blockedResponse(env, g);
   if (blocked) return blocked;

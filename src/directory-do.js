@@ -556,7 +556,7 @@ export class Directory extends DurableObject {
     const s = this.#settings();
     if (!u) {
       timingSafeEqualHex(String(verifier), '0'.repeat(64)); // similar work either way
-      return fail(401, 'invalid_login', 'Wrong username or password.');
+      return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or password.');
     }
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
@@ -573,6 +573,21 @@ export class Directory extends DurableObject {
     }
     this.#log(u.id, u.id, 'login');
     return this.#sessionFor(u, s);
+  }
+
+  /**
+   * A failed sign-in for a username that does not exist. It is counted and
+   * locked exactly like a real account (under a keyed hash of the name), so
+   * "423 locked" versus "401" does not reveal which usernames exist.
+   */
+  async #unknownLoginFailure(username, ts, s, lockoutOff, message) {
+    const key = await crypto.subtle.importKey('raw', utf8(`secbin-lockout/v1:${this.#meta('secret')}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(String(username).toLowerCase())));
+    const phantom = { id: `n:${b64urlFromBytes(mac.subarray(0, 18))}`, role: 'user' };
+    const locked = this.#lockedUntil(phantom, ts, lockoutOff);
+    if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
+    this.#passwordFailure(phantom, ts, s, lockoutOff);
+    return fail(401, 'invalid_login', message);
   }
 
   /** Account lockout end time, or 0. The owner is never locked out. */
@@ -592,7 +607,7 @@ export class Directory extends DurableObject {
     const lockedUntil = count >= s['lockout.max'] ? ts + s['lockout.lockSec'] : 0;
     this.sql.exec('INSERT INTO failures (user_id, count, start, locked_until) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start, locked_until = excluded.locked_until',
       u.id, lockedUntil ? 0 : count, lockedUntil ? ts : start, lockedUntil);
-    if (lockedUntil) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`);
+    if (lockedUntil && !u.id.startsWith('n:')) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`);
   }
 
   /** Session timeouts: the server-wide ones, or the account's role's (never for the owner). */
@@ -1187,7 +1202,7 @@ export class Directory extends DurableObject {
     const ts = now();
     const s = this.#settings();
     const hash = await this.#codeHash(code);
-    if (!u) return fail(401, 'invalid_login', 'Wrong username or recovery code.');
+    if (!u) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.');
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     // A recovery code is the way back in when everything else is lost: it
@@ -2221,10 +2236,17 @@ export class Directory extends DurableObject {
     return this.sql.exec('SELECT id, cidr, action, expires, note, created FROM ip_rules WHERE expires IS NULL OR expires > ? ORDER BY created DESC', ts).toArray();
   }
 
-  async addIpRule({ cidr, action, expires, note }, actorId) {
+  async addIpRule({ cidr, action, expires, note, callerIp = null }, actorId) {
     const c = normalizeRule(cidr);
     if (!c) return fail(400, 'invalid_cidr', 'Enter an IPv4/IPv6 address, a CIDR block (10.0.0.0/8) or a range (10.0.0.5-10.0.0.20).');
     if (action !== 'allow' && action !== 'block') return fail(400, 'invalid_action', 'action must be allow or block');
+    // Never lock out the owner adding the rule (as imports already check): a
+    // block covering their own address needs an allow rule for them first.
+    const me = parseIp(callerIp ?? '');
+    if (action === 'block' && me && ruleContains(parseRule(c), me)) {
+      const allowed = (await this.ipRules()).some((r) => r.action === 'allow' && (r.expires === null || r.expires > now()) && ruleContains(parseRule(r.cidr), me));
+      if (!allowed) return fail(409, 'blocks_yourself', `This rule would block your own address (${callerIp}). Add an allow rule for yourself first.`);
+    }
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
     const n = cleanLabel(note);
     if (n === null) return fail(400, 'invalid_note', 'Notes are up to 100 characters.');
@@ -2685,6 +2707,8 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM webauthn_challenges WHERE exp <= ?', ts);
     this.sql.exec('DELETE FROM webauthn_spent WHERE exp <= ?', ts);
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
+    // Lockout counters for usernames that do not exist, once they no longer matter.
+    this.sql.exec("DELETE FROM failures WHERE user_id LIKE 'n:%' AND locked_until < ? AND start < ?", ts, ts - this.#settings()['lockout.windowSec']);
     // Anonymous trackers expire after being idle, with their usage counters.
     const idleBefore = ts - this.#settings()['public.trackerIdleSec'];
     this.sql.exec("DELETE FROM usage WHERE user_id IN (SELECT 'pub:t:' || id_hash FROM trackers WHERE last_seen < ?)", idleBefore);

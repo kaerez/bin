@@ -222,7 +222,11 @@ export async function run(argv, io = defaultIo()) {
     // Bare `secbin` on a TTY ran the wizard, whose screens are centered —
     // its error lines are centered to match; plain commands stay left-aligned.
     const wizard = argv[0] === undefined && io.stdinIsTTY && typeof io.columns === 'function';
-    const fail = (message, code) => {
+    const fail = (raw, code) => {
+      // Messages can quote sender-chosen file names: escape C0 (but newline
+      // and tab) and C1 controls so none can steer the terminal.
+      // eslint-disable-next-line no-control-regex
+      const message = String(raw).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
       io.stderr((wizard ? center(message, io.columns()) : message) + '\n');
       return code;
     };
