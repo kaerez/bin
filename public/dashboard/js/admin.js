@@ -21,46 +21,71 @@ const $ = (s) => document.querySelector(s);
 const panel = (name) => document.querySelector(`.admin-panel[data-panel="${name}"]`);
 const MiB = 1024 * 1024;
 
-const LIMIT_UI = [
-  ['text', 'Notes allowed', 'bool'],
-  ['files', 'File sharing allowed', 'bool'],
-  ['url', 'Link shares allowed (needs notes)', 'bool'],
-  ['urlRules', 'Links that may be shared', 'urlrules'],
-  ['secret', 'Credential shares allowed (needs notes)', 'bool'],
-  ['openerDelete', 'Recipients may “delete now” (sender opts in)', 'bool'],
-  ['maxViews', 'Max views per share', 'int'],
-  ['allowUnlimitedViews', 'Unlimited views allowed', 'bool'],
-  ['maxExpireSec', 'Max expiry', 'dur'],
-  ['maxFilesPerShare', 'Max files per share', 'int'],
-  ['maxShareBytes', 'Max share size', 'bytes'],
-  ['maxFileBytes', 'Max single file size', 'bytes'],
-  ['viewer', 'In-browser viewer', 'bool'],
-  ['viewerCustomRules', 'Use this role\'s own viewer rules (not Default\'s)', 'bool'],
-  ['viewerMaxBytes', 'In-browser viewer: largest file', 'bytes', { nullable: false }],
-  ['apiEnabled', 'API keys allowed', 'bool'],
-  ['apiMaxKeys', 'Max API keys', 'int'],
-  ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
-  ['fileTypeRules', 'File type list', 'rules'],
-  ['maxFolderDepth', 'Max folder depth', 'int'],
-  ['receiptIp', 'Read receipts: sender sees the opener\'s address', 'bool'],
-  ['receiptLocation', 'Read receipts: sender sees the approximate location', 'bool'],
-  ['receiptBrowser', 'Read receipts: sender sees the browser and version', 'bool'],
-  ['receiptOs', 'Read receipts: sender sees the operating system', 'bool'],
-  ['receiptLanguages', 'Read receipts: sender sees the browser languages', 'bool'],
-  ['logMaxAgeSec', 'Keep this account\'s log entries for at most', 'dur'],
-  ['logMaxEntries', 'Keep at most this many log entries about the account', 'int'],
-  ['pwMinLength', 'Password: minimum length', 'int', { nullable: false }],
-  ['pwUpper', 'Password: needs an upper-case letter', 'bool'],
-  ['pwLower', 'Password: needs a lower-case letter', 'bool'],
-  ['pwDigit', 'Password: needs a digit', 'bool'],
-  ['pwSymbol', 'Password: needs a symbol', 'bool'],
-  ['passkeys', 'Passkeys', 'enum', { values: [['any', 'sign in alone or as a second factor'], ['second', 'only as a second factor after the password'], ['off', 'not allowed']] }],
-  ['passkeysMax', 'Passkeys: at most', 'int', { nullable: false }],
-  ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
-  ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
-  ['fileGrantSec', 'File shares: recipients may download for this long after opening', 'dur', { nullable: false }],
-  ['filePendingSec', 'File shares: an unfinished upload is discarded after', 'dur', { nullable: false }],
+// Role options in sections (the editor shows a heading per section). Each row:
+// [key, label, type, options]; the section is added as a fifth element.
+const LIMIT_SECTIONS = [
+  ['Sharing', [
+    ['text', 'Notes allowed', 'bool'],
+    ['files', 'File sharing allowed', 'bool'],
+    ['secret', 'Credential shares allowed (needs notes)', 'bool'],
+    ['openerDelete', 'Recipients may “delete now” (sender opts in)', 'bool'],
+    ['maxViews', 'Max views per share', 'int'],
+    ['allowUnlimitedViews', 'Unlimited views allowed', 'bool'],
+    ['maxExpireSec', 'Max expiry', 'dur'],
+  ]],
+  ['Links', [
+    ['url', 'Link shares allowed (needs notes)', 'bool'],
+    ['urlRules', 'Links that may be shared', 'urlrules'],
+  ]],
+  ['Files', [
+    ['maxFilesPerShare', 'Max files per share', 'int'],
+    ['maxShareBytes', 'Max share size', 'bytes'],
+    ['maxFileBytes', 'Max single file size', 'bytes'],
+    ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
+    ['fileTypeRules', 'File type list', 'rules'],
+    ['maxFolderDepth', 'Max folder depth', 'int'],
+  ]],
+  ['File shares', [
+    ['fileGrantSec', 'File shares: recipients may download for this long after opening', 'dur', { nullable: false }],
+    ['filePendingSec', 'File shares: an unfinished upload is discarded after', 'dur', { nullable: false }],
+  ]],
+  ['In-browser viewer', [
+    ['viewer', 'In-browser viewer', 'bool'],
+    ['viewerCustomRules', 'Use this role\'s own viewer rules (not Default\'s)', 'bool'],
+    ['viewerMaxBytes', 'In-browser viewer: largest file', 'bytes', { nullable: false }],
+  ]],
+  ['API keys', [
+    ['apiEnabled', 'API keys allowed', 'bool'],
+    ['apiMaxKeys', 'Max API keys', 'int'],
+  ]],
+  ['Read receipts', [
+    ['receiptIp', 'Read receipts: sender sees the opener\'s address', 'bool'],
+    ['receiptLocation', 'Read receipts: sender sees the approximate location', 'bool'],
+    ['receiptBrowser', 'Read receipts: sender sees the browser and version', 'bool'],
+    ['receiptOs', 'Read receipts: sender sees the operating system', 'bool'],
+    ['receiptLanguages', 'Read receipts: sender sees the browser languages', 'bool'],
+  ]],
+  ['Activity log', [
+    ['logMaxAgeSec', 'Keep each user\'s entries for', 'dur', { nullText: 'keep forever' }],
+    ['logMaxEntries', 'Keep at most this many entries per user', 'int', { nullText: 'keep forever' }],
+  ]],
+  ['Password', [
+    ['pwMinLength', 'Password: minimum length', 'int', { nullable: false }],
+    ['pwUpper', 'Password: needs an upper-case letter', 'bool'],
+    ['pwLower', 'Password: needs a lower-case letter', 'bool'],
+    ['pwDigit', 'Password: needs a digit', 'bool'],
+    ['pwSymbol', 'Password: needs a symbol', 'bool'],
+  ]],
+  ['Passkeys', [
+    ['passkeys', 'Passkeys', 'enum', { values: [['any', 'sign in alone or as a second factor'], ['second', 'only as a second factor after the password'], ['off', 'not allowed']] }],
+    ['passkeysMax', 'Passkeys: at most', 'int', { nullable: false }],
+  ]],
+  ['Sessions', [
+    ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
+    ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
+  ]],
 ];
+const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
@@ -215,11 +240,42 @@ function limitText(type, v) {
  * built-in defaults for the global level, the global values for a user),
  * shown next to the choice so every default is visible.
  */
+// Explanations shown under a section heading in the role editors (as the
+// Owner role editor has for the owner's own values).
+const SECTION_NOTES = {
+  Sessions: [() => h('p.mono.muted', { text: 'How long this role\'s users stay signed in: signed out after being idle, and in any case after the absolute time.' })],
+  'File shares': [() => h('p.mono.muted', { text: 'For file shares this role\'s users send: how long recipients may keep downloading after opening one, and how long an unfinished upload is kept before it is discarded.' })],
+  'Activity log': [
+    () => h('p.mono.muted', { text: 'Entries about each user with this role (their own actions and events on their account). Keep them forever, or delete the older ones, and the oldest beyond a number, automatically; Settings → Activity log caps every account as well. The owner\'s actions on the account follow the Owner role, and server-wide configuration changes are never deleted automatically. The owner can always clear entries by hand under Activity log.' }),
+  ],
+};
+
+// Role options whose built-in default is a server setting (the owner's value).
+const SETTING_DEFAULT = { sessionIdleSec: 'session.idleSec', sessionAbsSec: 'session.absSec', fileGrantSec: 'files.grantSec', filePendingSec: 'files.pendingSec' };
+/** A role option's value as text ("keep forever" rather than "no limit" where the option says so). */
+const optText = (type, v, opt = {}) => (v === null && opt.nullText ? opt.nullText : limitText(type, v));
+
+/** "default: …" for a role option: its built-in value on a new install. */
+function defaultText(key, type, opt) {
+  const d = overview?.defaults;
+  if (!d) return '';
+  const v = SETTING_DEFAULT[key] ? d.settings?.[SETTING_DEFAULT[key]] : d.limits?.[key];
+  if (v === undefined) return '';
+  if (type === 'enum') return `default: ${opt.values.find(([k]) => k === v)?.[1] ?? v}`;
+  return `default: ${optText(type, v, opt)}`;
+}
+
 function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omit = [], explicit = false }) {
   const box = h('div.limits-grid');
   const keys = (channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI).filter(([k]) => !omit.includes(k));
   const ctls = [];
-  for (const [key, label, type, opt = {}] of keys) {
+  let section = null;
+  for (const [key, label, type, opt, sec] of keys) {
+    if (sec !== section) {
+      section = sec;
+      box.appendChild(h('h4.limit-section', { text: sec }));
+      if (channel !== 'api') for (const n of SECTION_NOTES[sec] || []) box.appendChild(n());
+    }
     // The Default role (explicit) holds a value for every option: no "inherit".
     let has = Object.prototype.hasOwnProperty.call(rows, key);
     let v = has ? rows[key] : undefined;
@@ -229,9 +285,9 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
       enum: () => opt.values.map(([k, t]) => h('option', { value: `enum:${k}`, text: t, selected: has && v === k })),
       rules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
       urlrules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
-    }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: 'no limit', selected: has && v === null })]),
+    }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: opt.nullText || 'no limit', selected: has && v === null })]),
       h('option', { value: 'value', text: 'limit to', selected: has && v !== null })]);
-    const inh = channel !== 'api' && inherited && Object.prototype.hasOwnProperty.call(inherited, key) ? ` (${limitText(type, inherited[key])})` : '';
+    const inh = channel !== 'api' && inherited && Object.prototype.hasOwnProperty.call(inherited, key) ? ` (${optText(type, inherited[key], opt)})` : '';
     const inheritText = channel === 'api' ? 'no extra restriction' : `same as Default${inh}`;
     const mode = h('select.input', { 'aria-label': `${label} mode` },
       ...(explicit && channel !== 'api' ? [] : [h('option', { value: 'inherit', text: inheritText, selected: !has })]),
@@ -254,8 +310,9 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
     mode.onchange = sync;
     sync();
     const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
-    const effText = eff === undefined ? '' : `effective: ${limitText(type, eff)}`;
-    box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: effText })));
+    const effText = eff === undefined ? '' : `effective: ${optText(type, eff, opt)}`;
+    const note = [channel === 'api' ? '' : defaultText(key, type, opt), effText].filter(Boolean).join(' · ');
+    box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: note })));
     ctls.push({ key, type, mode, val });
   }
   const save = h('button.btn', { type: 'button', text: `Save ${channel === 'api' ? 'API' : ''} limits` });
@@ -542,8 +599,9 @@ async function renderRoles(openId = null) {
 
 /**
  * The Owner role: everything is allowed with no limits and that cannot
- * change; only the owner's own session timeouts and file-share windows can
- * (they are server settings, since the owner has no role options).
+ * change; only the owner's own session timeouts, file-share windows and
+ * activity-log retention can (they are server settings, since the owner has
+ * no role options).
  */
 async function ownerRole(box) {
   await refreshOverview();
@@ -556,18 +614,33 @@ async function ownerRole(box) {
     fields.push([key, label, () => c.read()]);
     return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono.muted', { text: `default: ${limitText('dur', defs[key])}` }));
   };
+  // A limit that may be off: "keep forever" (null) or "limit to" a value.
+  const keep = (key, label, type) => {
+    const mode = h('select.input', { 'aria-label': `${label}: mode` },
+      h('option', { value: 'null', text: 'keep forever', selected: s[key] === null }),
+      h('option', { value: 'value', text: 'limit to', selected: s[key] !== null }));
+    const c = type === 'dur' ? durationInput(s[key]) : numberInput(s[key], { label });
+    const sync = () => { c.hidden = mode.value !== 'value'; };
+    mode.onchange = sync;
+    sync();
+    fields.push([key, label, () => (mode.value === 'null' ? null : c.read())]);
+    return h('div.limit-row', {}, h('span.field-label', { text: label }), mode, c, h('span.mono.muted', { text: `default: ${defs[key] === null ? 'keep forever' : limitText(type, defs[key])}` }));
+  };
   const save = h('button.cta', { type: 'button', text: 'Save' });
   box.append(h('h2.section-title', { text: 'Owner role' }),
     h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
     h('div.card.stack', {},
       h('h3.field-label', { text: 'Your sessions' }), dur('session.idleSec', 'Sign out after being idle for'), dur('session.absSec', 'Sign out in any case after'),
       h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
+      h('h3.field-label', { text: 'Your activity log' }),
+      h('p.mono.muted', { text: 'Entries about you and entries you made (admin actions, including while logged in as a user) are never removed by the Settings or role limits. Keep them forever (the default), or delete the older ones, and the oldest beyond a number, automatically. Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically. You can always clear entries by hand under Activity log.' }),
+      keep('log.ownerMaxAgeSec', 'Keep your entries for', 'dur'), keep('log.ownerMaxEntries', 'Keep at most this many of your entries', 'int'),
       h('div.btn-row', {}, save)));
   save.onclick = async () => {
     const patch = {};
     for (const [k, label, read] of fields) {
       const v = read();
-      if (!Number.isFinite(v)) return msg(`Enter a value for "${label}".`, true);
+      if (v !== null && !Number.isFinite(v)) return msg(`Enter a value for "${label}".`, true);
       patch[k] = v;
     }
     await guard(() => admin.settings(patch), 'Owner role saved.');
@@ -611,7 +684,6 @@ async function publicRole(box, reopen) {
     if (await guard(() => admin.settings(patch), 'Public role saved.')) reopen();
   };
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Counting anonymous senders' }),
-    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the mode and the notice.' }),
     h('fieldset.range', {}, h('legend', { text: 'How anonymous creators are counted' }), ...radios),
     h('label.inline', {}, notice, ' Show a notice on the public composer'),
     h('label.field', {}, h('span.field-label', { text: 'Notice text' }), noticeText),
@@ -721,7 +793,7 @@ async function renderSettings() {
     scopeRule('invalid', 'Invalid fetches: links that never existed, a wrong #key or password, bad tokens. Not counted: opening a share that expired, was used up, revoked or deleted with its correct link (#key); a wrong #key for such a share still counts'),
     h('div.card.stack', {}, int('guard.v6Prefix', 'IPv6 tracking prefix (/n)'))));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Activity log' }),
-    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. Per-user limits (Defaults & quotas or a user) can keep less about an account. Entries about the owner, entries the owner made (admin actions, impersonation) and server-wide changes (settings, global limits, IP rules, exports) are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
+    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. A role\'s log limits (Roles) can keep less about its users. Entries about the owner and entries the owner made (admin actions, impersonation) follow the owner\'s own limits instead (Roles → Owner; kept forever by default). Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically.' }),
     dur('log.maxAgeSec', 'Keep entries for at most'), int('log.maxEntries', 'Keep at most this many entries')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
@@ -822,7 +894,7 @@ function statementEditor(s, defs) {
   };
 
   return h('div.card.stack.st-editor', {}, h('h2.section-title', { text: 'Accessibility' }),
-    h('p.mono.muted', {}, 'The public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), '. A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees). Have the statement reviewed by an accessibility professional or Legal before relying on it.'),
+    h('p.mono.muted', {}, 'The public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), '. A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees).'),
     h('p.mono.muted', { id: HELP, text: 'Plain text only (no HTML or formatting). In paragraphs, each line is a paragraph; in lists, each line is one item. Empty sections are left out.' }),
     field('How to report a problem (both languages)', contact),
     field('Accessibility coordinator (optional; both languages)', coord),
@@ -859,7 +931,6 @@ async function renderPublic() {
   p.appendChild(h('div.card.stack', {},
     h('h2.section-title', { text: 'Public (anonymous) sharing' }),
     h('p.subtitle', { text: 'When on, the home page offers the composer to anyone, as the built-in public account: no password, no dashboard, no API keys. What anonymous senders may do, how they are counted, the notice they see and their browser ids are set on the Public role (Roles).' }),
-    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the Public role\'s tracking mode and notice before turning this on.' }),
     h('label.inline', {}, on, ' Allow anonymous sharing'),
     h('div.btn-row', {}, save, toRole)));
 }
@@ -990,7 +1061,7 @@ function clearLogsCard(onDone) {
     }
   });
   return h('div.card.stack', {}, h('h2.section-title', { text: 'Clear logs' }),
-    h('p.mono.muted', { text: 'Deletes entries for good, without leaving a record that they existed. Audit trails may be subject to retention duties (e.g. SOX): check with Legal / Compliance before clearing.' }),
+    h('p.mono.muted', { text: 'Deletes entries for good, without leaving a record that they existed.' }),
     h('div.toolbar', {}, scope, who, h('label.inline', {}, olderOn, ' older than'), date, mine, go));
 }
 

@@ -40,9 +40,16 @@ export const SETTINGS = {
   'lockout.lockSec':     { type: 'int', min: 1, max: 365 * DAY, def: 15 * MIN },
   // Public (anonymous) share creation — off by default. See SECURITY.md §6
   // "Public access": tracking anonymous creators is a regulated activity.
-  // Activity log retention (everything except entries about the owner).
+  // Activity log retention (everything except the owner's entries and
+  // server-wide configuration changes).
   'log.maxAgeSec':       { type: 'int', min: DAY, max: 3650 * DAY, def: 365 * DAY },
   'log.maxEntries':      { type: 'int', min: 1000, max: 5000000, def: 500000 },
+  // The owner's own log retention (edited on the Owner role): entries about
+  // the owner and entries the owner made (admin actions, impersonation).
+  // null = keep them until cleared by hand. Server-wide configuration changes
+  // are never pruned automatically, whatever these say.
+  'log.ownerMaxAgeSec':  { type: 'int', min: DAY, max: 3650 * DAY, nullable: true, def: null },
+  'log.ownerMaxEntries': { type: 'int', min: 1000, max: 5000000, nullable: true, def: null },
   // The accessibility statement (/accessibility/), all plain text: the main
   // language (English by default) and an optional second one, with the
   // contact for reporting problems and the coordinator. See
@@ -114,6 +121,10 @@ export function checkSetting(key, value) {
     const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00Z`) : null;
     if (!d || Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) throw new Error(`${key} must be a date (YYYY-MM-DD)`);
     return v;
+  }
+  if (value === null) {
+    if (!s.nullable) throw new Error(`${key} cannot be empty`);
+    return null;
   }
   if (!Number.isSafeInteger(value) || value < s.min || value > s.max) {
     throw new Error(`${key} must be an integer between ${s.min} and ${s.max}`);

@@ -150,12 +150,13 @@ function select(entries, sub, limited) {
 
 function printList(io, entries) {
   const rows = entries.map((e) => (e.dir
-    ? ['-', 'folder', e.path + '/']
-    : [formatBytes(e.size), e.type, e.path]));
+    ? ['-', 'folder', `${safeLine(e.path)}/`]
+    : [formatBytes(e.size), e.type, safeLine(e.path)]));
   const w0 = Math.max(...rows.map((r) => r[0].length));
   const w1 = Math.max(...rows.map((r) => r[1].length));
-  // Paths and types were validated by validateManifest (no control characters),
-  // so printing them cannot inject terminal escapes.
+  // validateManifest rejects C0 controls and DEL in paths but not C1 (U+0080–
+  // U+009F, e.g. the one-character CSI), so paths are escaped like any other
+  // sender-controlled line; types match a strict MIME pattern.
   io.stdout(rows.map((r) => `${r[0].padStart(w0)}  ${r[1].padEnd(w1)}  ${r[2]}`).join('\n') + '\n');
 }
 
