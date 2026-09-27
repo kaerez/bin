@@ -6,6 +6,7 @@ import { MAX_TTL, MAX_VIEWS } from '../../public/js/format.js';
 import { HARD_MAX_SHARE_BYTES, RENDERERS } from '../../public/js/files.js';
 import { FILE_TYPE_MODES, MAX_FOLDER_DEPTH, normalizeRules } from '../../public/js/filepolicy.js';
 import { DEFAULT_URL_RULES, normalizeUrlRules } from '../../public/js/sharetypes.js';
+import { A11Y_SETTINGS, checkStatement } from '../../public/js/a11ystatement.js';
 
 const MIN = 60;
 const HOUR = 3600;
@@ -52,10 +53,11 @@ export const SETTINGS = {
   // are never pruned automatically, whatever these say.
   'log.ownerMaxAgeSec':  { type: 'int', min: DAY, max: 3650 * DAY, nullable: true, def: null },
   'log.ownerMaxEntries': { type: 'int', min: 1000, max: 5000000, nullable: true, def: null },
-  // The accessibility statement (/accessibility/): how to report a problem,
-  // and the coordinator (only where the law requires one). Plain text.
-  'a11y.contact':        { type: 'text', max: 500, def: '' },
-  'a11y.coordinator':    { type: 'text', max: 500, def: '' },
+  // The accessibility statement (/accessibility/), all plain text: the main
+  // language (English by default) and an optional second one, with the
+  // contact for reporting problems and the coordinator. See
+  // public/js/a11ystatement.js for the fields and their limits.
+  ...A11Y_SETTINGS,
   'public.enabled':      { type: 'bool', def: false },
   // How anonymous creators are counted against the public quotas:
   //   tracker          — a random ID the browser keeps (cookie, ETag cache,
@@ -91,8 +93,36 @@ export function checkSetting(key, value) {
   if (s.type === 'text') {
     if (typeof value !== 'string') throw new Error(`${key} must be text`);
     // eslint-disable-next-line no-control-regex
-    const v = value.replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim();
+    let v = value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim();
+    if (s.oneLine) v = v.replace(/\s*\n\s*/g, ' ');
+    // Paragraphs and list items: one per line, blank lines dropped.
+    if (s.paragraphs || s.items) v = v.split('\n').map((x) => x.trim()).filter(Boolean).join('\n');
+    if (s.items) {
+      const items = v ? v.split('\n') : [];
+      if (items.length > s.items) throw new Error(`${key} has at most ${s.items} items (one per line)`);
+      if (items.some((x) => x.length > s.itemMax)) throw new Error(`each item of ${key} is at most ${s.itemMax} characters`);
+    }
     if (v.length > s.max) throw new Error(`${key} is at most ${s.max} characters`);
+    if (s.required && !v) throw new Error(`${key} cannot be empty`);
+    return v;
+  }
+  if (s.type === 'lang') {
+    // A BCP 47 language tag (en, he, ar-EG…), stored canonical; '' only where optional.
+    if (typeof value !== 'string') throw new Error(`${key} must be a language code`);
+    const v = value.trim();
+    if (!v && s.optional) return '';
+    let tag = null;
+    try { if (/^[a-z]{2,3}(-[a-z0-9]{1,8}){0,4}$/i.test(v)) tag = Intl.getCanonicalLocales(v)[0]; } catch { /* invalid */ }
+    if (!tag) throw new Error(`${key} must be a language code such as en or he`);
+    return tag;
+  }
+  if (s.type === 'date') {
+    // A calendar date (YYYY-MM-DD) or '' (none).
+    if (typeof value !== 'string') throw new Error(`${key} must be a date`);
+    const v = value.trim();
+    if (!v) return '';
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00Z`) : null;
+    if (!d || Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) throw new Error(`${key} must be a date (YYYY-MM-DD)`);
     return v;
   }
   if (value === null) {
@@ -103,6 +133,20 @@ export function checkSetting(key, value) {
     throw new Error(`${key} must be an integer between ${s.min} and ${s.max}`);
   }
   return value;
+}
+
+/**
+ * Rules across settings, on the merged values (after a patch or an import):
+ * returns an error message, or null when they fit together.
+ */
+export function crossCheckSettings(merged) {
+  if (merged['session.idleSec'] > merged['session.absSec']) return 'The idle timeout cannot exceed the absolute timeout.';
+  return checkStatement(merged);
+}
+
+/** A setting's value as the activity log shows it: long text by its length only. */
+export function logValue(v) {
+  return typeof v === 'string' && (v.length > 60 || v.includes('\n')) ? `(${v.length} characters)` : JSON.stringify(v);
 }
 
 export function settingsWithDefaults(rows) {

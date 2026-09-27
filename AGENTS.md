@@ -93,8 +93,8 @@ never committed) and `node_modules`.
 - **Reverse shares:** an optional password gates the anonymous uploader only; uploads land in the
   user's chosen drive folder; the user never needs that password.
 
-## Compliance note
+## No Legal / Compliance notes
 
-The operator works in a regulated environment (PCI DSS v4, SOX, GDPR, SEC). Flag anything that
-touches personal data, retention, tracking or audit trails, and leave final determinations to
-Legal / Risk / Compliance. Nothing produced here is legal or compliance advice.
+Do not add Legal / Compliance review notes, sign-off reminders or "not legal advice" disclaimers
+to the code, the UI, the docs or the CHANGELOG. Describe the behaviour factually (what is stored,
+for how long, who can see it) and leave it there.
