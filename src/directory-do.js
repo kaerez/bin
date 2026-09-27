@@ -695,6 +695,8 @@ export class Directory extends DurableObject {
       caps: {
         maxShareBytes: caps.maxShareBytes,
         grantSec: caps.grantSec,
+        // The Drive (docs/DRIVE.md): never for the public account.
+        driveEnabled: u.role !== 'public' && !!eff.all.driveEnabled,
       },
       viewer: {
         enabled: caps.viewerEnabled,
@@ -1824,16 +1826,20 @@ export class Directory extends DurableObject {
   }
 
   // ── Drive (docs/DRIVE.md; the content lives in each user's Drive DO) ──────
-  /** A user's Drive as the admin sees it: allowed?, bytes used, capacity. The public account has none. */
+  /**
+   * A user's Drive as the admin sees it: allowed?, bytes used, capacity (null:
+   * no limit, i.e. the hard HARD_MAX_DRIVE_BYTES). The public account has none.
+   */
   #driveOf(u, used) {
     if (u.role === 'public') return null;
     const L = this.#effective(u).all;
-    return { enabled: !!L.driveEnabled, used, capacity: Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxBytes ?? HARD_MAX_DRIVE_BYTES) };
+    return { enabled: !!L.driveEnabled, used, capacity: L.driveMaxBytes ?? null };
   }
 
   /**
    * What the Worker needs before any Drive call: may this account use its
-   * Drive now, its capacity and largest file, the upload deadline for pending
+   * Drive now, its capacity and largest file (null: no limit — the Worker
+   * enforces HARD_MAX_DRIVE_BYTES then), the upload deadline for pending
    * files, and the owner's escrow public key (JWK text, or null).
    */
   async driveAccess(uid) {
@@ -1847,8 +1853,8 @@ export class Directory extends DurableObject {
       ok: true,
       enabled: !!L.driveEnabled,
       owner: u.role === 'owner',
-      capacity: Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxBytes ?? HARD_MAX_DRIVE_BYTES),
-      maxFile: Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxFileBytes ?? HARD_MAX_DRIVE_BYTES),
+      capacity: L.driveMaxBytes === null || L.driveMaxBytes === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxBytes),
+      maxFile: L.driveMaxFileBytes === null || L.driveMaxFileBytes === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxFileBytes),
       pendingSec: this.#caps(u, L, s).pendingSec,
       used,
       escrowPub: this.#meta('drive.escrowPub'),

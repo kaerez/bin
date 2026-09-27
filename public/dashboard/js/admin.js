@@ -380,7 +380,8 @@ function rulesEditor(scope, list, { withPresets = true } = {}) {
 
 // ── users ────────────────────────────────────────────────────────────────────
 /** A user's Drive usage for the list: used of capacity (the content itself is end-to-end encrypted). */
-const driveUsage = (d) => (!d ? '—' : !d.enabled && !d.used ? 'no Drive' : `${formatBytes(d.used)} of ${formatBytes(d.capacity)}${d.enabled ? '' : ' (Drive off)'}`);
+const driveUsage = (d) => (!d ? '—' : !d.enabled && !d.used ? 'no Drive'
+  : `${formatBytes(d.used)} ${d.capacity === null ? '(no limit)' : `of ${formatBytes(d.capacity)}`}${d.enabled ? '' : ' (Drive off)'}`);
 
 async function renderUsers() {
   const p = clear(panel('users'));

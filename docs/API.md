@@ -85,7 +85,7 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 | Method & path | Body → result |
 | --- | --- |
-| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowPriv? }` |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowPriv? }` (`capacity` / `maxFile` null = no limit) |
 | `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPriv?, escrowPub? }` — key wraps (not while impersonating; the escrow keys owner only) |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
 | `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta? }` — move / rename |

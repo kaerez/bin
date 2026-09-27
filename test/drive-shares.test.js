@@ -84,8 +84,11 @@ describe('Drive shares', () => {
     const s2 = await share(u.cookie, [f.id], { views: 1 });
     const s3 = await share(u.cookie, [f.id]);
     for (const s of [s1, s2, s3]) expect(s.res.status).toBe(201);
-    const list = async () => (await (await fetchJson(`/api/private/drive/nodes/${f.id}/shares`, { cookie: u.cookie })).json()).shares.map((x) => x.id).sort();
+    const rows = async () => (await (await fetchJson(`/api/private/drive/nodes/${f.id}/shares`, { cookie: u.cookie })).json()).shares;
+    const list = async () => (await rows()).map((x) => x.id).sort();
     expect(await list()).toEqual([s1.id, s2.id, s3.id].sort());
+    // Rows as in My shares (with `state` / `maxViews` aliases).
+    expect((await rows()).find((x) => x.id === s2.id)).toMatchObject({ kind: 'drive', status: 'active', state: 'active', views_total: 1, maxViews: 1, left: 1, label: '', created: expect.any(Number), expires: expect.any(Number) });
     // s2: its only view spent (then purged when the grant runs out).
     const o = await open(s2.id, s2.fragment);
     expect(o.res.status).toBe(200);

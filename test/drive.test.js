@@ -32,7 +32,13 @@ describe('Drive access', () => {
     expect((await r.res.json()).error).toBe('drive_disabled');
     expect((await node(u.cookie, 'root')).status).toBe(403);
     const o = await drive(oc);
-    expect(o).toMatchObject({ enabled: true, capacity: 100 * 1024 ** 3, used: 0 });
+    expect(o).toMatchObject({ enabled: true, capacity: null, maxFile: null, used: 0 }); // no limit (the hard 100 GiB)
+    // /api/private/me says whether the role has a Drive.
+    expect((await (await fetchJson('/api/private/me', { cookie: oc })).json()).caps.driveEnabled).toBe(true);
+    expect((await (await fetchJson('/api/private/me', { cookie: u.cookie })).json()).caps.driveEnabled).toBe(false);
+    await enableDrive(u.id);
+    expect((await (await fetchJson('/api/private/me', { cookie: u.cookie })).json()).caps.driveEnabled).toBe(true);
+    await driveLimits(u.id, { driveEnabled: false });
     // The role options live in LIMITS; migration 13 put them in the Default role.
     expect(await dirStub().schemaVersion()).toBe(SCHEMA_VERSION);
     expect(SCHEMA_VERSION).toBe(13);
@@ -201,10 +207,16 @@ describe('Drive limits', () => {
     expect(await over.res.json()).toMatchObject({ error: 'drive_full', max: 1000, used: 600 });
     expect((await createFile(u.cookie, 'root', 400)).res.status).toBe(201); // exactly full (pending counts)
     expect((await createFile(u.cookie, 'root', 1)).res.status).toBe(413);
-    // No limit = the hard 100 GiB.
+    // No limit (null) = the hard 100 GiB.
     await driveLimits(u.id, { driveMaxBytes: null, driveMaxFileBytes: null });
-    expect(await drive(u.cookie)).toMatchObject({ capacity: 100 * 1024 ** 3, maxFile: 100 * 1024 ** 3 });
+    expect(await drive(u.cookie)).toMatchObject({ capacity: null, maxFile: null });
     expect((await createFile(u.cookie, 'root', 100 * 1024 ** 3 + 1)).res.status).toBe(400);
+    expect((await createFile(u.cookie, 'root', 100 * 1024 ** 3 - 1000)).res.status).toBe(201); // 1000 bytes used: exactly full
+    const full = await createFile(u.cookie, 'root', 1);
+    expect(full.res.status).toBe(413);
+    expect((await full.res.json()).max).toBe(100 * 1024 ** 3);
+    const users = (await (await fetchJson('/api/private/admin/users', { cookie: oc })).json()).users;
+    expect(users.find((x) => x.id === u.id).drive.capacity).toBeNull();
   });
 
   it('a pending upload with no progress for the role’s filePendingSec is purged by the alarm', async () => {

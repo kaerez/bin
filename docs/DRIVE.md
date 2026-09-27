@@ -194,8 +194,10 @@ leave open:
   `403 api_key_not_allowed`); the public account gets `403 drive_unavailable`. With the role's
   Drive off, `GET /api/private/drive` answers `200 { enabled: false, wraps: [], … }` and every
   other Drive route `403 drive_disabled`. `GET /api/private/drive` also returns `maxFile` (the
-  largest file allowed). While impersonating, `PUT …/drive/keys` is `403 impersonating`; the
-  admin routes are closed as usual.
+  largest file allowed); `capacity` and `maxFile` are `null` when the role sets no limit (the
+  hard 100 GiB then applies). `GET /api/private/me` has `caps.driveEnabled` (false for the public
+  account, true for the owner). While impersonating, `PUT …/drive/keys` is
+  `403 impersonating`; the admin routes are closed as usual.
 - **Nodes.** `id` may be omitted (the server then picks one, which cannot be bound into the
   AAD). `PATCH` also accepts `meta`. `path` lists the ancestors as full nodes, root first.
   Children include pending files (`state: 'pending'`, `done` = chunks received). `DELETE`
@@ -219,9 +221,12 @@ leave open:
   (`409 not_ready`). `acc`, when sent both inside `paste` and next to it, must be the same. The
   stream-size caps (`maxShareBytes`, `maxFileBytes`) do not apply (nothing is uploaded; the files
   are within the Drive's own limits). The response also carries `expires`.
-  `GET …/nodes/<id>/shares` lists the active shares that reference the node, as My shares rows.
+  `GET …/nodes/<id>/shares` lists the active shares that reference the node, as My shares rows
+  (`id`, `kind`, `label`, `created`, `expires`, `views_total`, `left`, `status`, `locked`) plus the
+  aliases `state` (= `status`) and `maxViews` (= `views_total`); revoke them as any share.
   Deleting a node ends its shares (and those of every file below it) even when locked by the
   admin: the data is gone.
 - **Accounts.** Deleting an account deletes its Drive (every R2 object, every share of it). The
   Directory mirrors each Drive's usage (`drive_usage`); Admin → Users gets
-  `drive: { enabled, used, capacity }` per user (null for the public account).
+  `drive: { enabled, used, capacity }` per user (`capacity` null = no limit; `drive` null for the
+  public account).

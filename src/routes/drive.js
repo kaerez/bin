@@ -143,7 +143,7 @@ export async function handleDrive(request, env, url) {
     const uploadToken = genToken();
     const r = await drive().createFile(uid, {
       id, parent, name, meta, size: body.size, fk, uploadHash: await hashToken(uploadToken),
-      capacity: pol.capacity, maxFile: pol.maxFile, pendingSec: pol.pendingSec,
+      capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: pol.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: pol.pendingSec,
     });
     if (!r.ok) return withAuth(a, fromDir(r));
     await dir.setDriveUsed(uid, r.used);
@@ -335,7 +335,9 @@ async function nodeShares(env, dir, uid, id) {
     const s = await fileStub(env, row.id).status();
     if (s.status === 'gone') { await dir.markShareEnded(row.id, 'ended'); continue; }
     ended.delete(row.id);
-    live.push({ ...row, views_total: s.views ?? row.views_total, left: s.left ?? null, expires: s.expires ?? row.expires });
+    const views = s.views === undefined ? row.views_total : s.views;
+    // My-shares rows (so the same revoke flow works), plus `state` / `maxViews` aliases.
+    live.push({ ...row, views_total: views, left: s.left ?? null, expires: s.expires ?? row.expires, state: row.status, maxViews: views });
   }
   // Ended shares no longer reference anything.
   if (ended.size) await driveStub(env, uid).dropRefs(uid, [...ended]);
