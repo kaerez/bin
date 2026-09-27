@@ -2,8 +2,8 @@
 // server for the signed-in owner and encrypted HERE, with a passphrase, before
 // they are saved (public/js/exportcrypt.js); imports are decrypted here,
 // previewed (a dry run on the server) and then applied all-or-nothing. Both
-// ask for the owner's password again. The owner account, sessions and API
-// keys are never exported.
+// ask for the owner's password again. Every part is chosen when exporting and
+// again when importing. The owner account and sessions are never exported.
 
 import { admin, ApiError } from '../../js/api.js';
 import { loginProof } from '../../js/pwauth.js';
@@ -12,10 +12,24 @@ import { h, clear, showMsg, formatDate, friendlyError } from '../../js/common.js
 import { toast } from '../../js/ui.js';
 
 const field = (label, control, hint) => h('label.field', {}, h('span.field-label', { text: label }), control, hint ? h('span.mono.muted', { text: hint }) : null);
-const check = (label, checked = false) => {
+const check = (label, checked = false, note = '') => {
   const input = h('input', { type: 'checkbox', checked });
-  return { input, el: h('label.inline', {}, input, ` ${label}`) };
+  return { input, el: h('label.inline.part-opt', {}, input, h('span', {}, ` ${label}`, note ? h('span.mono.muted.block', { text: note }) : null)) };
 };
+// What each part holds, and what to know about it (shown on export and import).
+const SYSTEM_PARTS = [
+  ['settings', 'Settings', 'Server-wide settings (brute-force protection, lockout, logs, public access, accessibility statement…).'],
+  ['roles', 'Roles', 'The Default role and every custom role (limits, quotas, viewer rules). On import, roles are created or replaced by name, never deleted.'],
+  ['ipRules', 'IP rules', 'Manual allow / block rules. On import they are added, never removed.'],
+  ['turnstile', 'Turnstile keys', 'The site key and SECRET set in Security → Human check (not the deployment\'s own). The widget must allow the target hostname.'],
+  ['public', 'Public account', 'The anonymous account\'s limits, quotas and viewer rules.'],
+];
+const USER_PARTS = [
+  ['credentials', 'Credentials', 'User name, password verifier (not the password), disabled flag. Needed to create an account on the target.'],
+  ['config', 'Role', 'Which role the user has (by name; export the roles too).'],
+  ['apiKeys', 'API keys', 'The stored key hashes, names, scopes and dates: the same keys keep working on the target. Revoking a key on one server does not revoke it on the other.'],
+  ['passkeys', 'Passkeys and recovery codes', `Public keys, the "Password and passkey" choice and recovery-code hashes. Passkeys work only on the same hostname (${location.hostname}); recovery codes work anywhere.`],
+];
 const pw = (label, autocomplete) => h('input.input', { type: 'password', autocomplete, 'aria-label': label, maxlength: '256' });
 
 export async function renderPortable(panel, profile) {
@@ -28,14 +42,13 @@ export async function renderPortable(panel, profile) {
 
 // ── export ───────────────────────────────────────────────────────────────────
 function exportCard(users, profile) {
-  const sys = check('System configuration — settings, the roles (Default and custom: limits, quotas, viewer rules), IP rules', true);
+  const sysChecks = SYSTEM_PARTS.map(([k, label, note]) => ({ k, ...check(label, k !== 'turnstile', note) }));
   const scope = h('select.input', { 'aria-label': 'Users to export' },
     h('option', { value: 'none', text: 'no users' }), h('option', { value: 'all', text: `all users (${users.length})` }), h('option', { value: 'some', text: 'selected users' }));
   const pick = h('select.input.multi', { multiple: true, size: String(Math.min(8, Math.max(3, users.length))), 'aria-label': 'Selected users', hidden: true },
     ...users.map((u) => h('option', { value: u.id, text: u.username })));
   scope.onchange = () => { pick.hidden = scope.value !== 'some'; };
-  const creds = check('Credentials — user name, password verifier, disabled flag');
-  const conf = check('Configuration — the user’s role (by name; the role itself is in the system configuration)', true);
+  const userChecks = USER_PARTS.map(([k, label, note]) => ({ k, ...check(label, k === 'config', note) }));
   const pass1 = pw('Export passphrase', 'new-password');
   const pass2 = pw('Repeat export passphrase', 'new-password');
   const mine = pw('Your password', 'current-password');
@@ -44,9 +57,12 @@ function exportCard(users, profile) {
 
   go.onclick = async () => {
     const who = scope.value === 'all' ? 'all' : scope.value === 'some' ? [...pick.selectedOptions].map((o) => o.value) : [];
-    if (!sys.input.checked && (who === 'all' ? users.length === 0 : who.length === 0)) return showMsg(msg, 'Choose the system configuration and/or some users.');
+    const system = Object.fromEntries(sysChecks.map((c) => [c.k, c.input.checked]));
+    const anySys = Object.values(system).some(Boolean);
+    const parts = Object.fromEntries(userChecks.map((c) => [c.k, c.input.checked]));
+    if (!anySys && (who === 'all' ? users.length === 0 : who.length === 0)) return showMsg(msg, 'Choose some system parts and/or some users.');
     if (who !== 'all' && scope.value === 'some' && !who.length) return showMsg(msg, 'Select at least one user.');
-    if ((who === 'all' || who.length) && !creds.input.checked && !conf.input.checked) return showMsg(msg, 'Choose credentials and/or configuration for the users.');
+    if ((who === 'all' || who.length) && !Object.values(parts).some(Boolean)) return showMsg(msg, 'Choose what to export for the users.');
     if (pass1.value.length < MIN_PASSPHRASE) return showMsg(msg, `Use an export passphrase of at least ${MIN_PASSPHRASE} characters.`);
     if (pass1.value !== pass2.value) return showMsg(msg, 'The two passphrases differ.');
     if (!mine.value) return showMsg(msg, 'Enter your password to confirm.');
@@ -54,7 +70,7 @@ function exportCard(users, profile) {
     showMsg(msg, 'Exporting and encrypting…', false);
     try {
       const current = await loginProof(profile.user.username, mine.value);
-      const { document } = await admin.exportData({ current, system: sys.input.checked, users: who, credentials: creds.input.checked, config: conf.input.checked });
+      const { document } = await admin.exportData({ current, system: anySys ? system : false, users: who, ...parts });
       const text = await sealExport(document, pass1.value);
       download(text, `secbin-export-${location.hostname}-${new Date().toISOString().slice(0, 10)}.json`);
       showMsg(msg, `Exported ${document.system ? 'the system configuration and ' : ''}${document.users.length} user${document.users.length === 1 ? '' : 's'}. Keep the file and its passphrase apart.`, false);
@@ -70,10 +86,10 @@ function exportCard(users, profile) {
 
   return h('div.card.stack', {},
     h('h2.section-title', { text: 'Export' }),
-    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. The owner account, sessions, API keys and shares are never exported. Credentials let the accounts sign in with their current passwords on the target instance: treat the file as sensitive.' }),
-    sys.el,
+    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. The owner account, sessions and shares are never exported. Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
+    h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
     h('div.toolbar', {}, h('span.field-label', { text: 'Users' }), scope), pick,
-    h('div.stack', {}, creds.el, conf.el),
+    h('fieldset.range', {}, h('legend', { text: 'For each exported user' }), ...userChecks.map((c) => c.el)),
     h('div.toolbar', {}, field('Export passphrase', pass1, `at least ${MIN_PASSPHRASE} characters`), field('Repeat', pass2)),
     field('Your password (confirms it is you)', mine),
     h('div.btn-row', {}, go), msg);
@@ -129,11 +145,16 @@ function renderReview(box, doc, users, profile) {
   clear(box);
   const existing = new Map(users.map((u) => [u.username.toLowerCase(), u]));
   const ownerName = profile.user.username.toLowerCase();
-  const sys = doc.system ? check('Apply the system configuration (settings; the Default role; custom roles are created or replaced by name, never deleted; IP rules are added, never removed)') : null;
+  // The system parts in the file, each chosen again here (off by default).
+  const inFile = (k) => doc.system && (k === 'roles' ? doc.system.limits !== undefined : doc.system[k] !== undefined);
+  const sysChecks = SYSTEM_PARTS.filter(([k]) => inFile(k)).map(([k, label, note]) => ({ k, ...check(label, false, note) }));
+  // The user parts the file holds, chosen for every imported user.
+  const userChecks = USER_PARTS.filter(([k]) => doc.users.some((u) => u[k] !== undefined)).map(([k, label, note]) => ({ k, ...check(label, true, note) }));
   const rows = [];
   const body = h('tbody');
   for (const u of doc.users) {
-    const parts = [u.credentials ? 'credentials' : null, u.config?.role ? `role ${u.config.role}` : u.config ? 'old per-user settings (ignored)' : null].filter(Boolean).join(' + ');
+    const parts = [u.credentials ? 'credentials' : null, u.config?.role ? `role ${u.config.role}` : u.config ? 'old per-user settings (ignored)' : null,
+      u.apiKeys ? `${u.apiKeys.length} API key${u.apiKeys.length === 1 ? '' : 's'}` : null, u.passkeys ? `${u.passkeys.keys?.length ?? 0} passkey${u.passkeys.keys?.length === 1 ? '' : 's'}` : null].filter(Boolean).join(' + ');
     const action = h('select.input', { 'aria-label': `Action for ${u.username}` });
     const as = h('input.input', { value: u.username, maxlength: '64', 'aria-label': `Import ${u.username} as`, spellcheck: 'false' });
     const status = h('span.mono.muted');
@@ -164,17 +185,21 @@ function renderReview(box, doc, users, profile) {
   let previewed = null;
 
   const decisions = () => {
-    const out = { system: !!(sys && sys.input.checked), users: {} };
+    const chosen = sysChecks.filter((c) => c.input.checked).map((c) => c.k);
+    const out = { system: chosen.length ? Object.fromEntries(chosen.map((k) => [k, true])) : false, users: {} };
+    const wanted = userChecks.filter((c) => c.input.checked).map((c) => c.k);
     for (const r of rows) {
       if (r.action.value === 'skip') continue;
-      out.users[r.u.username] = { as: r.as.value.trim(), ...(r.action.value === 'overwrite' ? { overwrite: true } : {}) };
+      const parts = wanted.filter((k) => r.u[k] !== undefined);
+      if (!parts.length) continue;
+      out.users[r.u.username] = { as: r.as.value.trim(), parts, ...(r.action.value === 'overwrite' ? { overwrite: true } : {}) };
     }
     return out;
   };
   // Any change after a preview invalidates it.
   const invalidate = () => { previewed = null; apply.disabled = true; };
   for (const r of rows) { r.action.addEventListener('change', invalidate); r.as.addEventListener('input', invalidate); }
-  if (sys) sys.input.addEventListener('change', invalidate);
+  for (const c of [...sysChecks, ...userChecks]) c.input.addEventListener('change', invalidate);
 
   const run = async (dryRun) => {
     const d = decisions();
@@ -210,7 +235,8 @@ function renderReview(box, doc, users, profile) {
 
   box.append(
     h('p.mono.muted', { text: `Export from ${doc.origin || 'an unknown origin'} · ${formatDate(doc.created)} · ${doc.system ? 'system configuration + ' : ''}${doc.users.length} user${doc.users.length === 1 ? '' : 's'}` }),
-    sys ? sys.el : null,
+    sysChecks.length ? h('fieldset.range', {}, h('legend', { text: 'System parts to import' }), ...sysChecks.map((c) => c.el)) : null,
+    userChecks.length ? h('fieldset.range', {}, h('legend', { text: 'For each imported user' }), ...userChecks.map((c) => c.el)) : null,
     doc.users.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Contains', 'Import as', 'Action', 'Here'].map((t) => h('th', { text: t })))), body)) : null,
     field('Your password (confirms it is you)', mine),
     h('div.btn-row', {}, preview, apply), msg, planBox);
@@ -222,10 +248,17 @@ function renderPlan(box, plan) {
   const items = [];
   if (plan.system) {
     const s = plan.system;
-    const roleNote = s.roles?.length ? ` roles: ${s.roles.map((r) => `${r.name} (${r.action})`).join(', ')};` : '';
-    items.push(`System: ${s.settings.length} setting${s.settings.length === 1 ? '' : 's'} change${s.settings.length === 1 ? 's' : ''}; the Default role's limits, quotas (${s.quotas}) and viewer rules (${s.viewerRules}) replaced;${roleNote} ${s.ipRulesAdded.length} IP rule${s.ipRulesAdded.length === 1 ? '' : 's'} added${s.ipRulesSkipped ? `, ${s.ipRulesSkipped} already present or expired` : ''}.`);
-    for (const c of s.settings) items.push(`  ${c.key}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`);
-    for (const r of s.ipRulesAdded) items.push(`  + ${r}`);
+    if (s.settings) {
+      items.push(`Settings: ${s.settings.length} change${s.settings.length === 1 ? '' : 's'}.`);
+      for (const c of s.settings) items.push(`  ${c.key}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`);
+    }
+    if (s.roles) items.push(`Roles: the Default role's limits, quotas (${s.quotas}) and viewer rules (${s.viewerRules}) replaced${s.roles.length ? `; ${s.roles.map((r) => `${r.name} (${r.action})`).join(', ')}` : ''}.`);
+    if (s.ipRulesAdded) {
+      items.push(`IP rules: ${s.ipRulesAdded.length} added${s.ipRulesSkipped ? `, ${s.ipRulesSkipped} already present or expired` : ''}.`);
+      for (const r of s.ipRulesAdded) items.push(`  + ${r}`);
+    }
+    if (s.turnstile) items.push(`Turnstile keys: ${s.turnstile}.`);
+    if (s.public) items.push(`Public account: ${s.public.limits} limits, ${s.public.quotas} quotas, ${s.public.viewerRules} viewer rules.`);
   }
   for (const u of plan.users) {
     if (u.action === 'skip') continue;

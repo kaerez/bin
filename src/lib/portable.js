@@ -5,16 +5,21 @@
 // authenticated export/import request, and re-validates every field on import
 // with the same checkers the admin API uses.
 //
-// What it can hold:
-//   system  — settings, the Default role (global limits for the all and API
-//             channels, quotas, viewer rules), IP rules, and the custom roles
-//             (each with its own limits, quotas and viewer rules);
+// What it can hold (every part is optional, chosen at export and again at
+// import):
+//   system  — settings; the Default role (global limits for the all and API
+//             channels, quotas, viewer rules) together with the custom roles;
+//             IP rules; the Turnstile keys set in the admin panel (site key
+//             and secret); the public account's own limits, quotas and rules;
 //   users[] — per user: `credentials` (username is always present; salt, t,
 //             verifier, disabled) and/or `config` ({ role }: the role's name,
-//             "Default" for the Default role). Files from before roles carry
-//             per-user limits in `config`; they are accepted and ignored.
-// Never: the owner account, sessions, API keys, shares, usage counters or the
-// activity log.
+//             "Default" for the Default role), `apiKeys` (the stored hashes,
+//             names, scopes and dates: the keys keep working) and `passkeys`
+//             (public keys, the second-step choice, recovery-code hashes;
+//             passkeys work only under the same hostname). Files from before
+//             roles carry per-user limits in `config`; they are accepted and
+//             ignored.
+// Never: the owner account, sessions, shares, usage counters or the activity log.
 
 import { checkSetting, checkLimit, checkQuota, checkViewerRule } from './settings.js';
 import { upgradeUrlRules } from '../../public/js/sharetypes.js';
@@ -84,6 +89,8 @@ function ipRule(r, where) {
 }
 
 export const MAX_ROLES = 200;
+/** The parts of a user entry. */
+export const USER_PARTS = ['credentials', 'config', 'apiKeys', 'passkeys'];
 const ROLE_NAME_MAX = 64;
 
 function role(v, i) {
@@ -102,22 +109,99 @@ function role(v, i) {
   };
 }
 
+/** The parts of `system`, each optional; `parts` lists those present. */
+export const SYSTEM_PARTS = ['settings', 'roles', 'ipRules', 'turnstile', 'public'];
+const has = (v, k) => Object.prototype.hasOwnProperty.call(v, k);
+const TURNSTILE_KEY_RE = /^[A-Za-z0-9_-]{10,100}$/;
+
 function system(v) {
-  keys(v, 'system', ['settings', 'limits', 'quotas', 'viewerRules', 'ipRules'], ['roles']);
-  keys(v.settings, 'system.settings', [], Object.keys(v.settings ?? {}));
-  const settings = {};
-  for (const [k, val] of Object.entries(v.settings)) settings[k] = wrap(`system.settings.${short(k)}`, () => checkSetting(k, val));
-  if (settings['session.idleSec'] !== undefined && settings['session.absSec'] !== undefined && settings['session.idleSec'] > settings['session.absSec']) {
-    throw new PortableError('system.settings: the idle timeout cannot exceed the absolute timeout');
+  keys(v, 'system', [], ['settings', 'limits', 'quotas', 'viewerRules', 'ipRules', 'roles', 'turnstile', 'public']);
+  const out = { parts: [] };
+  if (has(v, 'settings')) {
+    keys(v.settings, 'system.settings', [], Object.keys(v.settings ?? {}));
+    const settings = {};
+    for (const [k, val] of Object.entries(v.settings)) settings[k] = wrap(`system.settings.${short(k)}`, () => checkSetting(k, val));
+    if (settings['session.idleSec'] !== undefined && settings['session.absSec'] !== undefined && settings['session.idleSec'] > settings['session.absSec']) {
+      throw new PortableError('system.settings: the idle timeout cannot exceed the absolute timeout');
+    }
+    out.settings = settings;
+    out.parts.push('settings');
   }
-  return {
-    settings,
-    limits: limitsBlock(v.limits, 'system.limits'),
-    quotas: quotas(v.quotas, 'system.quotas'),
-    viewerRules: viewerRules(v.viewerRules, 'system.viewerRules'),
-    ipRules: list(v.ipRules, 'system.ipRules', 1000).map((r, i) => ipRule(r, `system.ipRules[${i}]`)),
-    roles: v.roles === undefined ? [] : uniqueRoles(list(v.roles, 'system.roles', MAX_ROLES).map(role)),
-  };
+  // The roles part: the Default role (limits, quotas, viewer rules — all
+  // three together) and, optionally, the custom roles.
+  const def = ['limits', 'quotas', 'viewerRules'].filter((k) => has(v, k));
+  if (def.length && def.length < 3) throw new PortableError('system: limits, quotas and viewerRules (the Default role) go together');
+  if (def.length || has(v, 'roles')) {
+    if (!def.length) throw new PortableError('system: the custom roles need the Default role (limits, quotas, viewerRules) with them');
+    out.limits = limitsBlock(v.limits, 'system.limits');
+    out.quotas = quotas(v.quotas, 'system.quotas');
+    out.viewerRules = viewerRules(v.viewerRules, 'system.viewerRules');
+    out.roles = v.roles === undefined ? [] : uniqueRoles(list(v.roles, 'system.roles', MAX_ROLES).map(role));
+    out.parts.push('roles');
+  }
+  if (has(v, 'ipRules')) {
+    out.ipRules = list(v.ipRules, 'system.ipRules', 1000).map((r, i) => ipRule(r, `system.ipRules[${i}]`));
+    out.parts.push('ipRules');
+  }
+  if (has(v, 'turnstile')) {
+    if (v.turnstile !== null) {
+      keys(v.turnstile, 'system.turnstile', ['sitekey', 'secret']);
+      if (!TURNSTILE_KEY_RE.test(String(v.turnstile.sitekey)) || !TURNSTILE_KEY_RE.test(String(v.turnstile.secret))) throw new PortableError('system.turnstile: invalid keys');
+    }
+    out.turnstile = v.turnstile === null ? null : { sitekey: v.turnstile.sitekey, secret: v.turnstile.secret };
+    out.parts.push('turnstile');
+  }
+  if (has(v, 'public')) {
+    keys(v.public, 'system.public', ['limits', 'quotas', 'viewerRules']);
+    out.public = {
+      limits: limitsBlock(v.public.limits, 'system.public.limits'),
+      quotas: quotas(v.public.quotas, 'system.public.quotas'),
+      viewerRules: viewerRules(v.public.viewerRules, 'system.public.viewerRules'),
+    };
+    out.parts.push('public');
+  }
+  return out;
+}
+
+// ── per-user API keys and passkeys ───────────────────────────────────────────
+const HEX64 = /^[0-9a-f]{64}$/;
+const B64URL = /^[A-Za-z0-9_-]+$/;
+const API_SCOPES = ['notes', 'files', 'policy'];
+const intOrNull = (x) => x === null || Number.isSafeInteger(x);
+function labelOf(v, where) {
+  // eslint-disable-next-line no-control-regex
+  if (typeof v !== 'string' || !v.trim() || v.length > 100 || /[\u0000-\u001f\u007f]/.test(v)) throw new PortableError(`${where}: invalid name`);
+  return v;
+}
+
+function apiKey(k, where) {
+  keys(k, where, ['hash', 'name', 'created', 'expires', 'lastUsed', 'scopes']);
+  if (typeof k.hash !== 'string' || !HEX64.test(k.hash)) throw new PortableError(`${where}: invalid key hash`);
+  if (!Number.isSafeInteger(k.created) || !intOrNull(k.expires) || !intOrNull(k.lastUsed)) throw new PortableError(`${where}: invalid dates`);
+  if (!Array.isArray(k.scopes) || !k.scopes.length || k.scopes.some((x) => !API_SCOPES.includes(x))) throw new PortableError(`${where}: invalid scopes`);
+  return { hash: k.hash, name: labelOf(k.name, where), created: k.created, expires: k.expires, lastUsed: k.lastUsed, scopes: API_SCOPES.filter((x) => k.scopes.includes(x)) };
+}
+
+function passkeyBlock(v, where) {
+  keys(v, where, ['mfa', 'handle', 'keys', 'recoveryCodes']);
+  if (typeof v.mfa !== 'boolean') throw new PortableError(`${where}: mfa must be true or false`);
+  if (v.handle !== null && (typeof v.handle !== 'string' || v.handle.length > 64 || !B64URL.test(v.handle))) throw new PortableError(`${where}: invalid user handle`);
+  const ks = list(v.keys, `${where}.keys`, 10).map((p, i) => {
+    const w = `${where}.keys[${i}]`;
+    keys(p, w, ['id', 'name', 'publicKey', 'alg', 'signCount', 'transports', 'backupEligible', 'backedUp', 'created', 'lastUsed']);
+    if (typeof p.id !== 'string' || p.id.length < 16 || p.id.length > 1400 || !B64URL.test(p.id)) throw new PortableError(`${w}: invalid credential id`);
+    if (typeof p.publicKey !== 'string' || p.publicKey.length > 2000 || !B64URL.test(p.publicKey)) throw new PortableError(`${w}: invalid public key`);
+    if (![-7, -8, -257].includes(p.alg)) throw new PortableError(`${w}: unsupported algorithm`);
+    if (!Number.isSafeInteger(p.signCount) || p.signCount < 0) throw new PortableError(`${w}: invalid counter`);
+    if (!Array.isArray(p.transports) || p.transports.length > 10 || p.transports.some((t) => typeof t !== 'string' || !/^[a-z-]{1,20}$/.test(t))) throw new PortableError(`${w}: invalid transports`);
+    if (typeof p.backupEligible !== 'boolean' || typeof p.backedUp !== 'boolean') throw new PortableError(`${w}: invalid flags`);
+    if (!Number.isSafeInteger(p.created) || !intOrNull(p.lastUsed)) throw new PortableError(`${w}: invalid dates`);
+    return { id: p.id, name: labelOf(p.name, w), publicKey: p.publicKey, alg: p.alg, signCount: p.signCount, transports: p.transports, backupEligible: p.backupEligible, backedUp: p.backedUp, created: p.created, lastUsed: p.lastUsed };
+  });
+  const codes = list(v.recoveryCodes, `${where}.recoveryCodes`, 20);
+  if (codes.some((c) => typeof c !== 'string' || !HEX64.test(c))) throw new PortableError(`${where}.recoveryCodes: invalid code hash`);
+  if (new Set(ks.map((p) => p.id)).size !== ks.length) throw new PortableError(`${where}.keys: a passkey appears twice`);
+  return { mfa: v.mfa, handle: v.handle, keys: ks, recoveryCodes: [...new Set(codes)] };
 }
 
 function uniqueRoles(roles) {
@@ -132,7 +216,7 @@ function uniqueRoles(roles) {
 
 function user(v, i) {
   const where = `users[${i}]`;
-  keys(v, where, ['username'], ['credentials', 'config']);
+  keys(v, where, ['username'], ['credentials', 'config', 'apiKeys', 'passkeys']);
   if (typeof v.username !== 'string' || !USERNAME_RE.test(v.username)) throw new PortableError(`${where}: invalid username`);
   const out = { username: v.username };
   if (v.credentials !== undefined) {
@@ -158,7 +242,9 @@ function user(v, i) {
       out.config = { legacy: true };
     }
   }
-  if (!out.credentials && !out.config) throw new PortableError(`${where}: nothing to import (no credentials or config)`);
+  if (v.apiKeys !== undefined) out.apiKeys = list(v.apiKeys, `${where}.apiKeys`, 1000).map((k, j) => apiKey(k, `${where}.apiKeys[${j}]`));
+  if (v.passkeys !== undefined) out.passkeys = passkeyBlock(v.passkeys, `${where}.passkeys`);
+  if (!out.credentials && !out.config && !out.apiKeys && !out.passkeys) throw new PortableError(`${where}: nothing to import`);
   return out;
 }
 
@@ -187,21 +273,40 @@ export function validateExport(doc) {
  */
 export function validateDecisions(d, doc) {
   keys(d, 'decisions', ['system', 'users']);
-  if (typeof d.system !== 'boolean') throw new PortableError('decisions.system must be true or false');
-  if (d.system && !doc.system) throw new PortableError('the document has no system configuration');
+  // system: true (every part in the file), false, or { part: bool } for some.
+  let sysParts = [];
+  if (d.system === true) sysParts = doc.system ? doc.system.parts : [];
+  else if (isObj(d.system)) {
+    keys(d.system, 'decisions.system', [], SYSTEM_PARTS);
+    for (const [k, on] of Object.entries(d.system)) {
+      if (typeof on !== 'boolean') throw new PortableError(`decisions.system.${k} must be true or false`);
+      if (on && !(doc.system && doc.system.parts.includes(k))) throw new PortableError(`the document has no "${k}" part`);
+      if (on) sysParts.push(k);
+    }
+  } else if (d.system !== false) throw new PortableError('decisions.system must be true, false or a list of parts');
+  if (d.system === true && !doc.system) throw new PortableError('the document has no system configuration');
   keys(d.users, 'decisions.users', [], Object.keys(d.users ?? {}));
   const names = new Set(doc.users.map((u) => u.username));
-  const out = { system: d.system, users: new Map() };
+  const out = { system: sysParts.length > 0, systemParts: new Set(sysParts), users: new Map() };
   const targets = new Set();
   for (const [name, choice] of Object.entries(d.users)) {
     if (!names.has(name)) throw new PortableError(`decisions.users: "${name.slice(0, 64)}" is not in the document`);
-    keys(choice, `decisions.users.${name}`, [], ['as', 'overwrite']);
+    keys(choice, `decisions.users.${name}`, [], ['as', 'overwrite', 'parts']);
     const as = choice.as === undefined ? name : choice.as;
     if (typeof as !== 'string' || !USERNAME_RE.test(as)) throw new PortableError(`decisions.users.${name}: invalid target username`);
     if (choice.overwrite !== undefined && typeof choice.overwrite !== 'boolean') throw new PortableError(`decisions.users.${name}: overwrite must be true or false`);
     if (targets.has(as.toLowerCase())) throw new PortableError(`two users would be imported as "${as}"`);
     targets.add(as.toLowerCase());
-    out.users.set(name, { as, overwrite: choice.overwrite === true });
+    // parts: which of the user's parts to take (default: all of them).
+    const u = doc.users.find((x) => x.username === name);
+    const inDoc = USER_PARTS.filter((k) => u[k] !== undefined);
+    let parts = inDoc;
+    if (choice.parts !== undefined) {
+      if (!Array.isArray(choice.parts) || choice.parts.some((k) => !inDoc.includes(k))) throw new PortableError(`decisions.users.${name}: parts must be some of ${inDoc.join(', ') || 'nothing'}`);
+      parts = inDoc.filter((k) => choice.parts.includes(k));
+    }
+    if (!parts.length) throw new PortableError(`decisions.users.${name}: nothing chosen to import`);
+    out.users.set(name, { as, overwrite: choice.overwrite === true, parts: new Set(parts) });
   }
   return out;
 }

@@ -200,7 +200,8 @@ deployment's `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or by the owner in Admi
   the admin panel shows only whether one is saved. Anyone who can run code in the Worker, or
   read the Durable Object, can read it. A Worker secret (`wrangler secret put TURNSTILE_SECRET`)
   or Cloudflare Secrets Store remains the recommended place (recommendation), so the panel is
-  for deployments where editing secrets is not practical. The secret is not included in exports.
+  for deployments where editing secrets is not practical. An export includes the panel's keys,
+  the secret too, only when the owner ticks "Turnstile keys"; this part is off by default.
 - **Propagation.** Each Worker isolate caches the panel's keys for 30 seconds, so a change reaches
   every server within about 30 seconds. If the Directory cannot be read, the last keys seen stay
   in use; a first lookup that fails leaves Turnstile off, but then sign-in fails anyway,
@@ -499,7 +500,10 @@ codes as safe as the password.
     recovery codes. After a takeover, remove them as well. After a user's own change, Account
     says how many still work and asks the user to remove any passkey they do not recognise.
   - Owner recovery through `AUTHN` also removes the owner's passkeys.
-- Passkeys and recovery codes are never exported.
+- Passkeys and recovery codes leave the server only in an export where the owner chose
+  "Passkeys and recovery codes". The file carries the public keys (useless without the
+  authenticator) and the recovery-code hashes. Passkeys work only under the same hostname
+  (WebAuthn binds them to it); recovery codes work anywhere.
 
 ### Read receipts
 
@@ -556,8 +560,20 @@ codes as safe as the password.
   cookie alone cannot exfiltrate verifiers or replace credentials. Wrong passwords count like
   wrong current passwords (the account's sessions end at the lockout threshold) and against the
   IP's login guard.
-- Never exported: the owner account, sessions, API keys, passkeys and recovery codes, shares,
-  usage counters, the activity log. An import can never create or replace an owner; accounts it creates are plain users.
+- **Every part is optional and chosen twice**: when exporting (only what is ticked leaves the
+  server) and again when importing (only what is ticked is applied).
+  - System parts: settings; roles; IP rules; Turnstile keys, off by default because they
+    include the secret; the public account.
+  - User parts: credentials; role; API keys; passkeys and recovery codes.
+- **API keys** travel as their stored hashes, so the same keys keep working on the target, and
+  revoking a key on one server does not revoke it on the other. The import preview says so,
+  and refuses a key or passkey that already belongs to another account on the target.
+- Never exported: the owner account, sessions, shares, usage counters and the activity log. An
+  import can never create or replace an owner; the accounts it creates are plain users.
+- **Treat an export as a credential store.** One that holds verifiers, API key hashes and the
+  Turnstile secret is as sensitive as the database. Keep the file and its passphrase apart,
+  export only the parts you need, and delete files you no longer need (recommendation). Where
+  exports may be kept at all is a decision for your Security and Compliance teams.
 - Imports are re-validated field by field on the server with the same checkers as the admin API
   (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
   previewed as a dry run, and are applied in one storage transaction or not at all. Replacing

@@ -47,6 +47,15 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Export / import everything, part by part.**
+  - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
+    default) and the public account.
+  - Per user: credentials, role, API keys (the same keys keep working) and passkeys with
+    recovery codes (passkeys only on the same hostname).
+  - Each part is ticked when exporting and again when importing, with a note on what it holds.
+  - The preview warns about keys that keep working, passkeys from another hostname and Turnstile
+    keys, and refuses keys or passkeys that already belong to another account.
+
 - **Link rules say the form of a scheme:** `scheme:name://` allows links written with `//`
   (http and https are always written this way) and `scheme:name:` allows links without it
   (`tel:`, `mailto:`). A bare `scheme:name` is no longer accepted. Saved rules and older

@@ -30,7 +30,7 @@ describe('admin export', () => {
     expect(asUser.status).toBe(403);
   });
 
-  it('exports the chosen parts, never the owner, sessions or API keys', async () => {
+  it('exports the chosen parts, never the owner or sessions; API keys only when asked', async () => {
     const u = await makeUser('ie-export');
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { maxViews: 7, apiEnabled: true } } });
     await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'k' } });
@@ -45,7 +45,8 @@ describe('admin export', () => {
     const role = doc.system.roles.find((r) => r.name === `user ${u.id}`);
     expect(role.limits.all).toMatchObject({ maxViews: 7, apiEnabled: true });
     expect(JSON.stringify(doc)).not.toMatch(/sbk_|"sid"|sess_ver|key_hash|"hash"|"keys"/);
-    expect(Object.keys(doc.system).sort()).toEqual(['ipRules', 'limits', 'quotas', 'roles', 'settings', 'viewerRules']);
+    // Unless asked for, no API keys or passkeys leave the server.
+    expect(Object.keys(doc.system).sort()).toEqual(['ipRules', 'limits', 'public', 'quotas', 'roles', 'settings', 'turnstile', 'viewerRules']);
     // The Default role (system.limits.all) holds a value for every option.
     expect(Object.keys(doc.system.limits.all)).toContain('pwMinLength');
     // Parts are optional.
