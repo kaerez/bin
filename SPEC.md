@@ -247,7 +247,9 @@ Common errors on any route:
   expired, reused, or for another action or hostname), `503 turnstile_unavailable` (siteverify
   unreachable; fails closed). Setup, admin resets, file chunks/finalize and API keys are exempt.
 - `403 scope_denied`: an API key without the scope the route needs (`notes` for
-  `POST /api/private/paste`, `files` for the file routes, `policy` for `GET /api/private/policy`).
+  `POST /api/private/paste`, `files` for the file routes, `policy` for `GET /api/private/policy`,
+  `read` for `GET /api/private/shares[/:id[/opens]]`, `manage` for `PATCH /api/private/shares/:id`
+  and `POST …/:id/revoke`). `403 api_key_not_allowed`: an API key on any other route.
 
 ### Public (capability-gated)
 
@@ -337,7 +339,7 @@ spaces are ignored, O/I/L read as 0/1/1).
 | `POST /api/private/me/recovery-codes` `{step…}` | session | `{codes}` (20 new; the old ones stop working) |
 | `POST /api/private/me/second-factor` `{on, step…}` | session | password logins also need a passkey / code (limit `any`; forced on with `second`) |
 | `POST /api/private/admin/users/:id/passkeys` (`X-Secbin-Intent`) | owner | remove all of an account's passkeys and codes → `{removed}`. No confirmation for another user; `{step…}` on the owner's own account. An admin password reset (`…/password`) keeps them |
-| `GET/POST /api/private/me/keys` `{name, expiresInSec?, scopes?, step…}`, `PATCH …/keys/:id` `{name?, scopes?, step…}`, `DELETE …/keys/:id` `{step…}` (`X-Secbin-Intent`) | session, not impersonating (except `GET`) | API keys; `scopes` is a subset of `notes`, `files`, `policy` (default all three; empty or unknown → 400 `invalid_scopes`). Listing returns each key's `scopes` |
+| `GET/POST /api/private/me/keys` `{name, expiresInSec?, scopes?, step…}`, `PATCH …/keys/:id` `{name?, scopes?, step…}`, `DELETE …/keys/:id` `{step…}` (`X-Secbin-Intent`) | session, not impersonating (except `GET`) | API keys; `scopes` is a subset of `notes`, `files`, `policy`, `read`, `manage` (default `notes`, `files`, `policy`; empty or unknown → 400 `invalid_scopes`). Listing returns each key's `scopes` |
 | `GET /api/private/admin/turnstile` | owner | `{sitekey, secretSet, active: 'env'\|'admin'\|null, deployment}`; never the secret |
 | `PUT /api/private/admin/turnstile` `{sitekey, secret?, step…}` or `{clear: true, step…}` | owner | set (an empty `secret` keeps the saved one) or remove the panel's keys; 400 `invalid_sitekey` / `invalid_secret`. The deployment's keys still win |
 | `GET/POST /api/private/admin/roles` `{name}` or `{from, name}` | owner | list (Owner, Default, custom: `{id, name, builtin, locked?, ownQuotas?, users}`); create, or duplicate `from` a role id or `"default"` (Default's values copied as explicit settings); 409 `name_taken` (unique, case-insensitive; "Owner" and "Default" are reserved) |
@@ -353,9 +355,9 @@ challenge). Missing → 400 `reauth_required`; wrong password → 403 `wrong_pas
 that does not verify → 403 `reauth_failed`. Both failures count against the IP's login guard,
 and the 10th failure in the window (default) → 401 `session_revoked`, which ends every session
 of the account.
-| `GET /api/private/shares`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session | My shares |
+| `GET /api/private/shares`, `GET /api/private/shares/:id`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session / key (`read` for GET, `manage` otherwise) | My shares: `{rows, total}`; `{share}`; `{label?, views?, expires?}` (increase-only; a key is held to the API limits); revoke with `X-Secbin-Intent`. Only the caller's own shares (else 404); 423 when locked. See docs/API.md |
 | `/api/private/admin/*` | owner session, not impersonating | overview, settings, limits, quotas, viewer rules, users (+ password, unlock, impersonate, keys), unimpersonate, audit, guard, ip-rules, shares |
-| `GET /api/private/shares/:id/opens` | session | read receipts of my share → `{total, fields, rows: [{ts, …allowed fields}]}` (newest first, at most 200). `total` counts every open, including those not stored individually (at most one receipt per address per minute is stored), except floods of more than 5 a minute from one address |
+| `GET /api/private/shares/:id/opens` | session / key (`read`) | read receipts of my share → `{total, fields, rows: [{ts, …allowed fields}]}` (newest first, at most 200). `total` counts every open, including those not stored individually (at most one receipt per address per minute is stored), except floods of more than 5 a minute from one address |
 | `GET /api/private/admin/shares/:id/opens` | owner | the same with every field: `ip, country, region, city, browser, browser_ver, os, langs` |
 | `POST /api/private/admin/logs/clear` `{current, scope: "all"\|"user", user?, before?}` | owner | delete activity entries (all, or about `user`; only `ts < before` when given) → `{deleted}`; `current` is the owner's password proof (403 `wrong_password`); leaves no record |
 | `GET /api/private/admin/shares` `?users=id,id&kind=&status=&q=&locked=true\|false&createdFrom=&createdTo=&expiresFrom=&expiresTo=&limit=&offset=` | owner | every user's shares, filtered (times in unix seconds, each bound optional) → `{rows, total}` |

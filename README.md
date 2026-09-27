@@ -66,7 +66,7 @@ flowchart TD
 | Admin | Users, roles (limits, quotas, session timeouts, file-size caps, viewer policy), impersonation ("log in as"), password resets, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
 | Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. See SECURITY.md. |
-| CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
+| CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete, and list, show, read receipts of, label, extend and revoke your shares — with API keys. |
 | Installable | A PWA: install from the banner (or the browser menu; on iOS, Share → Add to Home Screen). The service worker caches only the static shell — never shares or API responses. |
 | Minimal surface | Strict CSP, self-hosted fonts, no third-party scripts, no analytics, no outbound requests. |
 
@@ -263,7 +263,10 @@ secbin get 'https://bin.example.com/p/f…#…' --out ./downloads
 ```
 
 See [`cli/README.md`](./cli/README.md). To call the REST API directly (curl, Python, Node), see
-[`docs/API.md`](./docs/API.md) and [`examples/api/`](./examples/api/).
+[`docs/API.md`](./docs/API.md) and [`examples/api/`](./examples/api/). Each API key has scopes:
+`notes`, `files` and `policy` to create (the default), and, when chosen, `read` (list your shares
+and their read receipts) and `manage` (label, extend and revoke them) — only ever your own
+shares, never the account or the admin panel.
 
 ## Architecture
 

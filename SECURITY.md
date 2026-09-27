@@ -360,12 +360,28 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
 - **CSRF**: state-changing calls must be non-simple (JSON content type or `X-Secbin-Intent`), are
   refused when `Sec-Fetch-Site` is `cross-site` **or `same-site`** (a sibling subdomain is not
   trusted), and cookies are SameSite=Strict. The API has no CORS.
-- **API keys** (`sbk_…`, stored hashed) authenticate share creation only — never account or
-  admin endpoints. The owner decides who may hold keys and how many; API limits and quotas can
-  only narrow the account's limits. Revoking API permission disables existing keys at once.
-  - **Scopes:** each key carries a subset of `notes`, `files` and `policy`, chosen at creation
-    and fixed for its lifetime; a call outside them is `403 scope_denied`. Issue each automation
-    the narrowest key it needs (least privilege) and an expiry.
+- **API keys** (`sbk_…`, stored hashed) authenticate share creation, the policy read and the
+  key user's own shares (list, receipts, label, extend, revoke) — never the account itself
+  (profile, password, passkeys, keys, activity) or admin endpoints (`403 api_key_not_allowed`).
+  The owner decides who may hold keys and how many; API limits and quotas can only narrow the
+  account's limits. Revoking API permission disables existing keys at once.
+  - **Scopes:** each key carries a subset of `notes`, `files`, `policy` (create), `read` (list
+    the user's shares, one share, and its read receipts) and `manage` (label, extend views /
+    expiry, revoke). A key created without a choice gets the three creation scopes only; `read`
+    and `manage` are always an explicit choice. Scopes are chosen at creation and can be changed
+    later (by the user with their password or a passkey, or by the owner); a call
+    outside them is `403 scope_denied`. Issue each automation the narrowest key it needs (least
+    privilege) and an expiry.
+  - **Same rules as the dashboard:** a key sees and changes only its user's shares (anything
+    else is `404`), cannot touch a share the owner has locked (`423`), can only grow views and
+    expiry, and is held to the account's **API** limits when extending. A revoke needs
+    `X-Secbin-Intent: 1`. Every change made with a key is logged with the key's id
+    (`apikey=<id>`), never the key.
+  - **Exposure:** a leaked `read` key reveals the user's share labels (not encrypted), sizes,
+    dates and read receipts (which may include recipients' network addresses, locations and
+    browsers, as far as the owner enables receipt details — personal data); a leaked `manage`
+    key can revoke the user's shares (availability) but can never read their content, which
+    stays encrypted with keys the server never holds.
   - **Storage:** the key is shown once. Keep it in a secrets manager (for example HashiCorp Vault
     or AWS Secrets Manager) and pass it through the environment, never in source code, shell
     history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`

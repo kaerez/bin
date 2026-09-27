@@ -58,6 +58,23 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **API key scopes `read` and `manage`** (#31): besides creating (`notes`, `files`, `policy`),
+  a key can list the user's shares, one share and its read receipts (`read`: `GET
+  /api/private/shares`, `GET …/shares/:id` — new — and `GET …/shares/:id/opens`) and label,
+  extend and revoke them (`manage`: `PATCH …/shares/:id`, `POST …/shares/:id/revoke`) — only
+  the key user's own shares, under the owner's share locks and, for extensions, the account's
+  API limits; changes made with a key are logged with its id. Both are opt-in: a key created
+  without a choice still gets the creation scopes only. Account → API keys and Admin → Users
+  offer and list the new scopes; exports and imports carry them. `docs/API.md` and the
+  Account page's "Using the API" help document every endpoint a key can use, with examples for
+  every use case in curl, Node.js and Python (new `examples/api/create-files.mjs` /
+  `create_files.py` for the file upload flow, `--encrypt-only` modes for curl, and
+  `shares.mjs` / `shares.py` for list, show, receipts, label, extend, revoke, policy and delete;
+  the Python examples use `requests`). The CLI gains `secbin list`, `show`, `receipts` (`read`)
+  and `label`, `extend`, `revoke` (`manage`). Existing keys keep exactly the creation scopes
+  they had. A `read` key can fetch read receipts, which include the recipients' network
+  addresses and locations when the owner enables those details.
+
 - **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
   `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
   owner made (admin actions, impersonation). Both default to keep forever, as before. Server-wide
