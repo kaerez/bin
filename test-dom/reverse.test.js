@@ -23,6 +23,7 @@ import { hkdf32 } from '../public/js/crypto.js';
 import { utf8, fromUtf8, bytesFromB64url } from '../public/js/bytes.js';
 import { formatDate } from '../public/js/common.js';
 import { CHUNK, TAG } from '../public/js/files.js';
+import { stretch } from '../public/js/pwauth.js';
 import { fakeServer, seedTree, seedReceived } from './drive-fake-server.js';
 
 // Argon2id stand-in: the DOM suites never run WebAssembly.
@@ -49,7 +50,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 // ── the uploader page ─────────────────────────────────────────────────────────
 
 /** A stand-in for /api/reverse/<id>/… and /api/config behind fetch. */
-async function reverseServer({ password = null, note = null, limits = {}, turnstile = null, status = 200 } = {}) {
+async function reverseServer({ password = null, note = null, limits = {}, turnstile = null, status = 200, paused = null } = {}) {
   const id = newReverseId();
   const { pub, privateKey } = await createReverseKey();
   const gate = password ? await passwordGate(password, pub) : null;
@@ -69,6 +70,8 @@ async function reverseServer({ password = null, note = null, limits = {}, turnst
       if (status !== 200) return fail(status, 'gone');
       if (m[2] === 'open' || m[2] === 'begin') {
         if (h['x-link-proof'] !== await linkProof(pub)) return fail(403, 'bad_link');
+        // Paused (the owner started over): refused once the link proof matched, as the server does.
+        if (paused === 'open' || (paused === 'begin' && m[2] === 'begin') || S.paused) return fail(409, 'paused');
       }
       if (m[2] === 'open') {
         return ok({ note: sealedNote, password: gate ? { salt: gate.salt, t: gate.t } : null, expires: 2000000000,
@@ -258,6 +261,27 @@ describe('the uploader page', () => {
     await mountUploader(page(), { location: S.location });
     expect($('#reverse-error').textContent).toMatch(/no longer accepts files/);
     expect($('#reverse-error [role="alert"]')).not.toBeNull();
+  });
+
+  it('a paused link (its owner started over) says it is not accepting files right now, on opening or when sending', async () => {
+    let S = await reverseServer({ paused: 'open' });
+    let r = await mountUploader(page(), { location: S.location });
+    expect(r.state).toBe('error');
+    expect($('#reverse-error h1').textContent).toBe('This link is not accepting files right now');
+    expect($('#reverse-error [role="alert"]').textContent).toMatch(/Try again later/);
+    expect($('#reverse-send')).toBeNull();
+    expect(S.requests.filter((x) => x.p.endsWith('/begin'))).toHaveLength(0);
+    // Paused while the page is open: sending is refused with the same words, nothing is sent.
+    S = await reverseServer({ paused: 'begin' });
+    r = await mountUploader(page(), { location: S.location });
+    expect(r.state).toBe('ready');
+    pick($('#reverse-file-input'), [fileOf('a.txt', 'alpha')]);
+    await until(() => !$('#reverse-send').disabled);
+    $('#reverse-send').click();
+    await until(() => !$('#reverse-msg').hidden);
+    expect($('#reverse-msg').textContent).toMatch(/^This link is not accepting files right now\./);
+    expect(S.files.size).toBe(0);
+    expect(document.querySelectorAll('#reverse-list li')).toHaveLength(1); // kept, to try again later
   });
 
   it('limitsText', () => {
@@ -632,4 +656,61 @@ describe('the owner acting as the user: received files', () => {
     expect(new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()))).toBe('signed contract');
     expect([...S.wraps.keys()].sort()).toEqual(['escrow|escrow', 'pw|pw']);
   }, 60000);
+});
+
+describe('the owner starting over: reverse links paused, then resumed by a kit for the old Drive', () => {
+  it('pauses the owner\'s link (its item kept as it arrived, not taken in); the kit restore re-seals the link\'s key under the Drive key now, and the kept item is taken in', async () => {
+    const PW = 'owner password 1';
+    const NEWPW = 'owner password after recovery';
+    const SALT = 'AAAAAAAAAAAAAAAAAAAAAA';
+    const proofOld = await stretch(PW, SALT, 3);
+    const proofNew = await stretch(NEWPW, SALT, 3);
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    S.proof = proofOld;
+    const d = await drive.unlockDrive({ password: PW });
+    const user = S.user;
+    ids = await seedTree(S, d.dk, { Inbox: {} });
+    const id = newReverseId();
+    const { pub, privateKey } = await createReverseKey();
+    const priv = await sealReversePriv(d.dk, id, privateKey);
+    S.reverse.push({ id, folder: ids.get('Inbox'), label: 'client', priv, status: 'active', files: 1, bytes: 6, created: 1700000000, expires: 2000000000 });
+    const item = await seedReceived(S, { rid: id, pub, folder: ids.get('Inbox'), path: 'contract.txt', bytes: utf8('signed') });
+    const sealedBefore = JSON.stringify(S.nodes.get(item));
+    const kit = (await drive.buildOwnerKit({ user, passphrase: 'a kit passphrase', step: { current: proofOld } })).text;
+    // AUTHN recovery; nothing opens the Drive: start over.
+    S.authnRecovery(proofNew);
+    clearSessionKey();
+    const so = await drive.startOverOwnerDrive({ user, confirm: 'owner', password: NEWPW, step: { current: proofNew } });
+    expect(S.reverse[0]).toMatchObject({ status: 'paused', agen: 1, priv });
+    // Kept in the archive exactly as it arrived (sealed to the link's key); nothing to take in now.
+    expect(JSON.stringify(S.archives[0].nodes.get(item))).toBe(sealedBefore);
+    const n0 = S.requests.length;
+    await so.client.receivePending();
+    expect(S.accepted ?? []).toEqual([]);
+    expect(S.requests.slice(n0).filter((x) => x.method !== 'GET')).toEqual([]);
+    // The Drive page's archive box says the link is paused, and what deleting the archive would do.
+    const started = await startDrive(mountPoint(), deps({ ...PROFILE, user: { ...user } }));
+    await started.app.ready;
+    expect($('#drive-archive-links-1').textContent).toBe('1 of your upload links (Receive files) is paused: its key is in this archive. It accepts files again once the archive is restored; the files already received are kept in it.');
+    expect($('#drive-archive').textContent).toMatch(/Its 1 paused upload link is revoked, and the files it received are deleted with it\./);
+    // The kit for the old Drive: the archive back, the link's key re-sealed, the link resumed.
+    const r = await drive.restoreOwnerKit({ user, text: kit, passphrase: 'a kit passphrase', password: NEWPW, step: { current: proofNew } });
+    expect(r.restored).toMatchObject({ archive: 1, items: 2 });
+    const put = S.requests.filter((x) => x.method === 'PUT' && x.path.endsWith('/archive/1/nodes')).flatMap((x) => x.body.nodes);
+    expect(put.find((x) => x.id === item)).toEqual({ id: item }); // the received item as it is
+    expect(S.reverse[0]).toMatchObject({ status: 'active', agen: null });
+    expect(S.audit.some((x) => x.action === 'reverse.resumed' && x.detail === `id=${id}`)).toBe(true);
+    const back = await openReversePriv(so.client.dk, id, S.reverse[0].priv);
+    expect(back.pub).toEqual(pub);
+    await expect(openReversePriv(d.dk, id, S.reverse[0].priv)).rejects.toThrow();
+    expect(JSON.stringify(S.nodes.get(item))).toBe(sealedBefore);
+    // The kept item is taken in with the restored key, into the restored folder.
+    const c = await drive.openDrive({ user });
+    await c.receivePending();
+    expect(S.accepted.map((x) => x.id)).toEqual([item]);
+    expect(S.accepted[0].body.parent).toBe(ids.get('Inbox'));
+    const keys = await deriveSubkeys(so.client.dk);
+    expect(fromUtf8(await openField(keys.names, 'name', item, S.accepted[0].body.name))).toBe('contract.txt');
+  });
 });

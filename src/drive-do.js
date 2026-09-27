@@ -54,13 +54,21 @@ CREATE TABLE IF NOT EXISTS archive_meta (gen INTEGER NOT NULL, k TEXT NOT NULL, 
 // reverse.pwfails / pwsince / pwlock: wrong passwords in the current window,
 // and a lock after too many. rsessions.net: 24 bits of a hash of the
 // uploader's network (per-network session cap); rsessions.started: its start.
+// reverse.agen: the owner's archive (after starting over) whose Drive key
+// seals this link's private key — the link is paused while that archive
+// exists (docs/DRIVE.md §3.2); archive_nodes.rs / rfail / rwhy: a received
+// item archived as it was, sealed to its link's key.
 const COLUMNS = [
   ['nodes', 'rs', 'TEXT'], ['nodes', 'rsess', 'TEXT'], ['nodes', 'rfail', 'INTEGER'], ['nodes', 'rwhy', 'TEXT'],
   ['reverse', 'sealed', 'INTEGER NOT NULL DEFAULT 0'], ['reverse', 'pwfails', 'INTEGER NOT NULL DEFAULT 0'],
   ['reverse', 'pwsince', 'INTEGER'], ['reverse', 'pwlock', 'INTEGER'],
   ['rsessions', 'net', 'TEXT'], ['rsessions', 'started', 'INTEGER'],
+  ['reverse', 'agen', 'INTEGER'],
+  ['archive_nodes', 'rs', 'TEXT'], ['archive_nodes', 'rfail', 'INTEGER'], ['archive_nodes', 'rwhy', 'TEXT'],
 ];
 const NODE_COLS = 'id, parent, kind, name, meta, size, chunks, fk, state, done, upload_hash, created, updated';
+/** The columns an archive keeps of each item: a received item keeps its link (rs) and failure (rfail, rwhy). */
+const ARCHIVE_COLS = `${NODE_COLS}, rs, rfail, rwhy`;
 /** What an archive keeps of the Drive's meta (everything sealed under the old DK, and its records). */
 const ARCHIVED_META = ['driveSalt', 'escrowPriv', 'escrowSignPriv', 'escrowPrivOld', 'escrowPin', 'pwStale', 'kit', 'kcv'];
 
@@ -97,6 +105,11 @@ export const RECEIVED_PAGE = 500;
 export const RECEIVED_FAIL_REASONS = ['unreadable', 'name', 'place'];
 /** An ended reverse share is kept (for its lists) this long — as long as the share index keeps its row. */
 const REVERSE_KEEP_SEC = 30 * 86400;
+/**
+ * SQL condition on a `nodes` row: its link's private key is not sealed under
+ * an archive's Drive key (only the key of the Drive now can take it in).
+ */
+const NOT_ARCHIVED_KEY = 'rs NOT IN (SELECT id FROM reverse WHERE agen IS NOT NULL)';
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
@@ -284,12 +297,13 @@ export class Drive extends DurableObject {
     };
   }
 
-  /** The owner's archived Drives (after starting over): [{ gen, at, items, bytes }]. */
+  /** The owner's archived Drives (after starting over): [{ gen, at, items, bytes, paused (reverse links) }]. */
   #archives() {
     return this.sql.exec(`SELECT m.gen AS gen, CAST(m.v AS INTEGER) AS at,
         (SELECT COUNT(*) FROM archive_nodes n WHERE n.gen = m.gen) AS items,
-        (SELECT COALESCE(SUM(CASE WHEN n.kind = 'file' THEN n.size ELSE 0 END), 0) FROM archive_nodes n WHERE n.gen = m.gen) AS bytes
-      FROM archive_meta m WHERE m.k = 'at' ORDER BY m.gen`).toArray().map((r) => ({ gen: r.gen, at: r.at, items: r.items, bytes: r.bytes }));
+        (SELECT COALESCE(SUM(CASE WHEN n.kind = 'file' THEN n.size ELSE 0 END), 0) FROM archive_nodes n WHERE n.gen = m.gen) AS bytes,
+        (SELECT COUNT(*) FROM reverse r WHERE r.agen = m.gen AND r.status = 'paused') AS paused
+      FROM archive_meta m WHERE m.k = 'at' ORDER BY m.gen`).toArray().map((r) => ({ gen: r.gen, at: r.at, items: r.items, bytes: r.bytes, paused: r.paused }));
   }
 
   /** A meta value stored as JSON, or null. */
@@ -728,7 +742,7 @@ export class Drive extends DurableObject {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.#deleteObjects(uid, this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file' UNION ALL SELECT id, chunks FROM archive_nodes WHERE kind = 'file'").toArray());
       const shares = this.sql.exec('SELECT DISTINCT share_id FROM refs').toArray().map((r) => r.share_id);
-      const reverse = this.sql.exec("SELECT id FROM reverse WHERE status = 'active'").toArray().map((r) => r.id);
+      const reverse = this.sql.exec("SELECT id FROM reverse WHERE status IN ('active', 'paused')").toArray().map((r) => r.id);
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
       this.destroyed = true;
@@ -740,17 +754,22 @@ export class Drive extends DurableObject {
   // ── reverse shares (docs/REVERSE.md) ─────────────────────────────────────
   /** Received files waiting to be taken in (not those the browser could not take in: they left the queue). */
   #receivedCount() {
-    return this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready' AND rfail IS NULL").one().c;
+    return this.sql.exec(`SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready' AND rfail IS NULL AND ${NOT_ARCHIVED_KEY}`).one().c;
   }
   #receivedFailedCount() {
-    return this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready' AND rfail IS NOT NULL").one().c;
+    return this.sql.exec(`SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready' AND rfail IS NOT NULL AND ${NOT_ARCHIVED_KEY}`).one().c;
   }
   #reverse(id) {
     return this.sql.exec('SELECT * FROM reverse WHERE id = ?', id).toArray()[0] || null;
   }
-  /** A reverse share's state now: 'active' | 'expired' | 'revoked' (the row may say active past its expiry). */
+  /**
+   * A reverse share's state now: 'active' | 'paused' | 'expired' | 'revoked'
+   * (the row may say active past its expiry). 'paused': the owner started
+   * over and the link's key is sealed under the archived Drive's key.
+   */
   #reverseState(r) {
     if (!r) return 'gone';
+    if (r.status === 'paused') return r.expires <= nowSec() ? 'expired' : 'paused';
     if (r.status !== 'active') return r.status;
     if (r.expires <= nowSec()) return 'expired';
     if (!this.#node(r.folder)) return 'revoked';
@@ -765,6 +784,8 @@ export class Drive extends DurableObject {
       maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, files: r.files, bytes: r.bytes,
       pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NULL", r.id).one().c,
       failed: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NOT NULL", r.id).one().c,
+      // Received items kept in an archive (the owner started over), sealed as they arrived.
+      kept: r.agen === null || r.agen === undefined ? 0 : this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes WHERE rs = ?', r.id).one().c,
     };
     if (priv) o.priv = JSON.parse(r.priv);
     return o;
@@ -796,12 +817,15 @@ export class Drive extends DurableObject {
   /**
    * Reverse shares that ended more than REVERSE_KEEP_SEC ago (as long as the
    * share index lists them) and whose received files have all been taken in:
-   * their key is no longer needed.
+   * their key is no longer needed. A link whose key is sealed under an
+   * archive's Drive key stays while that archive exists (a restore needs it).
    */
   #dropEndedReverse() {
     const before = nowSec() - REVERSE_KEEP_SEC;
-    this.sql.exec(`DELETE FROM reverse WHERE ((status != 'active' AND COALESCE(ended, 0) < ?) OR expires < ?)
-      AND id NOT IN (SELECT rs FROM nodes WHERE rs IS NOT NULL)`, before, before);
+    this.sql.exec(`DELETE FROM reverse WHERE ((status NOT IN ('active', 'paused') AND COALESCE(ended, 0) < ?) OR expires < ?)
+      AND id NOT IN (SELECT rs FROM nodes WHERE rs IS NOT NULL)
+      AND id NOT IN (SELECT rs FROM archive_nodes WHERE rs IS NOT NULL)
+      AND (agen IS NULL OR agen NOT IN (SELECT gen FROM archive_meta))`, before, before);
     this.sql.exec('DELETE FROM rsessions WHERE rid NOT IN (SELECT id FROM reverse)');
   }
   /** Upload sessions past their time: log what they received (count and size), then forget them. */
@@ -850,6 +874,8 @@ export class Drive extends DurableObject {
     const r = this.#reverse(id);
     if (!r) return { status: 'gone' };
     const st = this.#reverseState(r);
+    // Paused (the owner started over) is not ended: the link resumes when the archive is restored.
+    if (st === 'paused') return { status: 'ok', paused: true, files: r.files, bytes: r.bytes, expires: r.expires };
     return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires } : { status: 'gone', state: st, files: r.files, bytes: r.bytes };
   }
 
@@ -875,11 +901,11 @@ export class Drive extends DurableObject {
     });
   }
 
-  /** A later expiry (My shares' Extend). */
+  /** A later expiry (My shares' Extend; a paused link too: it has not ended). */
   async extendReverse(uid, id, expires) {
     this.#bind(uid);
     const r = this.#reverse(id);
-    if (!r || this.#reverseState(r) !== 'active') return { status: 'gone' };
+    if (!r || !['active', 'paused'].includes(this.#reverseState(r))) return { status: 'gone' };
     if (!Number.isSafeInteger(expires) || expires <= r.expires) return { status: 'invalid', message: 'Expiry can only be extended.' };
     this.sql.exec('UPDATE reverse SET expires = ? WHERE id = ?', expires, id);
     return { status: 'ok', expires };
@@ -888,12 +914,14 @@ export class Drive extends DurableObject {
   /**
    * What the uploader's page needs (after the Worker checked the link proof
    * against `lh`): the sealed note, the password parameters and the limits
-   * left. 'gone' unless active.
+   * left. 'paused' while the owner's archive holds the link's key (no
+   * session, no upload); 'gone' unless active.
    */
   async reverseOpen(uid, id, { roleMaxBytes = null } = {}) {
     this.#bind(uid);
     const r = this.#reverse(id);
     const st = this.#reverseState(r);
+    if (st === 'paused') return { status: 'paused', lh: r.lh };
     if (st !== 'active') return { status: st === 'gone' ? 'unknown' : 'gone', lh: r ? r.lh : null };
     const o = this.#reverseOut(r, { priv: false });
     o.maxBytes = capBytes(o.maxBytes, roleMaxBytes);
@@ -918,21 +946,33 @@ export class Drive extends DurableObject {
    * escrow key's version record and the account binding stay) for the new
    * keys the Worker writes next. Unfinished uploads go, as the alarm would
    * drop them. Shares of archived items keep working (their keys are in their
-   * links). → { gen }.
+   * links).
+   * Reverse links (docs/REVERSE.md): their private keys are sealed under the
+   * old DK, so each link now belongs to the archive (`agen`); the active ones
+   * are **paused** — no new session or upload; their open sessions end (what
+   * those sessions received is logged) and their unfinished uploads go — and
+   * the items they received stay in the archive exactly as they arrived,
+   * sealed to the link's key. A restore of the archive resumes them; deleting
+   * it revokes them. → { gen, paused: [link ids] }.
    */
   async startOver(uid) {
     this.#bind(uid);
     return this.ctx.blockConcurrencyWhile(async () => {
-      const pending = this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file' AND state = 'pending'").toArray();
+      const pending = this.sql.exec("SELECT id, chunks, size, rs FROM nodes WHERE kind = 'file' AND state = 'pending'").toArray();
       await this.#deleteObjects(uid, pending);
       // Archive numbers never repeat (one restored or deleted keeps its number).
       const gen = Math.max(Number(this.#meta('archiveGen')) || 0, this.sql.exec('SELECT MAX(gen) AS g FROM archive_meta').one().g ?? 0) + 1;
+      let paused = [];
       this.ctx.storage.transactionSync(() => {
-        for (const f of pending) {
-          this.sql.exec('DELETE FROM upchunks WHERE node_id = ?', f.id);
-          this.sql.exec('DELETE FROM nodes WHERE id = ?', f.id);
-        }
-        this.sql.exec(`INSERT INTO archive_nodes (gen, ${NODE_COLS}) SELECT ?, ${NODE_COLS} FROM nodes WHERE id != ?`, gen, ROOT);
+        // A reserved received file gives its link's allowance back, as when the alarm purges it.
+        for (const f of pending) this.#dropPending(f);
+        // Links whose key an earlier archive seals keep that archive (the key is under its DK).
+        this.sql.exec('UPDATE reverse SET agen = ? WHERE agen IS NULL', gen);
+        paused = this.sql.exec("SELECT id FROM reverse WHERE status = 'active' AND agen = ? AND expires > ?", gen, nowSec()).toArray().map((r) => r.id);
+        this.sql.exec("UPDATE reverse SET status = 'paused' WHERE status = 'active' AND agen = ?", gen);
+        // Their sessions end now (#lapseSessions below logs what they received).
+        this.sql.exec("UPDATE rsessions SET expires = 0 WHERE rid IN (SELECT id FROM reverse WHERE status = 'paused')");
+        this.sql.exec(`INSERT INTO archive_nodes (gen, ${ARCHIVE_COLS}) SELECT ?, ${ARCHIVE_COLS} FROM nodes WHERE id != ?`, gen, ROOT);
         this.sql.exec('DELETE FROM nodes WHERE id != ?', ROOT);
         this.sql.exec('INSERT INTO archive_wraps (gen, kind, ref, data) SELECT ?, kind, ref, data FROM wraps', gen);
         this.sql.exec('DELETE FROM wraps');
@@ -945,8 +985,9 @@ export class Drive extends DurableObject {
         this.sql.exec("INSERT INTO archive_meta (gen, k, v) VALUES (?, 'at', ?)", gen, String(nowSec()));
         this.#setMeta('archiveGen', String(gen));
       });
+      await this.#lapseSessions();
       await this.ctx.storage.deleteAlarm();
-      return { ok: true, gen };
+      return { ok: true, gen, paused };
     });
   }
 
@@ -958,8 +999,12 @@ export class Drive extends DurableObject {
   /**
    * Archive `gen` for the owner's browser to restore it with a recovery kit:
    * its sealed escrow keys and a page of its items (sealed fields as stored),
-   * by id after `after`. → { gen, at, escrowPriv, escrowSignPriv,
-   * escrowPrivOld, items, nodes, next }.
+   * by id after `after`. A received item (`rs`, its link) is restored as
+   * it is: it is sealed to its link's key, not the DK. The first page lists
+   * the reverse links whose private keys the archive's DK seals (`reverse`:
+   * [{ id, priv, status }]), for the browser to re-seal them under the
+   * Drive's DK now. → { gen, at, escrowPriv, escrowSignPriv, escrowPrivOld,
+   * items, nodes, reverse?, next }.
    */
   async archiveView(uid, gen, { after = '', limit = 500 } = {}) {
     this.#bind(uid);
@@ -974,10 +1019,16 @@ export class Drive extends DurableObject {
       items: this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes WHERE gen = ?', gen).one().c,
       nodes: rows.map((r) => ({
         id: r.id, parent: r.parent, kind: r.kind, name: parse(r.name), meta: r.meta ? parse(r.meta) : null, fk: r.fk ? parse(r.fk) : null,
-        size: r.size, chunks: r.chunks, state: r.state, created: r.created, updated: r.updated,
+        size: r.size, chunks: r.chunks, state: r.state, created: r.created, updated: r.updated, ...(r.rs ? { rs: r.rs } : {}),
       })),
+      ...(after ? {} : { reverse: this.#archiveLinks(gen).map((r) => ({ id: r.id, priv: parse(r.priv), status: this.#reverseState(r) })) }),
       next: rows.length === lim ? rows[rows.length - 1].id : null,
     };
+  }
+
+  /** The reverse links whose private keys archive `gen`'s DK seals. */
+  #archiveLinks(gen) {
+    return this.sql.exec('SELECT * FROM reverse WHERE agen = ? ORDER BY id', gen).toArray();
   }
 
   /**
@@ -993,7 +1044,9 @@ export class Drive extends DurableObject {
     this.#bind(uid);
     const tag = await this.#netTag(id, net); // before any check: nothing below awaits
     const r = this.#reverse(id);
-    if (this.#reverseState(r) !== 'active') return { status: 'gone' };
+    const st = this.#reverseState(r);
+    if (st === 'paused') return { status: 'paused' };
+    if (st !== 'active') return { status: 'gone' };
     const t = nowSec();
     if (r.ph) {
       if (r.pwlock && r.pwlock > t) return { status: 'pw_locked', until: r.pwlock };
@@ -1184,7 +1237,8 @@ export class Drive extends DurableObject {
   async received(uid, { after = null, limit = RECEIVED_PAGE, failed = false } = {}) {
     this.#bind(uid);
     const lim = Math.max(1, Math.min(RECEIVED_PAGE, limit | 0));
-    const cond = `rs IS NOT NULL AND state = 'ready' AND rfail IS ${failed ? 'NOT ' : ''}NULL`;
+    // Not the items of a link whose key is still sealed under an archive's DK (a restore in progress).
+    const cond = `rs IS NOT NULL AND state = 'ready' AND rfail IS ${failed ? 'NOT ' : ''}NULL AND ${NOT_ARCHIVED_KEY}`;
     const rows = after
       ? this.sql.exec(`SELECT * FROM nodes WHERE ${cond} AND (created > ? OR (created = ? AND id > ?)) ORDER BY created, id LIMIT ?`,
         after.created, after.created, after.id, lim + 1).toArray()
@@ -1212,7 +1266,7 @@ export class Drive extends DurableObject {
   async markReceived(uid, node, { failed, reason = null }) {
     this.#bind(uid);
     const n = this.#node(node);
-    if (!n || !n.rs || n.state !== 'ready') return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    if (!n || !n.rs || n.state !== 'ready' || (this.#reverse(n.rs)?.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
     if (failed) this.sql.exec('UPDATE nodes SET rfail = ?, rwhy = ? WHERE id = ?', nowSec(), RECEIVED_FAIL_REASONS.includes(reason) ? reason : 'unreadable', node);
     else this.sql.exec('UPDATE nodes SET rfail = NULL, rwhy = NULL WHERE id = ?', node);
     return { ok: true, received: this.#receivedCount(), failed: this.#receivedFailedCount(), rs: n.rs };
@@ -1222,7 +1276,7 @@ export class Drive extends DurableObject {
   async acceptReceived(uid, node, { parent, name, meta, fk }) {
     this.#bind(uid);
     const n = this.#node(node);
-    if (!n || !n.rs || n.state !== 'ready') return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    if (!n || !n.rs || n.state !== 'ready' || (this.#reverse(n.rs)?.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
     if (parent !== n.parent) {
       const bad = this.#checkParent(parent);
       if (bad) return bad;
@@ -1238,7 +1292,10 @@ export class Drive extends DurableObject {
    * meta?, fk? }], stored JSON text; a field left out keeps its archived
    * value). Parents first: an item whose folder is still archived is refused.
    * The archive's top-level items land in the Drive's top level. Content (R2)
-   * is not touched: each file's chunks are under its own key.
+   * is not touched: each file's chunks are under its own key. A received item
+   * (reverse shares) comes back exactly as it was, sealed to its link's key
+   * (`{ id }` only): the browser takes it in once the link's key is re-sealed
+   * (finishArchive).
    */
   async restoreArchiveNodes(uid, gen, list) {
     this.#bind(uid);
@@ -1248,6 +1305,9 @@ export class Drive extends DurableObject {
       const r = this.sql.exec('SELECT * FROM archive_nodes WHERE gen = ? AND id = ?', gen, x.id).toArray()[0];
       if (!r) return fail(404, 'not_found', 'An item is not in the archive.');
       if (this.#node(r.id)) return fail(409, 'exists', 'An item with this id already exists.');
+      const given = x.name !== undefined || x.meta !== undefined || x.fk !== undefined;
+      if (r.rs && given) return fail(400, 'received_as_is', 'A received item comes back as it is: send only its id.');
+      if (!r.rs && x.name === undefined) return fail(400, 'invalid', 'Each item needs its name re-sealed under the Drive key.');
       rows.push({ r, x });
     }
     const moving = new Set(rows.map(({ r }) => r.id));
@@ -1259,9 +1319,9 @@ export class Drive extends DurableObject {
     if (top && this.sql.exec('SELECT COUNT(*) AS c FROM nodes WHERE parent = ?', ROOT).one().c + top > MAX_CHILDREN) return fail(409, 'folder_full', `A folder holds at most ${MAX_CHILDREN} items.`);
     this.ctx.storage.transactionSync(() => {
       for (const { r, x } of rows) {
-        this.sql.exec(`INSERT INTO nodes (${NODE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        this.sql.exec(`INSERT INTO nodes (${ARCHIVE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           r.id, r.parent, r.kind, x.name ?? r.name, x.meta === undefined ? r.meta : x.meta, r.size, r.chunks, x.fk === undefined ? r.fk : x.fk,
-          r.state, r.done, r.upload_hash, r.created, nowSec());
+          r.state, r.done, r.upload_hash, r.created, nowSec(), r.rs ?? null, r.rfail ?? null, r.rwhy ?? null);
         this.sql.exec('DELETE FROM archive_nodes WHERE gen = ? AND id = ?', gen, r.id);
       }
     });
@@ -1272,25 +1332,40 @@ export class Drive extends DurableObject {
    * The archive's items are all back: its earlier escrow keys, re-sealed by
    * the owner's browser under the Drive's DK (`old` { kid: sealed }, checked
    * by the Worker), join escrowPrivOld, and the archive (its old wraps and
-   * sealed keys) goes.
+   * sealed keys) goes. Its reverse links' private keys, re-sealed by the
+   * browser under the Drive's DK (`reverse` { linkId: sealed }, one for each
+   * link of the archive, none other), replace the old ones: the paused links
+   * resume (uploads again) and their received items can be taken in.
+   * → { resumed: [link ids] }.
    */
-  async finishArchive(uid, gen, { old = {} } = {}) {
+  async finishArchive(uid, gen, { old = {}, reverse = {} } = {}) {
     this.#bind(uid);
     if (!this.#archiveMeta(gen)) return fail(404, 'not_found', 'No such archive.');
     if (this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes WHERE gen = ?', gen).one().c) return fail(409, 'archive_not_empty', 'Restore every archived item first.');
+    const links = this.#archiveLinks(gen);
+    if (Object.keys(reverse).length !== links.length || links.some((l) => typeof reverse[l.id] !== 'string')) {
+      return fail(409, 'reverse_keys_required', 'Re-seal the private key of every reverse link of this archive under the Drive key.', { links: links.map((l) => l.id) });
+    }
+    const t = nowSec();
+    const resumed = links.filter((l) => l.status === 'paused' && l.expires > t).map((l) => l.id);
     const cur = this.#oldEscrow();
     this.ctx.storage.transactionSync(() => {
       if (Object.keys(old).length) this.#setMeta('escrowPrivOld', JSON.stringify({ ...cur, ...old }));
+      for (const l of links) {
+        this.sql.exec("UPDATE reverse SET priv = ?, agen = NULL, status = CASE WHEN status = 'paused' THEN 'active' ELSE status END WHERE id = ?", reverse[l.id], l.id);
+      }
       this.sql.exec('DELETE FROM archive_wraps WHERE gen = ?', gen);
       this.sql.exec('DELETE FROM archive_meta WHERE gen = ?', gen);
     });
-    return { ok: true };
+    return { ok: true, resumed };
   }
 
   /**
    * The owner deletes archive `gen` (no kit could restore it afterwards): its
-   * R2 objects, items, wraps and sealed keys. → the shares that referenced its
-   * items (the Worker ends them).
+   * R2 objects, items, wraps and sealed keys. Its paused reverse links are
+   * revoked, and the items they received (in the archive) go with it.
+   * → the shares that referenced its items (the Worker ends them) and the
+   * revoked links (the Worker ends them in the share index).
    */
   async deleteArchive(uid, gen) {
     this.#bind(uid);
@@ -1298,13 +1373,15 @@ export class Drive extends DurableObject {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.#deleteObjects(uid, this.sql.exec("SELECT id, chunks FROM archive_nodes WHERE gen = ? AND kind = 'file'", gen).toArray());
       const shares = this.sql.exec('SELECT DISTINCT share_id FROM refs WHERE node_id IN (SELECT id FROM archive_nodes WHERE gen = ?)', gen).toArray().map((r) => r.share_id);
+      const revoked = this.#archiveLinks(gen).filter((l) => l.status === 'paused').map((l) => l.id);
       this.ctx.storage.transactionSync(() => {
+        this.sql.exec("UPDATE reverse SET status = 'revoked', ended = ? WHERE agen = ? AND status = 'paused'", nowSec(), gen);
         this.sql.exec('DELETE FROM refs WHERE node_id IN (SELECT id FROM archive_nodes WHERE gen = ?)', gen);
         this.sql.exec('DELETE FROM archive_nodes WHERE gen = ?', gen);
         this.sql.exec('DELETE FROM archive_wraps WHERE gen = ?', gen);
         this.sql.exec('DELETE FROM archive_meta WHERE gen = ?', gen);
       });
-      return { ok: true, shares, used: this.#used() };
+      return { ok: true, shares, revoked, used: this.#used() };
     });
   }
 

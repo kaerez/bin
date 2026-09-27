@@ -205,7 +205,9 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 
 Errors: `404 not_found` (never a reverse share), `410 gone` (revoked, expired, its folder
 deleted, or the user's role no longer allows it; a late visitor with the right link proof is not
-counted by the Guard), `423 share_locked` (the admin locked it),
+counted by the Guard), `409 paused` (`open` / `begin` with the right link proof, while the
+owner's Drive is started over and the link's key is in the archive: §9), `423 share_locked` (the
+admin locked it),
 `403 bad_link`, `401 password_required` (the password is needed; `{ salt, t }` in the body),
 `403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 turnstile_*`, `413 file_too_large` /
 `share_full` / `drive_full`, `409 too_many_files` (none left: `open` shows `filesLeft: 0`),
@@ -268,3 +270,33 @@ many files arrive.
 - My shares / Admin → Shares: kind "receive" (filter value `reverse`); the views column shows the
   files received; revoke, lock and extend (expiry only) as for other shares.
 - Empty folders in an upload are not sent (only files are received; their paths make the folders).
+
+## 9. The owner starting over (docs/DRIVE.md §3.2)
+
+- The owner's links' private keys are sealed under the owner's DK. When the owner starts over
+  without a recovery kit, the old DK goes into the archive with the rest of the Drive, so every
+  link of the owner's Drive is tied to that archive (`reverse.agen = gen`; a link an earlier
+  archive already holds stays with it) and the active ones are **paused** (`status = 'paused'`):
+  - `open` and `begin` answer `409 paused` once the link proof matches (no session, no human
+    check, no password check); the uploader page shows "This link is not accepting files right
+    now"; any other uploader route answers as for an ended session (`403 bad_grant`, counted);
+  - the links' open sessions end at once (what they received is logged as `reverse.received`),
+    and their unfinished uploads are deleted, giving their allowance back;
+  - the items they received stay in the archive (`archive_nodes`, with `rs`, `rfail`, `rwhy`)
+    exactly as they arrived, sealed to the link's key; they are not offered for taking in;
+  - the share index keeps the link `active` (My shares shows it as paused); it can still be
+    revoked or extended; it is never dropped while its archive exists.
+- **Restore** (a kit for the old DK, "Restore from kit"): the archive's received items come back
+  as they are (`PUT …/archive/<gen>/nodes` with `{ id }` only; any sealed field for them is
+  refused, `400 received_as_is`), and `POST …/archive/<gen>/finish` carries every link's private
+  key re-sealed by the browser from the kit's DK to the Drive's DK now (`reverse`; one per link
+  of the archive, `409 reverse_keys_required` otherwise). The links leave the archive and the
+  paused ones resume; their kept items are taken in like any received file at the next unlock.
+  Until finish, a restored received item whose link is still tied to the archive is neither
+  listed nor accepted (`409 not_received`).
+- **Delete the old Drive archive**: its paused links are revoked (the share index too) and the
+  items they received are deleted with the archive (R2 included).
+- Logged, one entry per link, the owner as the actor (the owner's activity and the admin
+  audit): `reverse.paused`, `reverse.resumed`, `reverse.revoked` (`reason=archive_deleted`).
+- No other user's link, session or received item is touched by any of this.
+

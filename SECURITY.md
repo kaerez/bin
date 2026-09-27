@@ -1113,6 +1113,16 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - **Ending.** Revoking a link, its expiry, an admin lock (paused), the role losing the option, or
   deleting its folder stops uploads at once; unfinished uploads are deleted; files already
   received stay. Deleting the account deletes everything.
+- **The owner starting over** (docs/REVERSE.md §9): the owner's links' private keys stay sealed
+  under the old Drive key, in the archive; the links are paused (`409 paused` only after the link
+  proof matches, before the human check and the password; open sessions end; unfinished uploads
+  go) and their received items stay in the archive exactly as they arrived. Nothing new opens
+  them: a restore needs a kit for the old Drive key, the step-up, and re-seals each link's key in
+  the owner's browser (the server never sees a link's private key); received items come back
+  only as they were (no field of theirs can be replaced), and none is offered for taking in
+  until its link's key is re-sealed. Deleting the archive revokes the paused links and deletes
+  their items. `reverse.paused`, `reverse.resumed` and `reverse.revoked` are logged per link,
+  the owner as the actor. No other user's link is touched.
 - **Audit.** `share.created` (`kind=reverse`) and `share.revoked`, `reverse.received` (count and
   bytes only; one entry per link per hour adding up that hour's sessions, so uploads cannot flood
   the user's log or the server-wide log limit), `reverse.bad_password`, and

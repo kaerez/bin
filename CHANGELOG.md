@@ -15,6 +15,17 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Reverse shares when the owner starts over** (docs/REVERSE.md §9, docs/DRIVE.md §3.2): the
+  owner's reverse links are **paused**, not revoked — no new session or upload (`409 paused`,
+  once the link proof matches; the uploader page says "This link is not accepting files right
+  now"), their open sessions end and unfinished uploads go, and the items they received stay in
+  the archive exactly as they arrived, with the links' private keys still sealed under the old
+  Drive key. A restore with a kit for the old Drive brings the items back as they are, re-seals
+  each link's key under the Drive's key now (`reverse` in `POST …/archive/<gen>/finish`) and
+  resumes the links; the kept items are then taken in. Deleting the archive revokes the paused
+  links and deletes their received items. `reverse.paused`, `reverse.resumed` and
+  `reverse.revoked` (`reason=archive_deleted`) in the owner's activity and the admin audit. No
+  other user's link changes. My shares shows a paused link as paused.
 - **Reverse shares, security audit round 4** (docs/REVERSE.md §3, §4, §5; SECURITY.md
   "Reverse shares"):
   - an upload session's deadline slides both ways: once nothing is unfinished (a file finished

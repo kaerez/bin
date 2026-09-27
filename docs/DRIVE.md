@@ -337,9 +337,18 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   its R2 objects, items, wraps and sealed keys go and its shares end; no kit can restore it
   afterwards (`DELETE /api/private/drive/archive/<gen>`, `drive.archive_deleted`). Archive
   numbers never repeat.
-- Reverse shares do not exist yet (task #24): when they do, starting over pauses the owner's
-  reverse links (no new uploads, "not accepting files right now"; received items kept, in the
-  archive) and a restore of the archive resumes them.
+- **The owner's reverse links** ([`REVERSE.md`](./REVERSE.md) §9): their private keys are sealed
+  under the old DK, so starting over ties each of them to the archive (`reverse.agen`) and
+  **pauses** the active ones: no new session or upload (`409 paused`; the uploader page says
+  "This link is not accepting files right now"), their open sessions end and their unfinished
+  uploads go; the items they received stay in the archive exactly as they arrived, sealed to
+  the link's key. A restore of the archive with a kit for the old DK brings those items back as
+  they are (`{ id }` only in `PUT …/nodes`), re-seals each link's private key under the Drive's
+  DK now (`reverse` in `POST …/finish`) and resumes the links; the kept items are then taken in
+  like any received file. Deleting the archive revokes the paused links and deletes their
+  received items. Logged as `reverse.paused`, `reverse.resumed` and `reverse.revoked`
+  (`reason=archive_deleted`), one entry per link, in the owner's activity and the admin audit.
+  No other user's link changes.
 - **Changes that need the step-up** (`PUT /api/private/drive/keys` with `current` or `reauth`,
   as on Account): removing a wrap, replacing the `pw` wrap, replacing `driveSalt`, and any
   change of the owner's escrow key pair — except the Drive's first set-up (no wraps yet), a
@@ -369,7 +378,8 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
     key check value), and for the owner only `escrowPriv`, `escrowSignPriv` and `escrowPrivOld`
     (each sealed under the owner's DK) and the public records `escrowVer`, `kit` and
     `archiveGen`. Nothing else: no key the server could use to open a Drive.
-  - the owner's archives after starting over (§3.2): `archive_nodes(gen, …the nodes columns)`,
+  - the owner's archives after starting over (§3.2): `archive_nodes(gen, …the nodes columns,
+    rs, rfail, rwhy)` (a received item keeps its link),
     `archive_wraps(gen, kind, ref, data)`, `archive_meta(gen, k, v)` (the old salt, pin, key
     check value, sealed keys, kit record, and `at`) — all as they were, sealed under the old DK.
   - `refs(share_id TEXT, node_id TEXT)`: which shares reference which nodes.

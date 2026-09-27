@@ -2299,6 +2299,30 @@ export class Directory extends DurableObject {
     return { ok: false };
   }
 
+  /**
+   * The owner's reverse links after starting over (docs/DRIVE.md §3.2):
+   * `paused` (the owner started over: their keys are in the archive),
+   * `resumed` (the archive was restored with a kit) or `revoked` (the archive
+   * was deleted: the index rows end too). One entry per link, the owner as
+   * the actor: in the owner's activity and the admin audit. Only the owner's
+   * own links, only for the owner.
+   */
+  async reverseArchiveEvent(ownerId, event, ids) {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner starts over.');
+    if (!['paused', 'resumed', 'revoked'].includes(event)) return fail(400, 'invalid', 'Unknown reverse-link event.');
+    const list = [...new Set((Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string' && /^r[A-Za-z0-9_-]{22}$/.test(x)))].slice(0, 10000);
+    let n = 0;
+    for (const id of list) {
+      const row = this.sql.exec("SELECT status FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse'", id, ownerId).toArray()[0];
+      if (!row) continue;
+      if (event === 'revoked') this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, ownerId);
+      this.#log(ownerId, ownerId, `reverse.${event}`, event === 'revoked' ? `id=${id} reason=archive_deleted` : `id=${id}`);
+      n++;
+    }
+    return { ok: true, logged: n };
+  }
+
   async createUser({ username, salt, t, verifier }, actorId) {
     if (typeof username !== 'string' || !USERNAME_RE.test(username)) return fail(400, 'invalid_username', 'Username must be 3–64 characters: letters, digits, . _ @ -');
     if (this.#userByName(username)) return fail(409, 'username_taken', 'That username is taken.');

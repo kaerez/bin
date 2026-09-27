@@ -28,6 +28,10 @@ export function limitsText(l = {}) {
   return parts.length ? `This link accepts ${parts.join(' · ')}.` : 'This link accepts any files.';
 }
 
+// A paused link (its user started their Drive over; docs/DRIVE.md §3.2): it may accept files again later.
+const PAUSED_TITLE = 'This link is not accepting files right now';
+const PAUSED_TEXT = 'Nothing you send can be received at the moment. Try again later, or ask the person who shared it.';
+
 function errorCard(title, text) {
   return h('div.card.stack', { id: 'reverse-error' },
     h('h1.title', { text: title }),
@@ -48,6 +52,7 @@ export async function mountUploader(root, deps = {}) {
     up = await openLink({ pathname: loc.pathname, hash: loc.hash });
   } catch (e) {
     if (e instanceof LinkError) root.replaceChildren(errorCard('This link does not work', e.message));
+    else if (e instanceof ApiError && e.code === 'paused') root.replaceChildren(errorCard(PAUSED_TITLE, PAUSED_TEXT));
     else if (e instanceof ApiError && e.status === 410) root.replaceChildren(errorCard('This link no longer accepts files', 'It has expired or was revoked by the person who shared it. Ask them for a new link.'));
     else if (e instanceof ApiError && e.status === 423) root.replaceChildren(errorCard('This link is paused', 'The administrator has locked it. Try again later or ask the person who shared it.'));
     else root.replaceChildren(errorCard('The link could not be opened', friendlyError(e)));
@@ -181,7 +186,8 @@ function buildApp(root, up, humanCheck) {
       } else if (e instanceof ApiError && e.code === 'password_locked') {
         const until = Number.isSafeInteger(e.extra.until) ? ` after ${formatDate(e.extra.until)}` : ' later';
         showMsg(msg, `Too many wrong passwords were tried for this link. Try again${until}.`);
-      } else if (e instanceof ApiError && e.status === 410) showMsg(msg, 'This link no longer accepts files: it has expired or was revoked.');
+      } else if (e instanceof ApiError && e.code === 'paused') showMsg(msg, `${PAUSED_TITLE}. ${PAUSED_TEXT}`);
+      else if (e instanceof ApiError && e.status === 410) showMsg(msg, 'This link no longer accepts files: it has expired or was revoked.');
       else showMsg(msg, friendlyError(e));
     } finally {
       busy = false;

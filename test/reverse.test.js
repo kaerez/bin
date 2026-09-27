@@ -10,18 +10,20 @@
 import { env, SELF, runDurableObjectAlarm, runInDurableObject, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import worker from '../src/index.js';
-import { owner, makeUser, fetchJson, intent, freshIp, ORIGIN, proofFor, USER_PW, cookieOf } from './helpers.js';
-import { enableDrive, driveLimits, mkdir, uploadFile, node, drive, enc } from './drive-helpers.js';
+import { owner, makeUser, fetchJson, intent, freshIp, ORIGIN, proofFor, USER_PW, cookieOf, login, setOwnerCookie, salt16 } from './helpers.js';
+import { enableDrive, driveLimits, mkdir, uploadFile, node, drive, enc, KCV } from './drive-helpers.js';
 import { SCHEMA_VERSION, PUBLIC_ID } from '../src/directory-do.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
 import { CSP, TURNSTILE_CSP } from '../src/lib/http.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
-import { driveChunkSize } from '../src/drive-do.js';
+import { driveChunkSize, driveChunkKey } from '../src/drive-do.js';
 import {
   createReverseKey, openReversePriv, linkProof,
   sealNote, openNote, sealUpload, openUpload, newReverseId, newNodeId, fragmentOf,
 } from '../public/js/reversekeys.js';
-import { deriveSubkeys, sealField, openField } from '../public/js/drivekeys.js';
+import {
+  deriveSubkeys, sealField, openField, createDriveKey, createEscrowKeyPair, sealEscrowPriv, createSigningKeyPair, sealSigningKey, endorseEscrowKey,
+} from '../public/js/drivekeys.js';
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, decryptChunk, importFileKey } from '../public/js/files.js';
 import {
@@ -638,5 +640,200 @@ describe('keys', () => {
     await expect(openNote(pub, newReverseId(), note)).rejects.toThrow();
     // The size of one chunk of a received file is a Drive chunk's.
     expect(driveChunkSize(10, 0)).toBe(26);
+  });
+});
+
+// The owner starting over without a recovery kit (docs/DRIVE.md §3.2): the
+// owner's reverse links pause (their keys are sealed under the old Drive key,
+// in the archive), a kit restore resumes them, deleting the archive revokes
+// them; no other user's link is touched.
+describe('the owner starting over: reverse links paused, resumed, revoked', () => {
+  const o = { pw: 'owner-password' };
+  const W = () => `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}`;
+  const startOver = (body) => fetchJson('/api/private/drive/start-over', { method: 'POST', cookie: oc, headers: intent, body });
+  const rowsOf = (uid, sql, ...args) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(sql, ...args).toArray());
+  const activity = async (cookie) => (await (await fetchJson('/api/private/me/activity', { cookie })).json()).rows;
+  const shareRow = async (cookie, id) => (await (await fetchJson('/api/private/shares', { cookie })).json()).rows.find((x) => x.id === id);
+  /** AUTHN owner recovery (a new setup token): the owner's Drive wraps go stale, nothing the owner signs in with opens it. */
+  async function authnRecovery(pw) {
+    const NEW = `recovery-token-${b64urlFromBytes(randomBytes(16))}`;
+    const res = await worker.fetch(new Request(`${ORIGIN}/api/auth/setup`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: NEW, username: 'owner', salt: salt16(), t: 3, proof: proofFor(pw) }),
+    }), { ...env, AUTHN: NEW }, { waitUntil() {} });
+    expect((await res.json()).recovered).toBe(true);
+    o.pw = pw;
+    oc = await login('owner', pw);
+    setOwnerCookie(oc);
+  }
+  /** Start over, all keys made anew under a new DK (as the owner's browser does). */
+  async function startOverNow() {
+    o.dk = createDriveKey();
+    const e = await createEscrowKeyPair();
+    const s = await createSigningKeyPair();
+    const r = await startOver({
+      confirm: 'owner', driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], escrowPub: e.publicJwk, escrowPriv: await sealEscrowPriv(o.dk, e.privateKey),
+      escrowSignPub: s.publicJwk, escrowSignPriv: await sealSigningKey(o.dk, s.privateKey), escrowSig: await endorseEscrowKey(s.privateKey, e.publicJwk), kcv: KCV,
+      current: proofFor(o.pw),
+    });
+    expect(r.status).toBe(200);
+    return r.json();
+  }
+  /** A link's private key, from one Drive key to another (as the kit restore does in the browser). */
+  async function reseal(id, priv, from, to) {
+    const pkcs8 = await openField((await deriveSubkeys(from)).files, 'reversePriv', id, priv);
+    return sealField((await deriveSubkeys(to)).files, 'reversePriv', id, pkcs8);
+  }
+
+  it('pauses the owner\'s links: no new session or upload (409 paused), open sessions end, received items kept exactly as they arrived; other users\' links go on', async () => {
+    o.id = (await (await fetchJson('/api/private/me', { cookie: oc })).json()).user.id;
+    // The owner's Drive, set up under DK (the helpers' key), with a folder and a link on it.
+    expect((await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], kcv: KCV } })).status).toBe(200);
+    o.folder = (await mkdir(oc)).id;
+    o.link = await newReverse(oc, { folder: o.folder, confirm: false, current: proofFor(o.pw), label: 'inbox' });
+    expect(o.link.res.status).toBe(201);
+    const ip = freshIp();
+    o.grant = await grantOf(o.link, { ip });
+    o.item = await send(o.link, o.grant, { ip, path: 'in/contract.txt', bytes: utf8('signed by bob') });
+    const half = await reserve(o.link, o.grant, { ip, path: 'half.txt' }); // reserved, never finished
+    expect(half.res.status).toBe(201);
+    // Another user's link, with a file received.
+    o.u = await receiver('rev-so-user');
+    o.ulink = await newReverse(o.u.cookie);
+    const uip = freshIp();
+    o.ufile = await send(o.ulink, await grantOf(o.ulink, { ip: uip }), { ip: uip });
+    const userBefore = JSON.stringify(await rowsOf(o.u.id, 'SELECT * FROM reverse')) + JSON.stringify(await rowsOf(o.u.id, 'SELECT * FROM nodes ORDER BY id'));
+    const sealedBefore = (await rowsOf(o.id, 'SELECT id, parent, name, meta, fk, size, chunks, rs FROM nodes WHERE id = ?', o.item.node))[0];
+    const privBefore = (await rowsOf(o.id, 'SELECT priv FROM reverse WHERE id = ?', o.link.id))[0].priv;
+
+    await authnRecovery('owner-password-after-recovery');
+    const out = await startOverNow();
+    expect(out.archive).toBe(1);
+
+    // No new session: a clear status once the link proof matches (a wrong one is still bad_link).
+    const opened = await openLink(o.link, ip);
+    expect(opened.status).toBe(409);
+    expect(await opened.json()).toMatchObject({ error: 'paused', message: 'This link is not accepting files right now.' });
+    const b = await begin(o.link, { ip });
+    expect(b.status).toBe(409);
+    expect(await errorOf(b)).toBe('paused');
+    expect(await errorOf(await openLink(o.link, ip, (await createReverseKey()).pub))).toBe('bad_link');
+    // The open session ended with the pause: no upload, no finalize of the half-done file.
+    expect((await reserve(o.link, o.grant, { ip })).res.status).toBe(403);
+    expect((await rv(o.link.id, `/files/${half.node}/finalize`, { headers: { 'x-reverse-grant': o.grant, 'x-upload-token': half.data.uploadToken }, ip })).status).toBe(403);
+    expect(await rowsOf(o.id, 'SELECT hash FROM rsessions')).toEqual([]);
+    // The received item: in the archive, exactly as it arrived (sealed to the link's key); the half-done one is gone.
+    expect((await rowsOf(o.id, 'SELECT id, parent, name, meta, fk, size, chunks, rs FROM archive_nodes WHERE gen = 1 AND id = ?', o.item.node))[0]).toEqual(sealedBefore);
+    expect(await rowsOf(o.id, 'SELECT id FROM nodes WHERE id = ? UNION ALL SELECT id FROM archive_nodes WHERE id = ?', half.node, half.node)).toEqual([]);
+    expect(await env.FILES.get(driveChunkKey(o.id, o.item.node, 0))).not.toBeNull();
+    // The link: paused, its key sealed under the old DK as it was, in the archive; its allowance given back for the half-done file.
+    expect((await rowsOf(o.id, 'SELECT status, agen, priv, files FROM reverse WHERE id = ?', o.link.id))[0]).toEqual({ status: 'paused', agen: 1, priv: privBefore, files: 1 });
+    const listed = (await (await fetchJson('/api/private/drive/reverse', { cookie: oc })).json()).reverse.find((x) => x.id === o.link.id);
+    expect(listed).toMatchObject({ status: 'paused', kept: 1, pending: 0 });
+    // Nothing to take in now (the key is the old DK's), and My shares keeps it (paused, not ended).
+    expect((await received(oc)).items).toEqual([]);
+    expect((await drive(oc)).received).toBe(0);
+    expect((await drive(oc)).archives).toEqual([expect.objectContaining({ gen: 1, paused: 1 })]);
+    expect(await shareRow(oc, o.link.id)).toMatchObject({ status: 'active', paused: true });
+    // Logged: the owner's activity and the admin audit, the owner as the actor.
+    const mine = (await activity(oc)).find((x) => x.action === 'reverse.paused');
+    expect(mine).toMatchObject({ detail: `id=${o.link.id}` });
+    expect((await audit(o.id)).find((x) => x.id === mine.id)).toMatchObject({ actor_id: o.id, subject_id: o.id, imp: 0, adm: 0 });
+    // What the ended session had received is logged too.
+    expect((await activity(oc)).some((x) => x.action === 'reverse.received' && x.detail.startsWith(`id=${o.link.id} files=1`))).toBe(true);
+    // The other user's link: untouched, and still takes uploads.
+    expect(JSON.stringify(await rowsOf(o.u.id, 'SELECT * FROM reverse')) + JSON.stringify(await rowsOf(o.u.id, 'SELECT * FROM nodes ORDER BY id'))).toBe(userBefore);
+    expect((await openLink(o.ulink, uip)).status).toBe(200);
+    await send(o.ulink, await grantOf(o.ulink, { ip: uip }), { ip: uip, path: 'more.txt' });
+    expect((await received(o.u.cookie)).items).toHaveLength(2);
+    expect((await activity(o.u.cookie)).some((x) => /^reverse\.(paused|resumed|revoked)$/.test(x.action))).toBe(false);
+  });
+
+  it('a kit for the old Drive restores the archive: the links resume, uploads work, and the kept items are taken in with the re-sealed key', async () => {
+    const view = await (await fetchJson('/api/private/drive/archive/1', { cookie: oc })).json();
+    expect(view.nodes.find((n) => n.id === o.item.node)).toMatchObject({ rs: o.link.id });
+    expect(view.reverse).toEqual([{ id: o.link.id, priv: JSON.parse((await rowsOf(o.id, 'SELECT priv FROM reverse WHERE id = ?', o.link.id))[0].priv), status: 'paused' }]);
+    const step = { current: proofFor(o.pw) };
+    const put = (nodes) => fetchJson('/api/private/drive/archive/1/nodes', { method: 'PUT', cookie: oc, headers: intent, body: { nodes, ...step } });
+    const fin = (body) => fetchJson('/api/private/drive/archive/1/finish', { method: 'POST', cookie: oc, headers: intent, body: { ...body, ...step } });
+    // A received item comes back only as it is; other items need their fields re-sealed.
+    expect(await errorOf(await put([{ id: o.folder }]))).toBe('invalid');
+    expect((await put([{ id: o.folder, name: enc() }])).status).toBe(200);
+    expect(await errorOf(await put([{ id: o.item.node, name: enc(), meta: enc(), fk: enc(32) }]))).toBe('received_as_is');
+    expect((await put([{ id: o.item.node }])).status).toBe(200);
+    expect((await rowsOf(o.id, 'SELECT rs FROM nodes WHERE id = ?', o.item.node))[0].rs).toBe(o.link.id);
+    // Until the link's key is re-sealed, it stays paused and its item is not offered for taking in.
+    expect((await received(oc)).items).toEqual([]);
+    const early = await fetchJson(`/api/private/drive/received/${o.item.node}`, { method: 'POST', cookie: oc, headers: intent, body: { parent: o.folder, name: enc(), meta: enc(), fk: enc(32) } });
+    expect(await errorOf(early)).toBe('not_received');
+    expect((await openLink(o.link)).status).toBe(409);
+    // finish needs every link's key, well formed.
+    expect(await errorOf(await fin({}))).toBe('reverse_keys_required');
+    expect(await errorOf(await fin({ reverse: { [o.link.id]: 'not sealed' } }))).toBe('invalid');
+    expect(await errorOf(await fin({ reverse: { [newReverseId()]: enc() } }))).toBe('reverse_keys_required');
+    const priv = await reseal(o.link.id, view.reverse[0].priv, DK, o.dk);
+    expect((await fetchJson('/api/private/drive/archive/1/finish', { method: 'POST', cookie: oc, headers: intent, body: { reverse: { [o.link.id]: priv } } })).status).toBe(400); // no step-up
+    const done = await fin({ reverse: { [o.link.id]: priv } });
+    expect(done.status).toBe(200);
+    expect(await done.json()).toMatchObject({ ok: true, resumed: [o.link.id] });
+    expect((await drive(oc)).archives).toEqual([]);
+    expect((await rowsOf(o.id, 'SELECT status, agen FROM reverse WHERE id = ?', o.link.id))[0]).toEqual({ status: 'active', agen: null });
+    expect((await activity(oc)).find((x) => x.action === 'reverse.resumed')).toMatchObject({ detail: `id=${o.link.id}` });
+    expect((await audit(o.id)).some((x) => x.action === 'reverse.resumed' && x.actor_id === o.id)).toBe(true);
+    // Uploads again.
+    const ip = freshIp();
+    expect((await openLink(o.link, ip)).status).toBe(200);
+    const again = await send(o.link, await grantOf(o.link, { ip }), { ip, path: 'after.txt', bytes: utf8('after the restore') });
+    // The kept item and the new one, with the link's key now sealed under the Drive's key: taken in.
+    const rec = await received(oc);
+    expect(rec.items.map((i) => i.id).sort()).toEqual([o.item.node, again.node].sort());
+    const key = await openReversePriv(o.dk, o.link.id, rec.keys.find((k) => k.id === o.link.id).priv);
+    await expect(openReversePriv(DK, o.link.id, rec.keys[0].priv)).rejects.toThrow();
+    const kept = rec.items.find((i) => i.id === o.item.node);
+    const got = await openUpload(key.privateKey, o.link.id, kept);
+    expect(got.path).toBe('in/contract.txt');
+    const acc = await fetchJson(`/api/private/drive/received/${o.item.node}`, { method: 'POST', cookie: oc, headers: intent, body: { parent: o.folder, name: enc(), meta: enc(), fk: enc(32) } });
+    expect(acc.status).toBe(200);
+    const chunk = await fetchJson(`/api/private/drive/files/${o.item.node}/chunk/0`, { cookie: oc });
+    expect(fromUtf8(await decryptChunk(await importFileKey(b64urlFromBytes(got.fk)), 0, 1, new Uint8Array(await chunk.arrayBuffer())))).toBe('signed by bob');
+    o.again = again;
+  });
+
+  it('deleting the archive revokes the paused links and deletes their received items; other users\' links go on', async () => {
+    // A second link, with an item; then the owner loses the way in again and starts over.
+    const folder2 = (await mkdir(oc)).id;
+    const link2 = await newReverse(oc, { folder: folder2, confirm: false, current: proofFor(o.pw) });
+    expect(link2.res.status).toBe(201);
+    const ip = freshIp();
+    const item2 = await send(link2, await grantOf(link2, { ip }), { ip });
+    await authnRecovery('owner-password-after-second-recovery');
+    const out = await startOverNow();
+    expect(out.archive).toBe(2);
+    for (const l of [o.link, link2]) expect(await errorOf(await openLink(l, ip))).toBe('paused');
+    expect((await rowsOf(o.id, 'SELECT id FROM reverse WHERE agen = 2 ORDER BY id')).map((r) => r.id)).toEqual([o.link.id, link2.id].sort());
+    const del = (body) => fetchJson('/api/private/drive/archive/2', { method: 'DELETE', cookie: oc, headers: intent, body });
+    expect((await del({ confirm: 'owner' })).status).toBe(400); // no step-up: nothing changes
+    expect(await errorOf(await openLink(link2, ip))).toBe('paused');
+    expect((await del({ confirm: 'owner', current: proofFor(o.pw) })).status).toBe(200);
+    // Revoked: the uploader gets 410; the index row and the Drive's row say so.
+    for (const l of [o.link, link2]) {
+      expect((await openLink(l, ip)).status).toBe(410);
+      expect(await shareRow(oc, l.id)).toMatchObject({ status: 'revoked' });
+      expect((await rowsOf(o.id, 'SELECT status FROM reverse WHERE id = ?', l.id))[0].status).toBe('revoked');
+    }
+    // Their received items went with the archive (R2 included).
+    for (const n of [item2.node, o.again.node]) expect(await env.FILES.get(driveChunkKey(o.id, n, 0))).toBeNull();
+    expect(await rowsOf(o.id, 'SELECT id FROM archive_nodes')).toEqual([]);
+    expect(await rowsOf(o.id, 'SELECT id FROM nodes WHERE rs IS NOT NULL')).toEqual([]);
+    // Logged, with the reason, in the owner's activity and the admin audit.
+    const log = (await activity(oc)).filter((x) => x.action === 'reverse.revoked');
+    expect(log.map((x) => x.detail).sort()).toEqual([o.link.id, link2.id].sort().map((id) => `id=${id} reason=archive_deleted`));
+    expect((await audit(o.id)).filter((x) => x.action === 'reverse.revoked' && x.actor_id === o.id && x.adm === 0)).toHaveLength(2);
+    // The other user's link: still active, still takes uploads.
+    expect((await rowsOf(o.u.id, 'SELECT status, agen FROM reverse'))[0]).toEqual({ status: 'active', agen: null });
+    const uip = freshIp();
+    expect((await openLink(o.ulink, uip)).status).toBe(200);
+    await send(o.ulink, await grantOf(o.ulink, { ip: uip }), { ip: uip, path: 'late.txt' });
+    expect((await received(o.u.cookie)).items).toHaveLength(3);
   });
 });

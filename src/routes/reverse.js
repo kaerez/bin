@@ -42,6 +42,9 @@ const MAX_FK_CT = 128;
 /** Bound parameters per query stay well under the Durable Object SQLite limit (100). */
 const ID_BATCH = 80;
 const GONE = 'This link no longer accepts files: it has expired or was revoked.';
+// The owner started over: the link's key is in the archive until a kit restores it (docs/DRIVE.md §3.2).
+const PAUSED = 'This link is not accepting files right now.';
+const pausedRes = () => err(409, 'paused', PAUSED);
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const invalid = (message) => err(400, 'invalid', message);
 const fromDo = (r) => {
@@ -85,7 +88,7 @@ export async function handleReverseOwner(request, env, url, a) {
         reverse: r.reverse.filter((x) => byId.has(x.id)).map((x) => {
           const row = byId.get(x.id);
           // The index row decides (revoked, expired, locked by the admin); the Drive adds the counters.
-          const status = row.status !== 'active' ? row.status : x.status === 'active' ? 'active' : 'ended';
+          const status = row.status !== 'active' ? row.status : ['active', 'paused'].includes(x.status) ? x.status : 'ended';
           return { ...x, label: row.label, locked: !!row.locked, status };
         }),
       });
@@ -279,6 +282,7 @@ export async function handleReversePublic(request, env, url) {
   if (action === 'open') {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
     const r = await drive.reverseOpen(uid, id, { roleMaxBytes: tg.roleMaxBytes });
+    if (r.status === 'paused') return pausedRes(); // the link proof matched (above)
     if (r.status !== 'ok') return err(410, 'gone', GONE);
     return json(r.head);
   }
@@ -286,6 +290,8 @@ export async function handleReversePublic(request, env, url) {
   if (action === 'begin') {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
     const r = await drive.reverseOpen(uid, id);
+    // Paused: no session, before the human check and the password (nothing is answered).
+    if (r.status === 'paused') return pausedRes();
     if (r.status !== 'ok') return err(410, 'gone', GONE);
     const kp = request.headers.get('x-key-proof');
     if (r.ph && !kp) return err(401, 'password_required', 'This link needs a password.', { salt: r.head.password.salt, t: r.head.password.t });
@@ -303,6 +309,7 @@ export async function handleReversePublic(request, env, url) {
     }
     if (s.status === 'pw_locked') return lockedRes(s.until);
     if (s.status === 'busy') return err(429, 'busy', 'Too many uploads to this link are in progress. Try again later.');
+    if (s.status === 'paused') return pausedRes();
     if (s.status !== 'ok') return err(410, 'gone', GONE);
     return json({ grant, expires: s.expires });
   }
@@ -383,6 +390,8 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
   if (!Number.isSafeInteger(body.size) || body.size < 0 || body.size > HARD_MAX_DRIVE_BYTES) return err(400, 'invalid_size', 'size must be the file’s size in bytes.');
   // The share's file types: declared by the uploader's browser (names are encrypted), as for file shares.
   const o = await drive.reverseOpen(uid, id, { roleMaxBytes: tg.roleMaxBytes });
+  // A paused link has no session (they ended when it was paused): any grant is not one of its own.
+  if (o.status === 'paused') return failed(env, g, err(403, 'bad_grant', 'This upload session has ended. Reload the page to start again.'));
   if (o.status !== 'ok') return err(410, 'gone', GONE);
   const rules = o.head.limits.types;
   if (rules) {

@@ -596,8 +596,9 @@ function archiveBox(client, deps) {
     });
     const section = h('div.stack', { dataset: { gen: String(a.gen) } },
       h('p', { text: `Archived ${formatDate(a.at)}: ${a.items} item${a.items === 1 ? '' : 's'}, ${formatBytes(a.bytes)}. It is kept exactly as it was, sealed under your old Drive key, and counts towards your storage. It comes back if you restore from a recovery kit made for it (Restore from kit).` }),
+      a.paused ? h('p', { id: `drive-archive-links-${a.gen}`, text: `${a.paused} of your upload links (Receive files) ${a.paused === 1 ? 'is' : 'are'} paused: ${a.paused === 1 ? 'its key is' : 'their keys are'} in this archive. ${a.paused === 1 ? 'It accepts' : 'They accept'} files again once the archive is restored; the files already received are kept in it.` }) : null,
       h('details', {}, h('summary', { text: 'Delete the old Drive archive' }),
-        h('p.msg.warn', { text: 'Deleting it removes its files for good: a recovery kit found later could no longer bring them back.' }),
+        h('p.msg.warn', { text: `Deleting it removes its files for good: a recovery kit found later could no longer bring them back.${a.paused ? ` Its ${a.paused} paused upload link${a.paused === 1 ? ' is' : 's are'} revoked, and the files ${a.paused === 1 ? 'it' : 'they'} received are deleted with it.` : ''}` }),
         form, msg));
     box.appendChild(section);
   }
@@ -1276,8 +1277,10 @@ function mountApp(mount, client, deps) {
         if (s.url && active) {
           row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Copy link', 'aria-label': `Copy the link ${s.label || ''}`.trim(), on: { click: async (e) => flashCopied(e.currentTarget, (await copyText(s.url)) ? 'copied' : 'failed') } }));
         }
-        if (active && s.locked) row.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
-        else if (active) {
+        // A paused link (the owner started over) has not ended: it can be revoked too.
+        const live = active || s.status === 'paused';
+        if (live && s.locked) row.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
+        else if (live) {
           const rv = h('button.btn.danger.tree-btn', { type: 'button', text: 'Revoke', 'aria-label': `Revoke ${s.label || 'this link'}` });
           armConfirm(rv, 'Revoke now', async () => {
             rv.disabled = true;

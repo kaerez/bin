@@ -28,7 +28,7 @@ import { MAX_CHUNK_CT } from '../../public/js/files.js';
 import { utf8, bytesFromB64url, b64urlFromBytes, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { binding } from '../lib/config.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
-import { NODE_ID_RE, ROOT } from '../drive-do.js';
+import { NODE_ID_RE, ROOT, MAX_REVERSE } from '../drive-do.js';
 import { handleReverseOwner } from './reverse.js';
 
 const fromDir = (r) => {
@@ -67,6 +67,12 @@ export const MAX_META_CT = 1024;
 const MAX_FK_CT = 256;
 const MAX_PIN_CT = 256;
 const MAX_SHARE_NODES = 10000;
+// A reverse link of an archive (after starting over): its id ("r" + 16 bytes)
+// and its private key re-sealed under the Drive's DK (as reverse.js accepts
+// it on create); a Drive holds at most MAX_REVERSE links.
+const LINK_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
+const MAX_LINK_PRIV_CT = 256;
+const MAX_ARCHIVE_LINKS = MAX_REVERSE;
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 /** An encrypted field {iv, ct} (base64url, 12-byte IV) as stored JSON text, or null if invalid. */
@@ -650,6 +656,8 @@ async function archiveRoute(request, env, url, dir, uid, pol, username, gen, sub
     const r = await driveStub(env, uid).deleteArchive(uid, gen);
     if (!r.ok) return fromDir(r);
     await endShares(env, dir, uid, r.shares, uid, 'drive item deleted');
+    // Its paused reverse links end (their received items went with the archive).
+    if (r.revoked?.length) await dir.reverseArchiveEvent(uid, 'revoked', r.revoked);
     await dir.setDriveUsed(uid, r.used);
     await dir.driveOwnerLog(uid, 'drive.archive_deleted', `archive ${gen}; shares ended=${r.shares.length}`);
     return json({ ok: true });
@@ -662,6 +670,8 @@ async function archiveRoute(request, env, url, dir, uid, pol, username, gen, sub
     const list = [];
     for (const n of body.nodes) {
       if (!isObj(n) || typeof n.id !== 'string' || !NODE_ID_RE.test(n.id)) return invalid('Each item needs its id.');
+      // A received item (reverse shares) comes back as it is: its id only (the Drive checks which it is).
+      if (n.name === undefined && n.meta === undefined && n.fk === undefined) { list.push({ id: n.id }); continue; }
       const name = encField(n.name, MAX_NAME_CT);
       const meta = n.meta === undefined ? undefined : n.meta === null ? null : encField(n.meta, MAX_META_CT);
       const fk = n.fk === undefined ? undefined : encField(n.fk, MAX_FK_CT);
@@ -689,12 +699,23 @@ async function archiveRoute(request, env, url, dir, uid, pol, username, gen, sub
       old[kid] = data;
     }
   }
+  // The archive's reverse links: their private keys re-sealed under the Drive's DK now ({ linkId: {iv, ct} }).
+  const reverse = {};
+  if (body.reverse !== undefined) {
+    if (!isObj(body.reverse) || Object.keys(body.reverse).length > MAX_ARCHIVE_LINKS) return invalid(`reverse must be { linkId: {iv, ct} } (at most ${MAX_ARCHIVE_LINKS}).`);
+    for (const [id, v] of Object.entries(body.reverse)) {
+      const priv = LINK_ID_RE.test(id) ? encField(v, MAX_LINK_PRIV_CT) : null;
+      if (!priv) return invalid('Each reverse link needs its private key sealed as {iv, ct}.');
+      reverse[id] = priv;
+    }
+  }
   const refused = await ownerStepUp(request, env, url, dir, uid, body);
   if (refused) return refused;
-  const r = await driveStub(env, uid).finishArchive(uid, gen, { old });
+  const r = await driveStub(env, uid).finishArchive(uid, gen, { old, reverse });
   if (!r.ok) return fromDir(r);
-  await dir.driveOwnerLog(uid, 'drive.archive_restored', `archive ${gen}; earlier escrow keys back: ${Object.keys(old).length}`);
-  return json({ ok: true });
+  await dir.driveOwnerLog(uid, 'drive.archive_restored', `archive ${gen}; earlier escrow keys back: ${Object.keys(old).length}; reverse links back: ${Object.keys(reverse).length}`);
+  if (r.resumed?.length) await dir.reverseArchiveEvent(uid, 'resumed', r.resumed);
+  return json({ ok: true, resumed: r.resumed ?? [] });
 }
 
 /**
@@ -737,6 +758,8 @@ async function startOver(request, env, url, dir, uid, pol, username, body) {
   const refused = await ownerStepUp(request, env, url, dir, uid, body);
   if (refused) return refused;
   const archived = await driveStub(env, uid).startOver(uid);
+  // The owner's reverse links are paused (their keys are in the archive; docs/DRIVE.md §3.2).
+  if (archived.paused?.length) await dir.reverseArchiveEvent(uid, 'paused', archived.paused);
   const r = await driveStub(env, uid).setKeys(uid, { driveSalt: body.driveSalt, set: [{ kind: 'pw', ref: 'pw', data: pwData }], escrowPriv, escrowSignPriv, newEscrowKid: newKid, firstEscrow: !pol.escrowPub, kcv: body.kcv });
   if (!r.ok) return fromDir(r);
   const e = await dir.setEscrowPub(uid, jwk, { signPub: signJwk, sig: body.escrowSig });

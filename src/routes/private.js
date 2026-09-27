@@ -448,6 +448,8 @@ export async function withLiveStatus(env, dir, rows, uid = null) {
       await dir.markShareEnded(r.id, s.state === 'expired' ? 'expired' : 'ended');
       return { ...r, status: s.state === 'expired' ? 'expired' : 'ended', left: 0, ...received };
     }
+    // A paused reverse link (the owner started over; docs/DRIVE.md §3.2) is still active: it resumes on a restore.
+    if (s.paused) received.paused = true;
     return { ...r, views_total: s.views ?? r.views_total, left: s.left ?? null, expires: s.expires ?? r.expires, ...received };
   }));
 }

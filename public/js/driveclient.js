@@ -776,8 +776,11 @@ async function findArchive(kit, st) {
  * key re-sealed under the Drive's DK (content is untouched: each file has its
  * own key); a top-level name the Drive already has gets " (2)"… (as uploads
  * do); the archive's escrow keys that users' wraps are still made for join
- * the owner's earlier keys, so those Drives open again. The kit's DK is not
- * kept.
+ * the owner's earlier keys, so those Drives open again. The archive's reverse
+ * links (paused when the owner started over) get their private keys re-sealed
+ * under the Drive's DK and resume; the items they received come back as they
+ * arrived (sealed to the link's key) and are taken in like any received file.
+ * The kit's DK is not kept.
  */
 async function restoreArchive(u, kit, st, arch, password, step) {
   const dk = loadSessionKey(u.id) || await unlockWithPassword(password, st.driveSalt, st.wraps);
@@ -807,6 +810,8 @@ async function restoreArchive(u, kit, st, arch, password, step) {
   const files = { from: from.files, to: to.files };
   const out = [];
   for (const n of all) {
+    // A received item: sealed to its link's key, not the DK — it comes back as it is.
+    if (n.rs) { out.push({ id: n.id }); continue; }
     const top = n.parent === ROOT;
     const x = { id: n.id, name: await reseal(names, 'name', n, n.name, (t) => (top ? uniqueName(taken, cleanName(t)) : t)) };
     if (n.meta) x.meta = await reseal(names, 'meta', n, n.meta);
@@ -830,7 +835,20 @@ async function restoreArchive(u, kit, st, arch, password, step) {
     if (k) old[kid] = { pub: k.publicJwk, data: await sealPrivateKeyBytes(dk, 'escrow', k.pkcs8) }; else missing.push(`earlier escrow key ${kidFingerprint(kid)}`);
   }
   for (const k of pool.values()) if (!kit.keys.has(k.kid)) k.pkcs8.fill(0);
-  await api.archiveFinish(arch.gen, { ...(Object.keys(old).length ? { escrowPrivOld: old } : {}), ...step });
+  // The archive's reverse links: each private key from the kit's DK to the Drive's DK.
+  const links = {};
+  for (const l of Array.isArray(arch.view.reverse) ? arch.view.reverse : []) {
+    let pkcs8 = null;
+    try {
+      pkcs8 = await openField(files.from, 'reversePriv', l.id, sealed(l.priv));
+      links[l.id] = await sealField(files.to, 'reversePriv', l.id, pkcs8);
+    } catch {
+      links[l.id] = l.priv; // does not open: kept as it was (the Drive shows no link for it)
+    } finally {
+      if (pkcs8) pkcs8.fill(0);
+    }
+  }
+  await api.archiveFinish(arch.gen, { ...(Object.keys(old).length ? { escrowPrivOld: old } : {}), ...(Object.keys(links).length ? { reverse: links } : {}), ...step });
   saveSessionKey(dk, u.id);
   await client.maintain(await loadState()).catch(() => {});
   return { client, missing, restored: { escrow: false, signing: false, earlier: Object.keys(old).length, archive: arch.gen, items: all.length } };

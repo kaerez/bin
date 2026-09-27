@@ -108,7 +108,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         received, receivedFailed: [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && n.rfail).length,
         ...(role === 'owner' ? {
           escrowPriv: S.escrowPriv, escrowSignPriv: S.escrowSignPriv, escrowPrivOld: S.escrowPrivOld, escrowKids: S.escrowKids, kit: S.kit,
-          archives: S.archives.map((a) => ({ gen: a.gen, at: a.at, items: a.nodes.size, bytes: [...a.nodes.values()].reduce((t, n) => t + n.size, 0) })),
+          archives: S.archives.map((a) => ({ gen: a.gen, at: a.at, items: a.nodes.size, bytes: [...a.nodes.values()].reduce((t, n) => t + n.size, 0), paused: S.reverse.filter((r) => r.agen === a.gen && r.status === 'paused').length })),
           escrowVersion: S.escrowPub ? (S.escrowVer && S.escrowVer.kid === await escrowKeyId(S.escrowPub) ? S.escrowVer : { version: null, kid: await escrowKeyId(S.escrowPub), created: null }) : null,
         } : {}),
       });
@@ -232,6 +232,11 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         const nodes = new Map([...S.nodes].filter(([id]) => id !== 'root'));
         S.archives.push({ gen, at: tick(), nodes, wraps: [...S.wraps.values()], driveSalt: S.driveSalt, escrowPriv: S.escrowPriv, escrowSignPriv: S.escrowSignPriv, escrowPrivOld: S.escrowPrivOld });
         for (const id of nodes.keys()) S.nodes.delete(id);
+        // As the server: the links' keys are in the archive; the active ones are paused.
+        for (const r of S.reverse) {
+          if (r.agen === undefined || r.agen === null) r.agen = gen;
+          if (r.agen === gen && r.status === 'active') r.status = 'paused';
+        }
         S.wraps.clear();
         for (const w of body.set) S.wraps.set(`${w.kind}|${w.ref}`, w);
         S.archives.at(-1).kcv = S.kcv;
@@ -250,13 +255,15 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
           const all = [...a.nodes.values()].sort((x, y) => (x.id < y.id ? -1 : 1)).filter((n) => n.id > after);
           const page = all.slice(0, S.archivePage || 500);
           const out = (n) => ({ ...n, name: typeof n.name === 'string' ? JSON.parse(n.name) : n.name, meta: n.meta ? (typeof n.meta === 'string' ? JSON.parse(n.meta) : n.meta) : null, fk: n.fk ? (typeof n.fk === 'string' ? JSON.parse(n.fk) : n.fk) : null });
-          return ok({ gen: a.gen, at: a.at, escrowPriv: a.escrowPriv, escrowSignPriv: a.escrowSignPriv, escrowPrivOld: a.escrowPrivOld, items: a.nodes.size, nodes: page.map(out), next: all.length > page.length ? page[page.length - 1].id : null });
+          const links = after ? {} : { reverse: S.reverse.filter((r) => r.agen === a.gen).map((r) => ({ id: r.id, priv: r.priv, status: r.status })) };
+          return ok({ gen: a.gen, at: a.at, escrowPriv: a.escrowPriv, escrowSignPriv: a.escrowSignPriv, escrowPrivOld: a.escrowPrivOld, items: a.nodes.size, nodes: page.map(out), ...links, next: all.length > page.length ? page[page.length - 1].id : null });
         }
         const f = stepFail(body);
         if (!m[2] && method === 'DELETE') {
           if (body.confirm !== S.user.username) return fail(400, 'confirm_required');
           if (f) return f;
           for (const id of a.nodes.keys()) for (const k of [...S.chunks.keys()]) if (k.startsWith(`${id}/`)) S.chunks.delete(k);
+          for (const r of S.reverse) if (r.agen === a.gen && r.status === 'paused') { r.status = 'revoked'; S.audit.push({ action: 'reverse.revoked', detail: `id=${r.id} reason=archive_deleted` }); }
           S.archives = S.archives.filter((x) => x !== a);
           S.audit.push({ action: 'drive.archive_deleted', detail: `archive ${a.gen}` });
           return ok({ ok: true });
@@ -267,9 +274,12 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
             const n = a.nodes.get(x.id);
             if (!n) return fail(404, 'not_found');
             if (n.parent !== 'root' && !S.nodes.has(n.parent) && !body.nodes.some((y) => y.id === n.parent)) return fail(409, 'parent_first');
+            // A received item comes back as it is (its id only); any other item needs its name re-sealed.
+            if (n.rs ? (x.name !== undefined || x.meta !== undefined || x.fk !== undefined) : x.name === undefined) return fail(400, n.rs ? 'received_as_is' : 'invalid');
           }
           for (const x of body.nodes) {
             const n = a.nodes.get(x.id);
+            if (n.rs) { S.nodes.set(x.id, { ...n }); a.nodes.delete(x.id); continue; }
             S.nodes.set(x.id, { ...n, name: JSON.stringify(x.name), ...(x.meta !== undefined ? { meta: JSON.stringify(x.meta) } : {}), ...(x.fk !== undefined ? { fk: JSON.stringify(x.fk) } : {}) });
             a.nodes.delete(x.id);
           }
@@ -280,7 +290,14 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
           for (const [k, x] of Object.entries(body.escrowPrivOld || {})) {
             if (k === kid || !S.escrowKids.includes(k) || await escrowKeyId(x.pub) !== k) return fail(400, 'key_mismatch');
           }
+          const links = S.reverse.filter((r) => r.agen === a.gen);
+          const given = body.reverse || {};
+          if (Object.keys(given).length !== links.length || links.some((r) => !given[r.id])) return fail(409, 'reverse_keys_required');
           for (const [k, x] of Object.entries(body.escrowPrivOld || {})) S.escrowPrivOld = { ...S.escrowPrivOld, [k]: x.data };
+          for (const r of links) {
+            Object.assign(r, { priv: given[r.id], agen: null });
+            if (r.status === 'paused') { r.status = 'active'; S.audit.push({ action: 'reverse.resumed', detail: `id=${r.id}` }); }
+          }
           S.archives = S.archives.filter((x) => x !== a);
           S.audit.push({ action: 'drive.archive_restored', detail: `archive ${a.gen}` });
           return ok({ ok: true });
@@ -328,7 +345,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       // As the server: oldest first, pages of S.receivedPage with a cursor; `failed=1` lists the failed ones.
       const failed = u.searchParams.get('failed') === '1';
       const after = u.searchParams.get('after');
-      const all = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !!n.rfail === failed)
+      const archivedKey = (n) => S.reverse.some((r) => r.id === n.rs && r.agen !== undefined && r.agen !== null);
+      const all = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !!n.rfail === failed && !archivedKey(n))
         .sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : 1));
       const from = after ? all.findIndex((n) => `${n.created}.${n.id}` === after) + 1 : 0;
       const page = all.slice(from, from + S.receivedPage);
