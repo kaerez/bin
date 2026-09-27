@@ -15,6 +15,14 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Nothing the Worker serves is stored in Cloudflare's cache** (with Workers Caching on, see
+  Changed): the top-level fetch handler adds `Cloudflare-CDN-Cache-Control: no-store` to every
+  response it returns, errors and exceptions included, and `Cache-Control: no-store` to any
+  response without one of its own (the asset server's `307` for `/index.html` and the bare
+  `404` when the assets binding is missing had none, and would have been cached
+  heuristically). The home page and the anonymous tracker keep their browser caching. A
+  workerd test walks 148 routes, methods and outcomes (API-key calls to My shares and the
+  Account page's human checks included) and checks every response.
 - **Human check on every Account change:** with Turnstile on, changing the username, adding or
   removing a passkey, the "password and passkey" choice, new recovery codes, and creating,
   changing or revoking an API key now need a fresh Turnstile token (action `account`), like the
@@ -344,6 +352,34 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 - **iOS:** icons no longer blow up to full width when a stale stylesheet is served (intrinsic
   SVG sizes), and the service worker now always revalidates static assets with the server
   (cache version 2 drops the old cache).
+- **Accessibility (from an audit of the Chromium accessibility tree, axe-core, keyboard-only
+  use, forced colours, 320 px reflow, reduced motion and right-to-left text, #29):**
+  - **Landmarks and structure:** one `main`, `banner`, `contentinfo` (the footer now follows
+    `<main>`) and named navigation on every page; column headers of action columns are named
+    ("Actions", for screen readers only).
+  - **Tabs** (composer and admin) follow the ARIA pattern: one Tab stop, arrow keys (mirrored
+    right to left), Home / End, and every tab controls a labelled tab panel.
+  - **Password dialog:** everything behind it is inert (no focus, no clicks, out of the
+    accessibility tree), Tab stays inside, Escape closes and focus returns to the opener.
+  - **Form errors are tied to their fields** (`aria-invalid` and `aria-describedby`, focus
+    moved to the field) on login, setup, the share-password dialog, the viewer's password
+    prompt and the account's username and password forms.
+  - **Focus is kept** when a list or editor re-renders: after Apply / Revoke on My shares,
+    after creating, disabling or deleting users and roles, after dismissing the install
+    banner; opening a user or role editor moves focus to its heading.
+  - **Live regions** exist before they speak and do not chatter: upload, download, preview
+    and slow key-derivation progress are announced at the start and at each quarter, and the
+    file list is no longer a live region.
+  - **Forced colours (Windows High Contrast):** focus rings are outlines (the box-shadow rings
+    vanished there), and the selected tab, pressed toggles, the current page and the widget's
+    switches keep a visible state.
+  - **Reduced motion:** the widget's "Stop animations" now also stops the theme wave, the
+    composer's send animation and smooth scrolling started from script, like the system
+    setting; admin editors no longer smooth-scroll when either asks for reduced motion.
+  - **Widget in Hebrew:** the panel opens next to its button, and the switches are mirrored.
+  - **Target size:** checkboxes keep a 24 px target with the widget's "Smaller" text.
+  - **Statement defaults:** the review note says what was tested, and the limitation "Not yet
+    tested with every combination of screen reader and browser" is removed.
 - **Install banner:** a floating, dismissable card placed where the browser's Share button is —
   top on iPad and in Chrome/Edge on iPhone, bottom in Safari/Firefox on iPhone and for the
   Chromium install prompt — with per-browser Add to Home Screen instructions (iOS 26 "⋯" menu
@@ -351,6 +387,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Smart Placement and Workers Caching** are on in `wrangler.toml` (and
+  `wrangler.toml.example`): `[placement] mode = "smart"` runs the fetch handler where it is
+  fastest overall (near the Directory Durable Object for most API calls), and
+  `[cache] enabled = true` sets the default caching for fetch-handler responses. No
+  per-entrypoint override is set (the default export is the only fetch entrypoint), and no
+  Worker response opts into the cache (see Security).
 - **Imports never remove or overwrite an existing account's credentials** (the owner's
   included). An account that already exists only gets its role set (if that part is chosen;
   never the owner's) and the imported passkeys added (if that part is chosen); its password,

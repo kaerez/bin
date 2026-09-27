@@ -5,7 +5,7 @@
 import { listShares, updateShare, revokeShare, shareOpens } from '../../js/api.js';
 import { opensButton } from './receipts.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
-import { toast } from '../../js/ui.js';
+import { toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 
 const $ = (s) => document.querySelector(s);
@@ -22,13 +22,14 @@ let rows = [];
   reload();
 })();
 
-function reload() {
+/** `focusKey`: the control to put focus back on after the re-render (see render). */
+function reload(focusKey = null) {
   offset = 0;
   rows = [];
-  load(true);
+  load(true, typeof focusKey === 'string' ? focusKey : null);
 }
 
-async function load(fresh) {
+async function load(fresh, focusKey = null) {
   const msg = $('#shares-msg');
   try {
     const qs = new URLSearchParams({ q: $('#shares-q').value.trim(), status: $('#shares-status').value, offset: String(offset) });
@@ -36,7 +37,7 @@ async function load(fresh) {
     rows = fresh ? r.rows : rows.concat(r.rows);
     offset = rows.length;
     $('#shares-more').hidden = r.rows.length < 50;
-    render();
+    render(focusKey);
     showMsg(msg, rows.length ? '' : 'Nothing here yet.', false);
   } catch (e) {
     showMsg(msg, friendlyError(e));
@@ -45,7 +46,10 @@ async function load(fresh) {
 
 const now = () => Math.floor(Date.now() / 1000);
 
-function render() {
+/** `focusKey`: where focus goes if the re-render loses it (see keepFocus). */
+function render(focusKey = null) {
+  // A revoke or an update re-renders the rows: keep focus in the same row.
+  const refocus = keepFocus($('#shares-body'), { fallback: $('#view-shares .title'), key: focusKey });
   const body = clear($('#shares-body'));
   for (const [i, r] of rows.entries()) {
     const active = r.status === 'active';
@@ -54,7 +58,7 @@ function render() {
       : `${r.left ?? '—'} left of ${r.views_total}`;
     const expires = r.expires ? (active && r.expires > now() ? `in ${formatCoarse(r.expires - now())}` : formatDate(r.expires)) : '—';
     const locked = !!r.locked;
-    const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': 'Label', placeholder: '(no label)', disabled: locked });
+    const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': 'Label', placeholder: '(no label)', disabled: locked, dataset: { focusKey: `share:${r.id}:label` } });
     // Shown under the field while it is being edited (see .label-cell in styles.css);
     // aria-describedby announces it on focus either way.
     const labelHint = unencryptedHint(`share-label-hint-${i}`, labelIn);
@@ -65,16 +69,16 @@ function render() {
     if (active && locked) {
       actions.appendChild(h('span.mono.muted', { text: 'Locked by the administrator — it cannot be changed or revoked.' }));
     } else if (active) {
-      actions.appendChild(h('button.btn', { type: 'button', text: 'Extend', on: { click: () => openExtend(r, tr) } }));
-      const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
+      actions.appendChild(h('button.btn', { type: 'button', text: 'Extend', dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openExtend(r, tr) } }));
+      const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `share:${r.id}:revoke` } });
       armConfirm(rv, 'Revoke now — irreversible', async () => {
         rv.disabled = true;
-        try { await revokeShare(r.id); r.status = 'revoked'; render(); toast('Share revoked.'); } catch (e) { rv.disabled = false; toast(friendlyError(e), { error: true }); }
+        try { await revokeShare(r.id); r.status = 'revoked'; render(`share:${r.id}:revoke`); toast('Share revoked.'); } catch (e) { rv.disabled = false; rv.focus(); toast(friendlyError(e), { error: true }); }
       });
       actions.appendChild(rv);
     }
     // data-label = the column name, shown per cell in the stacked (<640px) layout.
-    const tr = h('tr', { dataset: { status: r.status } },
+    const tr = h('tr', { dataset: { status: r.status, focusKey: `share:${r.id}` } },
       h('td', { dataset: { label: 'Label' } }, h('div.label-cell', {}, labelIn, labelHint)),
       h('td.mono', { dataset: { label: 'Type' }, text: KIND_NAMES[r.kind] || 'note' }),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
@@ -87,6 +91,7 @@ function render() {
     tr.querySelector('td[data-label="Opened"]').appendChild(opensButton(r, () => shareOpens(r.id), 8, tr));
     body.appendChild(tr);
   }
+  refocus();
 }
 
 function openExtend(r, tr) {
@@ -110,7 +115,8 @@ function openExtend(r, tr) {
     try {
       await updateShare(r.id, patch);
       toast('Share updated.');
-      reload();
+      // Apply was disabled while saving (so focus has already left it): back to this share's Extend.
+      reload(`share:${r.id}:extend`);
     } catch (e) {
       save.disabled = false;
       showMsg(msg, friendlyError(e));
@@ -119,7 +125,7 @@ function openExtend(r, tr) {
   };
   const limitsText = `Your limits: ${L.maxViews === null ? 'any number of views' : `up to ${L.maxViews} views`}, `
     + `${L.maxExpireSec === null ? 'expiry up to 365 days' : `expiry up to ${formatCoarse(L.maxExpireSec)} from now`}.`;
-  const row = h('tr.extend-row', {}, h('td.cell-full', { colspan: '8' },
+  const row = h('tr.extend-row', { dataset: { focusKey: `share:${r.id}:extend` } }, h('td.cell-full', { colspan: '8' },
     h('div.extend-box', {},
       r.kind !== 'files' && r.kind !== 'drive' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
       h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),

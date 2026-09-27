@@ -475,6 +475,8 @@ html.dark .theme-toggle .ico-moon { display: block; }
 .toolbar > .human-wait, .btn-row > .human-wait { flex-basis: 100%; }
 .msg { font-family: var(--mono); font-size: .8125rem; color: var(--ink-2); letter-spacing: .01em; padding: 1.25rem 0; text-align: center; }
 .msg.error { color: var(--seal); }
+/* Always in the page (a live region must exist before it speaks); no box while empty. */
+#upload-progress:empty { padding: 0; }
 #toast { position: fixed; left: 50%; bottom: calc(2rem + env(safe-area-inset-bottom, 0px)); z-index: 50; transform: translateX(-50%) translateY(12px);
   background: var(--accent-fill); color: var(--accent-fg); font-family: var(--sans); font-size: .875rem; font-weight: 500; letter-spacing: .01em;
   padding: .7rem 1.1rem; border-radius: 3px; max-width: calc(100vw - 2rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)); text-align: center; overflow-wrap: anywhere; box-shadow: var(--shadow-overlay);
@@ -485,6 +487,10 @@ html.dark .theme-toggle .ico-moon { display: block; }
 html.pwa-banner-open:not(.pwa-banner-top) #toast { bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); }
 
 .foot { margin-top: auto; padding-top: 3rem; text-align: center; }
+/* The footer follows <main> (so it is the page's contentinfo landmark); the
+   same column as .wrap. main grows (flex: 1), keeping it at the bottom. */
+body > .foot { position: relative; z-index: 10; width: 100%; max-width: 680px; margin: 0 auto; padding: 1rem 1.5rem 2rem; }
+@media (max-width: 768px) { body > .foot { padding: 1rem 1rem 2rem; } }
 .foot p { font-family: var(--sans); font-size: .78rem; color: var(--ink-3); letter-spacing: .01em; }
 .foot .foot-crypto { font-family: var(--mono); font-size: .7rem; letter-spacing: .04em; color: var(--ink-3); margin-top: .3rem; }
 .foot-crypto .foot-frag { color: var(--accent); }
@@ -627,7 +633,8 @@ button.back { cursor: pointer; }
 .rules-in { min-width: 14rem; font-family: var(--mono, monospace); resize: vertical; }
 .viewer-opt { display: flex; align-items: center; gap: .5rem; padding: 0 1.1rem .9rem; font-size: .82rem; color: var(--ink-2); }
 /* WCAG 2.2 target size (2.5.8): checkboxes and radios are at least 24px across. */
-input[type="checkbox"], input[type="radio"] { width: 1.125rem; height: 1.125rem; margin: 3px; flex: none; }
+/* max(): the widget's "Smaller" text size must not shrink a box below 18 px (+ 3 px margins = a 24 px target). */
+input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height: max(1.125rem, 18px); margin: 3px; flex: none; }
 .mime-in { width: 12rem; max-width: 100%; padding: .3rem .5rem; font-size: .72rem; }
 .mime-in[aria-invalid="true"] { border-color: var(--seal); color: var(--seal); }
 
@@ -978,6 +985,12 @@ html.dark { --a11y-mark: #ff6b6b; }
 .a11y-thumb { position: absolute; left: 0; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transform: translateX(3px); transition: transform .2s var(--ease); }
 .a11y-switch[aria-checked="true"] .a11y-track { background: var(--accent-fill); }
 .a11y-switch[aria-checked="true"] .a11y-thumb { transform: translateX(23px); }
+/* Right to left (Hebrew): the thumb starts at the inline start (right) and "on" moves it left. */
+.a11y-panel[dir="rtl"] .a11y-thumb { transform: translateX(23px); }
+.a11y-panel[dir="rtl"] .a11y-switch[aria-checked="true"] .a11y-thumb { transform: translateX(3px); }
+/* inset-inline-start follows the panel's own direction: a panel whose language
+   runs the other way from the page's still opens on the button's side. */
+html:not([dir="rtl"]) .a11y-panel[dir="rtl"], html[dir="rtl"] .a11y-panel[dir="ltr"] { inset-inline-start: auto; inset-inline-end: max(1rem, env(safe-area-inset-left, 0px)); }
 .a11y-seg { display: flex; gap: .35rem; margin: .45rem 0; }
 .a11y-seg button { flex: 1; min-height: 36px; padding: .3rem .5rem; border: 1px solid var(--rule-2); border-radius: 3px; background: transparent; color: var(--ink); font: inherit; cursor: pointer; }
 /* Pressed state is not carried by colour alone: a check mark and a heavier weight. */
@@ -995,6 +1008,8 @@ html.a11y-no-anim *, html.a11y-no-anim *::before, html.a11y-no-anim *::after {
   animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; animation-delay: 0s !important;
   transition-duration: 0.001ms !important; transition-delay: 0s !important; }
 html.a11y-no-anim { scroll-behavior: auto !important; }
+/* `*` does not reach the view-transition pseudos (theme.js also skips the wave in this mode). */
+html.a11y-no-anim::view-transition-old(root), html.a11y-no-anim::view-transition-new(root) { animation: none !important; }
 html.a11y-no-anim .reveal { opacity: 1; }
 /* High contrast: recolour (never `filter`, which would re-anchor every fixed element). */
 html.a11y-contrast { --a11y-mark: #ff5252; background-color: #000 !important; }
@@ -1064,3 +1079,29 @@ p a:not(.btn):not(.cta):not(.skip-link), li a:not(.btn):not(.cta) { text-decorat
 .bulk-row .field-label { min-width: 8.5rem; }
 @media (min-width: 641px) { .part-table td[data-label] > label.inline, .part-table td[data-label] > input[type="checkbox"] { white-space: nowrap; } }
 .part-notes { margin-top: .6rem; }
+
+/* ── forced colours (Windows High Contrast and similar) ─────────────────────
+   The system palette replaces every colour and drops box-shadows, so the
+   shadow focus rings above would vanish and states shown only by a fill
+   (selected tab, pressed toggle, current page, a switch that is on) would look
+   the same as their opposite. Outlines survive, and system colours with
+   forced-color-adjust: none keep the states apart. */
+@media (forced-colors: active) {
+  :focus-visible,
+  .input:focus-visible, .peek:focus-visible, .cta:focus-visible, .btn:focus-visible, .send:focus-visible, .lock:focus-visible,
+  .tab:focus-visible, .linkbtn:focus-visible, .pwa-close:focus-visible, .dropzone:focus-visible, .back:focus-visible,
+  .a11y-btn:focus-visible, .a11y-panel button:focus-visible, .a11y-panel a:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+  /* Inside the clipped option groups: drawn inward. */
+  .opt .input:focus-visible, .opt-toggle:focus-visible { outline: 2px solid Highlight; outline-offset: -3px; }
+  /* The note editor's ring is its box's. */
+  .editor-box:focus-within, .editor-box:has(.editor:focus) { outline: 2px solid Highlight; outline-offset: 2px; }
+  .tab[aria-selected="true"], .opt-toggle[aria-pressed="true"], .lock.active, .dash-nav .back[aria-current="page"] {
+    forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+  .lock.active .lock-ico { color: HighlightText; }
+  .a11y-track { forced-color-adjust: none; background: Canvas; border: 1px solid CanvasText; box-sizing: border-box; }
+  .a11y-thumb { forced-color-adjust: none; background: CanvasText; top: 2px; }
+  .a11y-switch[aria-checked="true"] .a11y-track { background: Highlight; border-color: Highlight; }
+  .a11y-switch[aria-checked="true"] .a11y-thumb { background: HighlightText; }
+  .a11y-seg button[aria-pressed="true"] { border: 2px solid Highlight; }
+  .pill { border: 1px solid CanvasText; }
+}
