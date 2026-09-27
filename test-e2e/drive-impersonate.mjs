@@ -4,11 +4,13 @@
 // user's file, uploads one, shares it (the recipient opens the link) and
 // revokes nothing of theirs; the user's key sits in its own tab slot, never
 // over the owner's, and goes when the impersonation ends. The user's own
-// keys cannot be removed or replaced (the page says why). A user with no
-// Drive yet gets one created by the owner, which the user's next sign-in
-// finishes with a password wrap. Nothing appears in the user's own activity;
-// the admin audit shows the owner as the real actor. Also: the notice when
-// the owner's own Drive is not unlocked in the tab.
+// keys cannot be removed or replaced (the page says why). A user who has not
+// signed in since the Drive was enabled has no Drive: the owner sees a notice
+// and nothing is created; the user's first sign-in sets it up by itself
+// (password and escrow wraps). The user's activity lists what was done as
+// them, as their own, with no trace of the impersonation; the admin audit
+// shows the owner as the real actor. Also: the notice when the owner's own
+// Drive is not unlocked in the tab.
 // A manual test, not run in CI: see test-e2e/README.md.
 // Usage: WT=<repo checkout> BASE=http://127.0.0.1:8787 [CHROMIUM=<path>] node test-e2e/drive-impersonate.mjs
 import { chromium } from 'playwright-core';
@@ -177,27 +179,35 @@ try {
   s = await slots(p);
   check('back as the owner: alice\'s key is gone from the tab, the owner\'s stays', !s.imp && !s.impUid && s.dk === ownerSlot);
 
-  // ── bob has no Drive yet: the owner creates it while acting as him ──
+  // ── bob has not signed in since the Drive was enabled: nothing is created ──
   await logInAs(p, 'bob');
   await openDrivePage(p);
-  check('as bob: a new Drive is created and opens', await p.isVisible('#drive-app'));
-  await p.setInputFiles('#drive-file-input', [{ name: 'welcome-bob.txt', mimeType: 'text/plain', buffer: Buffer.from('hello bob\n') }]);
-  await waitRow(p, 'welcome-bob.txt');
+  check('as bob: the notice says he has not signed in since the Drive was enabled',
+    await p.isVisible('#drive-impersonating') && (await p.getAttribute('#drive-impersonating', 'data-reason')) === 'no_drive'
+      && /The user hasn’t signed in since the Drive was enabled/.test(await p.textContent('#drive-impersonating')) && await p.isHidden('#drive-app'));
   const bst = (await api(p, '/api/private/drive')).body;
-  check('as bob: escrow + hand-over wraps, no password wrap, no hand-over key for the owner', bst.wraps.map((w) => w.kind).sort().join(',') === 'escrow,handoff' && bst.handoffKey === undefined);
+  check('as bob: nothing is created (no wraps, no salt)', bst.wraps.length === 0 && bst.driveSalt === null, JSON.stringify(bst.wraps));
+  s = await slots(p);
+  check('as bob: no key for bob in the tab', !s.imp && !s.impUid && s.dk === ownerSlot);
   await returnToAdmin(p);
+  // His first sign-in sets it up by itself: password and escrow wraps, no prompt.
   const bc = await b.newContext({ reducedMotion: 'reduce' });
   const bp = await bc.newPage();
   watch(bp);
   await login(bp, 'bob', BOB_PW);
-  await openDrivePage(bp);
-  check('bob: his sign-in finishes the set-up; the Drive opens without a prompt', await bp.isVisible('#drive-app'));
-  await waitRow(bp, 'welcome-bob.txt');
   const bst2 = (await api(bp, '/api/private/drive')).body;
-  check('bob: now pw + escrow wraps, the hand-over gone', bst2.wraps.map((w) => w.kind).sort().join(',') === 'escrow,pw' && !bst2.handoffKey);
-  const bobLog = (await api(bp, '/api/private/me/activity')).body.rows.map((x) => x.action);
-  check('bob: his activity has nothing of the owner\'s Drive use', !bobLog.some((x) => /^drive\.|^impersonate|^share\./.test(x)), bobLog.join(','));
+  check('bob: his first sign-in set up his Drive (pw + escrow wraps, the escrow key pinned)', bst2.wraps.map((w) => w.kind).sort().join(',') === 'escrow,pw' && !!bst2.escrowPin && !('handoffKey' in bst2), JSON.stringify(bst2.wraps.map((w) => w.kind)));
+  await openDrivePage(bp);
+  check('bob: the Drive opens without a prompt', await bp.isVisible('#drive-app') && await bp.isHidden('#drive-unlock'));
+  const bobLog = (await api(bp, '/api/private/me/activity')).body.rows;
+  check('bob: his activity shows his own set-up and nothing of the owner\'s visit', bobLog.some((x) => x.action === 'drive.keys_changed')
+    && !bobLog.some((x) => /imperson|escrow_used|acting as/i.test(`${x.action} ${x.detail}`)), bobLog.map((x) => x.action).join(','));
   await bc.close();
+  // And now the owner opens it through the escrow.
+  await logInAs(p, 'bob');
+  await openDrivePage(p);
+  check('as bob, after his sign-in: his Drive opens through the escrow', await p.isVisible('#drive-app'));
+  await returnToAdmin(p);
 
   // ── the owner's own Drive locked in a fresh tab: a notice, not a prompt ──
   const lc = await b.newContext({ reducedMotion: 'reduce' });
@@ -211,13 +221,15 @@ try {
   await returnToAdmin(l);
   await lc.close();
 
-  // ── nothing new in alice's own activity; the admin audit has the truth ──
-  const aliceAfter = (await api(a, '/api/private/me/activity')).body.rows;
-  check('alice: nothing new in her own activity', JSON.stringify(aliceAfter.map((x) => x.id)) === JSON.stringify(aliceBefore), aliceAfter.map((x) => x.action).join(','));
+  // ── alice's activity lists what was done as her, as hers; the admin audit has the truth ──
+  const aliceAfter = (await api(a, '/api/private/me/activity')).body.rows.filter((x) => !aliceBefore.includes(x.id));
+  const newActs = new Set(aliceAfter.map((x) => x.action));
+  check('alice: the Drive actions done as her are in her own activity', ['drive.file_read', 'drive.file_uploaded', 'share.created'].every((x) => newActs.has(x)), [...newActs].join(','));
+  check('alice: with no trace of the impersonation (no start or end, no escrow use, no actor)', !aliceAfter.some((x) => /imperson|escrow|owner/i.test(`${x.action} ${x.detail}`) || 'actor' in x || 'imp' in x));
   await a.goto(`${BASE}/dashboard/account/`);
   await a.waitForSelector('#activity-body td');
   const seen = await a.textContent('#activity-body');
-  check('alice: her activity view never mentions the owner\'s use', !/imperson|escrow|drive\./i.test(seen));
+  check('alice: her activity view never mentions the impersonation or the owner\'s escrow use', !/imperson|escrow_used|acting as/i.test(seen));
   await openDrivePage(a);
   await waitRow(a, 'from-admin.txt');
   check('alice: she sees the file the owner uploaded', (await rowNames(a)).includes('from-admin.txt'));
@@ -226,9 +238,10 @@ try {
   const acts = new Set(mine.map((x) => x.action));
   const want = ['impersonate.start', 'impersonate.end', 'drive.escrow_used', 'drive.file_read', 'drive.file_uploaded', 'share.created'];
   check('admin audit: the owner as the real actor of each', want.every((x) => acts.has(x)), [...acts].join(','));
-  check('admin audit: Drive rows marked as done acting as alice', mine.filter((x) => /^drive\.|^share\./.test(x.action)).every((x) => x.imp === 1));
-  const bobAudit = (await api(p, `/api/private/admin/audit?user=${bobId}`)).body.rows.map((x) => x.action);
-  check('admin audit: bob\'s Drive created by the owner (drive.setup)', bobAudit.includes('drive.setup'));
+  check('admin audit: Drive rows marked as done acting as alice (the escrow use as the owner\'s own)',
+    mine.filter((x) => /^drive\.|^share\./.test(x.action)).every((x) => x.imp === 1 && x.adm === (x.action === 'drive.escrow_used' ? 1 : 0)));
+  const bobAudit = (await api(p, `/api/private/admin/audit?user=${bobId}`)).body.rows;
+  check('admin audit: nothing was created in bob\'s Drive by the owner', !bobAudit.some((x) => x.actor === 'owner' && /^drive\./.test(x.action) && x.action !== 'drive.escrow_used'), bobAudit.map((x) => x.action).join(','));
   await ac.close();
   await oc.close();
 } catch (e) {

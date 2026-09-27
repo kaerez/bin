@@ -3,7 +3,7 @@
 // owner's session is the authority): password (any password; the user's
 // sessions end, the owner's does not), username, API keys, passkeys,
 // recovery codes and the sign-in steps, as well as notes, files and "My
-// shares". Impersonation is invisible to the user: their own activity shows
+// shares" and the Drive. Impersonation is invisible to the user: their own activity shows
 // each action as their own, while the owner-only admin audit keeps the
 // start, the end and the real actor. The admin panel, nested impersonation
 // and keys for the owner stay out of reach from inside impersonation.
@@ -11,6 +11,9 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { owner, makeUser, login, fetchJson, cookieOf, salt16, proofFor, freshIp, ORIGIN, USER_PW, intent, createNote } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
+import { enableDrive, escrowWrap, mkdir, uploadFile, getChunk, enc, del } from './drive-helpers.js';
+import { encryptPaste } from '../public/js/crypto.js';
+import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -182,6 +185,58 @@ describe('while impersonating, the owner changes the account with no confirmatio
     expect(Object.keys(row)).not.toContain('actor');
     for (const action of ['share.created', 'share.updated', 'share.revoked']) await loggedAsTheirs(u.id, u.cookie, action);
     await invisible(u.cookie);
+  });
+});
+
+describe('the Drive while impersonating (docs/DRIVE.md §9)', () => {
+  /** A Drive share of `nodes` (a refs manifest, as the browser makes one). */
+  async function driveShare(cookie, nodes) {
+    const manifest = { v: 3, kind: 'refs', entries: nodes.map((id, ref) => ({ path: `f${ref}`, size: 0, type: 'application/octet-stream', mtime: 0, ref, fk: b64urlFromBytes(randomBytes(32)) })), dirs: [] };
+    const { body } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', bar: false, expire: '1h' });
+    const r = await fetchJson('/api/private/drive/shares', { method: 'POST', cookie, body: { nodes, views: null, expire: '1h', paste: body } });
+    expect(r.status).toBe(201);
+    return (await r.json()).id;
+  }
+  const wrap = () => `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}`;
+
+  it('folders, uploads, reads, renames, shares and deletes show in the user’s activity as theirs, exactly like their own', async () => {
+    const u = await makeUser('imp-drive');
+    await enableDrive(u.id);
+    const keys = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: u.cookie, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrap() }, await escrowWrap()] } });
+    expect(keys.status).toBe(200);
+    // What the user does themselves, for comparison.
+    const own = await uploadFile(u.cookie, 'root', 20);
+    expect((await getChunk(u.cookie, own.id, 0)).status).toBe(200);
+    const ownRows = await ownLog(u.cookie);
+
+    const ic = await impersonate(u.id);
+    expect((await fetchJson('/api/private/drive/escrow', { method: 'POST', cookie: ic, body: {} })).status).toBe(200);
+    const folder = await mkdir(ic);
+    expect(folder.res.status).toBe(201);
+    const up = await uploadFile(ic, folder.id, 30);
+    expect((await getChunk(ic, own.id, 0)).status).toBe(200);
+    expect((await fetchJson(`/api/private/drive/nodes/${up.id}`, { method: 'PATCH', cookie: ic, headers: intent, body: { name: enc() } })).status).toBe(200);
+    const sid = await driveShare(ic, [up.id]);
+    expect((await call(ic)('PATCH', `/api/private/shares/${sid}`, { label: 'drive share' })).status).toBe(200);
+    expect((await del(ic, folder.id)).status).toBe(200);
+    expect((await fetchJson('/api/private/admin/unimpersonate', { method: 'POST', cookie: ic, headers: intent })).status).toBe(200);
+
+    for (const action of ['drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'share.created', 'share.updated', 'share.revoked', 'drive.item_deleted']) {
+      await loggedAsTheirs(u.id, u.cookie, action);
+    }
+    await invisible(u.cookie);
+    // Rows done as the user look exactly like the user's own: same actions,
+    // same detail format, no escrow use (the owner's key, admin audit only).
+    const rows = (await ownLog(u.cookie)).filter((r) => !ownRows.some((x) => x.id === r.id));
+    expect(rows.some((r) => /escrow|owner/i.test(`${r.action} ${r.detail}`))).toBe(false);
+    const fmt = (r) => `${r.action} ${r.detail.replace(/[A-Za-z0-9_-]{22}/g, '<id>')}`;
+    const byOwnerRead = rows.find((r) => r.action === 'drive.file_read');
+    const byUserRead = ownRows.find((r) => r.action === 'drive.file_read');
+    expect(fmt(byOwnerRead)).toBe(fmt(byUserRead));
+    expect(fmt(rows.find((r) => r.action === 'drive.file_uploaded'))).toBe(fmt(ownRows.find((r) => r.action === 'drive.file_uploaded')));
+    const esc = (await audit(u.id)).filter((r) => r.action === 'drive.escrow_used');
+    expect(esc).toHaveLength(1);
+    expect(esc[0]).toMatchObject({ actor: 'owner', imp: 1, adm: 1 });
   });
 });
 

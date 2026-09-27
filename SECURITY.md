@@ -460,12 +460,14 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     owner-only admin audit records `impersonate.start`, `impersonate.end` and, for each action,
     the owner as the real actor (`imp`).
   - **The Drive:** the owner has the user's whole Drive, opened with the owner escrow (see
-    "Drive keys"). What the owner does there while impersonating — opening it with the escrow
-    (`drive.escrow_used`), creating it, reads, uploads, changes, deletions, wraps added, Drive
-    shares and their revocation — is recorded in the owner-only admin audit with the owner as
-    the real actor (`imp`), marked as an admin action (`adm`), and never appears in the user's
-    own activity. The user's own password, recovery-code and passkey wraps are never removed or
-    replaced then (only added, for credentials the owner gives the user).
+    "Drive keys"). What the owner does there while impersonating — reads, uploads, folders,
+    renames, moves, deletions, wraps added, Drive shares and their changes — is logged exactly
+    like the rest of the account: in the user's activity as the user's own (no actor, no trace
+    of the impersonation), and in the owner-only admin audit with the owner as the real actor
+    (`imp`). Opening the Drive with the escrow is the owner's own action (`drive.escrow_used`,
+    admin audit only). The user's own password, recovery-code and passkey wraps are never removed
+    or replaced then (only added, for credentials the owner gives the user), and a user who has
+    no Drive yet gets none: nothing is created while impersonating.
 - **Admin share management**: the owner sees every user's shares and can change a share's label, views
   and expiry, revoke it, or **lock** it.
   - **Only metadata:** it never gains access to share content, which stays end-to-end
@@ -633,8 +635,21 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
   spent at sign-in loses its wrap on the server at once (the sign-in response carries it back
   once, so that sign-in can still open the Drive with it). `passkey`: HKDF over the WebAuthn
   PRF output for a fixed salt; the PRF output never leaves the browser (it is not part of the
-  assertion sent to the server). `escrow`: see below. `handoff`: see "Impersonation" below. The
+  assertion sent to the server). `escrow`: see below. There is no other kind of wrap. The
   Argon2 cost is fixed in the client and never taken from the server.
+- **Zero knowledge.** The server never holds DK, a key that opens DK, or anything that opens a
+  wrap: each wrap opens only with a secret the server does not have (the password, a recovery
+  code, a passkey's PRF output, or the owner's escrow private key — itself sealed under the
+  owner's DK). The only party other than the user who can open a Drive is the owner, through the
+  owner escrow below; there is no exception for the server. A regression test
+  (`test/drive-escrow.test.js`) checks that no Drive's storage holds any other key material and
+  that DK appears nowhere in the server's storage.
+- **Set-up.** DK is created only in the user's own browser, at their first sign-in once the Drive
+  is enabled (automatically: a `pw` wrap, the `escrow` wrap and the pin, and a `passkey` wrap
+  with PRF), and only after the owner's escrow key exists (before that the server refuses,
+  `409 escrow_not_ready`, and the page says the Drive is not ready yet). Nobody else creates a
+  Drive for a user: the owner impersonating a user who has none gets a notice and the server
+  refuses a first set-up then.
 - **Old passwords.** After a password change or an admin reset the `pw` wrap still opens with the
   old password (which may be the compromised one). The server marks it stale; the browser that
   knows the new password replaces it (without a second confirmation, since it is stale); an
@@ -662,7 +677,11 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
   to re-key a user's Drive after an admin password reset (the admin route; recorded in the
   admin audit as `drive.escrow_used`, with the user and the reason) and to open the user's Drive
   while the owner impersonates them (recorded in the admin audit only, see Impersonation).
-  Neither is ever shown in the user's own activity.
+  Neither is ever shown in the user's own activity. **Every user's Drive has an escrow wrap for
+  the current escrow key:** a new Drive is accepted only with one (and with a wrap of the user's
+  own), a new escrow wrap must carry the current key's kid, and the user cannot remove it
+  (`403 escrow_required`). No change may leave a Drive with only the escrow wrap
+  (`409 last_own_wrap`).
 - **Escrow key integrity.** A swapped escrow public key would make every user's browser wrap DK
   to someone else's key. So:
   - any change of the owner's escrow key pair needs the owner's password or a passkey, except
@@ -671,23 +690,29 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
     the one the server hands out; on a mismatch (or a private key that does not open, or none)
     the Drive page shows an alert and nothing is created or wrapped silently; restoring the
     public key or making a new pair needs the owner's confirmation;
-  - each user's browser pins the escrow key (trust on first use: the kid of the first key it
-    wraps to, sealed under DK in the Drive's `escrowPin`) and never re-wraps to another kid by
-    itself: the Drive page shows the user a notice with the new key's fingerprint and a "Trust the
-    new key" button. The choice is a notice, not an owner signature: a new escrow key needs the
-    user's explicit acceptance. Residual: a server that deletes both the pin and the escrow wrap
-    makes the next unlock pin afresh (the server cannot forge a pin, but it can remove it).
+  - the owner has a signing key (ECDSA P-256, its private key sealed under the owner's DK) whose
+    signature over the escrow public key is published with it; once it exists, the server
+    accepts a new escrow public key only with a valid signature (a new signing key needs the
+    step-up too);
+  - each user's browser pins `{ escrow, sign }` (trust on first use: the kid of the escrow key
+    it wraps to and of the signing key that signed it, sealed under DK in the Drive's
+    `escrowPin`). It re-wraps to a new escrow key by itself only when the pinned signing key
+    signed it; otherwise the Drive page shows the user a notice with the new key's fingerprint and
+    a "Trust the new key" button. Residual: a server that deletes both the pin and the escrow
+    wrap makes the next unlock pin afresh (the server cannot forge a pin, but it can remove it);
+  - **rotation** (the owner replacing the pair) needs the step-up. The old private key is kept,
+    sealed under the owner's DK in the owner's Drive (`escrowPrivOld`), only while some user's
+    escrow wrap is still for it, and handed only to the owner's session; it opens only wraps
+    made before the rotation, and only in a browser with the owner's DK, so it gives no one
+    access they did not already have.
 - **Impersonation.** While the owner acts as a user, the owner's tab opens the user's escrow wrap
   (handed out only by `POST /api/private/drive/escrow`, recorded in the admin audit) with the
-  owner's escrow private key, which it opens with the owner's own DK already in the tab. The
-  user's DK is kept in its own tab slot (`secbin_dk_imp`, bound to the user), never over the
-  owner's, and is cleared when the impersonation ends. A user who has no Drive yet gets one
-  created by the owner's tab: an escrow wrap and a one-time **hand-over** wrap under a random
-  key that the server keeps next to it and gives only to the user's own session; the user's next
-  unlock (at sign-in) opens it and writes the `pw` wrap, and the server then deletes both. Until
-  then the server holds what opens that Drive, so it could read what was put there; a server
-  that kept a copy keeps that ability, because DK does not change afterwards. The owner's tab
-  never removes or replaces the user's `pw`, recovery or passkey wraps (the server refuses it).
+  owner's escrow private key (or the earlier one the wrap is for), which it opens with the
+  owner's own DK already in the tab. The user's DK is kept in its own tab slot (`secbin_dk_imp`,
+  bound to the user), never over the owner's, and is cleared when the impersonation ends. A
+  user who has no Drive yet gets none: the page says the user has not signed in since the Drive
+  was enabled, and nothing is created. The owner's tab never removes or replaces the user's
+  `pw`, recovery or passkey wraps (the server refuses it).
 - **Failure modes.** A sign-in never fails because the Drive cannot be unlocked; the Drive page
   asks. A Drive that has content but no wraps is never given a new key (that would make its
   content unreadable), and no change may leave such a Drive without a wrap. After an admin reset
@@ -878,12 +903,16 @@ under "Drive keys" above.
   wrap, replacing the `pw` wrap or replacing `driveSalt` needs the account's password or a
   passkey (the Account page's `current` / `reauth`), except the Drive's first set-up and a `pw`
   wrap the server marked stale after a password change; a change that would leave a Drive with
-  content and no wrap is refused. Key material cannot be changed with an API key (the whole
-  Drive refuses them). While the owner impersonates the user, only the Drive's first set-up
-  through the escrow and wraps added for new credentials are accepted.
+  content and no wrap, or with no wrap of the user's own, is refused. Only the kinds `pw`,
+  `recovery`, `passkey` and `escrow` exist; a Drive's storage holds its wraps, its salt, its pin
+  and — for the owner only — the owner's sealed escrow and signing keys, nothing else. Key
+  material cannot be changed with an API key (the whole Drive refuses them). While the owner
+  impersonates the user, only wraps added for new credentials are accepted (never a first
+  set-up).
 - **Owner escrow.** The escrow public key is in the Directory and can be set by the owner only,
-  with the owner's password or a passkey once a key exists (recorded as
-  `drive.escrow_key_set`). A user's escrow wrap is handed out only by
+  with the owner's password or a passkey once a key exists and with the signing key's signature
+  once a signing key exists (recorded as `drive.escrow_key_set`). A user's Drive is set up only
+  with an escrow wrap for the current key (`409 escrow_not_ready` before the owner has one). A user's escrow wrap is handed out only by
   `POST /api/private/admin/drive/escrow/<userId>` (owner session, not impersonating), which needs
   a reason and records `drive.escrow_used` with the reason, and by `POST /api/private/drive/escrow`
   to the owner impersonating the user (recorded `drive.escrow_used`); while impersonating, the
@@ -891,7 +920,12 @@ under "Drive keys" above.
   owner's browser writes the user's new password wrap with `PUT /api/private/admin/drive/keys/<userId>`
   (a password wrap only; recorded `drive.pw_rewrapped`). All of these are in the owner-only admin
   audit and never in the user's own activity. So **the owner can decrypt every user's Drive** —
-  a deliberate choice by the maintainer.
+  a deliberate choice by the maintainer, and the only exception to zero knowledge.
+- **Activity.** Drive actions (keys changed, folders created, uploads, file reads, renames and
+  moves, deletions, Drive shares) are in the user's own activity like any other action; node ids
+  only, never names. A user's own file reads are throttled in the log (one row per file per
+  minute, at most 30 a minute) so they cannot flood it; rows of the owner acting as the user are
+  never dropped.
 - **Access control.** Every route is session-only and scoped to the caller's own Drive object
   (`idFromName('drive:' + userId)`; the object also refuses calls naming another user), so an id
   from another user's Drive simply does not exist there (IDOR). The role must allow the Drive

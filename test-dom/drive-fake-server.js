@@ -2,15 +2,18 @@
 // §6) behind a mocked fetch, shared by the DOM suites of the Drive client
 // (driveclient.test.js) and the Drive page (drive.test.js). It keeps only what
 // the real server would: sealed names, sizes, chunks, wraps — and its key
-// rules (docs/DRIVE.md §6, src/routes/drive.js setKeys): the step-up for
-// removing wraps, replacing the pw wrap or the salt (unless stale or the
-// first set-up) and for changing the owner's escrow key once one exists;
-// while the owner impersonates (`impersonatedBy`), only the first set-up
-// through the escrow and the logged escrow route. Not a test file itself
+// rules (docs/DRIVE.md §6, src/routes/drive.js setKeys): a user's Drive is set
+// up only once the owner's escrow key exists, with an escrow wrap for it (never
+// removable) and a wrap of the user's own; the step-up for removing wraps,
+// replacing the pw wrap or the salt (unless stale or the first set-up) and for
+// changing the owner's escrow or signing key once one exists; a new escrow key
+// signed by the signing key; the old escrow key kept (`escrowPrivOld`); while
+// the owner impersonates (`impersonatedBy`), only added wraps and the logged
+// escrow route. Not a test file itself
 // (vitest.dom.config.js picks up *.test.js only).
 import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
-import { deriveSubkeys, sealField } from '../public/js/drivekeys.js';
+import { deriveSubkeys, sealField, escrowKeyId, escrowWrapKeyId, escrowKeyEndorsed } from '../public/js/drivekeys.js';
 import { randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
 
 /** An in-memory Drive server for one user (plus an owner) and a fetch that talks to it. */
@@ -33,7 +36,10 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     adminKeys: [],
     pwStale: false,
     escrowPin: null,
-    handoffKey: null,
+    escrowSignPub: null,
+    escrowSig: null,
+    escrowSignPriv: null,
+    escrowPrivOld: {}, // the owner's earlier escrow keys (sealed, by kid)
     impersonatedBy: null, // the owner's username while the owner acts as this user
     ownerId: 'owner1',
     ownerEscrowPriv: null, // the owner's sealed escrow key (for the impersonation escrow route)
@@ -61,42 +67,62 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (!S.enabled) return ok({ enabled: false });
       const wraps = [...S.wraps.values()].map((w) => (S.impersonatedBy && w.kind === 'escrow' ? { ...w, data: null } : w));
       return ok({
-        enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps, escrowPub: S.escrowPub, escrowPin: S.escrowPin, pwStale: S.pwStale,
-        ...(S.handoffKey && !S.impersonatedBy ? { handoffKey: S.handoffKey } : {}),
-        ...(role === 'owner' ? { escrowPriv: S.escrowPriv } : {}),
+        enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps, escrowPub: S.escrowPub, escrowSignPub: S.escrowSignPub, escrowSig: S.escrowSig,
+        escrowPin: S.escrowPin, pwStale: S.pwStale,
+        ...(role === 'owner' ? { escrowPriv: S.escrowPriv, escrowSignPriv: S.escrowSignPriv, escrowPrivOld: S.escrowPrivOld } : {}),
       });
     }
     if (p === '/api/private/drive/escrow' && method === 'POST') {
       if (!S.impersonatedBy) return fail(403, 'not_impersonating');
       const wrap = [...S.wraps.values()].find((w) => w.kind === 'escrow') || null;
       if (wrap) S.escrowUses++;
-      return ok({ ownerId: S.ownerId, escrowPub: S.escrowPub, escrowPriv: S.ownerEscrowPriv, wrap, wraps: S.wraps.size });
+      return ok({ ownerId: S.ownerId, escrowPub: S.escrowPub, escrowPriv: S.ownerEscrowPriv, escrowPrivOld: S.escrowPrivOld, wrap, wraps: S.wraps.size });
     }
     if (p === '/api/private/drive/keys' && method === 'PUT') {
       const has = (k, r) => S.wraps.has(`${k}|${r}`);
+      const OWN = ['pw', 'recovery', 'passkey'];
       const first = S.wraps.size === 0;
       const set = body.set || [];
       const remove = body.remove || [];
       const newPw = set.some((w) => w.kind === 'pw');
-      if (S.impersonatedBy) {
-        const setupOnly = first && !remove.length && !body.driveSalt && set.every((w) => w.kind === 'escrow' || w.kind === 'handoff') && set.some((w) => w.kind === 'escrow');
-        if (!setupOnly) return fail(403, 'impersonating');
-      } else if (set.some((w) => w.kind === 'handoff') || body.handoffKey) {
-        return fail(403, 'forbidden');
+      const ownerKeys = ['escrowPriv', 'escrowPub', 'escrowSignPriv', 'escrowSignPub', 'escrowSig'].filter((k) => body[k] !== undefined);
+      if (ownerKeys.length && role !== 'owner') return fail(403, 'owner_only');
+      if (role !== 'owner') {
+        if (remove.some((w) => w.kind === 'escrow')) return fail(403, 'escrow_required');
+        const escrow = set.find((w) => w.kind === 'escrow');
+        if (first && !S.impersonatedBy) {
+          if (!S.escrowPub) return fail(409, 'escrow_not_ready');
+          if (!escrow || !set.some((w) => OWN.includes(w.kind))) return fail(400, 'invalid');
+        }
+        if (escrow && (!S.escrowPub || escrowWrapKeyId(escrow) !== await escrowKeyId(S.escrowPub))) return fail(400, 'invalid');
       }
+      if (S.impersonatedBy) {
+        if (first) return fail(403, 'impersonating');
+        const addOnly = set.length && set.every((w) => OWN.includes(w.kind) && !has(w.kind, w.ref)) && (!body.driveSalt || (newPw && !has('pw', 'pw'))) && !body.escrowPin && !ownerKeys.length;
+        if (remove.length || !addOnly) return fail(403, 'impersonating');
+      }
+      const signKey = body.escrowSignPub ?? S.escrowSignPub;
+      if ((body.escrowPub || body.escrowSignPub || body.escrowSig) && signKey && !(await escrowKeyEndorsed(signKey, body.escrowPub ?? S.escrowPub, body.escrowSig))) return fail(400, 'invalid');
       const pwExempt = S.pwStale || !has('pw', 'pw');
-      const needs = ((body.escrowPriv || body.escrowPub) && (S.escrowPub || S.escrowPriv))
+      const needs = (ownerKeys.length && (S.escrowPub || S.escrowPriv || S.escrowSignPub || S.escrowSignPriv))
         || (!first && (remove.some((w) => has(w.kind, w.ref)) || (newPw && !pwExempt) || (body.driveSalt && S.driveSalt && !(newPw && pwExempt))));
       if (needs && !body.current && !body.reauth) return fail(400, 'reauth_required');
       if (needs && body.current && body.current !== S.proof) return fail(403, 'wrong_password');
+      const own = new Set([...S.wraps.values()].filter((w) => OWN.includes(w.kind)).map((w) => `${w.kind}|${w.ref}`));
+      for (const w of remove) own.delete(`${w.kind}|${w.ref}`);
+      for (const w of set) if (OWN.includes(w.kind)) own.add(`${w.kind}|${w.ref}`);
+      if (!first && own.size === 0) return fail(409, 'last_own_wrap');
       if (body.driveSalt) S.driveSalt = body.driveSalt;
       for (const w of remove) S.wraps.delete(`${w.kind}|${w.ref}`);
       for (const w of set) S.wraps.set(`${w.kind}|${w.ref}`, w);
-      if (newPw) { S.pwStale = false; S.wraps.delete('handoff|handoff'); S.handoffKey = null; }
+      if (newPw) S.pwStale = false;
+      if (body.escrowPriv && S.escrowPriv && body.escrowPub && S.escrowPub) S.escrowPrivOld = { ...S.escrowPrivOld, [await escrowKeyId(S.escrowPub)]: S.escrowPriv };
       if (body.escrowPriv) S.escrowPriv = body.escrowPriv;
       if (body.escrowPub) S.escrowPub = body.escrowPub;
+      if (body.escrowSignPriv) S.escrowSignPriv = body.escrowSignPriv;
+      if (body.escrowSignPub) S.escrowSignPub = body.escrowSignPub;
+      if (body.escrowSig) S.escrowSig = body.escrowSig;
       if (body.escrowPin) S.escrowPin = body.escrowPin;
-      if (body.handoffKey) S.handoffKey = body.handoffKey;
       return ok({ ok: true });
     }
     if ((m = p.match(/^\/api\/private\/drive\/nodes\/([^/]+)$/))) {

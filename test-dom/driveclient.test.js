@@ -5,7 +5,7 @@
 // list (and never sent in the clear), exact chunk sizes on upload, download
 // round trips, manifest v3 contents of a share (decrypted as a recipient
 // would), reading v3 shares in downloads.js, and the wrap upkeep helpers.
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import {
   openDrive, unlockDrive, unlockAtSignIn, DriveLocked, DriveDisabled, escrowPasswordReset, updatePasswordWrap,
   replaceRecoveryWraps, addPasskeyWrap, checkName,
@@ -39,7 +39,15 @@ function pattern(n, seed = 1) {
 }
 
 let S;
-const install = (opts) => { S = fakeServer(opts); globalThis.fetch = S.fetch; return S; };
+// The owner's escrow key exists before any user's Drive (docs/DRIVE.md §3): a user's fake server has one.
+let ESCROW;
+beforeAll(async () => { ESCROW = await createEscrowKeyPair(); });
+const install = (opts = {}) => {
+  S = fakeServer(opts);
+  if ((opts.role || 'user') !== 'owner') S.escrowPub = ESCROW.publicJwk;
+  globalThis.fetch = S.fetch;
+  return S;
+};
 beforeEach(() => { clearSessionKey(); });
 afterEach(() => { vi.restoreAllMocks(); });
 

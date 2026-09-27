@@ -22,10 +22,18 @@ Visible to the server: the tree's shape (node ids, parent ids, file/folder), eac
 ciphertext size and chunk count, timestamps, and which shares reference which nodes.
 Never visible: names, file types, contents, file keys, the Drive key.
 
+**Zero knowledge, with one exception.** The server never holds DK, a key that opens DK, or
+anything that opens a wrap: every wrap is opened only in a browser, with a secret the server does
+not have (the user's password, recovery code or passkey, or the owner's escrow private key, which
+is itself sealed under the owner's own DK). The one exception is the owner escrow (§3, §9): the
+owner — not the server — can open every user's Drive. There is no other path: no hand-over wrap,
+no server-held key, no Drive created for a user by anyone but the user's own browser.
+
 ## 3. Keys (client side only)
 
-- **DK** — the Drive key: 32 random bytes per user, created in the browser the first time the
-  user opens the Drive. Never sent to the server in the clear.
+- **DK** — the Drive key: 32 random bytes per user, created in the user's own browser at their
+  first sign-in once the Drive is enabled (automatic set-up, below). Never sent to the server in
+  the clear.
 - Sub-keys, by HKDF-SHA-256 from DK (salt empty, info as given):
   - `secbin-drive/v1 names` → AES-256-GCM key for node names (field `name`) and file metadata
     (field `meta`: JSON `{ type, mtime, size }`; `size` lets the client check the server's);
@@ -42,7 +50,8 @@ Never visible: names, file types, contents, file keys, the Drive key.
   `1.<iv>.<ct>`, or for `escrow` `1.<epk>.<kid>.<iv>.<ct>`. Its AAD is the field AAD above with
   field `wrap:<kind>` and node id `ref` (for `escrow`: `escrow:<kid>`), so a wrap cannot be moved
   to another kind or ref. `escrowPriv` is `1.<iv>.<ct>` under the `files` key, field
-  `escrowPriv`, node id `drive`. `driveSalt` is 16 bytes, base64url.
+  `escrowPriv`, node id `drive`; `escrowSignPriv` likewise, field `escrowSign`. `driveSalt` is 16
+  bytes, base64url.
 - **Wraps of DK** (the server stores them, cannot open them). The browser unlocks DK with the
   first one that works:
   1. `pw` — password: `Argon2id(NFC(password), driveSalt, m = 64 MiB, t = 3, p = 1)` (a second
@@ -66,31 +75,54 @@ Never visible: names, file types, contents, file keys, the Drive key.
      The owner's escrow private key (PKCS#8) is stored encrypted under the **owner's own DK**
      (`escrowPriv` field of the owner's drive). The owner can therefore open any user's Drive
      (after a password reset, and while impersonating the user); how it is recorded: §9.
-     **Escrow key integrity.** Changing the owner's escrow key pair (`escrowPub`, `escrowPriv`)
-     needs the owner's password or a passkey (`current` / `reauth`), except the first time (no
-     key yet). The owner's browser derives the public key from the opened `escrowPriv` and
-     compares it with the server's `escrowPub`; on a mismatch, a private key that does not open,
-     or none, the Drive page shows an alert (`DriveClient#notice`) and nothing is re-created or
-     wrapped silently: restoring the public key or making a new pair needs the confirmation.
-     Each user's browser **pins** the escrow key: the kid of the first key it wraps DK to (trust
-     on first use; with no pin yet, the kid of an existing escrow wrap if there is one), sealed
-     under DK as the Drive's `escrowPin` (the names key, field `escrowPin`, node id `drive`). It
-     never re-wraps to another kid by itself: the Drive page shows the user a notice with the new
-     key's fingerprint and "Trust the new key", which re-wraps and re-pins. (A notice, not an
-     owner signature over the new key: the user decides.)
-  5. `handoff` — a **hand-over** wrap under a random one-time key (`handoffKey`, 32 bytes,
-     HKDF `secbin-drive/v1 kek-handoff`), `ref` = `handoff`: made only when the owner, acting as
-     a user who has no Drive yet, creates that Drive (with its `escrow` wrap and pin). The
-     server keeps `handoffKey` beside it and gives it only to the user's own session; the user's
-     next unlock (the sign-in) opens DK with it and writes the `pw` wrap, and writing a `pw` wrap
-     deletes both. Until then the server holds what opens that Drive.
+     **Every user's Drive has an escrow wrap, always.** A user's Drive is set up only once the
+     owner's escrow key exists (`409 escrow_not_ready` before; the page says "Drive is not ready
+     yet"), and only with an escrow wrap for the current key and a wrap of the user's own
+     (`pw`, `recovery` or `passkey`); an escrow wrap is always for the current key (its `kid`);
+     the user cannot remove it (`403 escrow_required`, with or without the step-up).
+     **The signing key.** The owner also has an ECDSA P-256 signing key: its private key sealed
+     under the owner's DK (`escrowSignPriv`), its public key (`escrowSignPub`) and its signature
+     over the escrow public key (`escrowSig`, raw r ‖ s over
+     `secbin-drive/v1 escrow-endorse\n<x>\n<y>`) in the Directory. Once a signing key exists the
+     server accepts a new escrow public key only with a valid signature by it (or, with the
+     step-up, a new signing key and its signature).
+     **Escrow key integrity.** Changing the owner's escrow key pair or signing key needs the
+     owner's password or a passkey (`current` / `reauth`), except the first time (no key yet).
+     The owner's browser derives the public key from the opened `escrowPriv` and compares it with
+     the server's `escrowPub`, and checks the signing key and its signature; on a mismatch, a key
+     that does not open, or none, the Drive page shows an alert (`DriveClient#notice`) and nothing
+     is re-created or wrapped silently: restoring the public key or making a new pair needs the
+     confirmation.
+     **Pin.** Each user's browser pins `{ escrow, sign }` — the kid of the escrow key its wrap is
+     for and the kid of the signing key that signed it (null when there was none) — sealed under
+     DK as the Drive's `escrowPin` (the names key, field `escrowPin`, node id `drive`), on first
+     use. It re-wraps to a new escrow key by itself only when the pinned signing key signed it;
+     otherwise the Drive page shows the user a notice with the new key's fingerprint and "Trust
+     the new key", which re-wraps and re-pins.
+     **Rotation.** The owner replaces the escrow key pair from the Drive page (with the step-up);
+     the new key is signed by the owner's signing key, so each user's browser re-wraps to it at
+     its next unlock. Until then the old private key stays in the owner's Drive, **sealed under the
+     owner's DK** (`escrowPrivOld`, by kid; the server moves it there on rotation), and is dropped
+     once no user's escrow wrap is for it (the Directory records each user's escrow kid,
+     `drive.escrowKid:<userId>`). It is handed only to the owner's own session and opens only
+     with the owner's DK, so keeping it gives no one access they did not have: only the owner
+     can open it, and only for wraps made before the rotation.
 - **Unlock at sign-in:** after a successful password, passkey or recovery-code sign-in, the login
   page fetches the wraps and unlocks DK with what it has (password → `pw`; passkey with PRF →
   `passkey`; recovery code → `recovery`), then keeps DK in the tab's `sessionStorage`
   (`secbin_dk`, base64url, with the user id in `secbin_dk_uid` so another account's page — e.g.
   while impersonating — never uses it) until sign-out or the tab closes. If none works, the
-  Drive page asks. The first time (no wraps yet) DK is created then, which needs the password;
-  a Drive whose root has content but no wraps is never given a new key.
+  Drive page asks. A Drive whose root has content but no wraps is never given a new key.
+- **Automatic set-up.** At a user's first successful sign-in while their role has the Drive
+  (no wraps yet), the login page creates DK with no user action: a `pw` wrap (the password just
+  accepted), the `escrow` wrap for the owner's current escrow key with the pin, and a `passkey`
+  wrap when the sign-in passkey gives a PRF output (with no password, the passkey wrap alone,
+  and the `pw` wrap follows at the next password sign-in). Recovery codes get their wraps when
+  new ones are made. The owner's escrow key must exist first: until the owner has signed in
+  once, a user's sign-in creates nothing and the Drive page says "Drive is not ready yet". The
+  owner's own first sign-in creates the owner's Drive with the escrow key pair and the signing
+  key. A sign-in with a recovery code, or with a passkey without PRF, sets nothing up (the
+  Drive page offers the set-up with the password).
 - **Pages with third-party script.** The Account page (Turnstile) moves the tab's keys out of
   `sessionStorage` into its module's memory before anything can load the Turnstile script
   (`holdSessionKeys`), uses them from there, and puts them back only when the server has no
@@ -102,11 +134,14 @@ Never visible: names, file types, contents, file keys, the Drive key.
   `escrowPriv` and `escrowPub`; the owner's DK opens `escrowPriv` (whose derived public key must
   be the server's `escrowPub`), which opens the wrap. The user's DK is kept in its own slot
   (`secbin_dk_imp`, with `secbin_dk_imp_uid` = the user), never over the owner's, and cleared
-  when the impersonation ends (and on any page loaded while not impersonating). A user with no
-  Drive yet gets one (an `escrow` wrap, a `handoff` wrap and the pin; the `pw` wrap waits for
-  the user's next sign-in). When the owner's Drive is not unlocked in the tab, the owner has no
-  escrow key yet, the user's Drive has no escrow wrap (yet), or the wrap is for another key, the
-  page says so and what to do instead of the unlock prompt.
+  when the impersonation ends (and on any page loaded while not impersonating). A wrap made for
+  an earlier escrow key opens with that key (`escrowPrivOld`, also returned by the route). **A
+  user with no Drive yet gets none:** the page says "The user hasn't signed in since the Drive
+  was enabled" and nothing is created (the server refuses a first set-up while impersonating,
+  `403 impersonating`); the user's own next sign-in sets it up. When the owner's Drive is not
+  unlocked in the tab, the owner has no escrow key yet, the user's Drive has no escrow wrap, or
+  the wrap is for a key the owner no longer holds, the page says so and what to do instead of the
+  unlock prompt.
 - **Keeping wraps current (always in the browser that has DK):**
   - password change by the user → the server marks the `pw` wrap stale (`pwStale`), and the
     browser writes a new one (new driveSalt) without a second confirmation;
@@ -127,17 +162,20 @@ Never visible: names, file types, contents, file keys, the Drive key.
   - new recovery codes → the server drops the old codes' wraps; the browser adds a wrap per new
     code (without DK in the tab, none);
   - a sign-in whose password the server accepted, when the `pw` wrap is stale or missing and
-    another wrap (or the hand-over) opened DK → a fresh `pw` wrap;
-  - escrow public key present and no `escrow` wrap → add it on the next unlock, for the pinned
-    key only (a new key: the notice above).
-- The owner's escrow key pair is created the first time the owner opens their Drive (when no
+    another wrap opened DK → a fresh `pw` wrap;
+  - the escrow wrap not for the server's current escrow key → re-wrapped on the next unlock
+    when the pinned key is the current one or the pinned signing key signed the new one (else
+    the notice above).
+- The owner's escrow key pair and signing key are created at the owner's first sign-in (when no
   escrow key exists anywhere yet).
 - **Changes that need the step-up** (`PUT /api/private/drive/keys` with `current` or `reauth`,
   as on Account): removing a wrap, replacing the `pw` wrap, replacing `driveSalt`, and any
   change of the owner's escrow key pair — except the Drive's first set-up (no wraps yet), a
   stale `pw` wrap (with its salt), and the owner's first escrow key. A change that would leave a
-  Drive with content and no wrap is refused (`409 last_wrap`). The browser never removes a wrap
-  itself: the server drops the wraps of credentials that are gone.
+  Drive with content and no wrap is refused (`409 last_wrap`), and so is one that would leave a
+  Drive with no wrap of the user's own (`409 last_own_wrap`: the escrow wrap alone is never
+  enough). The browser never removes a wrap itself: the server drops the wraps of credentials
+  that are gone.
 - **Client modules:** `public/js/drivekeys.js` (the keys and wraps above, the tab's copy),
   `public/js/driveclient.js` (`openDrive`, `unlockDrive`, `unlockDriveWithPasskey`, the
   `DriveClient` methods, `DriveLocked` / `DriveDisabled`, and the upkeep helpers used by the
@@ -154,11 +192,15 @@ Never visible: names, file types, contents, file keys, the Drive key.
     state TEXT NOT NULL CHECK(state IN ('pending','ready')), done INTEGER NOT NULL DEFAULT 0,
     upload_hash TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL)`; the root has
     `parent = NULL` and id `root`; a folder cannot become its own descendant.
-  - `wraps(kind TEXT, ref TEXT, data TEXT, PRIMARY KEY(kind, ref))` and `meta(k, v)` for
-    `driveSalt`, `escrowPriv` (owner only).
+  - `wraps(kind TEXT, ref TEXT, data TEXT, PRIMARY KEY(kind, ref))` (kinds `pw`, `recovery`,
+    `passkey`, `escrow`) and `meta(k, v)` for `driveSalt`, `escrowPin`, `pwStale`, and for the
+    owner only `escrowPriv`, `escrowSignPriv` and `escrowPrivOld` (each sealed under the owner's
+    DK). Nothing else: no key the server could use to open a Drive.
   - `refs(share_id TEXT, node_id TEXT)`: which shares reference which nodes.
 - R2 objects: `d/<userId>/<nodeId>/<i>` (never under `f/`). Only the Drive DO deletes them.
-- The owner's escrow **public** key lives in the Directory (`meta` key `drive.escrowPub`, JWK).
+- The owner's escrow **public** key lives in the Directory (`meta` key `drive.escrowPub`, JWK),
+  with `drive.escrowSignPub`, `drive.escrowSig` and each user's escrow kid
+  (`drive.escrowKid:<userId>`): public data only.
 - Pending uploads older than the role's `filePendingSec` are purged by the Drive DO's alarm.
 
 ## 5. Role options (Admin → Roles; `LIMITS` in `src/lib/settings.js`)
@@ -177,9 +219,9 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowPin, pwStale, handoffKey?, escrowPriv? }` (`escrowPriv` for the owner only; `handoffKey` for the user's own session while a hand-over is pending; while impersonating, the `escrow` wrap's `data` is null; `capacity` null = no limit; `driveSalt`, `escrowPub`, `escrowPin` null until set). A role without a Drive: `200 { enabled: false, wraps: [] }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
-| `PUT /api/private/drive/keys` | set wraps: `{ driveSalt?, set: [{kind, ref, data}], remove: [{kind, ref}], escrowPin?, handoffKey?, escrowPriv?, escrowPub?, current? \| reauth? }` (`escrowPriv` / `escrowPub` owner only; `handoffKey` and `handoff` wraps only from the owner impersonating; the step-up `current` / `reauth` where §3 says; `400 reauth_required` without it) |
-| `POST /api/private/drive/escrow` | the owner impersonating this user only: `{}` → `{ ownerId, escrowPub, escrowPriv, wrap, wraps }` (`wrap` = the user's `escrow` wrap or null, `escrowPriv` the owner's own sealed key, `wraps` how many the user's Drive has); recorded `drive.escrow_used` (§9) when a wrap is returned; `403 not_impersonating` otherwise |
+| `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, escrowPriv?, escrowSignPriv?, escrowPrivOld? }` (the last three for the owner only; while impersonating, the `escrow` wrap's `data` is null; `capacity` null = no limit; `driveSalt`, `escrowPub`, `escrowPin` null until set). A role without a Drive: `200 { enabled: false, wraps: [] }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
+| `PUT /api/private/drive/keys` | set wraps: `{ driveSalt?, set: [{kind, ref, data}], remove: [{kind, ref}], escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, current? \| reauth? }` (the `escrow…` keys owner only; the step-up `current` / `reauth` where §3 says, `400 reauth_required` without it; a user's first set-up `409 escrow_not_ready` before the owner's escrow key exists, `400` without an escrow wrap for the current key and a wrap of the user's own; `403 escrow_required` for removing the escrow wrap; `409 last_wrap` / `last_own_wrap`) |
+| `POST /api/private/drive/escrow` | the owner impersonating this user only: `{}` → `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }` (`wrap` = the user's `escrow` wrap or null, `escrowPriv` / `escrowPrivOld` the owner's own sealed keys, `wraps` how many the user's Drive has); recorded `drive.escrow_used` (§9) when a wrap is returned; `403 not_impersonating` otherwise |
 | `GET /api/private/drive/nodes/<id>` | the node and its children: `{ node, children: [...], path: [...ancestors] }` (`root` for the top; `path` root first, the node itself may be included). Each node: `{ id, parent, kind: 'dir' \| 'file', name, meta?, fk?, size, chunks, state, created, updated }` with the sealed fields as stored (`{ iv, ct }` objects or their JSON text), `size` in plaintext bytes, times in seconds; children include `meta` and `fk` for files (else the client fetches each file node). 404 for an unknown id |
 | `POST /api/private/drive/folders` | `{ id, parent, name }` → `{ id }` (`id` chosen by the browser, §3; 409 if taken) |
 | `POST /api/private/drive/files` | `{ id, parent, name, meta, size, fk }` → `{ id, uploadToken, chunks }` (`size` = plaintext bytes, `chunks = ceil(size / 8 MiB)`, §3; capacity checked) |
@@ -194,11 +236,11 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `PUT /api/private/admin/drive/keys/<userId>` | owner, after resetting the user's password: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (only a `pw` wrap, nothing removed), recorded `drive.pw_rewrapped` |
 
 While the owner impersonates a user, every Drive route works for the owner as for the user,
-except that `PUT /api/private/drive/keys` accepts only the Drive's first set-up through the
-escrow (`escrow` and `handoff` wraps, `handoffKey`, `escrowPin`) and wraps **added** for
-credentials the owner gives the user (a `pw` wrap when there is none, with its `driveSalt`;
-`recovery` and `passkey` wraps for new codes and passkeys); removing or replacing any of the
-user's wraps answers `403 impersonating`. The two admin routes are closed then, as the whole
+except that `PUT /api/private/drive/keys` accepts only wraps **added** for credentials the owner
+gives the user (a `pw` wrap when there is none, with its `driveSalt`; `recovery` and `passkey`
+wraps for new codes and passkeys); a first set-up (the user has no Drive yet: "has not signed in
+since the Drive was enabled") and removing or replacing any of the user's wraps answer
+`403 impersonating`. The two admin routes are closed then, as the whole
 admin surface is. State-changing routes carry the usual intent header (`public/js/api.js`) and
 upload / finalize the `X-Upload-Token` header. Drive shares are revoked with the existing
 `POST /api/private/shares/<id>/revoke` (the share ends, the drive data stays) and appear in My
@@ -259,20 +301,23 @@ stand-in. What each side relies on:
   owner's escrow key, and that the user's own keys (password, recovery codes, passkeys) cannot be
   removed or replaced then because they unlock the Drive for the user and only the user can
   confirm such a change. When it cannot be opened, `startDrive` resolves to state
-  `impersonating` with the `DriveLocked` reason (`owner_locked`, `no_escrow`, `no_wrap`,
-  `escrow_failed`, `escrow_mismatch`) and the page says what to do (`#drive-impersonating`).
+  `impersonating` with the `DriveLocked` reason (`no_drive`: "The user hasn't signed in since the
+  Drive was enabled", `owner_locked`, `no_escrow`, `no_wrap`, `escrow_failed`, `escrow_mismatch`)
+  and the page says what to do (`#drive-impersonating`).
   The Drive's unlock and key operations are not Account changes and take no human check
   (Turnstile).
 - **Escrow notices:** after an unlock, `client.notice` may hold `{ kind, text }`:
   `escrow_changed` (a user's Drive: the pinned escrow key is not the server's; "Trust the new
-  key" calls `acceptEscrowKey()`), or for the owner `escrow_mismatch` (`restoreEscrowKey(step)`)
-  and `escrow_unreadable` / `escrow_missing` (`newEscrowKey(step)`), where `step` is the
-  owner's confirmation. The page shows them above the Drive.
+  key" calls `acceptEscrowKey()`), or for the owner `escrow_mismatch` (`restoreEscrowKey(step)`),
+  `escrow_unreadable` / `escrow_missing` (`newEscrowKey(step)`) and `escrow_unsigned` (the
+  escrow key lacks a valid signature by the signing key; `restoreEscrowKey(step)`), where `step`
+  is the owner's confirmation. The page shows them above the Drive. The owner's Drive page also
+  has "Replace the escrow key" (`rotateEscrowKey(step)`, with the password).
 - **Opening:** `openDrive()` resolves to a `DriveClient` or throws `DriveDisabled` (the page says
   "Drive is not enabled for your account") or `DriveLocked` with `reason` and `credentialIds`
-  (the passkeys with a Drive wrap). Reason `setup` (no wraps yet): the prompt is "Set up your
-  Drive" and offers only the password (only the password can create DK); reason `handoff` (the
-  owner created the Drive): "Finish setting up your Drive", the password only. Otherwise it offers the
+  (the passkeys with a Drive wrap). Reason `not_ready` (a user's Drive before the owner's escrow
+  key exists): "Drive is not ready yet", no prompt. Reason `setup` (no wraps yet, the automatic
+  set-up did not run): the prompt is "Set up your Drive" and offers only the password. Otherwise it offers the
   password, a recovery code, and "Unlock with a passkey" when `credentialIds` is not empty and
   the browser has WebAuthn. `unlockDrive({ password } | { code })` and
   `unlockDriveWithPasskey()` resolve to the client; a wrong secret is `DriveLocked` reason
@@ -326,21 +371,24 @@ stand-in. What each side relies on:
 
 - Owner escrow means the owner can decrypt every user's Drive: this is a deliberate choice by
   the maintainer.
-- **What is recorded, and where.** Impersonation is invisible to the user. The owner-only admin
-  audit records, with the owner as the real actor:
-  - the admin escrow route (`drive.escrow_used`, with the reason) and the re-key after a reset
-    (`drive.pw_rewrapped`), as direct admin actions;
-  - while the owner impersonates the user: `impersonate.start` and `impersonate.end`, and every
-    Drive action taken then — opening the Drive with the escrow (`drive.escrow_used`, "opened
-    while acting as the user"), creating it (`drive.setup`), wraps added (`drive.keys_added`),
-    folders created, files uploaded and read, items renamed, moved or deleted
-    (`drive.folder_created`, `drive.file_uploaded`, `drive.file_read`, `drive.item_changed`,
-    `drive.item_deleted`) and Drive shares created or ended (`share.created`, `share.revoked`,
-    `share.updated`) — marked `imp` (done as the user) and `adm` (an admin action).
-
-  None of these ever appears in the user's own activity (`GET /api/private/me/activity`), which
-  lists no Drive action of the owner's. Deleting an account's Drive with the account is an admin
-  action too.
+- **What is recorded, and where.** Drive actions are logged like every other action of the
+  user's, and impersonation is invisible to the user (as for the rest of the account):
+  - the user's own activity (`GET /api/private/me/activity`) lists their Drive actions —
+    `drive.keys_changed` (wraps added or removed, the salt), `drive.folder_created`,
+    `drive.file_uploaded`, `drive.file_read` (a file opened: its first chunk read),
+    `drive.item_changed` (renamed, moved), `drive.item_deleted` — and their Drive shares
+    (`share.created`, `share.updated`, `share.revoked`). Node ids only, never names. A user's own
+    file reads are throttled in the log (one row per file per minute, at most 30 a minute), so
+    they cannot push other entries out;
+  - what the owner does in the Drive while impersonating the user is recorded exactly the same
+    way, as the user's own (`imp`, no `adm`): the user's activity shows it as theirs with no
+    actor and no trace of the impersonation, and the owner-only admin audit shows the owner as
+    the real actor, with `impersonate.start` and `impersonate.end` (never throttled);
+  - the owner's use of the escrow is the owner's own action, recorded in the admin audit only:
+    the admin escrow route (`drive.escrow_used`, with the reason), the re-key after a reset
+    (`drive.pw_rewrapped`), and opening a Drive with the escrow while impersonating
+    (`drive.escrow_used`, "opened while acting as the user"; `imp` and `adm`). Deleting an
+    account's Drive with the account is an admin action too.
 - DK in `sessionStorage` is readable by script on the origin; the CSP and Trusted Types are what
   keep other script out, as for the rest of the app. The pages that load the Turnstile script
   keep it out of `sessionStorage` (§3); what remains is in SECURITY.md.
@@ -359,7 +407,7 @@ leave open:
   largest file allowed); `capacity` and `maxFile` are `null` when the role sets no limit (the
   hard 100 GiB then applies). `GET /api/private/me` has `caps.driveEnabled` (false for the public
   account, true for the owner). While impersonating, `PUT …/drive/keys` accepts only what §6
-  says (else `403 impersonating`); the admin routes are closed as usual.
+  says (else `403 impersonating`: never a first set-up); the admin routes are closed as usual.
 - **Nodes.** `id` may be omitted (the server then picks one, which cannot be bound into the
   AAD). `PATCH` also accepts `meta`. `path` lists the ancestors as full nodes, root first.
   Children include pending files (`state: 'pending'`, `done` = chunks received). `DELETE`
@@ -375,13 +423,19 @@ leave open:
   shareable only once finalized. Finalize answers `409 busy` while a chunk write for the file is
   in flight (the client finalizes again); a chunk write that completes after its upload ended
   (deleted, purged, the Drive destroyed) removes its object, never a chunk of a finished file.
-- **Wraps.** `pw`, `escrow` and `handoff` have `ref` = their kind; a `passkey` wrap must name one
+- **Wraps.** Kinds `pw`, `recovery`, `passkey`, `escrow` only (anything else is `400`); `pw` and
+  `escrow` have `ref` = their kind; a `passkey` wrap must name one
   of the account's passkeys and a `recovery` wrap one of its current codes. The server drops the
   wraps of passkeys and codes the account no longer has (a passkey removed, codes regenerated, a
   code spent at sign-in, the owner's "remove all passkeys"). A password change marks the `pw`
   wrap stale (`pwStale`); an admin reset drops it when a passkey or recovery wrap remains; writing
-  a `pw` wrap clears the mark and ends a hand-over. Setting `escrowPub` is recorded
-  (`drive.escrow_key_set`, in the owner's own log).
+  a `pw` wrap clears the mark. An `escrow` wrap must carry the current escrow key's kid (the
+  server computes it from `escrowPub`), and the Directory records it per user
+  (`drive.escrowKid:<userId>`). Setting `escrowPub` needs a valid `escrowSig` once a signing key
+  exists and is recorded (`drive.escrow_key_set`, in the owner's own log). A rotation moves the
+  owner's previous `escrowPriv` to `escrowPrivOld` under the old kid (computed by the server);
+  the owner's summary and the impersonation escrow route drop from it every kid no user's wrap
+  is for.
 - **Owner routes.** The escrow route needs a `reason` of 3–500 characters, records every call
   (`drive.escrow_used`, with the reason) and answers `wrap: null` when the user has none;
   `PUT /api/private/admin/drive/keys/<userId>` refuses the owner's own id (use one's own Drive)
@@ -423,8 +477,9 @@ API (`test-dom/drive-fake-server.js`), which must stay in step with the server.
    `SHA-256("secbin-recovery/v1:" ‖ normalised code)`), `passkey` refs the stored credential ids
    (base64url of the raw id, as `passkeys.js` sends `rawId`); the server drops wraps of passkeys
    and codes that are gone (the client never removes one); `400 reauth_required` for a change
-   that needs the step-up without it (§3); while impersonating only the first set-up and added
-   wraps (§6), else `403 impersonating`; `escrowPin`, `pwStale` and `handoffKey` in the summary.
+   that needs the step-up without it (§3); `409 escrow_not_ready` before the owner's escrow key;
+   `403 escrow_required`, `409 last_own_wrap`; while impersonating only added wraps (§6), else
+   `403 impersonating`; `escrowPin`, `pwStale`, `escrowSignPub`, `escrowSig` in the summary.
 5. **Ids:** the browser always sends its 22-character node id (the AAD binds it); `409` when taken.
 6. **Files:** `chunks = ceil(size / 8 MiB)` exactly (the client refuses any other answer), chunk
    `i` exactly `min(8 MiB, size − i · 8 MiB) + 16` bytes under `X-Upload-Token`, finalize, and
@@ -445,6 +500,7 @@ API (`test-dom/drive-fake-server.js`), which must stay in step with the server.
 11. **Owner:** `POST /api/private/admin/drive/escrow/<userId>` `{ reason }` → `{ wrap, wraps }`
     (`wrap: null` → the client reports `no_wrap`); `PUT /api/private/admin/drive/keys/<userId>`
     with only a `pw` wrap and `driveSalt`; impersonating, `POST /api/private/drive/escrow` →
-    `{ ownerId, escrowPub, escrowPriv, wrap, wraps }`.
+    `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }`.
 12. **Sign-in:** a recovery-code sign-in's response carries `driveSpent` (the spent code's wrap,
-    removed on the server) for the sign-in's unlock.
+    removed on the server) for the sign-in's unlock; the first sign-in with the Drive enabled
+    sets the Drive up (§3, automatic set-up).

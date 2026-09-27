@@ -439,9 +439,9 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 | Method & path | Body → result |
 | --- | --- |
-| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowPin, pwStale, handoffKey?, escrowPriv? }` (`capacity` / `maxFile` null = no limit) |
-| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, handoffKey?, escrowPriv?, escrowPub?, current? \| reauth? }` — key wraps; removing a wrap, replacing the password wrap or the salt, and changing the escrow keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); while impersonating, only the first set-up and added wraps |
-| `POST /api/private/drive/escrow` | the owner impersonating the user: `{}` → `{ ownerId, escrowPub, escrowPriv, wrap, wraps }` (in the admin audit) |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, escrowPriv?, escrowSignPriv?, escrowPrivOld? }` (the last three for the owner only; `capacity` / `maxFile` null = no limit) |
+| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, current? \| reauth? }` — key wraps (kinds `pw`, `recovery`, `passkey`, `escrow`); removing a wrap, replacing the password wrap or the salt, and changing the escrow or signing keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); a user's first set-up needs the owner's escrow key (`409 escrow_not_ready`), an escrow wrap for the current key and a wrap of the user's own; the escrow wrap cannot be removed (`403 escrow_required`); while impersonating, only added wraps (never a first set-up) |
+| `POST /api/private/drive/escrow` | the owner impersonating the user: `{}` → `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }` (in the admin audit) |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
 | `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta? }` — move / rename |
 | `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
