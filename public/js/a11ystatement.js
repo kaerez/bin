@@ -24,7 +24,7 @@ export const STATEMENT_FIELDS = {
   commitmentHeading: line(120, 'Our commitment', 'Commitment: heading'),
   commitment: paras(2000, 'secbin should be usable by everyone, including people with disabilities. We build the pages themselves to be accessible, and keep improving them.', 'Commitment'),
   standardHeading: line(120, 'Standard and status', 'Standard and status: heading'),
-  standard: paras(2000, 'We target WCAG 2.2 level AA. Content that meets WCAG 2.2 AA also meets WCAG 2.0 AA, on which the Israeli standard IS 5568 (level AA) is based. The current status is partial conformance: see the known limitations below.', 'Standard and status'),
+  standard: paras(2000, 'We target WCAG 2.2 level AA, and level AAA where we can. Content that meets WCAG 2.2 AA also meets WCAG 2.1 AA and 2.0 AA. The current status is partial conformance: see the known limitations below.', 'Standard and status'),
   reviewLabel: line(120, 'Last technical review', 'Review: label before the date'),
   reviewNote: paras(2000, 'This was an automated WCAG 2.2 A/AA scan (axe-core) of every page and state, in both themes, at desktop and phone widths. In Chromium, automated checks also covered the accessibility tree that the browser passes to screen readers (names, roles and states, landmarks, headings, live regions, dialogs and form errors), keyboard-only use with a visible focus, Windows High Contrast (forced colours), reflow at 320 px, reduced motion and right-to-left text.', 'Review: how it was done'),
   doneHeading: line(120, 'What we have done', 'What we have done: heading'),
