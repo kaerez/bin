@@ -73,10 +73,14 @@ describe('gated buttons', () => {
     expect(b.disabled).toBe(true); // before the site key is even known
     const c = await pending;
     expect(b.disabled).toBe(true);
-    expect(b.title).toMatch(/human check/);
+    // The reason is shown under the button and linked to it.
+    const note = b.nextElementSibling;
+    expect(note.textContent).toMatch(/Waiting for the human check/);
+    expect(note.hidden).toBe(false);
+    expect(b.getAttribute('aria-describedby')).toBe(note.id);
     w.solve('tok-1');
     expect(b.disabled).toBe(false);
-    expect(b.hasAttribute('title')).toBe(false);
+    expect(note.hidden).toBe(true);
     // The page disables the button while it works and re-enables it after:
     // the button still waits for the next token.
     b.disabled = true;
@@ -93,15 +97,15 @@ describe('gated buttons', () => {
     // An expired token disables them again.
     w.renders.at(-1).opts['expired-callback']();
     expect(b.disabled).toBe(true);
+    expect(note.hidden).toBe(false);
   });
 
   it('are left alone when the server has no human check', async () => {
     config = { turnstile: null };
     const b = button();
-    b.title = 'Send';
     await humanCheck(document.createElement('div'), 'login', { gate: [b, null] });
     expect(b.disabled).toBe(false);
-    expect(b.title).toBe('Send');
+    expect(b.nextElementSibling.hidden).toBe(true); // no human check: no note
     b.disabled = true;
     expect(b.disabled).toBe(true);
   });
@@ -117,6 +121,7 @@ describe('gated buttons', () => {
     document.querySelector('script')?.dispatchEvent(new Event('error'));
     const c = await p;
     expect(b.disabled).toBe(true);
+    expect(b.nextElementSibling.hidden).toBe(true); // the alert explains instead
     expect(el.querySelector('[role="alert"]').textContent).toMatch(/could not load/);
     await expect(c.take()).rejects.toThrow(/could not load/);
   });
