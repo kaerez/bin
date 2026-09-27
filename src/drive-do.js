@@ -262,6 +262,17 @@ export class Drive extends DurableObject {
   }
 
   /**
+   * No wrap, but something that only an earlier DK made: content, the key
+   * check value, or (the owner's) sealed escrow or signing keys. Such a Drive
+   * is broken, not new: it never takes a first set-up (a new DK), only the
+   * same DK back (a recovery kit) or, for the owner, starting over.
+   */
+  #keyless() {
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c) return false;
+    return this.#hasContent() || this.#meta('kcv') !== null || this.#meta('escrowPriv') !== null || this.#meta('escrowSignPriv') !== null;
+  }
+
+  /**
    * Change the key material: `set` / `remove` wraps, the Drive salt, the
    * sealed escrow pin (the escrow key this Drive trusts) and (the owner's
    * Drive only — the Worker checks) the sealed escrow and signing private
@@ -273,16 +284,40 @@ export class Drive extends DurableObject {
    * passkey) is refused, and so is one that leaves a Drive with content and
    * no wrap at all: nothing could open it again.
    *
-   * `kcv` (the Drive key's check value) is stored once, when there is none.
+   * Every check below and the write run with no await in between, so each
+   * call is atomic against any other call of this object (R5-L2):
+   * - `onlyIfEmpty` (every first set-up: the user's own, the owner's, one the
+   *   owner makes for a user) is a compare-and-set on "a new Drive": no wrap,
+   *   no content, no key check value, no sealed owner key (`409 drive_exists`,
+   *   or `409 drive_keyless` for a Drive that has content or keys of an
+   *   earlier DK); it needs `kcv`, which is stored with the first wraps and
+   *   never replaced (only starting over, below, sets a new one);
+   * - `expectKcv` (every later change of wraps or the pin): the stored key
+   *   check value must exist and be this value (`409 kcv_missing`,
+   *   `409 kcv_mismatch`), compared in constant time;
+   * - `noEscrowYet` (the owner's very first escrow key, exempt from the
+   *   step-up): refused once a sealed escrow or signing key exists
+   *   (`409 escrow_exists`).
    * `newEscrowKid` (the owner's Drive, a new escrow key pair) moves the escrow
    * key's version (docs/DRIVE.md §3, owner recovery kit): 1 at the first
    * creation (`firstEscrow`), one more at each rotation, with its kid and the
    * time it was created. Not secret.
    */
-  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv, escrowSignPriv, escrowPin, oldKid, newEscrowKid, firstEscrow = false, kcv, onlyIfEmpty = false } = {}) {
+  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv, escrowSignPriv, escrowPin, oldKid, newEscrowKid, firstEscrow = false, kcv, expectKcv, noEscrowYet = false, onlyIfEmpty = false } = {}) {
     this.#bind(uid);
-    // A first set-up by someone else (the owner, for a new user) never lands on a Drive that has keys.
-    if (onlyIfEmpty && this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c) return fail(409, 'drive_exists', 'This Drive already has keys: they are never replaced.');
+    // A first set-up never lands on a Drive that has keys (or had them: content, a check value, sealed keys).
+    if (onlyIfEmpty) {
+      if (this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c) return fail(409, 'drive_exists', 'This Drive already has keys: they are never replaced.');
+      if (this.#keyless()) return fail(409, 'drive_keyless', 'This Drive has content or keys but no key wrap: restore it from a recovery kit (or, the owner, start over).');
+      if (typeof kcv !== 'string' || !kcv) return fail(400, 'kcv_required', 'A new Drive needs its key check value.');
+    } else if (expectKcv !== undefined) {
+      const have = this.#meta('kcv');
+      if (have === null) return fail(409, 'kcv_missing', 'This Drive has no key check value: no key can be added to it.');
+      if (!safeEq(expectKcv, have)) return fail(409, 'kcv_mismatch', 'That key is not this Drive’s key.');
+    }
+    if (noEscrowYet && escrowPriv !== undefined && (this.#meta('escrowPriv') !== null || this.#meta('escrowSignPriv') !== null)) {
+      return fail(409, 'escrow_exists', 'An escrow key exists already: replacing it needs your confirmation.');
+    }
     const has = (k, r) => this.sql.exec('SELECT 1 FROM wraps WHERE kind = ? AND ref = ?', k, r).toArray().length > 0;
     const newPw = set.some((w) => w.kind === 'pw');
     const total = this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c;
@@ -309,7 +344,7 @@ export class Drive extends DurableObject {
       }
       if (escrowSignPriv !== undefined) this.#setMeta('escrowSignPriv', escrowSignPriv);
       if (escrowPin !== undefined) this.#setMeta('escrowPin', escrowPin);
-      if (kcv !== undefined && this.#meta('kcv') === null) this.#setMeta('kcv', kcv); // kept from the first; never replaced
+      if (onlyIfEmpty) this.#setMeta('kcv', kcv); // with the first wraps; never replaced
       if (newPw) this.#setMeta('pwStale', null);
       if (newEscrowKid) {
         const ver = this.#json('escrowVer');
@@ -404,6 +439,26 @@ export class Drive extends DurableObject {
       if (!keep[w.kind].has(w.ref)) { this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref); gone.push({ kind: w.kind, ref: w.ref, data: w.data }); }
     }
     return { ok: true, removed: gone.length, wraps: gone };
+  }
+
+  /**
+   * A fixed-window counter for `key` (a route of this Drive's user, or of one
+   * of their sessions): one more hit → { ok } (false once `max` hits fall in
+   * the current `windowSec`). Kept in the Drive's meta; windows that are over
+   * are dropped, and at most 64 keys are kept (the oldest go first).
+   */
+  async hit(uid, key, max, windowSec) {
+    this.#bind(uid);
+    const t = nowSec();
+    const all = this.#json('rl') || {};
+    for (const [k, v] of Object.entries(all)) if (!v || !Number.isSafeInteger(v.start) || t - v.start >= (v.win || 0)) delete all[k];
+    const cur = all[key] || { start: t, n: 0, win: windowSec };
+    cur.n += 1;
+    all[key] = cur;
+    const keys = Object.keys(all).sort((a, b) => all[a].start - all[b].start);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 64))) delete all[k];
+    this.#setMeta('rl', JSON.stringify(all));
+    return { ok: cur.n <= max, retryAfter: cur.start + cur.win - t };
   }
 
   /** The escrow wrap and the list of wraps, for the owner's escrow route. */
@@ -671,14 +726,28 @@ export class Drive extends DurableObject {
    * Drive as it is — items, R2 objects (untouched), wraps, the salt and the
    * sealed escrow keys, all still sealed under the old DK — becomes archive
    * `gen`, which nothing here can open; the Drive is empty again (only the
-   * escrow key's version record and the account binding stay) for the new
-   * keys the Worker writes next. Unfinished uploads go, as the alarm would
-   * drop them. Shares of archived items keep working (their keys are in their
-   * links). → { gen }.
+   * escrow key's version record and the account binding stay) and set up
+   * with the new keys (`keys`: the `pw` wrap, the salt, the sealed escrow and
+   * signing keys, the new escrow kid and the key check value) in the same
+   * transaction. Unfinished uploads go, as the alarm would drop them. Shares
+   * of archived items keep working (their keys are in their links).
+   *
+   * Atomic (R5-L2): it runs inside blockConcurrencyWhile, and first re-checks
+   * that nothing the owner signs in with opens the Drive (no passkey or
+   * recovery-code wrap, no `pw` wrap or only a stale one). A second start
+   * over at the same moment finds the first one's fresh `pw` wrap and gets
+   * `409 drive_unlockable`: one archive, one key check value, one set of keys.
+   * → { gen }.
    */
-  async startOver(uid) {
+  async startOver(uid, { driveSalt, set = [], escrowPriv, escrowSignPriv, newEscrowKid, kcv } = {}) {
     this.#bind(uid);
+    if (typeof driveSalt !== 'string' || set.length !== 1 || set[0].kind !== 'pw' || typeof escrowPriv !== 'string' || typeof escrowSignPriv !== 'string' || typeof kcv !== 'string' || typeof newEscrowKid !== 'string') {
+      throw new Error('drive: startOver needs the new keys');
+    }
     return this.ctx.blockConcurrencyWhile(async () => {
+      const stale = this.#meta('pwStale') === '1';
+      const usable = this.sql.exec('SELECT kind FROM wraps').toArray().some((w) => w.kind === 'passkey' || w.kind === 'recovery' || (w.kind === 'pw' && !stale));
+      if (usable) return fail(409, 'drive_unlockable', 'Your Drive can still be unlocked (a password, passkey or recovery-code key of yours opens it): unlock it instead.');
       const pending = this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file' AND state = 'pending'").toArray();
       await this.#deleteObjects(uid, pending);
       // Archive numbers never repeat (one restored or deleted keeps its number).
@@ -700,6 +769,15 @@ export class Drive extends DurableObject {
         }
         this.sql.exec("INSERT INTO archive_meta (gen, k, v) VALUES (?, 'at', ?)", gen, String(nowSec()));
         this.#setMeta('archiveGen', String(gen));
+        // The new keys, in the same step.
+        this.sql.exec('INSERT INTO wraps (kind, ref, data) VALUES (?, ?, ?)', set[0].kind, set[0].ref, set[0].data);
+        this.#setMeta('driveSalt', driveSalt);
+        this.#setMeta('escrowPriv', escrowPriv);
+        this.#setMeta('escrowSignPriv', escrowSignPriv);
+        this.#setMeta('kcv', kcv);
+        const ver = this.#json('escrowVer');
+        const next = ver && Number.isSafeInteger(ver.version) ? ver.version + 1 : 2;
+        if (!ver || ver.kid !== newEscrowKid) this.#setMeta('escrowVer', JSON.stringify({ version: next, kid: newEscrowKid, created: nowSec() }));
       });
       await this.ctx.storage.deleteAlarm();
       return { ok: true, gen };

@@ -103,12 +103,17 @@ never committed) and `node_modules`.
 - **Reverse shares:** an optional password gates the anonymous uploader only; uploads land in the
   user's chosen drive folder; the user never needs that password.
 - **Starting over without a kit (an accepted exception to "Security first", this case only):**
-  when the owner starts their Drive over without a recovery kit, users' browsers move their
-  Drives to the new escrow key automatically, once per owner reset (the reset's epoch one more
-  than the pinned one, the escrow key signed by the reset's signing key), without the user's
-  approval. The maintainer chose this knowing that, in that window, anyone able to change the
-  server's responses could substitute an escrow key. Every other unsigned escrow key change keeps
-  the signed-key pin (the notice and "Trust the new key").
+  when the server reports that the owner started their Drive over without a recovery kit, users'
+  browsers move their Drives to the new escrow key automatically, once per owner reset (the
+  reset's epoch one more than the pinned one, the escrow key signed by the reset's signing key)
+  and at most once per Drive per 30 days (a second one gets the notice), without the user's
+  approval. This is not limited to a window after a real reset: nothing in a user's browser ties
+  a reported reset to a real one, so anyone able to change the server's responses can fake an
+  owner reset at any time, and again at each later epoch, and so can anyone able to complete
+  AUTHN owner recovery and then start over (anyone with access to the Worker's `AUTHN` secret
+  configuration). Every other unsigned escrow key change keeps the signed-key pin (the notice
+  and "Trust the new key"). The rules are in one function (`resetApplies`,
+  `public/js/driveclient.js`); the maintainer may change this design.
 - **The Drive key never changes** on a password change or an admin reset: only the `pw` wrap is
   replaced, proven to be of the same DK by the key check value.
 - **Impersonation:** the owner can do everything the user can, the Drive included; it is

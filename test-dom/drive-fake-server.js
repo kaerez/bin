@@ -11,8 +11,11 @@
 // the owner impersonates (`impersonatedBy`), only added wraps and the logged
 // escrow route; the owner recovery kit's routes (the step-up for a download,
 // a use and a restore of keys; a restored key only for the server's own
-// public keys; the escrow key's version) and starting over. Not a test file itself
-// (vitest.dom.config.js picks up *.test.js only).
+// public keys; the escrow key's version) and starting over; the key check
+// value with every first set-up and every later wrap or pin, the step-up for
+// replacing a wrap, no escrow wrap in the owner's own Drive, no first set-up
+// of a Drive with content or keys but no wrap, one `escrowReset` record per
+// epoch. Not a test file itself (vitest.dom.config.js picks up *.test.js only).
 import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
 import { deriveSubkeys, sealField, escrowKeyId, escrowWrapKeyId, escrowKeyEndorsed } from '../public/js/drivekeys.js';
@@ -116,41 +119,56 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (p === '/api/private/drive/keys' && method === 'PUT') {
       const has = (k, r) => S.wraps.has(`${k}|${r}`);
       const OWN = ['pw', 'recovery', 'passkey'];
-      const first = S.wraps.size === 0;
+      const keyless = S.wraps.size === 0 && ([...S.nodes.values()].some((n) => n.parent === 'root') || !!S.kcv || !!S.escrowPriv || !!S.escrowSignPriv);
+      const first = S.wraps.size === 0 && !keyless;
+      if (body.first === true && !S.impersonatedBy && (S.wraps.size || keyless)) return fail(409, S.wraps.size ? 'drive_exists' : 'drive_keyless');
       const set = body.set || [];
       const remove = body.remove || [];
       const newPw = set.some((w) => w.kind === 'pw');
       const ownerKeys = ['escrowPriv', 'escrowPub', 'escrowSignPriv', 'escrowSignPub', 'escrowSig'].filter((k) => body[k] !== undefined);
       if (ownerKeys.length && role !== 'owner') return fail(403, 'owner_only');
+      if (role === 'owner' && set.some((w) => w.kind === 'escrow')) return fail(400, 'escrow_own');
       if (role !== 'owner') {
         if (remove.some((w) => w.kind === 'escrow')) return fail(403, 'escrow_required');
         const escrow = set.find((w) => w.kind === 'escrow');
         if (first && !S.impersonatedBy) {
           if (!S.escrowPub) return fail(409, 'escrow_not_ready');
-          if (!escrow || !set.some((w) => OWN.includes(w.kind))) return fail(400, 'invalid');
+          if (!escrow || !set.some((w) => OWN.includes(w.kind)) || !body.escrowPin) return fail(400, 'invalid');
         }
         if (escrow && (!S.escrowPub || escrowWrapKeyId(escrow) !== await escrowKeyId(S.escrowPub))) return fail(400, 'invalid');
       }
       if (S.impersonatedBy) {
-        if (first) return fail(403, 'impersonating');
+        if (first || keyless) return fail(403, 'impersonating');
         const addOnly = set.length && set.every((w) => OWN.includes(w.kind) && !has(w.kind, w.ref)) && (!body.driveSalt || (newPw && !has('pw', 'pw'))) && !body.escrowPin && !ownerKeys.length;
         if (remove.length || !addOnly) return fail(403, 'impersonating');
       }
       const signKey = body.escrowSignPub ?? S.escrowSignPub;
       if ((body.escrowPub || body.escrowSignPub || body.escrowSig) && signKey && !(await escrowKeyEndorsed(signKey, body.escrowPub ?? S.escrowPub, body.escrowSig))) return fail(400, 'invalid');
+      // The key check value: with the first set-up; after it, with every wrap or pin written (the same value).
+      const touches = set.length > 0 || body.escrowPin !== undefined;
+      if (first && set.length && !body.kcv) return fail(400, 'kcv_required');
+      if (!first && touches) {
+        if (!body.kcv) return fail(keyless ? 409 : 400, keyless ? 'drive_keyless' : 'kcv_required');
+        if (!S.kcv) return fail(409, keyless ? 'drive_keyless' : 'kcv_missing');
+        if (body.kcv !== S.kcv) return fail(409, keyless ? 'drive_keyless' : 'kcv_mismatch');
+      }
       const pwExempt = S.pwStale || !has('pw', 'pw');
-      const needs = (ownerKeys.length && (S.escrowPub || S.escrowPriv || S.escrowSignPub || S.escrowSignPriv))
-        || (!first && (remove.some((w) => has(w.kind, w.ref)) || (newPw && !pwExempt) || (body.driveSalt && S.driveSalt && !(newPw && pwExempt))));
+      // Replacing a wrap that is there (other data; the escrow wrap for the same key) is as a removal.
+      const replaces = set.some((w) => {
+        const x = S.wraps.get(`${w.kind}|${w.ref}`);
+        if (!x || x.data === w.data || w.kind === 'pw') return false;
+        return w.kind !== 'escrow' || escrowWrapKeyId(x) === escrowWrapKeyId(w);
+      });
+      const needs = (ownerKeys.length && (S.escrowPub || S.escrowPriv || S.escrowSignPub || S.escrowSignPriv)) || (keyless && touches)
+        || (!first && (remove.some((w) => has(w.kind, w.ref)) || replaces || (newPw && !pwExempt) || (body.driveSalt && S.driveSalt && !(newPw && pwExempt))));
       if (needs && !body.current && !body.reauth) return fail(400, 'reauth_required');
       if (needs && body.current && body.current !== S.proof) return fail(403, 'wrong_password');
       const own = new Set([...S.wraps.values()].filter((w) => OWN.includes(w.kind)).map((w) => `${w.kind}|${w.ref}`));
       for (const w of remove) own.delete(`${w.kind}|${w.ref}`);
       for (const w of set) if (OWN.includes(w.kind)) own.add(`${w.kind}|${w.ref}`);
       if (!first && own.size === 0) return fail(409, 'last_own_wrap');
-      // The Drive key's check value: kept from the first; a new pw wrap later only with it.
-      if (!first && newPw && !body.kcv) return fail(400, 'kcv_required');
       if (body.kcv && S.kcv && body.kcv !== S.kcv) return fail(409, 'kcv_mismatch');
-      if (body.kcv && !S.kcv) S.kcv = body.kcv;
+      if (first && set.length) S.kcv = body.kcv; // with the first wraps; never replaced
       if (body.driveSalt) S.driveSalt = body.driveSalt;
       for (const w of remove) S.wraps.delete(`${w.kind}|${w.ref}`);
       for (const w of set) S.wraps.set(`${w.kind}|${w.ref}`, w);
@@ -165,6 +183,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (body.escrowPin) S.escrowPin = body.escrowPin;
       if (body.escrowReset !== undefined) {
         if (role === 'owner' || !S.ownerReset || body.escrowReset !== S.ownerReset.epoch) return fail(400, 'invalid');
+        if ((S.resetApplied || 0) >= body.escrowReset) return ok({ ok: true }); // once per epoch
+        S.resetApplied = body.escrowReset;
         S.activity.push({ action: 'drive.escrow_rewrapped', detail: `new escrow key ${escrowWrapKeyId(set.find((w) => w.kind === 'escrow'))}` });
         S.audit.push({ action: 'drive.escrow_rewrapped', detail: `user=${S.user.username}` });
       }
@@ -352,7 +372,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     }
     if (/^\/api\/private\/admin\/drive\/escrow\/[^/]+$/.test(p)) {
       const wraps = S.userWraps || [];
-      return ok({ wrap: wraps.find((w) => w.kind === 'escrow') || null, wraps });
+      return ok({ wrap: wraps.find((w) => w.kind === 'escrow') || null, wraps: wraps.length });
     }
     if ((m = p.match(/^\/api\/private\/admin\/drive\/keys\/([^/]+)$/))) {
       // The owner, for another user: a pw wrap after a reset (the key check value
@@ -369,7 +389,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         S.audit.push({ action: 'drive.created_by_owner', detail: m[1] });
         return ok({ ok: true, created: true });
       }
-      if (d && d.kcv && d.kcv !== body.kcv) return fail(409, 'kcv_mismatch');
+      if (d && !d.kcv) return fail(409, 'kcv_missing');
+      if (d && d.kcv !== body.kcv) return fail(409, 'kcv_mismatch');
       return ok({ ok: true });
     }
     return fail(404, `unrouted ${method} ${p}`);

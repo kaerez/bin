@@ -214,7 +214,7 @@ describe('L-4: key material needs the step-up', () => {
     const u = await makeUser('aud-wipe');
     await enableDrive(u.id);
     // The first set-up needs no step-up.
-    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: await ESC() }] })).status).toBe(200);
+    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: await ESC() }], kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
     await uploadFile(u.cookie, 'root', 10);
     const tries = [
       { remove: [{ kind: 'pw', ref: 'pw' }] },
@@ -234,8 +234,12 @@ describe('L-4: key material needs the step-up', () => {
       expect((await r.json()).error).toBe('escrow_required');
     }
     expect((await drive(u.cookie)).wraps).toHaveLength(2);
-    // Re-wrapping to the current escrow key needs none; a wrap for another key is refused.
-    expect((await keys(u.cookie, { set: [{ kind: 'escrow', ref: 'escrow', data: await ESC() }] })).status).toBe(200);
+    // Replacing the escrow wrap for the same escrow key is as a removal (R5-L1): the step-up and the
+    // key check value; a wrap for another key is refused.
+    const again = { set: [{ kind: 'escrow', ref: 'escrow', data: await ESC() }] };
+    expect((await (await keys(u.cookie, { ...again, kcv: KCV })).json()).error).toBe('reauth_required');
+    expect((await (await keys(u.cookie, { ...again, current: proofFor(USER_PW) })).json()).error).toBe('kcv_required');
+    expect((await keys(u.cookie, { ...again, kcv: KCV, current: proofFor(USER_PW) })).status).toBe(200);
     const stale = `1.${b64urlFromBytes(randomBytes(65))}.${b64urlFromBytes(randomBytes(16))}.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(48))}`;
     expect((await keys(u.cookie, { set: [{ kind: 'escrow', ref: 'escrow', data: stale }] })).status).toBe(400);
     // Even with the password: never without a wrap of the user's own.
@@ -247,7 +251,7 @@ describe('L-4: key material needs the step-up', () => {
   it('the normal password change: the stale pw wrap is replaced without a step-up, once', async () => {
     const u = await makeUser('aud-pwchange');
     await enableDrive(u.id);
-    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, await escrowWrap()] })).status).toBe(200);
+    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, await escrowWrap()], kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
     const ch = await fetchJson('/api/private/me/password', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), salt: salt16(), t: 3, proof: proofFor('new-password-456') } });
     expect(ch.status).toBe(200);
     const c2 = cookieOf(ch);
@@ -267,7 +271,7 @@ describe('L-5: wraps of retired credentials', () => {
     await runInDurableObject(dirStub(), (inst, state) => {
       state.storage.sql.exec('INSERT INTO recovery_codes (user_id, hash, created) VALUES (?, ?, ?)', u.id, ref, Math.floor(Date.now() / 1000));
     });
-    expect((await keys(u.cookie, { set: [{ kind: 'recovery', ref, data: W() }, { kind: 'pw', ref: 'pw', data: W() }, await escrowWrap()], driveSalt: salt16() })).status).toBe(200);
+    expect((await keys(u.cookie, { set: [{ kind: 'recovery', ref, data: W() }, { kind: 'pw', ref: 'pw', data: W() }, await escrowWrap()], driveSalt: salt16(), kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
     const wrap = (await drive(u.cookie)).wraps.find((w) => w.kind === 'recovery');
     const r = await fetchJson('/api/auth/recovery', { method: 'POST', body: { username: 'aud-spent', code }, ip: freshIp() });
     expect(r.status).toBe(200);
@@ -288,8 +292,8 @@ describe('L-5: wraps of retired credentials', () => {
     await runInDurableObject(dirStub(), (inst, state) => {
       state.storage.sql.exec('INSERT INTO recovery_codes (user_id, hash, created) VALUES (?, ?, ?)', a.id, ref, Math.floor(Date.now() / 1000));
     });
-    expect((await keys(a.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'recovery', ref, data: W() }, await escrowWrap()] })).status).toBe(200);
-    expect((await keys(b.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: await ESC() }] })).status).toBe(200);
+    expect((await keys(a.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'recovery', ref, data: W() }, await escrowWrap()], kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
+    expect((await keys(b.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: await ESC() }], kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
     for (const x of [a, b]) {
       expect((await fetchJson(`/api/private/admin/users/${x.id}/password`, { method: 'POST', cookie: oc, body: { salt: salt16(), t: 3, proof: proofFor('reset-pass-789') } })).status).toBe(200);
     }
@@ -330,7 +334,7 @@ describe('Impersonation: the owner uses the user’s whole Drive', () => {
     const u = await makeUser('aud-imp');
     await enableDrive(u.id);
     const esc = await ESC();
-    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: esc }] })).status).toBe(200);
+    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: esc }], kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
     const mine = await uploadFile(u.cookie, 'root', 20);
     const before = await activity(u.cookie);
     const ic = await impersonate(u.id);
@@ -394,7 +398,7 @@ describe('Impersonation: the owner uses the user’s whole Drive', () => {
     await runInDurableObject(dirStub(), (inst, state) => {
       state.storage.sql.exec('INSERT INTO recovery_codes (user_id, hash, created) VALUES (?, ?, ?)', u.id, ref, Math.floor(Date.now() / 1000));
     });
-    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'recovery', ref, data: W() }, await escrowWrap()] })).status).toBe(200);
+    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'recovery', ref, data: W() }, await escrowWrap()], kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
     const before = await activity(u.cookie);
     const ic = await impersonate(u.id);
     const ch = await fetchJson('/api/private/me/password', { method: 'POST', cookie: ic, body: { salt: salt16(), t: 3, proof: proofFor('set-by-the-owner-1') } });
@@ -436,7 +440,7 @@ describe('Drive activity: logged like every other action (docs/DRIVE.md §9)', (
   it('the user’s own Drive actions are in their activity; their file reads are throttled, the owner’s never', async () => {
     const u = await makeUser('aud-log');
     await enableDrive(u.id);
-    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, await escrowWrap()] })).status).toBe(200);
+    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, await escrowWrap()], kcv: KCV, escrowPin: enc(40) })).status).toBe(200);
     const f = await uploadFile(u.cookie, 'root', 10);
     const acts = (await activity(u.cookie)).map((r) => `${r.action} ${r.detail}`);
     expect(acts).toContain('drive.keys_changed added pw, escrow; salt');

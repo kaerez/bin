@@ -11,7 +11,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { owner, makeUser, login, fetchJson, cookieOf, salt16, proofFor, freshIp, ORIGIN, USER_PW, intent, createNote } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
-import { enableDrive, escrowWrap, mkdir, uploadFile, getChunk, enc, del } from './drive-helpers.js';
+import { enableDrive, escrowWrap, mkdir, uploadFile, getChunk, enc, del, KCV } from './drive-helpers.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 
@@ -202,7 +202,7 @@ describe('the Drive while impersonating (docs/DRIVE.md §9)', () => {
   it('folders, uploads, reads, renames, shares and deletes show in the user’s activity as theirs, exactly like their own', async () => {
     const u = await makeUser('imp-drive');
     await enableDrive(u.id);
-    const keys = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: u.cookie, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrap() }, await escrowWrap()] } });
+    const keys = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: u.cookie, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrap() }, await escrowWrap()], escrowPin: enc(40), kcv: KCV } });
     expect(keys.status).toBe(200);
     // What the user does themselves, for comparison.
     const own = await uploadFile(u.cookie, 'root', 20);

@@ -1959,29 +1959,51 @@ export class Directory extends DurableObject {
    * escrow key's kid, the new signing public key and the time — that lets a
    * user's browser move its Drive to the new escrow key by itself, once per
    * reset (the maintainer's accepted exception to the signed-key pin).
+   *
+   * The new escrow public key, signing key and signature (`escrowPub`,
+   * `signPub`, `sig`: JSON text / base64url) are set in the same transaction,
+   * and only when the latest reset is still `expectEpoch` (the one the Worker
+   * read before the owner's Drive started over): a compare-and-set, so one
+   * start over is one epoch (R5-L2; `409 reset_conflict` otherwise).
    */
-  async recordOwnerReset(ownerId, { kid, signPub }) {
+  async recordOwnerReset(ownerId, { kid, signPub, escrowPub, sig, expectEpoch }) {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner starts over.');
     let prev;
     try { prev = JSON.parse(this.#meta('drive.ownerReset') || 'null')?.epoch ?? 0; } catch { prev = 0; }
+    if (prev !== expectEpoch) return fail(409, 'reset_conflict', 'Another start over was recorded at the same time.');
     const rec = { epoch: prev + 1, kid, signPub: JSON.parse(signPub), at: now() };
-    this.#setMeta('drive.ownerReset', JSON.stringify(rec));
+    const had = !!this.#meta('drive.escrowPub');
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta('drive.escrowPub', escrowPub);
+      this.#setMeta('drive.escrowSignPub', signPub);
+      this.#setMeta('drive.escrowSig', sig);
+      this.#setMeta('drive.ownerReset', JSON.stringify(rec));
+      this.#log(ownerId, ownerId, 'drive.escrow_key_set', had ? 'replaced' : 'created');
+    });
     return { ok: true, reset: rec };
   }
 
   /**
-   * A user's browser moved their Drive to the escrow key of an owner reset by
-   * itself: a system event in the user's activity, and the same, naming the
-   * user, in the owner-only admin audit.
+   * A user's browser moved their Drive to the escrow key of owner reset
+   * `epoch` by itself: a system event in the user's activity, and the same,
+   * naming the user, in the owner-only admin audit — once per user and epoch
+   * (R5-I1: a repeated `escrowReset` for an epoch already applied, or an
+   * earlier one, writes nothing; → { ok, logged }).
    */
-  async driveEscrowRewrapped(userId, fingerprint) {
+  async driveEscrowRewrapped(userId, fingerprint, epoch) {
     const u = this.#user(userId);
     if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (!Number.isSafeInteger(epoch) || epoch < 1) return fail(400, 'invalid', 'An owner reset epoch.');
+    const k = `drive.resetApplied:${userId}`;
+    if ((Number(this.#meta(k)) || 0) >= epoch) return { ok: true, logged: false };
     const fp = String(fingerprint || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 16);
-    this.#log(null, userId, 'drive.escrow_rewrapped', `new escrow key ${fp}`);
-    this.#log({ id: null, adm: true }, userId, 'drive.escrow_rewrapped', `user=${u.username} new escrow key ${fp} (after the owner started over)`);
-    return { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta(k, String(epoch));
+      this.#log(null, userId, 'drive.escrow_rewrapped', `new escrow key ${fp}`);
+      this.#log({ id: null, adm: true }, userId, 'drive.escrow_rewrapped', `user=${u.username} new escrow key ${fp} (after the owner started over)`);
+    });
+    return { ok: true, logged: true };
   }
 
   /**
@@ -2010,11 +2032,14 @@ export class Directory extends DurableObject {
    * The owner sets (or replaces) the escrow public key every Drive wraps its
    * key to, with the owner's signing key and its signature over the escrow key
    * (users' browsers check it against the signing key they pinned).
+   * `onlyIfNone` (the very first escrow key, which needs no step-up): refused
+   * once an escrow or signing public key exists (`409 escrow_exists`).
    */
-  async setEscrowPub(ownerId, jwkText, { signPub, sig } = {}) {
+  async setEscrowPub(ownerId, jwkText, { signPub, sig, onlyIfNone = false } = {}) {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner can set the escrow key.');
     const had = !!this.#meta('drive.escrowPub');
+    if (onlyIfNone && (had || this.#meta('drive.escrowSignPub'))) return fail(409, 'escrow_exists', 'An escrow key exists already: replacing it needs your confirmation.');
     if (jwkText !== undefined) this.#setMeta('drive.escrowPub', jwkText);
     if (signPub !== undefined) this.#setMeta('drive.escrowSignPub', signPub);
     if (sig !== undefined) this.#setMeta('drive.escrowSig', sig);
@@ -2024,13 +2049,17 @@ export class Directory extends DurableObject {
 
   /** The kid a user's escrow wrap is made for (so the owner keeps an earlier escrow key while one needs it). */
   async setEscrowKid(uid, kid) {
-    if (!this.#user(uid) || typeof kid !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kid)) return;
+    const u = this.#user(uid);
+    if (!u || u.role === 'owner' || typeof kid !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kid)) return;
     this.#setMeta(`drive.escrowKid:${uid}`, kid);
   }
 
-  /** The kids users' escrow wraps are made for (existing accounts only). */
+  /**
+   * The kids users' escrow wraps are made for (existing accounts only; never
+   * the owner's own Drive, which has no escrow wrap: R5-I6).
+   */
   async escrowKidsInUse() {
-    return [...new Set(this.sql.exec("SELECT m.v AS v FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id").toArray().map((r) => r.v))];
+    return [...new Set(this.sql.exec("SELECT m.v AS v FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id WHERE u.role != 'owner'").toArray().map((r) => r.v))];
   }
 
   /**
@@ -2072,7 +2101,7 @@ export class Directory extends DurableObject {
   /** One user per kid users' escrow wraps are made for (the recovery kit's live check opens one wrap per kid). */
   async escrowKidUsers() {
     const seen = new Map();
-    for (const r of this.sql.exec("SELECT u.id AS id, m.v AS kid FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id ORDER BY u.created, u.id").toArray()) {
+    for (const r of this.sql.exec("SELECT u.id AS id, m.v AS kid FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id WHERE u.role != 'owner' ORDER BY u.created, u.id").toArray()) {
       if (!seen.has(r.kid)) seen.set(r.kid, r.id);
     }
     return [...seen].map(([kid, userId]) => ({ kid, userId }));

@@ -242,31 +242,48 @@ export async function unlockDriveWithPasskey({ user } = {}) {
   return unlockDrive({ prfOutput: prf, credentialId }, { user });
 }
 
-/** The pin for the server's current escrow key: its kid, the signing key's when that key signed it, and the latest owner reset's epoch. */
-async function pinFor(st) {
+/**
+ * The pin for the server's current escrow key: its kid, the signing key's when
+ * that key signed it, and the latest owner reset's epoch (plus `resetAt`
+ * carried over from the pin `prev`: the time of this Drive's last automatic
+ * reset re-wrap, which a new pin never forgets).
+ */
+async function pinFor(st, prev = null) {
   const escrow = await escrowKeyId(st.escrowPub);
   const signed = st.escrowSignPub && st.escrowSig && await escrowKeyEndorsed(st.escrowSignPub, st.escrowPub, st.escrowSig);
-  return { escrow, sign: signed ? await signingKeyId(st.escrowSignPub) : null, epoch: resetEpoch(st) };
+  return { escrow, sign: signed ? await signingKeyId(st.escrowSignPub) : null, epoch: resetEpoch(st), ...keptResetAt(prev) };
 }
+
+const keptResetAt = (pin) => (pin && Number.isSafeInteger(pin.resetAt) ? { resetAt: pin.resetAt } : {});
 
 const resetOf = (st) => (st.ownerReset && typeof st.ownerReset === 'object' && Number.isSafeInteger(st.ownerReset.epoch) && st.ownerReset.epoch > 0 ? st.ownerReset : null);
 const resetEpoch = (st) => (resetOf(st) ? resetOf(st).epoch : 0);
 
+/** At most one automatic owner-reset re-wrap per Drive in this many seconds (the browser's clock; R5-M1). */
+export const RESET_REWRAP_GAP_SEC = 30 * 24 * 3600;
+
 /**
  * The one case where a user's browser accepts an escrow key its pinned
  * signing key did not sign (the maintainer's accepted exception, docs/DRIVE.md
- * §3): the owner started over without a kit. Only when the server reports an
- * owner reset exactly one epoch after the one pinned, whose new signing key is
- * the server's signing key and signed the escrow key. Anything else (no reset,
- * a signature that does not verify, a jump of more than one epoch) is the
- * usual notice.
+ * §3.2): the server reports that the owner started over without a kit. Every
+ * rule of that exception is here, and nowhere else:
+ * - an owner reset exactly one epoch after the one pinned;
+ * - whose new signing key is the server's signing key and signed the escrow key;
+ * - and no automatic reset re-wrap of this Drive in the last
+ *   RESET_REWRAP_GAP_SEC (`resetAt` in the sealed pin, this browser's clock;
+ *   a clock moved back counts as "too soon").
+ * → { epoch, pin } (the pin to seal: the new key, the reset's signing key and
+ * epoch, `resetAt` now), or null: the usual notice and "Trust the new key".
+ * Nothing the browser holds ties such a reset to a real start over: anyone
+ * able to change the server's responses can report one (SECURITY.md).
  */
-async function resetApplies(st, pinned) {
+async function resetApplies(st, pinned, now = Math.floor(Date.now() / 1000)) {
   const r = resetOf(st);
   if (!r || !pinned || r.epoch !== (pinned.epoch ?? 0) + 1) return null;
+  if (Number.isSafeInteger(pinned.resetAt) && now - pinned.resetAt < RESET_REWRAP_GAP_SEC) return null;
   if (!st.escrowSignPub || !sameEscrowKey(r.signPub, st.escrowSignPub)) return null;
   if (!st.escrowSig || !(await escrowKeyEndorsed(r.signPub, st.escrowPub, st.escrowSig))) return null;
-  return r;
+  return { epoch: r.epoch, pin: { escrow: await escrowKeyId(st.escrowPub), sign: await signingKeyId(r.signPub), epoch: r.epoch, resetAt: now } };
 }
 
 /**
@@ -281,7 +298,7 @@ async function setUp(u, st, creds) {
   if (top && Array.isArray(top.children) && top.children.length) throw new DriveLocked('Your Drive has no keys. Contact the administrator.', 'wrong');
   const dk = createDriveKey();
   const set = [];
-  const body = { set, remove: [] };
+  const body = { first: true, set, remove: [] };
   let pwWrap = null;
   if (creds.password) {
     const { driveSalt, wrap } = await wrapPassword(dk, creds.password);
@@ -297,7 +314,12 @@ async function setUp(u, st, creds) {
     body.escrowPin = await sealEscrowPin(dk, await pinFor(st));
   }
   body.kcv = await keyCheckValue(dk);
-  await api.setKeys(body);
+  try {
+    await api.setKeys(body);
+  } catch (e) {
+    // Another tab (or the owner, for a new account) set this Drive up first: the stored wraps decide.
+    if (!(e instanceof ApiError && e.code === 'drive_exists')) throw e;
+  }
   // Two tabs may set up at the same moment: the stored wraps decide.
   const after = await loadState();
   const mine = (w) => after.wraps.some((x) => x.kind === w.kind && x.ref === w.ref && x.data === w.data);
@@ -449,14 +471,14 @@ export async function replaceRecoveryWraps(userId, codes, { password, impersonat
   return withKey(userId, async (dk) => {
     const set = [];
     for (const c of codes) set.push(await wrapRecovery(dk, c, await recoveryRef(c)));
-    if (set.length) await api.setKeys({ set });
+    if (set.length) await api.setKeys({ set, kcv: await keyCheckValue(dk) });
   }, { password, impersonating });
 }
 
 /** A passkey with PRF output: add (or replace) its wrap. */
 export function addPasskeyWrap(userId, prfOutput, credentialId, { password, impersonating = false } = {}) {
   return withKey(userId, async (dk) => {
-    await api.setKeys({ set: [await wrapPrf(dk, prfOutput, credentialId)], remove: [] });
+    await api.setKeys({ set: [await wrapPrf(dk, prfOutput, credentialId)], remove: [], kcv: await keyCheckValue(dk) });
   }, { password, impersonating });
 }
 
@@ -484,10 +506,11 @@ export async function escrowPasswordReset({ ownerId, userId, newPassword, reason
     if (e instanceof ApiError && (e.status === 404 || e.status === 409)) return 'no_wrap';
     throw e;
   }
-  const wraps = Array.isArray(r.wraps) ? r.wraps : [];
-  const wrap = r.wrap || wraps.find((w) => w && w.kind === 'escrow');
+  // Only the escrow wrap comes back, with how many wraps the Drive has.
+  const count = Number.isSafeInteger(r.wraps) ? r.wraps : 0;
+  const wrap = r.wrap && r.wrap.kind === 'escrow' ? r.wrap : null;
   // No Drive yet: the owner, who knows the new password, sets it up now.
-  if (!wrap && !wraps.length) return ownerSetsUpUserDrive({ ownerId, userId, password: newPassword });
+  if (!wrap && !count) return ownerSetsUpUserDrive({ ownerId, userId, password: newPassword });
   if (!wrap) return 'no_wrap';
   const priv = await escrowKeyFor(ownerDk, wrap, current, st.escrowPrivOld);
   const dk = priv ? await unlockWithEscrow(priv, wrap) : null;
@@ -1014,27 +1037,32 @@ export class DriveClient {
       const wrapKid = current ? escrowWrapKeyId(current) : null;
       const pinned = st.escrowPin ? await openEscrowPin(this.dk, st.escrowPin) : null;
       const next = await pinFor(st);
-      // Trust on first use: the first escrow key this Drive wraps to, and the
-      // owner's signing key, are pinned. Another escrow key is wrapped to only
-      // when the pinned signing key signed it; else the user decides (notice).
-      const ok = pinned
-        ? pinned.escrow === kid || (!!pinned.sign && pinned.sign === next.sign)
-        : !st.escrowPin && (wrapKid ?? kid) === kid; // a pin that does not open counts as changed
-      const reset = ok ? null : await resetApplies(st, pinned);
+      // Every user's Drive has, from its first set-up (setUp here, or
+      // ownerSetsUpUserDrive), an escrow wrap and a pin, and the wrap is always
+      // for the pinned escrow key (both change together). A pin that is
+      // missing or does not open, no escrow wrap, or a wrap for another key is
+      // tampering, never a first use (R5-M2): the notice, and no re-wrap.
+      const intact = !!pinned && !!wrapKid && wrapKid === pinned.escrow;
+      // Another escrow key is wrapped to only when the pinned signing key
+      // signed it; else the user decides (notice).
+      const ok = intact && (pinned.escrow === kid || (!!pinned.sign && pinned.sign === next.sign));
+      const reset = intact && !ok ? await resetApplies(st, pinned) : null;
       if (reset) {
         // The owner started over: moved to the reset's key once, and the
         // reset's epoch pinned so the same reset never applies twice.
         body.set.push(await wrapEscrow(this.dk, st.escrowPub));
-        body.escrowPin = await sealEscrowPin(this.dk, { escrow: kid, sign: await signingKeyId(reset.signPub), epoch: reset.epoch });
+        body.escrowPin = await sealEscrowPin(this.dk, reset.pin);
         body.escrowReset = reset.epoch;
         this.notice = { kind: 'escrow_rotated', text: 'Your administrator rotated a security key; nothing for you to do.' };
+      } else if (!intact) {
+        this.notice = { kind: 'escrow_changed', kid, tampered: true, text: 'Your Drive’s record of the administrator’s escrow key is missing or does not match its escrow wrap, so your Drive was not re-keyed. The server’s data may have been altered.' };
       } else if (!ok) {
         this.notice = { kind: 'escrow_changed', kid, text: 'The administrator’s escrow key has changed since your Drive last used it, and the change is not signed by the key your Drive trusts, so your Drive was not re-keyed for it.' };
       } else {
         if (wrapKid !== kid) body.set.push(await wrapEscrow(this.dk, st.escrowPub));
-        // A pinned signing key never changes silently; the pinned reset epoch stays.
-        const pin = { escrow: kid, sign: (pinned && pinned.sign) || next.sign, epoch: pinned ? (pinned.epoch ?? 0) : next.epoch };
-        if (!pinned || pinned.escrow !== pin.escrow || pinned.sign !== pin.sign || (pinned.epoch ?? 0) !== pin.epoch) body.escrowPin = await sealEscrowPin(this.dk, pin);
+        // A pinned signing key never changes, and none is adopted silently; the pinned reset epoch and resetAt stay.
+        const pin = { escrow: kid, sign: pinned.sign, epoch: pinned.epoch ?? 0, ...keptResetAt(pinned) };
+        if (pinned.escrow !== pin.escrow) body.escrowPin = await sealEscrowPin(this.dk, pin);
       }
     }
     if (prfOutput && credentialId && via !== 'passkey' && !wraps.some((w) => w.kind === 'passkey' && w.ref === credentialId)) {
@@ -1045,8 +1073,9 @@ export class DriveClient {
       const { driveSalt, wrap } = await wrapPassword(this.dk, password);
       body.driveSalt = driveSalt;
       body.set.push(wrap);
-      body.kcv = await keyCheckValue(this.dk);
     }
+    // Every wrap or pin written comes with the key check value: proof that it is of this Drive's DK.
+    if (body.set.length || body.escrowPin) body.kcv = await keyCheckValue(this.dk);
     if (body.set.length || body.escrowPriv || body.escrowPin) await api.setKeys(body);
   }
 
@@ -1079,12 +1108,19 @@ export class DriveClient {
 
   /**
    * The user accepts the owner's new escrow key (after the notice): wrap DK to
-   * it and pin it (with the signing key that signed it, if any).
+   * it and pin it (with the signing key that signed it, if any; the time of
+   * the last automatic reset re-wrap is kept). A Drive whose escrow wrap is
+   * already for that key (the pin was missing) gets only the new pin: a
+   * replacement of that wrap would need the step-up.
    */
   async acceptEscrowKey() {
     const st = await loadState();
     if (!st.escrowPub) return false;
-    await api.setKeys({ set: [await wrapEscrow(this.dk, st.escrowPub)], escrowPin: await sealEscrowPin(this.dk, await pinFor(st)) });
+    const kid = await escrowKeyId(st.escrowPub);
+    const cur = (st.wraps || []).find((w) => w.kind === 'escrow');
+    const prev = st.escrowPin ? await openEscrowPin(this.dk, st.escrowPin) : null;
+    const set = cur && escrowWrapKeyId(cur) === kid ? [] : [await wrapEscrow(this.dk, st.escrowPub)];
+    await api.setKeys({ set, escrowPin: await sealEscrowPin(this.dk, await pinFor(st, prev)), kcv: await keyCheckValue(this.dk) });
     this.notice = null;
     return true;
   }

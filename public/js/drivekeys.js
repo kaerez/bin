@@ -319,20 +319,24 @@ export function sameEscrowKey(a, b) {
 /**
  * What this Drive trusts, sealed under DK (field `escrowPin`, node "drive"):
  * `{ escrow, sign }` — the kid of the escrow key its escrow wrap is for, and
- * the kid of the owner's signing key (null when there was none). A user's
- * browser pins them the first time (trust on first use) and re-wraps to
- * another escrow key only when the pinned signing key signed it (or when the
- * user accepts it).
+ * the kid of the owner's signing key (null when there was none), plus the
+ * owner-reset `epoch` it has seen and `resetAt` (seconds: this browser's last
+ * automatic reset re-wrap). A user's browser pins them at the Drive's first
+ * set-up and re-wraps to another escrow key only when the pinned signing key
+ * signed it (or when the user accepts it, or once for an owner reset:
+ * driveclient.js resetApplies).
  */
 export async function sealEscrowPin(dk, pin) {
   const { names } = await deriveSubkeys(dk);
   const v = typeof pin === 'string' ? { escrow: pin, sign: null } : { escrow: String(pin.escrow), sign: pin.sign ? String(pin.sign) : null };
-  // The owner reset this pin has seen (docs/DRIVE.md §3), when there was one.
+  // The owner reset this pin has seen (docs/DRIVE.md §3), when there was one,
+  // and when this browser last moved the Drive to a reset's key by itself.
   if (pin && Number.isSafeInteger(pin.epoch) && pin.epoch > 0) v.epoch = pin.epoch;
+  if (pin && Number.isSafeInteger(pin.resetAt) && pin.resetAt > 0) v.resetAt = pin.resetAt;
   return sealField(names, 'escrowPin', 'drive', JSON.stringify(v));
 }
 
-/** The pin `{ escrow, sign, epoch? }`, or null (none; or it does not open with this DK — altered). */
+/** The pin `{ escrow, sign, epoch?, resetAt? }`, or null (none; or it does not open with this DK — altered). */
 export async function openEscrowPin(dk, sealed) {
   if (!sealed) return null;
   try {
@@ -342,6 +346,7 @@ export async function openEscrowPin(dk, sealed) {
     if (!v || typeof v.escrow !== 'string') return null;
     const pin = { escrow: v.escrow, sign: typeof v.sign === 'string' ? v.sign : null };
     if (Number.isSafeInteger(v.epoch) && v.epoch > 0) pin.epoch = v.epoch;
+    if (Number.isSafeInteger(v.resetAt) && v.resetAt > 0) pin.resetAt = v.resetAt;
     return pin;
   } catch {
     return null;
