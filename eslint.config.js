@@ -58,6 +58,13 @@ export default [
     languageOptions: { globals: { ...globals.node } },
   },
 
+  // Manual end-to-end scripts (test-e2e/, never run in CI): Node, plus the DOM
+  // globals of the functions they run inside the page.
+  {
+    files: ['test-e2e/**/*.mjs'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
+  },
+
   // Build-time asset tooling (tools/render-og.mjs): plain Node scripts, never shipped.
   {
     files: ['tools/**/*.mjs', 'examples/**/*.mjs'],

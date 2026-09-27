@@ -201,8 +201,10 @@ stand-in. What each side relies on:
   `impersonating = !!impersonatedBy`) to `openDrive({ user })`, `unlockDrive(creds, { user })` and
   `unlockDriveWithPasskey({ user })`, so the client needs no session lookup. While the owner
   impersonates a user, the tab's key slot keeps the owner's own DK (`secbin_dk_uid`), so the
-  user's Drive shows the unlock prompt; a Drive with no key yet cannot be set up then
-  (`DriveLocked` reason `impersonating`).
+  user's Drive shows the unlock prompt; a Drive with no key yet cannot be set up then: instead of
+  the prompt, the page says "The Drive can only be set up by its user" (`startDrive` state
+  `impersonating`; the client's `DriveLocked` reason `impersonating`). The Drive's unlock and key
+  operations are not Account changes and take no human check (Turnstile).
 - **Opening:** `openDrive()` resolves to a `DriveClient` or throws `DriveDisabled` (the page says
   "Drive is not enabled for your account") or `DriveLocked` with `reason` and `credentialIds`
   (the passkeys with a Drive wrap). Reason `setup` (no wraps yet): the prompt is "Set up your
@@ -246,7 +248,10 @@ stand-in. What each side relies on:
 - Names typed in the UI are trimmed and NFC-normalised; empty, `.`/`..`, `/`, `\`, control
   characters and more than 255 UTF-8 bytes are refused (as `checkName` in the client), and so is
   a name already used in the same folder when creating or renaming (the server cannot check
-  encrypted names). Uploads keep the file's own name; a duplicate name in a folder is allowed.
+  encrypted names). An upload keeps the file's own name unless the folder already has it: then it
+  becomes "name (2).ext", "name (3).ext"… (`upload(…, { taken })` with the set from
+  `names(folderId)`; `uploadTree` does the same per folder, merges into an existing folder of the
+  same name and renames a new folder whose name a file already has).
 
 ## 9. Security notes
 

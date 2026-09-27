@@ -215,6 +215,17 @@ describe('startDrive states', () => {
     }
   });
 
+  it('impersonating: a Drive with no key yet says only its user can set it up (no prompt)', async () => {
+    S = fakeServer();
+    globalThis.fetch = S.fetch;
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true } }));
+    expect(r.state).toBe('impersonating');
+    expect(mount.querySelector('#drive-impersonating').textContent).toMatch(/The Drive can only be set up by its user/);
+    expect(mount.querySelector('#drive-unlock')).toBeNull();
+    expect(S.requests.some((x) => x.method !== 'GET')).toBe(false);
+  });
+
   it('a tab key that does not open this Drive goes back to the unlock prompt', async () => {
     await server({ locked: true });
     saveSessionKey(createDriveKey(), S.user.id);
@@ -410,6 +421,15 @@ describe('the Drive', () => {
     expect(node.state).toBe('ready');
   });
 
+  it('an uploaded name already in the folder gets " (2)", " (3)"…', async () => {
+    await openApp();
+    const input = document.getElementById('drive-file-input');
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File(['a'], 'readme.txt'), new File(['b'], 'readme.txt'), new File(['c'], 'Photos')] });
+    input.dispatchEvent(new Event('change'));
+    await until(() => row('readme (3).txt'));
+    expect(names()).toEqual(['Documents', 'Empty', 'Photos', 'Photos (2)', 'readme (2).txt', 'readme (3).txt', 'readme.txt']);
+  });
+
   it('download a file (decrypted in the browser), with progress', async () => {
     await openApp();
     let saved = null;
@@ -444,6 +464,22 @@ describe('the client\'s progress and cancel for downloads', () => {
     const ctl = new AbortController();
     ctl.abort();
     await expect((await c.download(ids.get('readme.txt'), { signal: ctl.signal })).blob()).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('uploadTree: names that clash get " (2)"; existing folders are merged into, a file of a folder\'s name is not', async () => {
+    await server();
+    const c = await drive.openDrive({ user: S.user });
+    const f = (n, t = 'x') => new File([t], n);
+    await c.uploadTree('root', [
+      { path: 'Documents/notes.md', file: f('notes.md') },
+      { path: 'Documents/new.txt', file: f('new.txt') },
+      { path: 'readme.txt/inner.txt', file: f('inner.txt') },
+    ]);
+    const top = await c.list('root');
+    expect(top.children.map((x) => x.name)).toEqual(['Documents', 'Empty', 'Photos', 'readme (2).txt', 'readme.txt']);
+    expect(top.children.find((x) => x.name === 'readme (2).txt').kind).toBe('dir');
+    const docs = await c.list(ids.get('Documents'));
+    expect(docs.children.map((x) => x.name)).toEqual(['Reports', 'new.txt', 'notes (2).md', 'notes.md']);
   });
 
   it('openDrive\'s DriveLocked names the passkeys that can unlock', async () => {
