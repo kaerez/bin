@@ -2,8 +2,11 @@
 // server for the signed-in owner and encrypted HERE, with a passphrase, before
 // they are saved (public/js/exportcrypt.js); imports are decrypted here,
 // previewed (a dry run on the server) and then applied all-or-nothing. Both
-// ask for the owner's password again. Every part is chosen when exporting and
-// again when importing. The owner account and sessions are never exported.
+// ask for the owner's password again. Every part is chosen per user (a table
+// of users × parts) when exporting and again when importing. The owner's
+// password and recovery codes are never exported; its passkeys only when
+// asked. An import never changes an existing account's password, recovery
+// codes, API keys or passkeys: it only sets its role and adds passkeys.
 
 import { admin, ApiError } from '../../js/api.js';
 import { loginProof } from '../../js/pwauth.js';
@@ -16,6 +19,8 @@ const check = (label, checked = false, note = '') => {
   const input = h('input', { type: 'checkbox', checked });
   return { input, el: h('label.inline.part-opt', {}, input, h('span', {}, ` ${label}`, note ? h('span.mono.muted.block', { text: note }) : null)) };
 };
+const box = (label, checked = false) => h('input', { type: 'checkbox', checked, 'aria-label': label });
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 // What each part holds, and what to know about it (shown on export and import).
 const SYSTEM_PARTS = [
   ['settings', 'Settings', 'Server-wide settings (brute-force protection, lockout, logs, public access, accessibility statement…).'],
@@ -25,12 +30,29 @@ const SYSTEM_PARTS = [
   ['public', 'Public account', 'The anonymous account\'s limits, quotas and viewer rules.'],
 ];
 const USER_PARTS = [
-  ['credentials', 'Credentials', 'User name, password verifier (not the password), disabled flag. Needed to create an account on the target.'],
-  ['config', 'Role', 'Which role the user has (by name; export the roles too).'],
-  ['apiKeys', 'API keys', 'The stored key hashes, names, scopes and dates: the same keys keep working on the target. Revoking a key on one server does not revoke it on the other.'],
-  ['passkeys', 'Passkeys and recovery codes', `Public keys, the "Password and passkey" choice and recovery-code hashes. Passkeys work only on the same hostname (${location.hostname}); recovery codes work anywhere.`],
+  ['credentials', 'Credentials', 'User name, password verifier (not the password), disabled flag. Needed to create an account on the target; an existing account keeps its own.'],
+  ['role', 'Role', 'Which role the user has (by name; export the roles too). The only setting an import changes on an existing account (never the owner\'s).'],
+  ['apiKeys', 'API keys', 'The stored key hashes, names, scopes and dates: the same keys keep working on the target. Revoking a key on one server does not revoke it on the other. Only for new accounts.'],
+  ['passkeys', 'Passkeys', `Public keys and the "Password and passkey" choice. Passkeys work only on the same hostname (${location.hostname}). On import they are added (existing passkeys stay); an existing account keeps its own choice.`],
+  ['recoveryCodes', 'Recovery codes', 'The recovery-code hashes. Recovery codes work anywhere (any hostname). Only for new accounts: an existing account keeps its own.'],
 ];
+const OWNER_NOTE = `Your own passkeys (public keys). Off by default. Passkeys work only on the same hostname (${location.hostname}). Your password and recovery codes are never exported.`;
 const pw = (label, autocomplete) => h('input.input', { type: 'password', autocomplete, 'aria-label': label, maxlength: '256' });
+
+/** Select all / Deselect all for a set of checkboxes (a part column, or the users). */
+function bulk(label, what, boxes) {
+  const set = (on) => () => {
+    for (const b of boxes()) {
+      if (b.disabled || b.checked === on) continue;
+      b.checked = on;
+      b.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  };
+  return h('div.toolbar.bulk-row', {}, h('span.field-label', { text: label }),
+    h('button.btn.mini', { type: 'button', text: 'Select all', 'aria-label': `Select all: ${what}`, on: { click: set(true) } }),
+    h('button.btn.mini', { type: 'button', text: 'Deselect all', 'aria-label': `Deselect all: ${what}`, on: { click: set(false) } }));
+}
+const partNotes = () => h('ul.plan-list.part-notes', {}, ...USER_PARTS.map(([, label, note]) => h('li.mono.muted', {}, h('strong', { text: `${label}: ` }), note)));
 
 export async function renderPortable(panel, profile) {
   const p = clear(panel);
@@ -43,12 +65,21 @@ export async function renderPortable(panel, profile) {
 // ── export ───────────────────────────────────────────────────────────────────
 function exportCard(users, profile) {
   const sysChecks = SYSTEM_PARTS.map(([k, label, note]) => ({ k, ...check(label, k !== 'turnstile', note) }));
-  const scope = h('select.input', { 'aria-label': 'Users to export' },
-    h('option', { value: 'none', text: 'no users' }), h('option', { value: 'all', text: `all users (${users.length})` }), h('option', { value: 'some', text: 'selected users' }));
-  const pick = h('select.input.multi', { multiple: true, size: String(Math.min(8, Math.max(3, users.length))), 'aria-label': 'Selected users', hidden: true },
-    ...users.map((u) => h('option', { value: u.id, text: u.username })));
-  scope.onchange = () => { pick.hidden = scope.value !== 'some'; };
-  const userChecks = USER_PARTS.map(([k, label, note]) => ({ k, ...check(label, k === 'config', note) }));
+  const ownerCheck = check('Owner passkeys', false, OWNER_NOTE);
+  // One row per user: whether to export it, and each part (the role is on by default).
+  const rows = users.map((u) => ({
+    u,
+    pick: box(`Export ${u.username}`),
+    parts: Object.fromEntries(USER_PARTS.map(([k, label]) => [k, box(`${label} for ${u.username}`, k === 'role')])),
+  }));
+  const table = rows.length ? h('div.table-wrap', {}, h('table.table.part-table', {},
+    h('thead', {}, h('tr', {}, h('th', { text: 'Export' }), h('th', { text: 'User' }), ...USER_PARTS.map(([, label]) => h('th', { text: label })))),
+    h('tbody', {}, ...rows.map((r) => h('tr', {},
+      h('td', { dataset: { label: 'Export' } }, r.pick), h('td', { dataset: { label: 'User' }, text: r.u.username }),
+      ...USER_PARTS.map(([k, label]) => h('td', { dataset: { label } }, r.parts[k]))))))) : h('p.mono.muted', { text: 'No users to export.' });
+  const bulks = rows.length ? h('div.stack.bulk', {},
+    bulk('Users', 'users to export', () => rows.map((r) => r.pick)),
+    ...USER_PARTS.map(([k, label]) => bulk(label, `${label} for every user`, () => rows.map((r) => r.parts[k])))) : null;
   const pass1 = pw('Export passphrase', 'new-password');
   const pass2 = pw('Repeat export passphrase', 'new-password');
   // An empty passphrase is allowed, but then the encryption protects nothing.
@@ -61,23 +92,23 @@ function exportCard(users, profile) {
   const go = h('button.btn', { type: 'button', text: 'Encrypt and download' });
 
   go.onclick = async () => {
-    const who = scope.value === 'all' ? 'all' : scope.value === 'some' ? [...pick.selectedOptions].map((o) => o.value) : [];
+    const chosen = rows.filter((r) => r.pick.checked).map((r) => ({ r, parts: USER_PARTS.map(([k]) => k).filter((k) => r.parts[k].checked) }));
     const system = Object.fromEntries(sysChecks.map((c) => [c.k, c.input.checked]));
     const anySys = Object.values(system).some(Boolean);
-    const parts = Object.fromEntries(userChecks.map((c) => [c.k, c.input.checked]));
-    if (!anySys && (who === 'all' ? users.length === 0 : who.length === 0)) return showMsg(msg, 'Choose some system parts and/or some users.');
-    if (who !== 'all' && scope.value === 'some' && !who.length) return showMsg(msg, 'Select at least one user.');
-    if ((who === 'all' || who.length) && !Object.values(parts).some(Boolean)) return showMsg(msg, 'Choose what to export for the users.');
+    const ownerPasskeys = ownerCheck.input.checked;
+    if (!anySys && !ownerPasskeys && !chosen.length) return showMsg(msg, 'Choose some system parts, your passkeys and/or some users.');
+    const empty = chosen.find((c) => !c.parts.length);
+    if (empty) return showMsg(msg, `Choose what to export for "${empty.r.u.username}", or leave it out.`);
     if (pass1.value !== pass2.value) return showMsg(msg, 'The two passphrases differ.');
     if (!mine.value) return showMsg(msg, 'Enter your password to confirm.');
     go.disabled = true;
     showMsg(msg, 'Exporting and encrypting…', false);
     try {
       const current = await loginProof(profile.user.username, mine.value);
-      const { document } = await admin.exportData({ current, system: anySys ? system : false, users: who, ...parts });
+      const { document } = await admin.exportData({ current, system: anySys ? system : false, ownerPasskeys, users: chosen.map((c) => ({ id: c.r.u.id, parts: c.parts })) });
       const text = await sealExport(document, pass1.value);
       download(text, `secbin-export-${location.hostname}-${new Date().toISOString().slice(0, 10)}.json`);
-      const what = `Exported ${document.system ? 'the system configuration and ' : ''}${document.users.length} user${document.users.length === 1 ? '' : 's'}.`;
+      const what = `Exported ${document.system ? 'the system configuration, ' : ''}${document.owner ? 'your passkeys, ' : ''}${plural(document.users.length, 'user')}.`;
       showMsg(msg, pass1.value ? `${what} Keep the file and its passphrase apart.` : `${what} No passphrase: anyone with the file can read it.`, false);
       toast('Export saved.');
       pass1.value = pass2.value = mine.value = '';
@@ -92,10 +123,10 @@ function exportCard(users, profile) {
 
   return h('div.card.stack', {},
     h('h2.section-title', { text: 'Export' }),
-    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. The owner account, sessions and shares are never exported. Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
+    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. Sessions and shares are never exported, nor your own password and recovery codes. Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
     h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
-    h('div.toolbar', {}, h('span.field-label', { text: 'Users' }), scope), pick,
-    h('fieldset.range', {}, h('legend', { text: 'For each exported user' }), ...userChecks.map((c) => c.el)),
+    h('fieldset.range', {}, h('legend', { text: 'Owner' }), ownerCheck.el),
+    h('fieldset.range', {}, h('legend', { text: 'Users and what to export for each' }), bulks, table, partNotes()),
     h('div.toolbar', {}, field('Export passphrase (optional)', pass1), field('Repeat', pass2)), noPass,
     field('Your password (confirms it is you)', mine),
     h('div.btn-row', {}, go), msg);
@@ -143,45 +174,65 @@ function importCard(users, profile) {
 
   return h('div.card.stack', {},
     h('h2.section-title', { text: 'Import' }),
-    h('p.subtitle', { text: 'Decrypt an export, choose what to take over, preview the changes, then import. Nothing changes until you import, and an import is applied completely or not at all. The owner account can never be replaced.' }),
+    h('p.subtitle', { text: 'Decrypt an export, choose what to take over, preview the changes, then import. Nothing changes until you import, and an import is applied completely or not at all. New accounts are created from the parts you choose. An account that already exists (yours included) keeps its password, recovery codes, API keys and passkeys: an import only sets its role and adds passkeys.' }),
     h('div.toolbar', {}, file, pass, open), msg, review);
 }
 
-function renderReview(box, doc, users, profile) {
-  clear(box);
+/** What a user entry of the file holds for a part (shown next to its checkbox). */
+function partSummary(u, k) {
+  if (k === 'credentials') return u.credentials?.disabled ? 'disabled' : 'yes';
+  if (k === 'role') return String(u.role ?? '');
+  if (k === 'apiKeys') return String(u.apiKeys?.length ?? 0);
+  if (k === 'passkeys') return String(u.passkeys?.keys?.length ?? 0);
+  return String(u.recoveryCodes?.length ?? 0);
+}
+
+function renderReview(out, doc, users, profile) {
+  clear(out);
   const existing = new Map(users.map((u) => [u.username.toLowerCase(), u]));
   const ownerName = profile.user.username.toLowerCase();
   // The system parts in the file, each chosen again here (off by default).
   const inFile = (k) => doc.system && (k === 'roles' ? doc.system.limits !== undefined : doc.system[k] !== undefined);
   const sysChecks = SYSTEM_PARTS.filter(([k]) => inFile(k)).map(([k, label, note]) => ({ k, ...check(label, false, note) }));
-  // The user parts the file holds, chosen for every imported user.
-  const userChecks = USER_PARTS.filter(([k]) => doc.users.some((u) => u[k] !== undefined)).map(([k, label, note]) => ({ k, ...check(label, true, note) }));
+  const ownerKeys = doc.owner?.passkeys?.keys?.length;
+  const ownerCheck = doc.owner?.passkeys ? check(`Owner passkeys (${ownerKeys ?? 0})`, false,
+    `Adds the file owner's passkeys to your account (${profile.user.username}); your passkeys, password and recovery codes stay. Passkeys work only on the same hostname (${location.hostname}).`) : null;
+  // The part columns: those any user in the file holds.
+  const cols = USER_PARTS.filter(([k]) => doc.users.some((u) => u[k] !== undefined));
   const rows = [];
   const body = h('tbody');
   for (const u of doc.users) {
-    const parts = [u.credentials ? 'credentials' : null, u.config?.role ? `role ${u.config.role}` : u.config ? 'old per-user settings (ignored)' : null,
-      u.apiKeys ? `${u.apiKeys.length} API key${u.apiKeys.length === 1 ? '' : 's'}` : null, u.passkeys ? `${u.passkeys.keys?.length ?? 0} passkey${u.passkeys.keys?.length === 1 ? '' : 's'}` : null].filter(Boolean).join(' + ');
     const action = h('select.input', { 'aria-label': `Action for ${u.username}` });
     const as = h('input.input', { value: u.username, maxlength: '64', 'aria-label': `Import ${u.username} as`, spellcheck: 'false' });
     const status = h('span.mono.muted');
+    // Each part the entry holds, on by default.
+    const parts = Object.fromEntries(cols.filter(([k]) => u[k] !== undefined).map(([k, label]) => [k, box(`Import ${label} for ${u.username}`, true)]));
+    let usual = 'skip'; // what "Select all" picks for this row
     const sync = () => {
       const name = as.value.trim().toLowerCase();
       const clash = name === ownerName ? 'owner' : existing.has(name) ? 'user' : null;
       const keep = action.value;
       clear(action).append(
         h('option', { value: 'skip', text: 'skip' }),
-        clash === 'user' ? h('option', { value: 'overwrite', text: 'overwrite the existing user' }) : null,
-        clash === null && u.credentials ? h('option', { value: 'create', text: 'create' }) : null);
+        clash === null && u.credentials ? h('option', { value: 'create', text: 'create' }) : null,
+        clash === 'user' ? h('option', { value: 'update', text: 'update existing: role + add passkeys' }) : null,
+        clash === 'owner' ? h('option', { value: 'update', text: 'update your account: add passkeys' }) : null);
+      usual = clash ? 'update' : u.credentials ? 'create' : 'skip';
       action.value = [...action.options].some((o) => o.value === keep) ? keep : 'skip';
-      status.textContent = clash === 'owner' ? 'this is your own (owner) name — rename to import'
-        : clash === 'user' ? 'exists here' : u.credentials ? 'new here' : 'new here, but no credentials — cannot be created';
+      status.textContent = clash === 'owner' ? 'your own (owner) account — only passkeys can be added; it keeps the Owner role'
+        : clash === 'user' ? 'exists here — only its role and new passkeys can change'
+          : u.credentials ? 'new here' : 'new here, but no credentials — cannot be created';
     };
     as.addEventListener('input', sync);
     sync();
     if ([...action.options].some((o) => o.value === 'create')) action.value = 'create';
-    rows.push({ u, action, as });
-    body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td', { dataset: { label: 'Contains' }, text: parts }),
-      h('td', { dataset: { label: 'Import as' } }, as), h('td', { dataset: { label: 'Action' } }, action), h('td', { dataset: { label: 'Here' } }, status)));
+    rows.push({ u, action, as, parts, usual: () => usual });
+    body.appendChild(h('tr', {},
+      h('td', { dataset: { label: 'User' }, text: u.username }),
+      h('td', { dataset: { label: 'Import as' } }, as),
+      h('td', { dataset: { label: 'Action' } }, action),
+      ...cols.map(([k, label]) => h('td', { dataset: { label } }, parts[k] ? h('label.inline', {}, parts[k], h('span.mono', { text: partSummary(u, k) })) : h('span.muted', { text: '—', 'aria-label': 'not in the file' }))),
+      h('td', { dataset: { label: 'Here' } }, status)));
   }
   const mine = pw('Your password', 'current-password');
   const msg = h('p.msg', { role: 'status', hidden: true });
@@ -190,26 +241,38 @@ function renderReview(box, doc, users, profile) {
   const apply = h('button.btn.danger', { type: 'button', text: 'Import', disabled: true });
   let previewed = null;
 
+  // Any change after a preview invalidates it.
+  const invalidate = () => { previewed = null; apply.disabled = true; };
+  // "Select all" users: each takes its usual action (create a new one, update an existing one).
+  const setUsers = (on) => () => {
+    for (const r of rows) {
+      const v = on ? r.usual() : 'skip';
+      if (r.action.value !== v && [...r.action.options].some((o) => o.value === v)) { r.action.value = v; invalidate(); }
+    }
+  };
+  const userBulk = h('div.toolbar.bulk-row', {}, h('span.field-label', { text: 'Users' }),
+    h('button.btn.mini', { type: 'button', text: 'Select all', 'aria-label': 'Select all: users to import', on: { click: setUsers(true) } }),
+    h('button.btn.mini', { type: 'button', text: 'Deselect all', 'aria-label': 'Deselect all: users to import (skip them)', on: { click: setUsers(false) } }));
+
   const decisions = () => {
     const chosen = sysChecks.filter((c) => c.input.checked).map((c) => c.k);
-    const out = { system: chosen.length ? Object.fromEntries(chosen.map((k) => [k, true])) : false, users: {} };
-    const wanted = userChecks.filter((c) => c.input.checked).map((c) => c.k);
+    const out = { system: chosen.length ? Object.fromEntries(chosen.map((k) => [k, true])) : false, owner: ownerCheck?.input.checked ? { passkeys: true } : false, users: {} };
     for (const r of rows) {
       if (r.action.value === 'skip') continue;
-      const parts = wanted.filter((k) => r.u[k] !== undefined);
-      if (!parts.length) continue;
-      out.users[r.u.username] = { as: r.as.value.trim(), parts, ...(r.action.value === 'overwrite' ? { overwrite: true } : {}) };
+      const parts = Object.keys(r.parts).filter((k) => r.parts[k].checked);
+      if (!parts.length) return { empty: r.u.username };
+      out.users[r.u.username] = { as: r.as.value.trim(), action: r.action.value, parts };
     }
     return out;
   };
-  // Any change after a preview invalidates it.
-  const invalidate = () => { previewed = null; apply.disabled = true; };
   for (const r of rows) { r.action.addEventListener('change', invalidate); r.as.addEventListener('input', invalidate); }
-  for (const c of [...sysChecks, ...userChecks]) c.input.addEventListener('change', invalidate);
+  for (const c of [...sysChecks, ...(ownerCheck ? [ownerCheck] : [])]) c.input.addEventListener('change', invalidate);
+  for (const r of rows) for (const b of Object.values(r.parts)) b.addEventListener('change', invalidate);
 
   const run = async (dryRun) => {
     const d = decisions();
-    if (!d.system && !Object.keys(d.users).length) return showMsg(msg, 'Nothing selected to import.');
+    if (d.empty) return showMsg(msg, `Choose what to import for "${d.empty}", or skip it.`);
+    if (!d.system && !d.owner && !Object.keys(d.users).length) return showMsg(msg, 'Nothing selected to import.');
     if (!mine.value) return showMsg(msg, 'Enter your password to confirm.');
     preview.disabled = apply.disabled = true;
     showMsg(msg, dryRun ? 'Checking…' : 'Importing…', false);
@@ -239,23 +302,27 @@ function renderReview(box, doc, users, profile) {
   preview.onclick = () => run(true);
   apply.onclick = () => { if (previewed === JSON.stringify(decisions())) run(false); else invalidate(); };
 
-  box.append(
-    h('p.mono.muted', { text: `Export from ${doc.origin || 'an unknown origin'} · ${formatDate(doc.created)} · ${doc.system ? 'system configuration + ' : ''}${doc.users.length} user${doc.users.length === 1 ? '' : 's'}` }),
+  const bulks = doc.users.length ? h('div.stack.bulk', {}, userBulk,
+    ...cols.map(([k, label]) => bulk(label, `${label} for every user`, () => rows.map((r) => r.parts[k]).filter(Boolean)))) : null;
+  out.append(
+    h('p.mono.muted', { text: `Export from ${doc.origin || 'an unknown origin'} · ${formatDate(doc.created)} · ${doc.system ? 'system configuration + ' : ''}${doc.owner ? 'owner passkeys + ' : ''}${plural(doc.users.length, 'user')}` }),
     sysChecks.length ? h('fieldset.range', {}, h('legend', { text: 'System parts to import' }), ...sysChecks.map((c) => c.el)) : null,
-    userChecks.length ? h('fieldset.range', {}, h('legend', { text: 'For each imported user' }), ...userChecks.map((c) => c.el)) : null,
-    doc.users.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Contains', 'Import as', 'Action', 'Here'].map((t) => h('th', { text: t })))), body)) : null,
+    ownerCheck ? h('fieldset.range', {}, h('legend', { text: 'Owner' }), ownerCheck.el) : null,
+    doc.users.length ? h('fieldset.range', {}, h('legend', { text: 'Users and what to import for each' }), bulks,
+      h('div.table-wrap', {}, h('table.table.part-table', {}, h('thead', {}, h('tr', {}, ...['User', 'Import as', 'Action', ...cols.map(([, label]) => label), 'Here'].map((t) => h('th', { text: t })))), body)),
+      partNotes()) : null,
     field('Your password (confirms it is you)', mine),
     h('div.btn-row', {}, preview, apply), msg, planBox);
 }
 
-function renderPlan(box, plan) {
-  clear(box);
+function renderPlan(out, plan) {
+  clear(out);
   if (!plan) return;
   const items = [];
   if (plan.system) {
     const s = plan.system;
     if (s.settings) {
-      items.push(`Settings: ${s.settings.length} change${s.settings.length === 1 ? '' : 's'}.`);
+      items.push(`Settings: ${plural(s.settings.length, 'change')}.`);
       for (const c of s.settings) items.push(`  ${c.key}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`);
     }
     if (s.roles) items.push(`Roles: the Default role's limits, quotas (${s.quotas}) and viewer rules (${s.viewerRules}) replaced${s.roles.length ? `; ${s.roles.map((r) => `${r.name} (${r.action})`).join(', ')}` : ''}.`);
@@ -266,11 +333,22 @@ function renderPlan(box, plan) {
     if (s.turnstile) items.push(`Turnstile keys: ${s.turnstile}.`);
     if (s.public) items.push(`Public account: ${s.public.limits} limits, ${s.public.quotas} quotas, ${s.public.viewerRules} viewer rules.`);
   }
+  const detail = (e) => {
+    for (const c of e.changes ?? []) items.push(`  + ${c}`);
+    if (e.changes && !e.changes.length && (e.action === 'update' || !e.action)) items.push('  nothing changes');
+    for (const s of e.skipped ?? []) items.push(`  skipped: ${s}`);
+  };
+  if (plan.owner) {
+    items.push(`Owner passkeys → ${plan.owner.as}:`);
+    detail(plan.owner);
+  }
   for (const u of plan.users) {
     if (u.action === 'skip') continue;
-    items.push(`${u.username}${u.as && u.as !== u.username ? ` → ${u.as}` : ''}: ${u.action}${u.parts?.length ? ` (${u.parts.join(' + ')})` : ''}${u.note ? ` — ${u.note}` : ''}`);
+    const verb = u.action === 'update' ? `update existing${u.owner ? ' (owner)' : ''}` : u.action;
+    items.push(`${u.username}${u.as && u.as !== u.username ? ` → ${u.as}` : ''}: ${verb}`);
+    if (u.action === 'create' || u.action === 'update') detail(u);
   }
-  box.append(h('h3.field-label', { text: 'Changes' }), h('ul.plan-list', {}, ...items.map((t) => h('li.mono', { text: t }))));
-  if (plan.warnings?.length) box.append(h('h3.field-label', { text: 'Check these' }), h('ul.plan-list', {}, ...plan.warnings.map((t) => h('li.type-hint.warn', { text: t }))));
-  if (plan.errors.length) box.append(h('h3.field-label', { text: 'Problems' }), h('ul.plan-list', {}, ...plan.errors.map((t) => h('li.msg.error', { text: t }))));
+  out.append(h('h3.field-label', { text: 'Changes' }), h('ul.plan-list', {}, ...items.map((t) => h('li.mono', { text: t }))));
+  if (plan.warnings?.length) out.append(h('h3.field-label', { text: 'Check these' }), h('ul.plan-list', {}, ...plan.warnings.map((t) => h('li.type-hint.warn', { text: t }))));
+  if (plan.errors.length) out.append(h('h3.field-label', { text: 'Problems' }), h('ul.plan-list', {}, ...plan.errors.map((t) => h('li.msg.error', { text: t }))));
 }

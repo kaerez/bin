@@ -1,8 +1,9 @@
 // import-export.test.js — the owner's export/import of system configuration and
 // users (secbin-export/v1). Both need the owner's password again (step-up);
-// the owner is never exported and cannot be imported over; an import is
+// the owner's password and recovery codes are never exported; an import is
 // previewed (dry run) and applied all-or-nothing; imported credentials log in
-// with the original password; every field is re-validated server-side.
+// with the original password; an existing account (the owner included) never
+// has its credentials changed; every field is re-validated server-side.
 import { describe, it, expect, beforeAll } from 'vitest';
 import { owner, makeUser, fetchJson, login, proofFor, USER_PW, freshIp } from './helpers.js';
 
@@ -34,29 +35,48 @@ describe('admin export', () => {
     const u = await makeUser('ie-export');
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { maxViews: 7, apiEnabled: true } } });
     await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'k' } });
-    const doc = await exportDoc({ system: true, users: 'all', credentials: true, config: true });
+    const doc = await exportDoc({ system: true, users: 'all', parts: ['credentials', 'role'] });
     expect(doc.format).toBe('secbin-export/v1');
     expect(doc.users.some((x) => x.username === 'owner')).toBe(false);
+    expect(doc.owner).toBeUndefined(); // the owner's passkeys only when asked
     const e = doc.users.find((x) => x.username === 'ie-export');
-    expect(Object.keys(e).sort()).toEqual(['config', 'credentials', 'username']);
+    expect(Object.keys(e).sort()).toEqual(['credentials', 'role', 'username']);
     expect(Object.keys(e.credentials).sort()).toEqual(['disabled', 'salt', 't', 'verifier']);
-    // A user's configuration is their role, by name; the role travels in `system`.
-    expect(e.config).toEqual({ role: `user ${u.id}` });
+    // A user's role, by name; the role travels in `system`.
+    expect(e.role).toBe(`user ${u.id}`);
     const role = doc.system.roles.find((r) => r.name === `user ${u.id}`);
     expect(role.limits.all).toMatchObject({ maxViews: 7, apiEnabled: true });
-    expect(JSON.stringify(doc)).not.toMatch(/sbk_|"sid"|sess_ver|key_hash|"hash"|"keys"/);
+    expect(JSON.stringify(doc)).not.toMatch(/sbk_|"sid"|sess_ver|key_hash|"hash"|"keys"|recoveryCodes/);
     // Unless asked for, no API keys or passkeys leave the server.
     expect(Object.keys(doc.system).sort()).toEqual(['ipRules', 'limits', 'public', 'quotas', 'roles', 'settings', 'turnstile', 'viewerRules']);
     // The Default role (system.limits.all) holds a value for every option.
     expect(Object.keys(doc.system.limits.all)).toContain('pwMinLength');
     // Parts are optional.
-    const onlyConfig = await exportDoc({ users: [u.id], config: true });
-    expect(onlyConfig.system).toBeUndefined();
-    expect(onlyConfig.users).toHaveLength(1);
-    expect(onlyConfig.users[0].credentials).toBeUndefined();
+    const onlyRole = await exportDoc({ users: [u.id], parts: ['role'] });
+    expect(onlyRole.system).toBeUndefined();
+    expect(onlyRole.users).toEqual([{ username: 'ie-export', role: `user ${u.id}` }]);
+    // No parts → no users; unknown part names are ignored.
+    expect((await exportDoc({ users: [u.id], parts: [] })).users).toEqual([]);
+    expect((await exportDoc({ users: [u.id], parts: ['config', 'password'] })).users).toEqual([]);
     // Selecting the owner's id exports nothing for it.
     const ownerId = await userId('owner');
-    expect((await exportDoc({ users: [ownerId], credentials: true })).users).toEqual([]);
+    expect((await exportDoc({ users: [ownerId], parts: ['credentials'] })).users).toEqual([]);
+    expect((await exportDoc({ users: [{ id: ownerId, parts: ['credentials', 'recoveryCodes'] }] })).users).toEqual([]);
+  });
+
+  it('chooses the parts per user', async () => {
+    const a = await makeUser('ie-per-a');
+    const b = await makeUser('ie-per-b');
+    const doc = await exportDoc({ users: [{ id: a.id, parts: ['credentials'] }, { id: b.id, parts: ['role', 'recoveryCodes', 'passkeys'] }, { id: a.id, parts: ['role'] }] });
+    expect(doc.users).toHaveLength(2); // a user appears once (its first entry)
+    expect(Object.keys(doc.users.find((x) => x.username === 'ie-per-a')).sort()).toEqual(['credentials', 'username']);
+    const eb = doc.users.find((x) => x.username === 'ie-per-b');
+    expect(Object.keys(eb).sort()).toEqual(['passkeys', 'recoveryCodes', 'role', 'username']);
+    expect(eb.passkeys).toEqual({ mfa: false, keys: [] });
+    expect(eb.recoveryCodes).toEqual([]);
+    const audit = (await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json()).rows;
+    expect(audit.some((r) => r.action === 'export.users' && r.detail === 'credentials: ie-per-a')).toBe(true);
+    expect(audit.some((r) => r.action === 'export.users' && r.detail === 'role+passkeys+recoveryCodes: ie-per-b')).toBe(true);
   });
 });
 
@@ -65,14 +85,15 @@ describe('admin import', () => {
     const u = await makeUser('ie-roundtrip', 'roundtrip-password-1');
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { maxViews: 3 } } });
     await fetchJson('/api/private/admin/quotas', { method: 'PUT', cookie: oc, body: { scope: u.id, list: [{ channel: 'all', kind: 'all', n: 1, unit: 'd', max: 4 }] } });
-    const doc = await exportDoc({ users: [u.id], credentials: true, config: true });
+    const doc = await exportDoc({ users: [u.id], parts: ['credentials', 'role'] });
     expect((await fetchJson(`/api/private/admin/users/${u.id}`, { method: 'DELETE', cookie: oc, headers: { 'x-secbin-intent': '1' } })).status).toBe(200);
 
     const preview = await importDoc(doc, { system: false, users: { 'ie-roundtrip': {} } });
     expect(preview.status).toBe(200);
     const p = await preview.json();
     expect(p.applied).toBe(false);
-    expect(p.plan.users).toEqual([{ username: 'ie-roundtrip', as: 'ie-roundtrip', parts: ['credentials', 'config'], action: 'create', role: `user ${u.id}` }]);
+    expect(p.plan.users).toEqual([{ username: 'ie-roundtrip', as: 'ie-roundtrip', action: 'create', changes: ['credentials', `role user ${u.id}`], skipped: [], role: `user ${u.id}` }]);
+    expect(p.plan.owner).toBeNull();
     expect(await userId('ie-roundtrip')).toBeUndefined(); // a preview changes nothing
 
     const applied = await importDoc(doc, { system: false, users: { 'ie-roundtrip': {} } }, false);
@@ -83,32 +104,55 @@ describe('admin import', () => {
     expect(me.limits.maxViews).toBe(3);
     expect(me.quotas.some((q) => q.max === 4)).toBe(true);
     const audit = await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json();
-    expect(audit.rows.some((r) => r.action === 'user.imported')).toBe(true);
+    expect(audit.rows.some((r) => r.action === 'user.imported' && /^create: role=user /.test(r.detail))).toBe(true);
   });
 
-  it('refuses conflicts unless overwritten or renamed, and never imports over the owner', async () => {
+  it('create vs update must match what is there; the owner can be updated but never re-created', async () => {
     const u = await makeUser('ie-conflict', 'conflict-password-1');
-    const doc = await exportDoc({ users: [u.id], credentials: true });
+    const doc = await exportDoc({ users: [u.id], parts: ['credentials'] });
     const clash = await importDoc(doc, { system: false, users: { 'ie-conflict': {} } }, false);
     expect(clash.status).toBe(409);
-    expect((await clash.json()).plan.users[0].action).toBe('conflict');
+    const cp = (await clash.json()).plan;
+    expect(cp.users[0].action).toBe('conflict');
+    expect(cp.errors.join(' ')).toMatch(/already exists here — choose "update existing"/);
     // Renamed: a second account with the same password.
     expect((await importDoc(doc, { system: false, users: { 'ie-conflict': { as: 'ie-conflict-2' } } }, false)).status).toBe(200);
     await login('ie-conflict-2', 'conflict-password-1');
-    // Over the owner: refused even with overwrite.
-    const r = await importDoc(doc, { system: false, users: { 'ie-conflict': { as: 'owner', overwrite: true } } }, false);
-    expect(r.status).toBe(409);
-    expect((await r.json()).plan.users[0].action).toBe('refused');
+    // "update" for an account that does not exist is refused.
+    const none = await (await importDoc(doc, { system: false, users: { 'ie-conflict': { as: 'ie-nobody-here', action: 'update' } } })).json();
+    expect(none.plan.users[0].action).toBe('refused');
+    expect(none.plan.errors.join(' ')).toMatch(/does not exist here, so it cannot be updated/);
+    // As the owner: "create" is a conflict; "update" changes nothing here (no role, no password).
+    expect((await importDoc(doc, { system: false, users: { 'ie-conflict': { as: 'owner' } } }, false)).status).toBe(409);
+    const up = await importDoc(doc, { system: false, users: { 'ie-conflict': { as: 'owner', action: 'update' } } }, false);
+    expect(up.status).toBe(200);
+    const upPlan = (await up.json()).plan;
+    expect(upPlan.users[0]).toMatchObject({ action: 'update', owner: true, changes: [], skipped: ['password and disabled flag: an existing account keeps its own'] });
     await login('owner', 'owner-password'); // still the owner's own password
+    expect((await fetchJson('/api/auth/login', { method: 'POST', body: { username: 'owner', proof: proofFor('conflict-password-1') }, ip: freshIp() })).status).toBe(401);
   });
 
-  it('overwriting credentials ends the account\'s sessions', async () => {
+  it('updating an existing account never changes its password, sessions, API keys or disabled flag', async () => {
     const a = await makeUser('ie-over-a', 'first-password-12');
     const b = await makeUser('ie-over-b', 'second-password-1');
-    const doc = await exportDoc({ users: [b.id], credentials: true });
-    expect((await importDoc(doc, { system: false, users: { 'ie-over-b': { as: 'ie-over-a', overwrite: true } } }, false)).status).toBe(200);
-    expect((await fetchJson('/api/private/me', { cookie: a.cookie })).status).toBe(401);
-    await login('ie-over-a', 'second-password-1');
+    for (const x of [a, b]) await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: x.id, channel: 'all', patch: { apiEnabled: true } } });
+    const keyA = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: a.cookie, body: { current: proofFor('first-password-12'), name: 'a-key' } })).json()).key;
+    await fetchJson('/api/private/me/keys', { method: 'POST', cookie: b.cookie, body: { current: proofFor('second-password-1'), name: 'b-key' } });
+    const doc = await exportDoc({ users: [b.id], parts: ['credentials', 'apiKeys'] });
+    doc.users[0].credentials.disabled = true;
+    const pre = await (await importDoc(doc, { system: false, users: { 'ie-over-b': { as: 'ie-over-a', action: 'update' } } })).json();
+    expect(pre.plan.errors).toEqual([]);
+    expect(pre.plan.users[0]).toMatchObject({ action: 'update', changes: [] });
+    expect(pre.plan.users[0].skipped).toEqual(['password and disabled flag: an existing account keeps its own', 'API keys: an existing account keeps its own']);
+    expect((await importDoc(doc, { system: false, users: { 'ie-over-b': { as: 'ie-over-a', action: 'update' } } }, false)).status).toBe(200);
+    expect((await fetchJson('/api/private/me', { cookie: a.cookie })).status).toBe(200); // its session still works
+    await login('ie-over-a', 'first-password-12');
+    expect((await fetchJson('/api/auth/login', { method: 'POST', body: { username: 'ie-over-a', proof: proofFor('second-password-1') }, ip: freshIp() })).status).toBe(401);
+    expect((await fetchJson('/api/private/policy', { headers: { authorization: `Bearer ${keyA}` } })).status).toBe(200);
+    const keys = (await (await fetchJson('/api/private/me/keys', { cookie: a.cookie })).json()).keys;
+    expect(keys.map((k) => k.name)).toEqual(['a-key']);
+    const audit = (await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json()).rows;
+    expect(audit.some((r) => r.action === 'user.imported' && r.detail === 'update from=ie-over-b: no changes; skipped 2')).toBe(true);
   });
 
   it('the preview calls out a change to public (anonymous) access', async () => {
@@ -118,9 +162,9 @@ describe('admin import', () => {
     expect(plan.warnings.some((w) => w.includes('public.enabled'))).toBe(true);
   });
 
-  it('config-only entries cannot create accounts; system settings are applied', async () => {
+  it('role-only entries cannot create accounts; system settings are applied', async () => {
     const u = await makeUser('ie-config');
-    const doc = await exportDoc({ system: true, users: [u.id], config: true });
+    const doc = await exportDoc({ system: true, users: [u.id], parts: ['role'] });
     doc.users[0].username = 'ie-nobody';
     doc.system.settings['files.grantSec'] = 1800;
     const r = await importDoc(doc, { system: true, users: { 'ie-nobody': {} } }, false);
@@ -135,22 +179,26 @@ describe('admin import', () => {
 
   it('re-validates every field of an untrusted document', async () => {
     const u = await makeUser('ie-validate');
-    const base = await exportDoc({ system: true, users: [u.id], credentials: true, config: true });
+    const base = await exportDoc({ system: true, users: [u.id], parts: ['credentials', 'role'] });
     const variants = [
       (d) => { d.format = 'other'; },
       (d) => { d.extra = 1; },
       (d) => { d.users[0].credentials.t = 1; },
       (d) => { d.users[0].credentials.verifier = 'zz'; },
-      (d) => { d.users[0].config = { limits: { all: { maxViews: -1 }, api: {} }, quotas: [], viewerRules: [] }; }, // pre-roles form, still checked
-      (d) => { d.users[0].config = { limits: { all: {}, api: { fileTypeMode: 'allow' } }, quotas: [], viewerRules: [] }; },
-      (d) => { d.users[0].config = { role: '' }; },
-      (d) => { d.users[0].config = { role: 'x', extra: 1 }; },
+      (d) => { d.users[0].config = { role: 'Default' }; }, // the shape before per-user parts
+      (d) => { d.users[0].role = ''; },
+      (d) => { d.users[0].role = { name: 'x' }; },
+      (d) => { d.users[0].role = 'Owner'; }, // the Owner role belongs to the owner only
+      (d) => { d.users[0].role = 'x\ny'; },
       (d) => { d.system = { ...(d.system || {}), roles: [{ name: 'Owner', ownQuotas: false, limits: { all: {}, api: {} }, quotas: [], viewerRules: [] }] }; },
       (d) => { d.users[0].username = '../x'; },
       (d) => { d.system.settings['guard.login.max'] = 0; },
       (d) => { d.system.ipRules.push({ cidr: 'not-an-ip', action: 'block' }); },
       (d) => { d.users.push({ ...d.users[0] }); },
-      (d) => { d.users[0].role = 'owner'; },
+      (d) => { d.users[0].owner = true; },
+      (d) => { d.owner = {}; },
+      (d) => { d.owner = { passkeys: { keys: [] }, password: 'x' }; },
+      (d) => { d.owner = { recoveryCodes: [] }; },
     ];
     for (const [i, mutate] of variants.entries()) {
       const d = structuredClone(base);
@@ -163,19 +211,14 @@ describe('admin import', () => {
     // Decisions are validated too.
     expect((await importDoc(base, { system: false, users: { 'not-in-doc': {} } })).status).toBe(400);
     expect((await importDoc(base, { system: false, users: { 'ie-validate': { as: 'bad name!' } } })).status).toBe(400);
+    expect((await importDoc(base, { system: false, users: { 'ie-validate': { action: 'overwrite' } } })).status).toBe(400);
+    expect((await importDoc(base, { system: false, users: { 'ie-validate': { overwrite: true } } })).status).toBe(400);
+    expect((await importDoc(base, { system: false, owner: { passkeys: true }, users: {} })).status).toBe(400); // no owner part in the file
   });
 
-  it('review hardening: API keys revoked on credential overwrite, no self-block, full audit, clean notes', async () => {
+  it('review hardening: no self-block, full audit, clean notes', async () => {
     const a = await makeUser('ie-keys-a', 'keys-password-123');
-    await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: a.id, channel: 'all', patch: { apiEnabled: true } } });
-    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: a.cookie, body: { current: proofFor('keys-password-123'), name: 'k' } })).json()).key;
-    const doc = await exportDoc({ users: [a.id], credentials: true });
-    const pre = await (await importDoc(doc, { system: false, users: { 'ie-keys-a': { overwrite: true } } })).json();
-    expect(pre.plan.users[0].note).toMatch(/revokes its API keys/);
-    expect((await importDoc(doc, { system: false, users: { 'ie-keys-a': { overwrite: true } } }, false)).status).toBe(200);
-    const withKey = await fetchJson('/api/private/paste', { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: { paste: {} } });
-    expect(withKey.status).toBe(401);
-
+    await exportDoc({ users: [a.id], parts: ['credentials'] });
     // An imported block rule covering the importing owner's own address is refused.
     const sys = await exportDoc({ system: true });
     sys.system.ipRules = [{ cidr: '203.0.113.0/24', action: 'block', note: 'line1\nline2' }];

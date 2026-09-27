@@ -180,7 +180,7 @@ describe('public access', () => {
     expect((await fetchJson(`/api/private/admin/users/${PUBLIC_ID}`, { method: 'PATCH', cookie: oc, body: { disabled: true } })).status).toBe(403);
     expect((await fetchJson(`/api/private/admin/users/${PUBLIC_ID}/password`, { method: 'POST', cookie: oc, body: { salt: 'A'.repeat(22), t: 3, proof: proofFor('abcdefghijkl') } })).status).toBe(403);
     expect((await fetchJson(`/api/private/admin/users/${PUBLIC_ID}/impersonate`, { method: 'POST', cookie: oc, headers: intent })).status).toBe(404);
-    const exp = await fetchJson('/api/private/admin/export', { method: 'POST', cookie: oc, body: { current: proofFor('owner-password'), users: [PUBLIC_ID], credentials: true, config: true } });
+    const exp = await fetchJson('/api/private/admin/export', { method: 'POST', cookie: oc, body: { current: proofFor('owner-password'), users: [PUBLIC_ID], parts: ['credentials', 'role'] } });
     expect((await exp.json()).document.users).toEqual([]);
     // Its limits are editable like any account's.
     expect((await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: PUBLIC_ID, channel: 'all', patch: { maxViews: 3 } } })).status).toBe(200);
