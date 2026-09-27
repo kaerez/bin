@@ -6,7 +6,9 @@
 //   pw       — Argon2id(NFC(password), driveSalt, 64 MiB, t=3, p=1) → HKDF → AES-GCM;
 //   recovery — HKDF over a recovery code's normalised text, one wrap per code;
 //   passkey  — HKDF over the WebAuthn PRF output for DRIVE_PRF_SALT;
-//   escrow   — ECDH P-256 (ephemeral × the owner's escrow key) → HKDF.
+//   escrow   — ECDH P-256 (ephemeral × the owner's escrow key) → HKDF;
+//   handoff  — HKDF over a one-time random key (a Drive the owner created
+//              while acting as the user, until the user's first sign-in).
 // Every sealed value carries AAD "secbin-drive/v1\n<field>\n<nodeId>\n" so the
 // server cannot move a value to another node, field or wrap.
 //
@@ -26,6 +28,10 @@ const SALT_BYTES = 16;
 export const DRIVE_ARGON2 = Object.freeze({ mKiB: 65536, t: 3, p: 1 });
 const SESSION_KEY = 'secbin_dk';
 const SESSION_UID = 'secbin_dk_uid';
+// The Drive of the user the owner acts as: a separate slot, so it never
+// overwrites the owner's own key (cleared when the impersonation ends).
+const IMP_KEY = 'secbin_dk_imp';
+const IMP_UID = 'secbin_dk_imp_uid';
 
 /** SHA-256("secbin-drive/v1 prf"): the fixed PRF input for passkey wraps (a test checks it). */
 export const DRIVE_PRF_SALT = new Uint8Array([
@@ -223,6 +229,30 @@ export async function unlockWithPrf(prfOutput, credentialId, wraps) {
   return null;
 }
 
+/**
+ * A hand-over wrap: DK wrapped under a fresh one-time key → { handoffKey,
+ * wrap }. Used when the owner, acting as a user, creates that user's Drive:
+ * the user's browser opens it at their next sign-in and writes the password
+ * wrap; the server then deletes both (docs/DRIVE.md §3).
+ */
+export async function wrapHandoff(dk) {
+  const key = randomBytes(DK_BYTES);
+  return { handoffKey: b64urlFromBytes(key), wrap: await wrapWith(await kekFrom(key, 'kek-handoff'), 'handoff', 'handoff', dk) };
+}
+
+/** DK from the hand-over wrap, or null. */
+export async function unlockWithHandoff(handoffKey, wraps) {
+  let key;
+  try { key = bytesFromB64url(handoffKey); } catch { return null; }
+  if (key.length !== DK_BYTES) return null;
+  const kek = await kekFrom(key, 'kek-handoff');
+  for (const w of listOf(wraps, 'handoff')) {
+    const dk = await unwrapWith(kek, w);
+    if (dk) return dk;
+  }
+  return null;
+}
+
 // ── owner escrow ───────────────────────────────────────────────────────────
 
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
@@ -263,6 +293,57 @@ export async function openEscrowPriv(dk, data) {
     return await crypto.subtle.importKey('pkcs8', pkcs8, ECDH, false, ['deriveBits']);
   } catch {
     throw new DecryptError('invalid escrow key');
+  }
+}
+
+/**
+ * The escrow private key back with its public key → { privateKey, publicJwk }:
+ * the public key is derived from the private one, so the owner's browser can
+ * check that the escrow public key the server hands to every Drive is this
+ * key's (docs/DRIVE.md §3). DecryptError on a wrong DK.
+ */
+export async function openEscrowKeyPair(dk, data) {
+  const seg = segments(data, 2);
+  if (!seg || seg[0].length !== 12) throw new DecryptError('invalid escrow key');
+  const { files } = await deriveSubkeys(dk);
+  const pkcs8 = await open(files, aad('escrowPriv', 'drive'), seg[0], seg[1]);
+  try {
+    const full = await crypto.subtle.exportKey('jwk', await crypto.subtle.importKey('pkcs8', pkcs8, ECDH, true, ['deriveBits']));
+    return { privateKey: await crypto.subtle.importKey('pkcs8', pkcs8, ECDH, false, ['deriveBits']), publicJwk: cleanJwk(full) };
+  } catch {
+    throw new DecryptError('invalid escrow key');
+  }
+}
+
+/** Whether two escrow public JWKs are the same key. */
+export function sameEscrowKey(a, b) {
+  try {
+    const x = cleanJwk(a);
+    const y = cleanJwk(b);
+    return x.x === y.x && x.y === y.y;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The escrow key this Drive trusts, sealed under DK (field `escrowPin`, node
+ * "drive"): its kid. A user's browser pins the first escrow key it wraps to
+ * and never re-wraps to another one without the user's say (trust on first use).
+ */
+export async function sealEscrowPin(dk, kid) {
+  const { names } = await deriveSubkeys(dk);
+  return sealField(names, 'escrowPin', 'drive', String(kid));
+}
+
+/** The pinned kid, or null (none; or it does not open with this DK — altered). */
+export async function openEscrowPin(dk, sealed) {
+  if (!sealed) return null;
+  try {
+    const { names } = await deriveSubkeys(dk);
+    return new TextDecoder().decode(await openField(names, 'escrowPin', 'drive', sealed));
+  } catch {
+    return null;
   }
 }
 
@@ -320,33 +401,44 @@ function storage() {
 }
 
 /**
- * Keep DK for this tab (sessionStorage "secbin_dk", base64url) until sign-out
- * or the tab closes. `userId` (optional) is kept next to it so another
- * account's page (e.g. while impersonating) never picks it up.
+ * While `held` is set (see holdSessionKeys), the tab's keys live only in this
+ * module's memory, never in sessionStorage.
  */
-export function saveSessionKey(dk, userId) {
+let held = null;
+
+function put(slot, uidSlot, dk, userId) {
   if (!isDk(dk)) return false;
+  if (held) {
+    held[slot] = b64urlFromBytes(dk);
+    held[uidSlot] = typeof userId === 'string' && userId ? userId : null;
+    return true;
+  }
   const s = storage();
   if (!s) return false;
   try {
-    s.setItem(SESSION_KEY, b64urlFromBytes(dk));
-    if (typeof userId === 'string' && userId) s.setItem(SESSION_UID, userId);
-    else s.removeItem(SESSION_UID);
+    s.setItem(slot, b64urlFromBytes(dk));
+    if (typeof userId === 'string' && userId) s.setItem(uidSlot, userId);
+    else s.removeItem(uidSlot);
     return true;
   } catch {
     return false;
   }
 }
 
-/** This tab's DK, or null (none, malformed, or kept for another user). */
-export function loadSessionKey(userId) {
-  const s = storage();
-  if (!s) return null;
+function get(slot, uidSlot, userId, strict) {
+  let v;
+  let owner;
+  if (held) {
+    v = held[slot];
+    owner = held[uidSlot];
+  } else {
+    const s = storage();
+    if (!s) return null;
+    try { v = s.getItem(slot); owner = s.getItem(uidSlot); } catch { return null; }
+  }
+  if (!v) return null;
+  if ((strict || (typeof userId === 'string' && userId)) && owner !== userId) return null;
   try {
-    const v = s.getItem(SESSION_KEY);
-    if (!v) return null;
-    const owner = s.getItem(SESSION_UID);
-    if (typeof userId === 'string' && userId && owner !== userId) return null;
     const dk = bytesFromB64url(v);
     return isDk(dk) ? dk : null;
   } catch {
@@ -354,10 +446,83 @@ export function loadSessionKey(userId) {
   }
 }
 
-/** Forget this tab's DK. */
-export function clearSessionKey() {
+function drop(...slots) {
+  if (held) { for (const k of slots) held[k] = null; return; }
   const s = storage();
   if (!s) return;
-  try { s.removeItem(SESSION_KEY); } catch { /* storage refused */ }
-  try { s.removeItem(SESSION_UID); } catch { /* storage refused */ }
+  for (const k of slots) { try { s.removeItem(k); } catch { /* storage refused */ } }
+}
+
+/**
+ * Keep DK for this tab (sessionStorage "secbin_dk", base64url) until sign-out
+ * or the tab closes. `userId` (optional) is kept next to it so another
+ * account's page (e.g. while impersonating) never picks it up.
+ */
+export function saveSessionKey(dk, userId) {
+  return put(SESSION_KEY, SESSION_UID, dk, userId);
+}
+
+/** This tab's DK, or null (none, malformed, or kept for another user). */
+export function loadSessionKey(userId) {
+  return get(SESSION_KEY, SESSION_UID, userId, false);
+}
+
+/** The account whose DK this tab holds (the owner's, while impersonating), or null. */
+export function sessionKeyUser() {
+  if (held) return held[SESSION_KEY] ? held[SESSION_UID] || null : null;
+  const s = storage();
+  try { return s && s.getItem(SESSION_KEY) ? s.getItem(SESSION_UID) : null; } catch { return null; }
+}
+
+/** Forget this tab's DK (and the Drive key of a user the owner acted as). */
+export function clearSessionKey() {
+  drop(SESSION_KEY, SESSION_UID, IMP_KEY, IMP_UID);
+}
+
+/**
+ * The Drive key of the user the owner is acting as (opened through the owner
+ * escrow): its own slot, bound to that user, never the owner's.
+ */
+export function saveImpersonationKey(dk, userId) {
+  return put(IMP_KEY, IMP_UID, dk, userId);
+}
+
+export function loadImpersonationKey(userId) {
+  return get(IMP_KEY, IMP_UID, userId, true);
+}
+
+/** The impersonation ended (or never started on this page): forget that user's key. */
+export function clearImpersonationKey() {
+  drop(IMP_KEY, IMP_UID);
+}
+
+/**
+ * Pages that load third-party script (the Turnstile widget on login and
+ * Account) call this before it loads: the tab's Drive keys move out of
+ * sessionStorage into this module's memory, where other script on the page
+ * cannot read them, and are gone when the page is left (the Drive page asks
+ * again). `releaseSessionKeys()` puts them back when the page ends up not
+ * loading such script. See SECURITY.md (Drive keys, in the tab).
+ */
+export function holdSessionKeys() {
+  if (held) return;
+  const s = storage();
+  const next = { [SESSION_KEY]: null, [SESSION_UID]: null, [IMP_KEY]: null, [IMP_UID]: null };
+  if (s) {
+    for (const k of Object.keys(next)) {
+      try { next[k] = s.getItem(k); s.removeItem(k); } catch { /* storage refused */ }
+    }
+  }
+  held = next;
+}
+
+export function releaseSessionKeys() {
+  if (!held) return;
+  const h = held;
+  held = null;
+  const s = storage();
+  if (!s) return;
+  for (const [k, v] of Object.entries(h)) {
+    try { if (v) s.setItem(k, v); else s.removeItem(k); } catch { /* storage refused */ }
+  }
 }

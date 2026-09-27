@@ -270,6 +270,10 @@ const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
+/** Bound parameters per `IN (…)` query: SQLite in a Durable Object allows about 100. */
+const SQL_BATCH = 90;
+/** What the owner's impersonated Drive use is logged as (admin audit only; docs/DRIVE.md §9). */
+const DRIVE_IMP_ACTIONS = ['drive.escrow_used', 'drive.setup', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted'];
 const MAX_OPENS_PER_SHARE = 1000;
 // Read receipts are throttled so that a link holder cannot flood this object
 // or push the genuine receipts out: one per share and address per window, at
@@ -668,14 +672,15 @@ export class Directory extends DurableObject {
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can impersonate.');
     if (!t || t.id === o.id || t.role === 'public') return fail(404, 'not_found', 'User not found.');
     if (t.disabled) return fail(409, 'account_disabled', 'That account is disabled.');
-    this.#log(o.id, t.id, 'impersonate.start', `as=${t.username}`);
+    // Impersonation is invisible to the user: the admin audit only (adm).
+    this.#log({ id: o.id, adm: true }, t.id, 'impersonate.start', `as=${t.username}`);
     return { ok: true, target: this.#publicUser(t), ver: o.sess_ver, settings: this.#sessionSettings() };
   }
 
   async endImpersonation(ownerId, targetId) {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner' || o.disabled) return fail(403, 'forbidden', 'Not impersonating.');
-    this.#log(o.id, targetId, 'impersonate.end');
+    this.#log({ id: o.id, adm: true }, targetId, 'impersonate.end');
     return { ok: true, user: this.#publicUser(o), ver: o.sess_ver, settings: this.#sessionSettings() };
   }
 
@@ -1761,7 +1766,9 @@ export class Directory extends DurableObject {
     if (!row) return fail(404, 'not_found', 'Share not found.');
     if (row.locked && !admin) return fail(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
     const subject = row.user_id;
-    const actor = admin ? { id: admin, adm: true } : actorId;
+    // The owner changing a Drive share while impersonating: admin audit only (docs/DRIVE.md §9).
+    const impDrive = !admin && actorId && typeof actorId === 'object' && actorId.imp && row.kind === 'drive';
+    const actor = admin ? { id: admin, adm: true } : impDrive ? { ...actorId, adm: true } : actorId;
     const parts = [];
     if (label !== undefined) {
       const l = cleanLabel(label);
@@ -1775,6 +1782,7 @@ export class Directory extends DurableObject {
     // A change made with an API key names the key (its id, never the secret).
     if (keyId && !admin) parts.push(`apikey=${String(keyId).slice(0, 16)}`);
     this.#log(actor, subject, status === 'revoked' ? 'share.revoked' : 'share.updated', `id=${id} ${parts.join(' ')}`);
+    if (status !== undefined && status !== 'active') await this.#dropDriveRefs([id]);
     return { ok: true };
   }
 
@@ -1822,6 +1830,7 @@ export class Directory extends DurableObject {
 
   async markShareEnded(id, status) {
     this.sql.exec("UPDATE shares SET status = ? WHERE id = ? AND status = 'active'", status, id);
+    await this.#dropDriveRefs([id]);
   }
 
   /** A recipient used "delete now" (the sender allowed it): end the row and tell the sender. */
@@ -1829,6 +1838,30 @@ export class Directory extends DurableObject {
     const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
     this.sql.exec("UPDATE shares SET status = 'deleted' WHERE id = ? AND status = 'active'", id);
     if (row) this.#log(null, row.user_id, 'share.deleted_by_recipient', `id=${id}`);
+    await this.#dropDriveRefs([id]);
+  }
+
+  /**
+   * Drive shares that ended: their Drive forgets them (its `refs`), so an
+   * item's share list and its share count only hold live shares. Best effort:
+   * the Drive page's share list also drops ended ones.
+   */
+  async #dropDriveRefs(ids) {
+    const ns = this.env && this.env.DRIVE;
+    if (!ns || !ids.length) return;
+    const byUser = new Map();
+    for (let k = 0; k < ids.length; k += SQL_BATCH) {
+      const part = ids.slice(k, k + SQL_BATCH);
+      const rows = this.sql.exec(`SELECT id, user_id FROM shares WHERE kind = 'drive' AND status != 'active' AND id IN (${part.map(() => '?').join(', ')})`, ...part).toArray();
+      for (const r of rows) byUser.set(r.user_id, [...(byUser.get(r.user_id) || []), r.id]);
+    }
+    for (const [uid, list] of byUser) {
+      try {
+        await ns.get(ns.idFromName(`drive:${uid}`)).dropRefs(uid, list);
+      } catch (e) {
+        console.warn('secbin: drive refs not dropped', e && e.message ? e.message : e);
+      }
+    }
   }
 
   // ── admin: users ─────────────────────────────────────────────────────────
@@ -1912,6 +1945,19 @@ export class Directory extends DurableObject {
    * password wrap after a reset): allowed for an existing account (not the
    * public one), always logged as a direct admin action.
    */
+  /**
+   * What the owner does in a user's Drive while impersonating them (opening
+   * it with the escrow, creating it, uploads, reads, changes): recorded in the
+   * admin audit with the real actor, never in the user's own activity.
+   */
+  async driveImpLog(ownerId, userId, action, detail = '') {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
+    if (!DRIVE_IMP_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    this.#log({ id: ownerId, imp: true, adm: true }, userId, action, detail);
+    return { ok: true };
+  }
+
   async driveAdminAction(ownerId, userId, action, detail = '') {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
@@ -1922,22 +1968,26 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
-  /** A Drive's shares that are still in the index (for "shares of this item"). */
+  /** A Drive's shares that are still in the index (for "shares of this item"), queried in batches. */
   async sharesByIds(uid, ids) {
-    const list = (Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string').slice(0, 1000);
-    if (!list.length) return [];
-    return this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND id IN (${list.map(() => '?').join(', ')}) ORDER BY created DESC`,
-      uid, ...list).toArray();
+    const list = [...new Set((Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string'))].slice(0, 10000);
+    const out = [];
+    for (let k = 0; k < list.length; k += SQL_BATCH) {
+      const part = list.slice(k, k + SQL_BATCH);
+      out.push(...this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND id IN (${part.map(() => '?').join(', ')})`,
+        uid, ...part).toArray());
+    }
+    return out.sort((x, y) => y.created - x.created || (x.id < y.id ? -1 : 1));
   }
 
-  /** Drive items were deleted: the shares that referenced them end (revoked), locked or not. */
-  async endDriveShares(uid, ids, actorId = uid) {
+  /** Drive items were deleted (or the account): the shares that referenced them end (revoked), locked or not. */
+  async endDriveShares(uid, ids, actorId = uid, reason = 'drive item deleted') {
     const list = (Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string').slice(0, 10000);
     let n = 0;
     for (const id of list) {
       n += this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, uid).rowsWritten;
     }
-    if (n) this.#log(actorId, uid, 'share.revoked', `drive item deleted: ${n} share${n === 1 ? '' : 's'}`);
+    if (n) this.#log(actorId, uid, 'share.revoked', `${reason === 'account deleted' ? 'account deleted' : 'drive item deleted'}: ${n} share${n === 1 ? '' : 's'}`);
     return { ok: true, ended: n };
   }
 
@@ -1975,11 +2025,19 @@ export class Directory extends DurableObject {
   }
 
   /** Delete a user. Returns the ids of their still-active shares (the Worker may purge them). */
-  async deleteUser(id, actorId) {
+  /** Whether an account may be deleted (the Worker removes its Drive first, then calls deleteUser). */
+  async canDeleteUser(id) {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'owner') return fail(403, 'forbidden', 'The owner cannot be deleted.');
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in and cannot be deleted.');
+    return { ok: true };
+  }
+
+  async deleteUser(id, actorId) {
+    const can = await this.canDeleteUser(id);
+    if (!can.ok) return can;
+    const u = this.#user(id);
     const shares = this.sql.exec("SELECT id FROM shares WHERE user_id = ? AND status = 'active'", id).toArray().map((r) => r.id);
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM meta WHERE k IN (SELECT ? || id FROM passkeys WHERE user_id = ?)', handleAlias(''), id);
@@ -2987,7 +3045,9 @@ export class Directory extends DurableObject {
     this.sql.exec("DELETE FROM usage WHERE user_id IN (SELECT 'pub:t:' || id_hash FROM trackers WHERE last_seen < ?)", idleBefore);
     this.sql.exec('DELETE FROM trackers WHERE last_seen < ?', idleBefore);
     this.sql.exec('DELETE FROM ip_rules WHERE expires IS NOT NULL AND expires < ?', ts);
+    const expiring = this.sql.exec("SELECT id FROM shares WHERE kind = 'drive' AND status = 'active' AND expires > 0 AND expires < ?", ts).toArray().map((r) => r.id);
     this.sql.exec("UPDATE shares SET status = 'expired' WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
+    await this.#dropDriveRefs(expiring);
     this.sql.exec("DELETE FROM shares WHERE status != 'active' AND locked = 0 AND expires < ?", ts - SHARE_PRUNE_SEC);
     // Receipts go with their share: once the share row is gone nobody can see them.
     this.sql.exec('DELETE FROM opens WHERE share_id NOT IN (SELECT id FROM shares)');

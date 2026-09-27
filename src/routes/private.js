@@ -18,7 +18,7 @@ import { binding } from '../lib/config.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { creationOptions, requestOptions } from '../lib/webauthn.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
-import { handleDrive, syncCredentialWraps } from './drive.js';
+import { handleDrive, syncCredentialWraps, drivePasswordChanged } from './drive.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const EXTRA_KEYS = ['max', 'quota', 'until', 'policy', 'refused'];
@@ -113,6 +113,8 @@ export async function handlePrivate(request, env, url, ctx) {
     if (!next) return err(400, 'invalid_credential', 'Invalid password proof.');
     const r = await dir.changePassword(a.user.id, { ...step, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
     if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
+    // The Drive's password wrap is stale now (the browser writes the new one next).
+    await drivePasswordChanged(env, a.user.id);
     // The session version moved on (all other sessions end); keep this device signed in.
     const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env) });
     return json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }, 200, { 'set-cookie': cookie });

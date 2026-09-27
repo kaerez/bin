@@ -5,6 +5,9 @@
 // Share… (the composer's share options) and each item's shares with revoke.
 // A capacity bar; an unlock prompt (password, passkey with PRF, recovery code)
 // when the tab has no Drive key; a plain notice when the role has no Drive.
+// While the owner acts as a user, the user's Drive opens through the owner
+// escrow (or a notice says what is missing); escrow-key notices (a changed
+// key for a user, a mismatch for the owner) are shown, never handled silently.
 //
 // Everything cryptographic lives behind the Drive client (public/js/
 // driveclient.js, docs/DRIVE.md §3, §8.1), including the passkey unlock (its
@@ -215,8 +218,8 @@ export async function startDrive(mount, deps) {
   } catch (e) {
     if (deps.drive.DriveDisabled && e instanceof deps.drive.DriveDisabled) { mount.replaceChildren(disabledNotice()); return { state: 'disabled' }; }
     if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
-      // The owner acting as a user cannot create that user's Drive key.
-      if (e.reason === 'impersonating' || (e.reason === 'setup' && deps.user && deps.user.impersonating)) { mount.replaceChildren(impersonatingNotice()); return { state: 'impersonating' }; }
+      // The owner acting as a user: what is missing to open their Drive.
+      if (deps.user && deps.user.impersonating) { mount.replaceChildren(impersonatingNotice(e.reason, deps)); return { state: 'impersonating', reason: e.reason }; }
       return { state: 'locked', unlocked: unlockView(mount, deps, e) };
     }
     mount.replaceChildren(h('div.card.drive-notice', {}, h('p.msg.error', { role: 'alert', text: `The Drive could not be opened: ${friendlyError(e)}` })));
@@ -225,10 +228,26 @@ export async function startDrive(mount, deps) {
   return { state: 'open', app: mountApp(mount, client, deps) };
 }
 
-function impersonatingNotice() {
-  return h('div.card.drive-notice', { id: 'drive-impersonating' },
-    h('h2.section-title', { text: 'The Drive can only be set up by its user' }),
-    h('p.modal-sub', { text: 'This user has not set up their Drive yet, and its key can only be created by the user, when they sign in. While you act as them, their Drive stays closed.' }));
+/** Why the owner, acting as a user, cannot open that user's Drive, and what to do. */
+const IMP_NOTICES = {
+  owner_locked: ['Unlock your own Drive first',
+    'You open this user’s Drive with your escrow key, which your own Drive holds, and your Drive is not unlocked in this tab. Return to admin (the banner above), open Drive and unlock it, then log in as this user again.'],
+  no_escrow: ['You have no escrow key yet',
+    'Your escrow key is created the first time you open your own Drive. Return to admin, open Drive once, then log in as this user again.'],
+  no_wrap: ['This Drive has no escrow wrap yet',
+    'It was set up before you had an escrow key (or its user removed the wrap). It gets one the next time its user unlocks their Drive; until then it cannot be opened with your escrow key.'],
+  escrow_failed: ['This Drive’s escrow wrap is for another key',
+    'It was made for an earlier escrow key of yours. It is replaced when its user next unlocks their Drive and accepts your current key.'],
+  escrow_mismatch: ['The escrow public key on the server is not yours',
+    'It may have been replaced. Nothing was opened or wrapped with it. Return to admin and open your own Drive to review and restore it.'],
+};
+
+function impersonatingNotice(reason, deps) {
+  const [title, text] = IMP_NOTICES[reason] || ['This Drive cannot be opened', 'Its key could not be opened with your escrow key.'];
+  const who = deps.profile && deps.profile.user ? deps.profile.user.username : 'this user';
+  return h('div.card.drive-notice', { id: 'drive-impersonating', dataset: { reason: reason || '' } },
+    h('h2.section-title', { text: title }),
+    h(`p.modal-sub${reason === 'escrow_mismatch' ? '.msg.error' : ''}`, { role: reason === 'escrow_mismatch' ? 'alert' : null, text: text.replace('this user', who) }));
 }
 
 function disabledNotice() {
@@ -246,7 +265,8 @@ function disabledNotice() {
  * only the password can create the Drive's key.
  */
 function unlockView(mount, deps, lockedErr) {
-  const setup = !!lockedErr && lockedErr.reason === 'setup';
+  const handoff = !!lockedErr && lockedErr.reason === 'handoff';
+  const setup = !!lockedErr && (lockedErr.reason === 'setup' || handoff);
   const withPasskey = !setup && !(lockedErr && Array.isArray(lockedErr.credentialIds) && !lockedErr.credentialIds.length);
   return new Promise((resolve) => {
     const msg = h('p.msg.error', { id: 'drive-unlock-msg', role: 'alert', hidden: true });
@@ -299,10 +319,12 @@ function unlockView(mount, deps, lockedErr) {
       if (show) code.focus();
     });
     mount.replaceChildren(h('div.card.drive-unlock', { id: 'drive-unlock' },
-      h('h2.section-title', { text: setup ? 'Set up your Drive' : 'Unlock your Drive' }),
+      h('h2.section-title', { text: setup ? (handoff ? 'Finish setting up your Drive' : 'Set up your Drive') : 'Unlock your Drive' }),
       h('p.modal-sub', {
-        text: setup
-          ? 'Your Drive is encrypted with a key that only you can open. Enter your account password to create it: the key is made here, in your browser, and kept only until you sign out or close the tab.'
+        text: handoff
+          ? 'Your administrator created your Drive for you. Enter your account password to finish setting it up: from then on it opens with your password, in your browser.'
+          : setup
+            ? 'Your Drive is encrypted with a key that only you can open. Enter your account password to create it: the key is made here, in your browser, and kept only until you sign out or close the tab.'
           : 'Your Drive is encrypted with a key that only you can open, and this tab does not have it yet. Confirm it is you: the key is unlocked here, in your browser, and kept only until you sign out or close the tab.',
       }),
       pwForm,
@@ -311,6 +333,77 @@ function unlockView(mount, deps, lockedErr) {
       msg));
     pw.focus();
   });
+}
+
+// ── notices above the Drive ─────────────────────────────────────────────────
+
+/**
+ * The banners over an open Drive: the owner acting as its user, and any
+ * escrow-key notice of the client (DriveClient#notice) with its action.
+ */
+function banners(client, deps) {
+  const out = [];
+  if (deps.user && deps.user.impersonating) {
+    const who = deps.profile && deps.profile.user ? deps.profile.user.username : 'this user';
+    out.push(h('div.card.drive-notice.drive-imp-note', { id: 'drive-imp-note', role: 'note' },
+      h('p', { text: `You are in ${who}’s Drive, opened with your escrow key: browse, upload, download, move, rename, delete and share as they would.` }),
+      h('p.muted', { text: `Their own keys (password, recovery codes, passkeys) cannot be removed or replaced while you act as ${who}: those unlock their Drive for them, and only they can confirm such a change. What you do here is recorded in the admin audit, not in their activity.` })));
+  }
+  const n = client.notice;
+  if (!n) return out;
+  const msg = h('p.msg.error', { id: 'drive-notice-msg', role: 'alert', hidden: true });
+  if (n.kind === 'escrow_changed') {
+    const accept = h('button.btn', { type: 'button', id: 'drive-escrow-accept', text: 'Trust the new key' });
+    const box = h('div.card.drive-notice', { id: 'drive-escrow-notice', role: 'status' },
+      h('h2.section-title', { text: 'The administrator’s escrow key changed' }),
+      h('p', { text: n.text }),
+      h('p.muted', { text: `Only trust it if your administrator told you they replaced it; otherwise, tell them. New key fingerprint: ${n.kid}.` }),
+      h('div.btn-row', {}, accept), msg);
+    accept.addEventListener('click', async () => {
+      accept.disabled = true;
+      try {
+        await client.acceptEscrowKey();
+        box.remove();
+        toast('Your Drive now trusts the new escrow key.');
+      } catch (e) {
+        accept.disabled = false;
+        showMsg(msg, friendlyError(e));
+      }
+    });
+    out.push(box);
+    return out;
+  }
+  // The owner: the escrow key pair needs attention; changing it needs the password (or a passkey).
+  const restore = n.kind === 'escrow_mismatch';
+  const pw = h('input.input', { id: 'drive-escrow-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024' });
+  const go = h('button.btn.danger', { type: 'submit', id: 'drive-escrow-fix', text: restore ? 'Restore the escrow public key' : 'Create a new escrow key' });
+  const form = h('form.form.drive-unlock-form', { novalidate: true }, field('Your password (or leave it empty to confirm with a passkey)', pw), go);
+  const box = h('div.card.drive-notice', { id: 'drive-escrow-alert', role: 'alert' },
+    h('h2.section-title', { text: restore ? 'Your escrow public key was replaced' : 'Your escrow key needs attention' }),
+    h('p', { text: n.text }),
+    h('p.muted', {
+      text: restore
+        ? 'Restoring puts back the public key that belongs to your escrow private key, so users’ Drives are wrapped to your key again.'
+        : 'A new escrow key replaces the old one: escrow wraps made for the old key no longer open, and each user is asked to trust the new key before their Drive is wrapped to it.',
+    }),
+    form, msg);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    go.disabled = true;
+    msg.hidden = true;
+    try {
+      const { confirmStep, canUsePasskey } = await import('./confirm.js');
+      const step = await confirmStep(pw, deps.profile.user.username, !pw.value && await canUsePasskey());
+      await (restore ? client.restoreEscrowKey(step) : client.newEscrowKey(step));
+      box.remove();
+      toast(restore ? 'The escrow public key is yours again.' : 'A new escrow key was created.');
+    } catch (err) {
+      go.disabled = false;
+      showMsg(msg, friendlyError(err));
+    }
+  });
+  out.push(box);
+  return out;
 }
 
 // ── the Drive ───────────────────────────────────────────────────────────────
@@ -420,7 +513,7 @@ function mountApp(mount, client, deps) {
     if (on) tree.focus();
   });
 
-  mount.replaceChildren(h('div.drive', { id: 'drive-app' }, cap, toolbar, fileIn, folderIn, transferBox, msg, layout));
+  mount.replaceChildren(h('div.drive', { id: 'drive-app' }, ...banners(client, deps), cap, toolbar, fileIn, folderIn, transferBox, msg, layout));
 
   // drag and drop onto the right pane
   pane.addEventListener('dragover', (e) => { if (!busy) { e.preventDefault(); pane.classList.add('over'); } });
@@ -453,7 +546,11 @@ function mountApp(mount, client, deps) {
     } catch (e) {
       if (n !== openSeq) return false;
       // The tab's key does not open this Drive (the client dropped it): ask again.
-      if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) { unlockView(mount, deps, e); return false; }
+      if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
+        if (deps.user && deps.user.impersonating) mount.replaceChildren(impersonatingNotice('escrow_failed', deps));
+        else unlockView(mount, deps, e);
+        return false;
+      }
       showMsg(paneMsg, `This folder could not be opened: ${friendlyError(e)}`);
       return false;
     }

@@ -215,13 +215,14 @@ describe('startDrive states', () => {
     }
   });
 
-  it('impersonating: a Drive with no key yet says only its user can set it up (no prompt)', async () => {
+  it('impersonating without the owner’s own Drive unlocked in the tab: a notice saying what to do (no prompt, nothing sent)', async () => {
     S = fakeServer();
     globalThis.fetch = S.fetch;
+    S.impersonatedBy = 'owner';
     const mount = mountPoint();
     const r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true } }));
-    expect(r.state).toBe('impersonating');
-    expect(mount.querySelector('#drive-impersonating').textContent).toMatch(/The Drive can only be set up by its user/);
+    expect(r).toMatchObject({ state: 'impersonating', reason: 'owner_locked' });
+    expect(mount.querySelector('#drive-impersonating').textContent).toMatch(/Unlock your own Drive first.*open Drive and unlock it/);
     expect(mount.querySelector('#drive-unlock')).toBeNull();
     expect(S.requests.some((x) => x.method !== 'GET')).toBe(false);
   });

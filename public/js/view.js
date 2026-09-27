@@ -10,6 +10,7 @@ import { validateHead, validatePaste } from './format.js';
 import { validateManifest, buildTree, basename } from './files.js';
 import { fetchHead, openShare, expireShare, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
 import { humanCheck } from './turnstile.js';
+import { clearSessionKey } from './drivekeys.js';
 import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
@@ -73,6 +74,8 @@ async function initPublicComposer() {
   const n = $('#public-notice');
   if (prof.notice) { n.textContent = prof.notice; n.hidden = false; }
   // Loads alongside the composer; a share waits for the token only when created.
+  // Its script (third-party) must never find a Drive key left in this tab.
+  clearSessionKey();
   const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')] });
   setPublicHumanCheck(async () => (await check).take());
   const { startComposer } = await import('./composer.js');

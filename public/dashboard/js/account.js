@@ -9,15 +9,23 @@
 import '../../js/kdf-progress.js';
 import { changePassword, listKeys, createKey, updateKey, revokeKey, myActivity, ApiError, myPasskeys, passkeyRegisterOptions, addPasskey, removePasskey, regenerateRecoveryCodes, setSecondFactor, changeUsername } from '../../js/api.js';
 import { passkeysSupported, createPasskeyPrf } from '../../js/passkeys.js';
-import { DRIVE_PRF_SALT } from '../../js/drivekeys.js';
-import { updatePasswordWrap, replaceRecoveryWraps, removeRecoveryWraps, addPasskeyWrap, removePasskeyWrap } from '../../js/driveclient.js';
+import { DRIVE_PRF_SALT, holdSessionKeys, releaseSessionKeys } from '../../js/drivekeys.js';
+import { updatePasswordWrap, replaceRecoveryWraps, addPasskeyWrap } from '../../js/driveclient.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
 import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
 import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
-import { humanCheck } from '../../js/turnstile.js';
+import { humanCheck, turnstileSiteKey } from '../../js/turnstile.js';
+
+// This page may load Cloudflare's Turnstile script: before anything can load
+// it, the tab's Drive keys leave sessionStorage for this module's memory (the
+// changes below still use them); they go back only if the page turns out not
+// to load that script. Otherwise the Drive page asks to unlock again after a
+// visit here (SECURITY.md, Drive keys in the tab).
+holdSessionKeys();
+turnstileSiteKey().then((key) => { if (!key) releaseSessionKeys(); }).catch(() => {});
 
 const $ = (s) => document.querySelector(s);
 let profile;
@@ -363,12 +371,8 @@ async function renderPasskeys() {
   for (const p of st.passkeys) {
     const rm = h('button.btn.danger', { type: 'button', text: 'Remove' });
     armConfirm(rm, st.passkeys.length === 1 ? 'Remove (and its recovery codes)?' : 'Remove?', () => passkeyAction(
-      async (step, token) => removePasskey(p.id, step, await token()), async () => {
-        toast('Passkey removed.');
-        // Its Drive wrap goes; with the last passkey, the recovery codes (and their wraps) go too.
-        await driveUpkeep(() => removePasskeyWrap(p.id));
-        if (st.passkeys.length === 1) await driveUpkeep(() => removeRecoveryWraps());
-      },
+      // The server drops its Drive wrap (and, with the last passkey, the recovery codes' wraps).
+      async (step, token) => removePasskey(p.id, step, await token()), () => toast('Passkey removed.'),
     ));
     passkeyCheck?.gate(rm);
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: p.name }), h('td.mono', { dataset: { label: 'Added' }, text: formatDate(p.created) }),

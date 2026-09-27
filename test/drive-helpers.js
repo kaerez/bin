@@ -9,6 +9,13 @@ import { driveChunkSize } from '../src/drive-do.js';
 /** An opaque {iv, ct} field as the browser would send it (random bytes: the server cannot tell). */
 export const enc = (n = 32) => ({ iv: b64urlFromBytes(randomBytes(12)), ct: b64urlFromBytes(randomBytes(n + 16)) });
 export const newNodeId = () => b64urlFromBytes(randomBytes(16));
+/**
+ * What one item's sealed fields add to the Drive's `used` (docs/DRIVE.md §10):
+ * a folder's name, or a file's name, metadata and key, as the fixtures send them.
+ */
+export const FIELD_BYTES = JSON.stringify(enc()).length;
+export const DIR_BYTES = FIELD_BYTES;
+export const FILE_BYTES = 3 * FIELD_BYTES;
 /** `n` bytes standing in for ciphertext (random at the start; getRandomValues takes at most 64 KiB). */
 export function someBytes(n) {
   const b = new Uint8Array(n);

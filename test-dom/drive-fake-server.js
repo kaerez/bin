@@ -1,8 +1,13 @@
 // drive-fake-server.js — an in-memory stand-in for the Drive API (docs/DRIVE.md
 // §6) behind a mocked fetch, shared by the DOM suites of the Drive client
 // (driveclient.test.js) and the Drive page (drive.test.js). It keeps only what
-// the real server would: sealed names, sizes, chunks, wraps. Not a test file
-// itself (vitest.dom.config.js picks up *.test.js only).
+// the real server would: sealed names, sizes, chunks, wraps — and its key
+// rules (docs/DRIVE.md §6, src/routes/drive.js setKeys): the step-up for
+// removing wraps, replacing the pw wrap or the salt (unless stale or the
+// first set-up) and for changing the owner's escrow key once one exists;
+// while the owner impersonates (`impersonatedBy`), only the first set-up
+// through the escrow and the logged escrow route. Not a test file itself
+// (vitest.dom.config.js picks up *.test.js only).
 import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
 import { deriveSubkeys, sealField } from '../public/js/drivekeys.js';
@@ -26,6 +31,13 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     requests: [],
     userWraps: null, // the "other user" for the escrow route
     adminKeys: [],
+    pwStale: false,
+    escrowPin: null,
+    handoffKey: null,
+    impersonatedBy: null, // the owner's username while the owner acts as this user
+    ownerId: 'owner1',
+    ownerEscrowPriv: null, // the owner's sealed escrow key (for the impersonation escrow route)
+    escrowUses: 0,
   };
   const ok = (data, status = 200) => ({ ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) });
   const bin = (bytes) => ({ ok: true, status: 200, type: 'basic', json: async () => null, arrayBuffer: async () => bytes.slice().buffer });
@@ -43,17 +55,47 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
     S.requests.push({ method, path: p, body, headers: init.headers || {} });
     let m;
-    if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: null });
+    if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: S.impersonatedBy });
     if (p === '/api/private/drive' && method === 'GET') {
       if (!S.enabled) return ok({ enabled: false });
-      return ok({ enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps: [...S.wraps.values()], escrowPub: S.escrowPub, ...(role === 'owner' ? { escrowPriv: S.escrowPriv } : {}) });
+      const wraps = [...S.wraps.values()].map((w) => (S.impersonatedBy && w.kind === 'escrow' ? { ...w, data: null } : w));
+      return ok({
+        enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps, escrowPub: S.escrowPub, escrowPin: S.escrowPin, pwStale: S.pwStale,
+        ...(S.handoffKey && !S.impersonatedBy ? { handoffKey: S.handoffKey } : {}),
+        ...(role === 'owner' ? { escrowPriv: S.escrowPriv } : {}),
+      });
+    }
+    if (p === '/api/private/drive/escrow' && method === 'POST') {
+      if (!S.impersonatedBy) return fail(403, 'not_impersonating');
+      const wrap = [...S.wraps.values()].find((w) => w.kind === 'escrow') || null;
+      if (wrap) S.escrowUses++;
+      return ok({ ownerId: S.ownerId, escrowPub: S.escrowPub, escrowPriv: S.ownerEscrowPriv, wrap, wraps: S.wraps.size });
     }
     if (p === '/api/private/drive/keys' && method === 'PUT') {
+      const has = (k, r) => S.wraps.has(`${k}|${r}`);
+      const first = S.wraps.size === 0;
+      const set = body.set || [];
+      const remove = body.remove || [];
+      const newPw = set.some((w) => w.kind === 'pw');
+      if (S.impersonatedBy) {
+        const setupOnly = first && !remove.length && !body.driveSalt && set.every((w) => w.kind === 'escrow' || w.kind === 'handoff') && set.some((w) => w.kind === 'escrow');
+        if (!setupOnly) return fail(403, 'impersonating');
+      } else if (set.some((w) => w.kind === 'handoff') || body.handoffKey) {
+        return fail(403, 'forbidden');
+      }
+      const pwExempt = S.pwStale || !has('pw', 'pw');
+      const needs = ((body.escrowPriv || body.escrowPub) && (S.escrowPub || S.escrowPriv))
+        || (!first && (remove.some((w) => has(w.kind, w.ref)) || (newPw && !pwExempt) || (body.driveSalt && S.driveSalt && !(newPw && pwExempt))));
+      if (needs && !body.current && !body.reauth) return fail(400, 'reauth_required');
+      if (needs && body.current && body.current !== S.proof) return fail(403, 'wrong_password');
       if (body.driveSalt) S.driveSalt = body.driveSalt;
-      for (const w of body.remove || []) S.wraps.delete(`${w.kind}|${w.ref}`);
-      for (const w of body.set || []) S.wraps.set(`${w.kind}|${w.ref}`, w);
+      for (const w of remove) S.wraps.delete(`${w.kind}|${w.ref}`);
+      for (const w of set) S.wraps.set(`${w.kind}|${w.ref}`, w);
+      if (newPw) { S.pwStale = false; S.wraps.delete('handoff|handoff'); S.handoffKey = null; }
       if (body.escrowPriv) S.escrowPriv = body.escrowPriv;
       if (body.escrowPub) S.escrowPub = body.escrowPub;
+      if (body.escrowPin) S.escrowPin = body.escrowPin;
+      if (body.handoffKey) S.handoffKey = body.handoffKey;
       return ok({ ok: true });
     }
     if ((m = p.match(/^\/api\/private\/drive\/nodes\/([^/]+)$/))) {
@@ -89,6 +131,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       S.nodes.set(body.id, { id: body.id, parent: body.parent, kind: 'dir', name: body.name, size: 0, chunks: 0, state: 'ready', created: 2, updated: 2 });
       return ok({ id: body.id });
     }
+    if (p === '/api/auth/prelogin' && method === 'POST') return ok({ salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3 });
     if (p === '/api/private/drive/files' && method === 'POST') {
       if (!/^[A-Za-z0-9_-]{22}$/.test(body.id) || S.nodes.has(body.id)) return fail(409, 'bad_id');
       if (used() + body.size > S.capacity) return fail(413, 'drive_full');
