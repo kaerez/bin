@@ -1,7 +1,9 @@
 // turnstile.js — Cloudflare Turnstile (a privacy-preserving human check) on
 // the forms bots attack: login, a signed-in password change and anonymous
-// share creation. Off unless BOTH TURNSTILE_SITEKEY and TURNSTILE_SECRET are
-// set; admin password resets and owner setup never need it.
+// share creation. Off unless a site key and a secret key are both configured:
+// as the deployment's TURNSTILE_SITEKEY and TURNSTILE_SECRET (preferred: a
+// Worker secret), or else in the admin panel (Security → Human check), where
+// the owner enters them. Admin password resets and owner setup never need it.
 //
 // The browser sends the widget's token in X-Secbin-Turnstile. The server
 // redeems it with Cloudflare's siteverify and accepts it only when it
@@ -14,10 +16,12 @@
 // results are accepted as they are (they always pass or always fail anyway).
 
 import { HttpError } from './http.js';
+import { directory } from './guard.js';
 
 export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 const SITEVERIFY = `${TURNSTILE_ORIGIN}/turnstile/v0/siteverify`;
-const KEY_RE = /^[A-Za-z0-9_-]{10,100}$/;
+export const KEY_RE = /^[A-Za-z0-9_-]{10,100}$/;
+const ADMIN_CACHE_MS = 30 * 1000;
 const TOKEN_MAX = 2048; // Cloudflare's documented maximum
 const VERIFY_TIMEOUT_MS = 10000;
 
@@ -40,6 +44,28 @@ export function turnstileConfig(env) {
   return { sitekey, secret };
 }
 
+// Keys set in the admin panel, cached per isolate (another isolate sees a
+// change within ADMIN_CACHE_MS).
+let adminCache = { at: 0, keys: undefined };
+/** Forget the cached admin-panel keys (after the owner changes them). */
+export function invalidateTurnstileCache() { adminCache = { at: 0, keys: undefined }; }
+
+/**
+ * The keys in force: { sitekey, secret, source: 'env' | 'admin' }, or null
+ * (Turnstile off). The deployment's keys win over the admin panel's.
+ */
+export async function turnstileKeys(env) {
+  const fromEnv = turnstileConfig(env);
+  if (fromEnv) return { ...fromEnv, source: 'env' };
+  if (adminCache.keys === undefined || Date.now() - adminCache.at > ADMIN_CACHE_MS) {
+    let keys;
+    try { keys = await directory(env).turnstileKeys(); } catch { keys = adminCache.keys ?? null; }
+    adminCache = { at: Date.now(), keys };
+  }
+  const k = adminCache.keys;
+  return k && KEY_RE.test(k.sitekey) && KEY_RE.test(k.secret) ? { sitekey: k.sitekey, secret: k.secret, source: 'admin' } : null;
+}
+
 // Tests replace the network call; production always posts to siteverify.
 let siteverify = (body) => fetch(SITEVERIFY, { method: 'POST', body, signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS) });
 /** Test hook: swap the siteverify call (returns the previous one). */
@@ -50,7 +76,7 @@ export function setSiteverify(fn) { const prev = siteverify; siteverify = fn; re
  * `action`. A no-op when Turnstile is not configured.
  */
 export async function requireTurnstile(env, request, action) {
-  const cfg = turnstileConfig(env);
+  const cfg = await turnstileKeys(env);
   if (!cfg) return;
   const token = (request.headers.get('x-secbin-turnstile') || '').trim();
   if (!token) throw new HttpError(403, 'turnstile_required', 'Complete the human check and try again.');

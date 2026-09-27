@@ -231,8 +231,9 @@ Common errors on any route:
 - `503 server_not_configured`: `SIG`/`ENC` are missing or invalid (auth and private routes only).
 - `403 account_disabled`: a disabled account's session or API key. The session cookie is also
   cleared.
-- **Human check (Cloudflare Turnstile)**, only when `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`
-  are both set: `POST /api/auth/login`, `POST /api/private/me/password` and
+- **Human check (Cloudflare Turnstile)**, only when a site key and a secret key are configured
+  (`TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or else the keys set with
+  `PUT /api/private/admin/turnstile`): `POST /api/auth/login`, `POST /api/private/me/password` and
   `POST /api/public/paste` / `POST /api/public/file` need `X-Secbin-Turnstile: <token>`, issued
   for the action `login`, `password` or `public-share` respectively on this hostname. Each token
   is accepted once. Errors: `403 turnstile_required` (no token), `403 turnstile_failed` (rejected,
@@ -330,6 +331,9 @@ spaces are ignored, O/I/L read as 0/1/1).
 | `POST /api/private/me/second-factor` `{on, step…}` | session | password logins also need a passkey / code (limit `any`; forced on with `second`) |
 | `POST /api/private/admin/users/:id/passkeys` (`X-Secbin-Intent`) | owner | remove all of an account's passkeys and codes → `{removed}`. No confirmation for another user; `{step…}` on the owner's own account. An admin password reset (`…/password`) keeps them |
 | `GET/POST /api/private/me/keys` `{name, expiresInSec?, scopes?, step…}`, `PATCH …/keys/:id` `{name?, scopes?, step…}`, `DELETE …/keys/:id` `{step…}` (`X-Secbin-Intent`) | session, not impersonating (except `GET`) | API keys; `scopes` is a subset of `notes`, `files`, `policy` (default all three; empty or unknown → 400 `invalid_scopes`). Listing returns each key's `scopes` |
+| `GET /api/private/admin/turnstile` | owner | `{sitekey, secretSet, active: 'env'\|'admin'\|null, deployment}`; never the secret |
+| `PUT /api/private/admin/turnstile` `{sitekey, secret?, step…}` or `{clear: true, step…}` | owner | set (an empty `secret` keeps the saved one) or remove the panel's keys; 400 `invalid_sitekey` / `invalid_secret`. The deployment's keys still win |
+| `PATCH /api/private/admin/limits` for `public-user-0000` | owner | 400 `invalid_limit` for limits that do not apply to the public account (`apiEnabled`, `apiMaxKeys`, `receipt*`, `logMax*`, `pw*`, `passkeys`); `inherit` is accepted |
 | `POST /api/private/admin/users/:id/keys` `{name, expiresInSec?, scopes?}`, `PATCH`/`DELETE …/keys/:kid` | owner | the same for another user's keys, without a confirmation (with `{step…}` on the owner's own account). The new key is returned once |
 
 `step…` is the confirmation for a change to one's own account: `current` (the password proof, as

@@ -4,10 +4,10 @@
 // a passkey, a fresh passkey check; the password is asked again every time.
 
 import '../../js/kdf-progress.js';
-import { changePassword, listKeys, createKey, updateKey, revokeKey, myActivity, ApiError, myPasskeys, passkeyRegisterOptions, addPasskey, removePasskey, regenerateRecoveryCodes, setSecondFactor, reauthOptions, changeUsername } from '../../js/api.js';
-import { passkeysSupported, createPasskey, usePasskey } from '../../js/passkeys.js';
-import { stretch, newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
-import { prelogin } from '../../js/api.js';
+import { changePassword, listKeys, createKey, updateKey, revokeKey, myActivity, ApiError, myPasskeys, passkeyRegisterOptions, addPasskey, removePasskey, regenerateRecoveryCodes, setSecondFactor, changeUsername } from '../../js/api.js';
+import { passkeysSupported, createPasskey } from '../../js/passkeys.js';
+import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
+import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
 import { copyText, flashCopied, toast } from '../../js/ui.js';
 import { ready } from './nav.js';
@@ -26,28 +26,12 @@ function labelConfirmFields() {
   const alt = hasPasskey && passkeysSupported();
   for (const [sel, text] of CONFIRM_FIELDS) {
     const label = $(`${sel}-label`);
-    if (label) label.textContent = alt ? `${text}, or leave it empty to confirm with a passkey` : text;
+    if (label) label.textContent = confirmLabel(text, alt);
   }
 }
 
-/**
- * The confirmation for one change: the password typed in `input` (cleared at
- * once, so every change asks again) or, when it is empty and the account has a
- * passkey, a passkey check.
- */
-async function confirmStep(input) {
-  const pw = input.value;
-  input.value = '';
-  if (pw) {
-    const { salt, t } = await prelogin(profile.user.username);
-    return { current: await stretch(pw, salt, t) };
-  }
-  if (hasPasskey && passkeysSupported()) {
-    const o = await reauthOptions();
-    return { reauth: { challengeId: o.challengeId, credential: await usePasskey(o.publicKey) } };
-  }
-  throw new Error(hasPasskey ? 'Enter your password, or leave it empty and confirm with a passkey.' : 'Enter your current password.');
-}
+/** The confirmation for one change (see confirm.js). */
+const confirmStep = (input) => confirmWith(input, profile.user.username, hasPasskey);
 
 const refusal = (e) => (e instanceof ApiError && e.code === 'wrong_password' ? 'The password is incorrect.'
   : e instanceof ApiError && e.code === 'reauth_failed' ? 'The passkey could not be verified.' : friendlyError(e));
@@ -255,8 +239,8 @@ async function renderKeys() {
 
 // ── passkeys and recovery codes ────────────────────────────────────────────
 const MODE_TEXT = {
-  any: 'Sign in with a passkey alone, or require it after your password.',
-  second: 'The administrator allows passkeys only as a second step: once you add one, every password login asks for it.',
+  any: 'Sign in with your password or a passkey, or require both. A recovery code always signs you in on its own.',
+  second: 'The administrator allows passkeys only as a second step: once you add one, you sign in with your password and a passkey. A recovery code always signs you in on its own.',
 };
 
 
@@ -314,7 +298,7 @@ async function renderPasskeys() {
   $('#mfa-on').disabled = !has;
   $(st.mfa ? '#mfa-on' : '#mfa-off').checked = true;
   $('#recovery-status').textContent = has
-    ? `${st.recoveryLeft} of 20 recovery codes left.${st.required ? ' Password logins ask for a passkey or a code.' : ''}`
+    ? `${st.recoveryLeft} of 20 recovery codes left.${st.required ? ' You sign in with your password and a passkey (or a code).' : ''}`
     : 'Adding your first passkey gives you 20 one-time recovery codes.';
   $('#recovery-regen').hidden = !has;
   $('#passkey-add').disabled = st.passkeys.length >= st.max;
@@ -354,7 +338,7 @@ function wirePasskeys() {
     $(radio).addEventListener('change', (e) => {
       if (!e.target.checked) return;
       const on = e.target.value === 'on';
-      passkeyAction((step) => setSecondFactor(on, step), () => toast(on ? 'Password logins now also need a passkey.' : 'A password alone signs you in again.'))
+      passkeyAction((step) => setSecondFactor(on, step), () => toast(on ? 'You now sign in with your password and a passkey.' : 'Your password or a passkey signs you in again.'))
         .finally(() => renderPasskeys());
     });
   }

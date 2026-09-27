@@ -135,6 +135,23 @@ describe('/dashboard gate', () => {
     expect(authed.headers.get('cache-control')).toBe('no-store');
   });
 
+  it('sends a signed-in visitor from the home page and the login page to the dashboard', async () => {
+    const u = await makeUser('gate-home');
+    for (const path of ['/', '/index.html', '/dashboard/login/', '/dashboard/login', '/dashboard/login/index.html']) {
+      const r = await SELF.fetch(`${ORIGIN}${path}`, { headers: { cookie: u.cookie }, redirect: 'manual' });
+      expect(r.status, path).toBe(302);
+      expect(r.headers.get('location'), path).toBe('/dashboard/');
+      expect(r.headers.get('cache-control'), path).toBe('no-store');
+    }
+    // Not signed in, or a stale cookie: the page itself.
+    expect((await SELF.fetch(`${ORIGIN}/`, { redirect: 'manual' })).status).toBe(200);
+    expect((await SELF.fetch(`${ORIGIN}/`, { headers: { cookie: '__Host-secbin_sess=garbage' }, redirect: 'manual' })).status).toBe(200);
+    expect((await SELF.fetch(`${ORIGIN}/dashboard/login/`, { headers: { cookie: '__Host-secbin_sess=garbage' }, redirect: 'manual' })).status).toBe(200);
+    // Other pages are not redirected (a share link opens as usual).
+    expect((await SELF.fetch(`${ORIGIN}/dashboard/setup/`, { headers: { cookie: u.cookie }, redirect: 'manual' })).status).toBe(200);
+    expect((await SELF.fetch(`${ORIGIN}/accessibility/`, { headers: { cookie: u.cookie }, redirect: 'manual' })).status).toBe(200);
+  });
+
   it('keeps non-owners out of /dashboard/admin', async () => {
     const u = await makeUser('gate-user');
     const r = await SELF.fetch(`${ORIGIN}/dashboard/admin/`, { headers: { cookie: u.cookie }, redirect: 'manual' });

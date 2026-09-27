@@ -10,8 +10,9 @@ import { newCredential, checkOwnerPassword, describePolicy, loginProof } from '.
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
-import { normalizeUrlRules, parseShareUrl } from '../../js/sharetypes.js';
+import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
 import { ready } from './nav.js';
+import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { renderShares } from './admin-shares.js';
 import { renderPortable } from './admin-portable.js';
 
@@ -54,7 +55,6 @@ const LIMIT_UI = [
   ['passkeys', 'Passkeys', 'enum', { values: [['any', 'sign in alone or as a second factor'], ['second', 'only as a second factor after the password'], ['off', 'not allowed']] }],
 ];
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
-const URL_RULES_HINT = 'One rule per line. scheme:https allows every https link; scheme:tel, scheme:mailto, scheme:sms… allow those schemes; re:<regular expression> allows links it matches (case-insensitive, against the whole link — anchor with ^, e.g. re:^https://([a-z0-9-]+\\.)*example\\.com/). javascript:, data:, file: and similar can never be allowed. The sender\'s browser or CLI checks the rules: the server never sees the link.';
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
   'Any file as plain text': [{ match: 'any', value: '', renderer: 'text' }],
@@ -127,32 +127,56 @@ function numberInput(v, { step = 1, scale = 1, label } = {}) {
   return i;
 }
 
+/** How link rules work: shown in a help panel next to every rules editor. */
+function urlRulesHelp() {
+  const li = (...kids) => h('li', {}, ...kids);
+  const code = (t) => h('code.mono', { text: t });
+  return h('details.rules-help', {},
+    h('summary', { text: 'How link rules work' }),
+    h('p', {}, 'A link\'s ', h('strong', { text: 'scheme' }), ' is the part before the first colon: ', code('https'), ' in ', code('https://example.com/page'), ', ', code('mailto'), ' in ', code('mailto:a@example.com'), ', ', code('tel'), ' in ', code('tel:+15551234'), '. One rule per line; a link is allowed when any rule matches:'),
+    h('ul', {},
+      li(code('scheme:https'), ' allows every link with that scheme (', code('scheme:http'), ' and ', code('scheme:https'), ' are the built-in default).'),
+      li(code('scheme:*'), ' allows every scheme except the dangerous ones below.'),
+      li(code('re:<pattern>'), ' allows links a regular expression matches. The engine is the browser\'s (JavaScript ', code('RegExp'), ', flags ', code('i'), ' and ', code('u'), ': case-insensitive, Unicode), tested against the whole link as the browser normalizes it (e.g. ', code('https://example.com/a?b=1'), '). It matches ', h('em', { text: 'anywhere' }), ' in the link unless you anchor it: ', code('re:^https://([a-z0-9-]+\\.)*example\\.com(/|$)'), ' allows example.com and its subdomains only.')),
+    h('p', {}, code('javascript:'), ', ', code('data:'), ', ', code('file:'), ', ', code('blob:'), ' and similar can never be allowed. The sender\'s browser or CLI checks the rules (the server never sees the link), and recipients can open only web, mail, phone and SMS links; others are shown for copying.'));
+}
+
 /**
- * URL rules: a textarea plus a tester — type a link and see, live, whether
- * the rules in the box (not yet saved) would allow it.
+ * Link rules: the rules in effect (inherited ones shown read-only), a textarea
+ * when "set to" is chosen, the help panel, and a tester that is always there —
+ * type a link and see which rule allows it, or why it is refused.
  */
-function urlRulesInput(initial, label) {
-  const area = h('textarea.input.rules-in', { rows: '3', spellcheck: 'false', 'aria-label': label, placeholder: 'scheme:https\nscheme:tel\nre:^https://([a-z0-9-]+\\.)*example\\.com/', title: URL_RULES_HINT });
+function urlRulesInput(initial, label, inheritedRules) {
+  const area = h('textarea.input.rules-in', { rows: '3', spellcheck: 'false', 'aria-label': label, placeholder: 'scheme:https\nscheme:tel\nre:^https://([a-z0-9-]+\\.)*example\\.com(/|$)' });
   area.value = initial.join('\n');
-  const probe = h('input.input', { type: 'text', spellcheck: 'false', placeholder: 'test a link, e.g. tel:+15551234', 'aria-label': `${label}: test a link` });
+  const inheritedNote = h('p.mono.muted', { text: `In effect: ${(inheritedRules || DEFAULT_URL_RULES).join(', ')}` });
+  const probe = h('input.input', { type: 'text', spellcheck: 'false', placeholder: 'test a link, e.g. https://example.com/page', 'aria-label': `${label}: test a link` });
   const result = h('span.mono.muted', { role: 'status', 'aria-live': 'polite' });
+  const warn = h('p.mono.warn', { hidden: true });
+  let own = false;
+  const current = () => (own ? normalizeUrlRules(area.value.split('\n')) : (inheritedRules || [...DEFAULT_URL_RULES]));
   const test = () => {
     result.classList.remove('ok-text', 'warn');
-    if (!probe.value.trim()) { result.textContent = ''; return; }
     let rules;
-    try { rules = normalizeUrlRules(area.value.split('\n')); } catch (e) { result.textContent = `rules: ${e.message}`; result.classList.add('warn'); return; }
+    try { rules = current(); } catch (e) { result.textContent = `rules: ${e.message}`; result.classList.add('warn'); warn.hidden = true; return; }
+    const loose = unanchoredRules(rules);
+    warn.hidden = !loose.length;
+    warn.textContent = loose.length ? `Not anchored, so it matches anywhere in a link: ${loose.join(', ')}. Start the pattern with ^ to match from the beginning.` : '';
+    if (!probe.value.trim()) { result.textContent = ''; return; }
     try {
-      parseShareUrl(probe.value, { rules });
-      result.textContent = 'allowed';
+      const u = parseShareUrl(probe.value, { rules });
+      result.textContent = `allowed by ${matchingUrlRule(u, rules)}`;
       result.classList.add('ok-text');
     } catch (e) {
-      result.textContent = /not allowed for your account/.test(e.message) ? 'refused — no rule matches this link' : `refused — ${e.message}`;
+      result.textContent = /not allowed for your account/.test(e.message) ? 'refused: no rule matches this link' : `refused: ${e.message}`;
       result.classList.add('warn');
     }
   };
   probe.addEventListener('input', test);
   area.addEventListener('input', test);
-  const wrap = h('span.url-rules', {}, area, h('span.inline-ctl', {}, probe, result));
+  const wrap = h('span.url-rules', {}, inheritedNote, area, warn, h('span.inline-ctl', {}, probe, result), urlRulesHelp());
+  /** "set to" shows the textarea; otherwise the rules in effect are shown and tested. */
+  wrap.setMode = (isOwn) => { own = isOwn; area.hidden = !isOwn; inheritedNote.hidden = isOwn; test(); };
   wrap.read = () => {
     const rules = normalizeUrlRules(area.value.split('\n'));
     if (!rules.length) throw new Error('add at least one rule (or turn link shares off)');
@@ -183,9 +207,9 @@ function limitText(type, v) {
  * built-in defaults for the global level, the global values for a user),
  * shown next to the choice so every default is visible.
  */
-function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
+function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omit = [] }) {
   const box = h('div.limits-grid');
-  const keys = channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI;
+  const keys = (channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI).filter(([k]) => !omit.includes(k));
   const ctls = [];
   for (const [key, label, type, opt = {}] of keys) {
     const has = Object.prototype.hasOwnProperty.call(rows, key);
@@ -208,11 +232,15 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
       val.value = has && Array.isArray(v) ? v.join('\n') : '';
       val.read = () => normalizeRules(val.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean));
     }
-    if (type === 'urlrules') val = urlRulesInput(has && Array.isArray(v) ? v : (effective?.[key] ?? inherited?.[key] ?? []), label);
+    if (type === 'urlrules') val = urlRulesInput(has && Array.isArray(v) ? v : (effective?.[key] ?? inherited?.[key] ?? [...DEFAULT_URL_RULES]), label, inherited?.[key] ?? (effective && !has ? effective[key] : undefined));
     if (type === 'int') val = numberInput(has && v !== null ? v : null, { label });
     if (type === 'bytes') val = h('span.inline-ctl', {}, numberInput(has && v !== null ? v : null, { step: 0.1, scale: MiB, label: `${label} (MiB)` }), h('span.mono', { text: 'MiB' }));
     if (type === 'dur') val = durationInput(has && v !== null ? v : null, { allowNull: true });
-    const sync = () => { if (val) val.hidden = mode.value !== 'value'; };
+    const sync = () => {
+      if (!val) return;
+      if (val.setMode) val.setMode(mode.value === 'value'); // link rules: always shown, with the tester
+      else val.hidden = mode.value !== 'value';
+    };
     mode.onchange = sync;
     sync();
     const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
@@ -242,7 +270,6 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved }) {
     if (ok && onSaved) onSaved(); // re-render so the "effective" column is current
   };
   if (keys.some(([k]) => k === 'fileTypeRules')) box.appendChild(h('p.mono.muted', { text: RULES_HINT }));
-  if (keys.some(([k]) => k === 'urlRules')) box.appendChild(h('p.mono.muted', { text: URL_RULES_HINT }));
   box.appendChild(h('div.btn-row', {}, save));
   return box;
 }
@@ -322,21 +349,17 @@ async function renderUsers() {
     h('p.mono.muted', { text: `You may set any password. When users change their own, it must follow their policy (${describePolicy(newPolicy)}), checked in the browser only: the server never sees passwords.` })));
 
   const body = h('tbody');
-  // The built-in public account is managed under Public access, not here.
-  for (const u of data.users.filter((x) => x.role !== 'public')) {
+  // The built-in public account is managed under Public access, and the owner
+  // (you) on Account: neither is listed here.
+  for (const u of data.users.filter((x) => x.role !== 'public' && x.role !== 'owner')) {
     const actions = h('div.btn-row.row-actions');
-    if (u.role !== 'owner') {
-      actions.appendChild(h('button.btn', { type: 'button', text: 'Manage', on: { click: () => openUser(u.id) } }));
-      actions.appendChild(h('button.btn', { type: 'button', text: 'Log in as', on: { click: async () => { if (await guard(() => admin.impersonate(u.id))) location.href = '/dashboard/'; } } }));
-      actions.appendChild(h('button.btn', { type: 'button', text: u.disabled ? 'Enable' : 'Disable', on: { click: async () => { await guard(() => admin.updateUser(u.id, { disabled: !u.disabled }), u.disabled ? 'User enabled.' : 'User disabled.'); renderUsers(); } } }));
-      if (u.locked) actions.appendChild(h('button.btn', { type: 'button', text: 'Unlock', on: { click: async () => { await guard(() => admin.unlock(u.id), 'Unlocked.'); renderUsers(); } } }));
-      const del = h('button.btn.danger', { type: 'button', text: 'Delete' });
-      armConfirm(del, 'Delete user + revoke shares?', async () => { await guard(() => admin.deleteUser(u.id, true), 'User deleted.'); renderUsers(); });
-      actions.appendChild(del);
-    } else {
-      // The owner's own password changes on Account, with the current password.
-      actions.appendChild(h('a.btn', { href: '/dashboard/account/', text: 'Change my password (Account)' }));
-    }
+    actions.appendChild(h('button.btn', { type: 'button', text: 'Manage', on: { click: () => openUser(u.id) } }));
+    actions.appendChild(h('button.btn', { type: 'button', text: 'Log in as', on: { click: async () => { if (await guard(() => admin.impersonate(u.id))) location.href = '/dashboard/'; } } }));
+    actions.appendChild(h('button.btn', { type: 'button', text: u.disabled ? 'Enable' : 'Disable', on: { click: async () => { await guard(() => admin.updateUser(u.id, { disabled: !u.disabled }), u.disabled ? 'User enabled.' : 'User disabled.'); renderUsers(); } } }));
+    if (u.locked) actions.appendChild(h('button.btn', { type: 'button', text: 'Unlock', on: { click: async () => { await guard(() => admin.unlock(u.id), 'Unlocked.'); renderUsers(); } } }));
+    const del = h('button.btn.danger', { type: 'button', text: 'Delete' });
+    armConfirm(del, 'Delete user + revoke shares?', async () => { await guard(() => admin.deleteUser(u.id, true), 'User deleted.'); renderUsers(); });
+    actions.appendChild(del);
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td.mono', { dataset: { label: 'Role' }, text: u.role }),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(u.created) }), h('td.cell-actions', {}, actions)));
@@ -514,6 +537,10 @@ async function renderSettings() {
 
 // ── public access ────────────────────────────────────────────────────────────
 const PUBLIC_ID = 'public-user-0000';
+// Not for the public account (no API keys, receipts page, password, passkeys
+// or log of its own); the server refuses them too (PUBLIC_NA_LIMITS).
+const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs', 'receiptLanguages',
+  'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],
   ['ip', 'Network address only', 'Counts per IP address (IPv6 per the tracking prefix), stored only as a keyed hash. Nothing is stored in the browser; people behind one address share the limits.'],
@@ -567,7 +594,7 @@ async function renderPublic() {
     h('div.btn-row', {}, save)));
 
   p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public account: capabilities & limits' }),
-    limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, inherited: overview.defaults.inherited, onSaved: renderPublic })));
+    limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, inherited: overview.defaults.inherited, onSaved: renderPublic, omit: PUBLIC_OMIT })));
   p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public quotas (counted per anonymous creator, in addition to global quotas)' }), quotasEditor(PUBLIC_ID, detail.quotas)));
 
   const t = data.trackers;
@@ -607,9 +634,53 @@ async function renderViewer() {
 }
 
 // ── security ─────────────────────────────────────────────────────────────────
+/**
+ * Cloudflare Turnstile (the human check on login, password change and public
+ * sharing): keys entered here apply when the deployment sets none. The secret
+ * is write-only: never shown again, only replaced or removed.
+ */
+async function turnstileCard() {
+  const st = await guard(() => admin.turnstile());
+  const card = h('div.card.stack', {}, h('h2.section-title', { text: 'Human check (Cloudflare Turnstile)' }));
+  if (!st) return card;
+  const state = st.active === 'env' ? 'On, with the deployment\'s keys (TURNSTILE_SITEKEY and TURNSTILE_SECRET).'
+    : st.active === 'admin' ? 'On, with the keys set here.' : 'Off: no keys are set.';
+  card.appendChild(h('p', { text: state }));
+  card.appendChild(h('p.mono.muted', { text: 'When on, login, a password change and anonymous sharing ask for a Turnstile check. Create a widget in the Cloudflare dashboard (Turnstile → Add widget) for this hostname, then paste its site key and secret key. The deployment\'s keys (Worker variables or secrets) always win over the ones set here; a Worker secret is the safer place for the secret key.' }));
+  if (st.deployment) {
+    card.appendChild(h('p.mono.muted', { text: 'Set by the deployment: change or remove the keys there (wrangler secret put TURNSTILE_SECRET, TURNSTILE_SITEKEY in wrangler.toml or the dashboard).' }));
+    return card;
+  }
+  const passkey = await canUsePasskey();
+  const sitekey = h('input.input', { value: st.sitekey || '', placeholder: '0x4AAAAAAA…', maxlength: '100', spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Turnstile site key' });
+  const secret = h('input.input', { type: 'password', placeholder: st.secretSet ? 'saved: leave empty to keep it' : '0x4AAAAAAA…', maxlength: '100', autocomplete: 'off', 'aria-label': 'Turnstile secret key' });
+  const mineLabel = confirmLabel('Your password', passkey);
+  const mine = h('input.input', { type: 'password', autocomplete: 'current-password', 'aria-label': mineLabel, placeholder: mineLabel });
+  const save = h('button.btn', { type: 'button', text: 'Save keys' });
+  save.onclick = async () => {
+    let step;
+    try { step = await confirmStep(mine, profile.user.username, passkey); } catch (e) { return msg(friendlyError(e), true); }
+    if (await guard(() => admin.setTurnstile({ sitekey: sitekey.value.trim(), secret: secret.value.trim(), ...step }), 'Turnstile keys saved. The human check is on (other servers pick it up within 30 seconds).')) renderSecurity();
+  };
+  const remove = h('button.btn.danger', { type: 'button', text: 'Remove keys', disabled: !st.sitekey && !st.secretSet });
+  armConfirm(remove, 'Remove keys: turn the check off?', async () => {
+    let step;
+    try { step = await confirmStep(mine, profile.user.username, passkey); } catch (e) { return msg(friendlyError(e), true); }
+    if (await guard(() => admin.setTurnstile({ clear: true, ...step }), 'Turnstile keys removed. The human check is off.')) renderSecurity();
+  });
+  card.append(
+    h('label.field', {}, h('span.field-label', { text: 'Site key (public)' }), sitekey),
+    h('label.field', {}, h('span.field-label', { text: st.secretSet ? 'Secret key (saved; never shown again)' : 'Secret key' }), secret),
+    h('label.field', {}, h('span.field-label', { text: mineLabel }), mine),
+    h('div.btn-row', {}, save, remove),
+    h('p.mono.muted', { text: 'The secret key is stored in the server\'s database, never returned by any API and never logged. Test the keys by signing in from a private window before relying on them.' }));
+  return card;
+}
+
 async function renderSecurity() {
   const p = clear(panel('security'));
   const [g, rules] = await Promise.all([guard(() => admin.guard()), guard(() => admin.ipRules())]);
+  p.appendChild(await turnstileCard());
   // Manual rules.
   const cidr = h('input.input', { placeholder: 'IP, CIDR or range: 10.0.0.0/8, 10.0.0.5-10.0.0.20', 'aria-label': 'IP address, CIDR block or range', maxlength: '100' });
   const action = h('select.input', { 'aria-label': 'Action' }, h('option', { value: 'block', text: 'block' }), h('option', { value: 'allow', text: 'allow (never blocked or tracked)' }));

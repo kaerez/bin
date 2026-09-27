@@ -246,9 +246,10 @@
                 <div class="card stack reveal d3" id="passkeys-card">
                     <h2 class="section-title">Passkeys</h2>
                     <fieldset class="range" id="mfa-row" hidden>
-                        <legend>Password logins</legend>
-                        <label class="radio-opt"><input type="radio" name="mfa" id="mfa-off" value="off" checked /><span>Password alone (default)</span></label>
-                        <label class="radio-opt"><input type="radio" name="mfa" id="mfa-on" value="on" /><span>Also require a passkey (or a recovery code) after my password</span></label>
+                        <legend>How you sign in</legend>
+                        <label class="radio-opt"><input type="radio" name="mfa" id="mfa-off" value="off" checked /><span>Password or Passkey (default)</span></label>
+                        <label class="radio-opt"><input type="radio" name="mfa" id="mfa-on" value="on" /><span>Password and passkey</span></label>
+                        <p class="mono muted">A recovery code always signs you in on its own, instead of your password and passkey.</p>
                     </fieldset>
                     <p class="subtitle" id="passkeys-sub">Sign in with this device's fingerprint, face or screen lock instead of your password, or add it as a second step after the password. You can have several (one per device).</p>
                     <p class="msg" id="recovery-used" role="status" hidden></p>
@@ -320,6 +321,11 @@
                     <span class="foot-sep" aria-hidden="true">·</span>
                     <a href="/accessibility/">Accessibility</a>
                 </nav>
+                <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
+                    <span class="feat" role="listitem">Private</span>
+                    <span class="feat" role="listitem">End-to-end encrypted</span>
+                    <span class="feat" role="listitem">Notes &amp; files</span>
+                </div>
                 <p class="foot-crypto mono" aria-label="Cryptography">
                     AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
                     <span class="foot-frag">#fragment</span>

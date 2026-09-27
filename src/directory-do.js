@@ -161,6 +161,7 @@ function migrator(sql) {
 }
 
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{2,63}$/;
+const TURNSTILE_KEY_RE = /^[A-Za-z0-9_-]{10,100}$/; // as src/lib/turnstile.js
 /** A key's scopes in canonical order, or null unless a non-empty list of known scopes. */
 const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x) => API_SCOPES.includes(x)) ? API_SCOPES.filter((x) => list.includes(x)) : null);
 /**
@@ -170,6 +171,13 @@ const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x
  * outside USERNAME_RE, so no real account can take it.
  */
 export const PUBLIC_ID = 'public-user-0000';
+/**
+ * Limits that mean nothing for the public account: it has no API keys, no
+ * dashboard to see read receipts in, no password or passkeys, and its log
+ * entries are the server's. They cannot be set for it (inheriting is fine).
+ */
+export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
+  'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys']);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -1755,6 +1763,47 @@ export class Directory extends DurableObject {
     };
   }
 
+  // ── Turnstile keys set in the admin panel ────────────────────────────────
+  /** For the Worker only (never returned by an API): the keys, or null. */
+  async turnstileKeys() {
+    const sitekey = this.#meta('turnstile.sitekey');
+    const secret = this.#meta('turnstile.secret');
+    return sitekey && secret ? { sitekey, secret } : null;
+  }
+
+  /** What the admin panel shows: the site key (public) and whether a secret is set. */
+  async turnstileStatus() {
+    return { sitekey: this.#meta('turnstile.sitekey'), secretSet: !!this.#meta('turnstile.secret') };
+  }
+
+  /**
+   * Set or clear the admin-panel Turnstile keys. A security setting, so it
+   * needs the owner's password or a passkey. An empty `secret` keeps the one
+   * already stored (the site key can change alone); the secret is never
+   * returned or logged.
+   */
+  async setTurnstileKeys(actorId, { sitekey, secret, clear = false, current, reauth, origin, rpId, lockoutOff = false }) {
+    const actor = this.#user(actorId);
+    if (!actor || actor.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can change this.');
+    const wrong = await this.#stepUp(actor, { current, reauth, origin, rpId }, lockoutOff);
+    if (wrong) return wrong;
+    if (clear === true) {
+      this.sql.exec("DELETE FROM meta WHERE k IN ('turnstile.sitekey', 'turnstile.secret')");
+      this.#log(actorId, null, 'turnstile.cleared');
+      return { ok: true, sitekey: null, secretSet: false };
+    }
+    const key = typeof sitekey === 'string' ? sitekey.trim() : '';
+    const sec = typeof secret === 'string' ? secret.trim() : '';
+    const keptSecret = this.#meta('turnstile.secret');
+    if (!TURNSTILE_KEY_RE.test(key)) return fail(400, 'invalid_sitekey', 'Enter the site key from the Cloudflare dashboard (10–100 letters, digits, - or _).');
+    if (sec && !TURNSTILE_KEY_RE.test(sec)) return fail(400, 'invalid_secret', 'Enter the secret key from the Cloudflare dashboard (10–100 letters, digits, - or _).');
+    if (!sec && !keptSecret) return fail(400, 'invalid_secret', 'Enter the secret key too.');
+    this.#setMeta('turnstile.sitekey', key);
+    if (sec) this.#setMeta('turnstile.secret', sec);
+    this.#log(actorId, null, 'turnstile.updated', `sitekey=${key}${sec ? ' (secret replaced)' : ''}`);
+    return { ok: true, sitekey: key, secretSet: true };
+  }
+
   // ── admin: limits / quotas / viewer rules / settings ─────────────────────
   async setLimits(scopeUserId, channel, patch, actorId) {
     if (scopeUserId && !this.#user(scopeUserId)) return fail(404, 'not_found', 'User not found.');
@@ -1764,6 +1813,7 @@ export class Directory extends DurableObject {
     try {
       for (const [k, v] of Object.entries(patch)) {
         if (!Object.prototype.hasOwnProperty.call(LIMITS, k)) throw new Error(`unknown limit "${k}"`);
+        if (scopeUserId === PUBLIC_ID && v !== 'inherit' && PUBLIC_NA_LIMITS.includes(k)) throw new Error(`"${k}" does not apply to the public account`);
         // `undefined`-like sentinel "inherit" removes the override.
         ops.push(v === 'inherit' ? [k, undefined] : [k, checkLimit(k, v, channel)]);
       }
