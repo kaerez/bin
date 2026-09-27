@@ -11,6 +11,7 @@ import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, 
 import { toast, copyText, flashCopied, keepFocus, tablistKeys } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
+import { STATEMENT_FIELDS, MAIN, ALT, guessDir } from '../../js/a11ystatement.js';
 import { ready } from './nav.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { renderShares } from './admin-shares.js';
@@ -835,16 +836,6 @@ async function renderSettings() {
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
     int('lockout.max', 'Failed logins allowed'), dur('lockout.windowSec', 'Within', 'Account lockout'), dur('lockout.lockSec', 'Then lock the account for')));
-  const contact = h('textarea.input', { rows: '2', maxlength: '500', 'aria-label': 'How to report an accessibility problem', placeholder: 'e.g. accessibility@example.com or +972-3-000-0000' });
-  contact.value = s['a11y.contact'] || '';
-  const coord = h('textarea.input', { rows: '2', maxlength: '500', 'aria-label': 'Accessibility coordinator (name and contact)', placeholder: 'Name, phone, email: only if you must appoint one' });
-  coord.value = s['a11y.coordinator'] || '';
-  const saveStatement = h('button.btn', { type: 'button', text: 'Save statement details' });
-  saveStatement.onclick = () => guard(() => admin.settings({ 'a11y.contact': contact.value.trim(), 'a11y.coordinator': coord.value.trim() }), 'Accessibility statement saved.');
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Accessibility statement' }),
-    h('p.mono.muted', {}, 'Shown on the public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), ' page (English and Hebrew). A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees).'),
-    h('label.field-label', { text: 'How to report a problem' }), contact,
-    h('label.field-label', { text: 'Accessibility coordinator (optional)' }), coord, h('div.btn-row', {}, saveStatement)));
   const save = h('button.cta', { type: 'button', text: 'Save settings' });
   save.onclick = async () => {
     const patch = {};
@@ -856,6 +847,110 @@ async function renderSettings() {
     await guard(() => admin.settings(patch), 'Settings saved.');
   };
   p.appendChild(save);
+  // Its own section, saved with its own button.
+  p.appendChild(statementEditor(s, defs));
+}
+
+/**
+ * Settings → Accessibility: the whole public statement as plain-text fields
+ * (public/js/a11ystatement.js), in the main language and optionally a second
+ * one, with the contact and coordinator both languages show. The server
+ * validates and normalises every field; the form shows what it stored.
+ */
+function statementEditor(s, defs) {
+  const HELP = 'st-edit-help';
+  const LANG_RE = /^[a-z]{2,3}(-[a-z0-9]{1,8}){0,4}$/i;
+  const field = (label, control) => h('label.field', {}, h('span.field-label', { text: label }), control);
+  const text = (key, { rows = '2', max = 500, placeholder } = {}) => {
+    const el = h('textarea.input', { rows, maxlength: String(max), placeholder, dataset: { setting: key } });
+    el.value = s[key] ?? '';
+    return el;
+  };
+  const contact = text('a11y.contact', { placeholder: 'e.g. accessibility@example.com or +972-3-000-0000' });
+  const coord = text('a11y.coordinator', { placeholder: 'Name, phone, email: only if you must appoint one' });
+  const reviewed = h('input.input', { type: 'date', value: s['a11y.reviewed'] || '', dataset: { setting: 'a11y.reviewed' } });
+
+  // One language block: its code, direction and every text field.
+  const block = (prefix, legend, alt) => {
+    const lang = h('input.input', { type: 'text', maxlength: '35', autocomplete: 'off', spellcheck: 'false', placeholder: alt ? 'e.g. he' : 'en', dataset: { setting: `${prefix}lang` } });
+    const dir = h('select.input', { dataset: { setting: `${prefix}dir` } }, h('option', { value: 'ltr', text: 'Left to right' }), h('option', { value: 'rtl', text: 'Right to left' }));
+    const ctl = {};
+    const rows = [];
+    for (const [k, f] of Object.entries(STATEMENT_FIELDS)) {
+      const key = `${prefix}${k}`;
+      const el = f.oneLine
+        ? h('input.input', { type: 'text', maxlength: String(f.max), dataset: { setting: key }, placeholder: alt ? s[`${MAIN}${k}`] : undefined })
+        : h('textarea.input', { rows: f.items ? '6' : '3', maxlength: String(f.max), 'aria-describedby': HELP, dataset: { setting: key } });
+      ctl[k] = el;
+      rows.push(field(`${f.label}${alt && !f.oneLine ? ' (optional)' : alt && k !== 'title' ? ' (empty: the main language’s)' : ''}`, el));
+    }
+    // Typing in the statement's language: its lang and dir on every field.
+    const mark = () => {
+      const code = lang.value.trim();
+      for (const el of Object.values(ctl)) {
+        if (LANG_RE.test(code)) el.setAttribute('lang', code); else el.removeAttribute('lang');
+        el.setAttribute('dir', dir.value);
+      }
+    };
+    lang.addEventListener('change', () => { if (LANG_RE.test(lang.value.trim())) dir.value = guessDir(lang.value.trim()); mark(); });
+    dir.addEventListener('change', mark);
+    const fill = (v) => {
+      lang.value = v[`${prefix}lang`] ?? '';
+      dir.value = v[`${prefix}dir`] || 'ltr';
+      for (const k of Object.keys(ctl)) ctl[k].value = v[`${prefix}${k}`] ?? '';
+      mark();
+    };
+    fill(s);
+    const read = () => ({ [`${prefix}lang`]: lang.value.trim(), [`${prefix}dir`]: dir.value, ...Object.fromEntries(Object.entries(ctl).map(([k, el]) => [`${prefix}${k}`, el.value])) });
+    const box = h('fieldset.st-lang', {}, h('legend', { text: legend }),
+      h('div.st-row', {}, field('Language code', lang), field('Direction', dir)), ...rows);
+    return { box, fill, read, lang };
+  };
+
+  const main = block(MAIN, 'Main language', false);
+  const alt = block(ALT, 'Second language', true);
+  const altOn = h('input', { type: 'checkbox', checked: !!s['a11y.alt.lang'], 'aria-controls': 'st-alt-fields' });
+  alt.box.id = 'st-alt-fields';
+  alt.box.hidden = !altOn.checked;
+  altOn.onchange = () => { alt.box.hidden = !altOn.checked; if (altOn.checked) alt.lang.focus(); };
+
+  let restored = false; // set by "Restore the default statement" until the next save
+  const saveBtn = h('button.cta', { type: 'button', text: 'Save accessibility statement' });
+  saveBtn.onclick = async () => {
+    // With the second language off, its text is kept for later, unless the
+    // default was restored (then it is cleared too).
+    const patch = { 'a11y.contact': contact.value, 'a11y.coordinator': coord.value, 'a11y.reviewed': reviewed.value, ...main.read(), ...(altOn.checked || restored ? alt.read() : { 'a11y.alt.lang': '' }) };
+    if (altOn.checked && !patch['a11y.alt.lang']) { alt.lang.focus(); return msg('Enter the second language’s code (for example he), or turn the second language off.', true); }
+    const r = await guard(() => admin.settings(patch), 'Accessibility statement saved.');
+    if (!r) return;
+    // Show what the server stored (trimmed, blank lines removed).
+    contact.value = r.settings['a11y.contact']; coord.value = r.settings['a11y.coordinator']; reviewed.value = r.settings['a11y.reviewed'];
+    main.fill(r.settings);
+    if (r.settings['a11y.alt.lang'] || restored) alt.fill(r.settings);
+    restored = false;
+  };
+  // The default statement (English only, no second language) back in the
+  // form; the contact and coordinator are this server's own and stay.
+  const resetBtn = h('button.btn', { type: 'button', text: 'Restore the default statement' });
+  resetBtn.onclick = () => {
+    main.fill(defs); alt.fill(defs); reviewed.value = defs['a11y.reviewed'];
+    altOn.checked = false; alt.box.hidden = true;
+    restored = true;
+    msg('The default statement (English only) is back in the form. Save to publish it.');
+  };
+
+  return h('div.card.stack.st-editor', {}, h('h2.section-title', { text: 'Accessibility' }),
+    h('p.mono.muted', {}, 'The public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), '. A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees).'),
+    h('p.mono.muted', { id: HELP, text: 'Plain text only (no HTML or formatting). In paragraphs, each line is a paragraph; in lists, each line is one item. Empty sections are left out.' }),
+    field('How to report a problem (both languages)', contact),
+    field('Accessibility coordinator (optional; both languages)', coord),
+    field('Last technical review (date; empty for none)', reviewed),
+    main.box,
+    h('label.inline', {}, altOn, ' Also show the statement in a second language'),
+    alt.box,
+    h('div.btn-row', {}, saveBtn, resetBtn,
+      h('a.btn', { href: '/accessibility/', target: '_blank', rel: 'noopener', text: 'Preview (opens in a new tab)' })),
+    h('p.mono.muted', { text: 'The preview shows the statement as last saved.' }));
 }
 
 // ── public access ────────────────────────────────────────────────────────────

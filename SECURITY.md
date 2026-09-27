@@ -262,8 +262,10 @@ API keys are never challenged.
   strings, no third party.
 - **What is stored.** Only the viewer's display choices, kept in `localStorage`
   (`secbin:a11y`); malformed values are ignored. Nothing is sent to the server.
-- **The statement page.** `/accessibility/` is static and uses the strict policy. It inserts
-  the admin's contact text with `textContent`, never as markup.
+- **The statement page.** `/accessibility/` uses the strict policy. The whole statement is
+  admin-set plain text (validated settings: lengths, one-line headings, list items, a checked
+  language code, `ltr`/`rtl`, a date, 32,000 characters in all), served by `/api/config` and
+  built with DOM calls and `textContent` (`public/js/statement.js`), never as markup.
 
 ### Service worker and install banner (PWA)
 
