@@ -40,9 +40,18 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     can read the link key on the uploader page.
 - **Drive, security audit round 2** (docs/DRIVE.md §3, §6, §10; SECURITY.md "Drive keys"):
   - the owner's escrow key pair changes only with the owner's password or a passkey (the first
-    one excepted); the owner's browser checks the server's escrow public key against its own
-    private key and alerts on a mismatch; each user's browser pins the escrow key and shows a
-    notice ("Trust the new key") instead of re-wrapping to a new one;
+    one excepted), and a new escrow key must be signed by the owner's signing key (ECDSA P-256,
+    sealed under the owner's Drive key); the owner's browser checks the server's escrow public
+    key and signature against its own keys and alerts on a mismatch; each user's browser pins the
+    escrow key and the signing key, re-wraps by itself only to a key the pinned signing key
+    signed, and otherwise shows a notice ("Trust the new key");
+  - every user's Drive has an escrow wrap for the current escrow key: a Drive is set up only
+    once the owner's escrow key exists ("Drive is not ready yet" before), only with an escrow wrap
+    and a wrap of the user's own, and the escrow wrap cannot be removed; no change leaves only
+    the escrow wrap; rotating the escrow key (with the owner's password) keeps the old private key
+    sealed under the owner's Drive key until no user's wrap needs it;
+  - no server-held key exists for any Drive: the one-time hand-over wrap and its server-held key
+    are gone, and a regression test checks that the server stores no key that opens a Drive;
   - removing a key wrap, replacing the password wrap or the Drive salt needs the password or a
     passkey (not for the first set-up or a stale password wrap), and no change leaves a Drive
     with content and no wrap;
@@ -70,12 +79,20 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   left-to-right isolate (`common.js` `nameEl`): the Drive's tree, table and dialogs, the
   composer's file list, the viewer, downloads and ZIPs. A share id is never moved to another
   account when it is recorded again.
+- **The Drive sets itself up at the first sign-in.** Once the Drive is enabled and the owner's
+  escrow key exists, a user's first sign-in creates their Drive key in the browser with the
+  password wrap, the escrow wrap (and a passkey wrap with PRF), with no prompt.
 - **Log in as: the user's whole Drive.** The owner acting as a user opens that user's Drive with
   the owner escrow (the owner's own Drive unlocked in the tab) and can browse, upload, download,
   move, rename, delete, share and revoke; the user's key stays in its own tab slot and goes when
-  the impersonation ends. A user without a Drive gets one, finished by their next sign-in. The
-  user's own key wraps are never removed or replaced then. All of it is in the owner-only admin
-  audit with the owner as the real actor, and none of it in the user's own activity.
+  the impersonation ends. A user who has not signed in since the Drive was enabled has no Drive,
+  and none is created: the page says so. The user's own key wraps are never removed or replaced
+  then.
+- **Drive actions are in the user's activity**, like every other action (node ids only): keys
+  changed, folders, uploads, file reads (throttled: one row per file per minute, at most 30 a
+  minute), renames and moves, deletions and Drive shares. What the owner does while logged in as
+  the user shows there as the user's own, with no trace of the impersonation; the owner-only
+  admin audit has the owner as the real actor, and the owner's escrow use.
 - **The user's own activity no longer lists the start and end of an impersonation**
   (`impersonate.start`, `impersonate.end`); they stay in the owner-only admin audit.
 - **Nothing the Worker serves is stored in Cloudflare's cache** (with Workers Caching on, see
@@ -164,7 +181,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   key does not open the Drive; transfers report bytes and can be cancelled (downloads too);
   dropped empty folders are kept; an upload whose name the folder already has becomes
   "name (2).ext"…; while the owner impersonates a user whose Drive has no key yet, the page says
-  "The Drive can only be set up by its user" instead of the prompt; the manual end-to-end
+  "The user hasn’t signed in since the Drive was enabled" instead of the prompt; the manual end-to-end
   script is `test-e2e/drive-int.mjs` (see `test-e2e/README.md`, not run in CI); Share… applies
   the file-type and folder-depth policy and can allow in-browser viewing, like the composer. My shares and Admin → Shares name drive shares
   "drive".

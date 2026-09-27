@@ -287,8 +287,17 @@ const PENDING_REVERSE_SEC = 600;
 const RECEIVED_LOG_SEC = 3600;
 /** Bound parameters per `IN (…)` query: SQLite in a Durable Object allows about 100. */
 const SQL_BATCH = 90;
-/** What the owner's impersonated Drive use is logged as (admin audit only; docs/DRIVE.md §9). */
-const DRIVE_IMP_ACTIONS = ['drive.escrow_used', 'drive.setup', 'drive.keys_added', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted'];
+/**
+ * What is done in a user's Drive, logged like every other action of theirs
+ * (docs/DRIVE.md §9): as the user, or — the owner impersonating them — as the
+ * user's own in their activity with the real actor in the admin audit.
+ */
+const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted'];
+// A user's own file reads (one row per opened file) are throttled so that they
+// cannot flood the log and push other entries out: one per file per minute, at
+// most DRIVE_READS_PER_MINUTE a minute. The owner's rows are never dropped.
+const DRIVE_READ_DEDUPE_SEC = 60;
+const DRIVE_READS_PER_MINUTE = 30;
 const MAX_OPENS_PER_SHARE = 1000;
 // Read receipts are throttled so that a link holder cannot flood this object
 // or push the genuine receipts out: one per share and address per window, at
@@ -1813,9 +1822,7 @@ export class Directory extends DurableObject {
     if (!row) return fail(404, 'not_found', 'Share not found.');
     if (row.locked && !admin) return fail(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
     const subject = row.user_id;
-    // The owner changing a Drive share while impersonating: admin audit only (docs/DRIVE.md §9).
-    const impDrive = !admin && actorId && typeof actorId === 'object' && actorId.imp && row.kind === 'drive';
-    const actor = admin ? { id: admin, adm: true } : impDrive ? { ...actorId, adm: true } : actorId;
+    const actor = admin ? { id: admin, adm: true } : actorId;
     const parts = [];
     if (label !== undefined) {
       const l = cleanLabel(label);
@@ -1953,6 +1960,8 @@ export class Directory extends DurableObject {
       pendingSec: this.#caps(u, L, s).pendingSec,
       used,
       escrowPub: this.#meta('drive.escrowPub'),
+      escrowSignPub: this.#meta('drive.escrowSignPub'),
+      escrowSig: this.#meta('drive.escrowSig'),
     };
   }
 
@@ -1978,31 +1987,66 @@ export class Directory extends DurableObject {
       uid, used, now());
   }
 
-  /** The owner sets (or replaces) the escrow public key every Drive wraps its key to. */
-  async setEscrowPub(ownerId, jwkText) {
+  /**
+   * The owner sets (or replaces) the escrow public key every Drive wraps its
+   * key to, with the owner's signing key and its signature over the escrow key
+   * (users' browsers check it against the signing key they pinned).
+   */
+  async setEscrowPub(ownerId, jwkText, { signPub, sig } = {}) {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner can set the escrow key.');
     const had = !!this.#meta('drive.escrowPub');
-    this.#setMeta('drive.escrowPub', jwkText);
-    this.#log(ownerId, ownerId, 'drive.escrow_key_set', had ? 'replaced' : 'created');
+    if (jwkText !== undefined) this.#setMeta('drive.escrowPub', jwkText);
+    if (signPub !== undefined) this.#setMeta('drive.escrowSignPub', signPub);
+    if (sig !== undefined) this.#setMeta('drive.escrowSig', sig);
+    this.#log(ownerId, ownerId, 'drive.escrow_key_set', jwkText === undefined ? 'signature' : had ? 'replaced' : 'created');
     return { ok: true };
   }
 
+  /** The kid a user's escrow wrap is made for (so the owner keeps an earlier escrow key while one needs it). */
+  async setEscrowKid(uid, kid) {
+    if (!this.#user(uid) || typeof kid !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kid)) return;
+    this.#setMeta(`drive.escrowKid:${uid}`, kid);
+  }
+
+  /** The kids users' escrow wraps are made for (existing accounts only). */
+  async escrowKidsInUse() {
+    return [...new Set(this.sql.exec("SELECT m.v AS v FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id").toArray().map((r) => r.v))];
+  }
+
   /**
-   * The owner acts on a user's Drive keys (opens the escrow wrap, writes a
-   * password wrap after a reset): allowed for an existing account (not the
-   * public one), always logged as a direct admin action.
+   * A Drive action (DRIVE_ACTIONS) on `userId`'s Drive. `actor` is the user's
+   * id, or { id, imp: true } for the owner acting as the user (#log: the
+   * user's activity shows it as theirs, the admin audit the real actor).
    */
+  async driveLog(actor, userId, action, detail = '') {
+    if (!DRIVE_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    const u = this.#user(userId);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    const imp = actor && typeof actor === 'object';
+    if (imp) {
+      const o = this.#user(actor.id);
+      if (!o || o.role !== 'owner' || actor.imp !== true || actor.adm) return fail(403, 'forbidden', 'Owner only.');
+    } else if (actor !== userId) return fail(403, 'forbidden', 'Not your Drive.');
+    const d = cleanDetail(detail);
+    if (!imp && action === 'drive.file_read') {
+      const recent = this.sql.exec(`SELECT detail FROM (SELECT ts, actor_id, action, detail, imp FROM activity WHERE subject_id = ? ORDER BY id DESC LIMIT 200)
+        WHERE action = 'drive.file_read' AND actor_id = ? AND imp = 0 AND ts >= ?`, userId, userId, now() - DRIVE_READ_DEDUPE_SEC).toArray();
+      if (recent.length >= DRIVE_READS_PER_MINUTE || recent.some((r) => r.detail === d)) return { ok: true, logged: false };
+    }
+    this.#log(imp ? { id: actor.id, imp: true } : userId, userId, action, d);
+    return { ok: true, logged: true };
+  }
+
   /**
-   * What the owner does in a user's Drive while impersonating them (opening
-   * it with the escrow, creating it, uploads, reads, changes): recorded in the
-   * admin audit with the real actor, never in the user's own activity.
+   * The owner opening a user's Drive with the escrow while impersonating
+   * them: the owner's own escrow key is used, not anything of the user's, so
+   * it is recorded in the admin audit only (like the admin escrow route).
    */
-  async driveImpLog(ownerId, userId, action, detail = '') {
+  async driveEscrowUsed(ownerId, userId, detail = '') {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
-    if (!DRIVE_IMP_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
-    this.#log({ id: ownerId, imp: true, adm: true }, userId, action, detail);
+    this.#log({ id: ownerId, imp: true, adm: true }, userId, 'drive.escrow_used', detail);
     return { ok: true };
   }
 
@@ -2207,6 +2251,7 @@ export class Directory extends DurableObject {
       this.sql.exec('DELETE FROM meta WHERE k IN (SELECT ? || id FROM passkeys WHERE user_id = ?)', handleAlias(''), id);
       for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges', 'drive_usage']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
       this.sql.exec('DELETE FROM users WHERE id = ?', id);
+      this.sql.exec('DELETE FROM meta WHERE k = ?', `drive.escrowKid:${id}`);
       this.#log(actorId, id, 'user.deleted', `username=${u.username}`);
     });
     return { ok: true, shares };

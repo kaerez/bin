@@ -258,12 +258,31 @@ export class Drive extends DurableObject {
       wraps,
       escrowPriv: this.#meta('escrowPriv'),
       escrowPin: this.#meta('escrowPin'),
-      handoffKey: this.#meta('handoffKey'),
+      escrowSignPriv: this.#meta('escrowSignPriv'),
+      escrowPrivOld: this.#oldEscrow(),
       pwStale: this.#meta('pwStale') === '1',
       content: this.#hasContent(),
       received: this.#receivedCount(),
       receivedFailed: this.#receivedFailedCount(),
     };
+  }
+
+  /** The owner's earlier escrow private keys (sealed, by kid), kept while a user's wrap may still need one. */
+  #oldEscrow() {
+    try { return JSON.parse(this.#meta('escrowPrivOld') || '{}'); } catch { return {}; }
+  }
+
+  /**
+   * The owner's Drive: keep only the earlier escrow keys whose kid is in
+   * `inUse` (the kids users' escrow wraps are still made for).
+   */
+  async pruneOldEscrow(uid, inUse = []) {
+    this.#bind(uid);
+    const keep = new Set(inUse);
+    const old = this.#oldEscrow();
+    const next = Object.fromEntries(Object.entries(old).filter(([kid]) => keep.has(kid)));
+    if (Object.keys(next).length !== Object.keys(old).length) this.#setMeta('escrowPrivOld', Object.keys(next).length ? JSON.stringify(next) : null);
+    return { ok: true, escrowPrivOld: next };
   }
 
   #hasContent() {
@@ -272,56 +291,62 @@ export class Drive extends DurableObject {
 
   /**
    * Change the key material: `set` / `remove` wraps, the Drive salt, the
-   * sealed escrow pin (the escrow key this Drive trusts), the one-time
-   * hand-over key and (the owner's Drive only — the Worker checks) the
-   * encrypted escrow private key. Values arrive validated; `data`,
-   * `escrowPriv` and `escrowPin` are opaque. Writing a `pw` wrap ends a
-   * pending hand-over and the "stale password wrap" mark. A change that would
-   * leave a Drive with content and no wrap at all is refused: nothing could
-   * open it again.
+   * sealed escrow pin (the escrow key this Drive trusts) and (the owner's
+   * Drive only — the Worker checks) the sealed escrow and signing private
+   * keys. Values arrive validated; `data`, `escrowPriv`, `escrowSignPriv` and
+   * `escrowPin` are opaque. A replaced escrow private key is kept, sealed as
+   * it was, under its kid (`oldKid`) until no user's escrow wrap needs it.
+   * Writing a `pw` wrap clears the "stale password wrap" mark. A change that
+   * would leave a Drive with wraps but none of the user's own (pw, recovery,
+   * passkey) is refused, and so is one that leaves a Drive with content and
+   * no wrap at all: nothing could open it again.
    */
-  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv, escrowPin, handoffKey } = {}) {
+  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv, escrowSignPriv, escrowPin, oldKid } = {}) {
     this.#bind(uid);
     const has = (k, r) => this.sql.exec('SELECT 1 FROM wraps WHERE kind = ? AND ref = ?', k, r).toArray().length > 0;
     const newPw = set.some((w) => w.kind === 'pw');
-    const dropHandoff = newPw && has('handoff', 'handoff') && !set.some((w) => w.kind === 'handoff');
-    const rm = dropHandoff ? [...remove, { kind: 'handoff', ref: 'handoff' }] : remove;
     const total = this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c;
-    const removed = rm.filter((w) => has(w.kind, w.ref) && !set.some((x) => x.kind === w.kind && x.ref === w.ref)).length;
+    const removed = remove.filter((w) => has(w.kind, w.ref) && !set.some((x) => x.kind === w.kind && x.ref === w.ref)).length;
     const added = set.filter((w) => !has(w.kind, w.ref)).length;
     const after = total - removed + added;
     if (after > MAX_WRAPS) return fail(409, 'too_many_wraps', `At most ${MAX_WRAPS} key wraps.`);
     if (after === 0 && total > 0 && this.#hasContent()) return fail(409, 'last_wrap', 'This would leave your Drive with no way to open it.');
+    const own = new Set(this.sql.exec("SELECT kind, ref FROM wraps WHERE kind IN ('pw', 'recovery', 'passkey')").toArray().map((w) => `${w.kind}\n${w.ref}`));
+    for (const w of remove) own.delete(`${w.kind}\n${w.ref}`);
+    for (const w of set) if (['pw', 'recovery', 'passkey'].includes(w.kind)) own.add(`${w.kind}\n${w.ref}`);
+    if (after > 0 && own.size === 0 && total > 0) return fail(409, 'last_own_wrap', 'Your Drive must keep a password, passkey or recovery-code key of yours.');
+    const old = this.#oldEscrow();
+    const prev = this.#meta('escrowPriv');
     this.ctx.storage.transactionSync(() => {
-      for (const w of rm) this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref);
+      for (const w of remove) this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref);
       for (const w of set) {
         this.sql.exec('INSERT INTO wraps (kind, ref, data) VALUES (?, ?, ?) ON CONFLICT(kind, ref) DO UPDATE SET data = excluded.data', w.kind, w.ref, w.data);
       }
       if (driveSalt !== undefined) this.#setMeta('driveSalt', driveSalt);
-      if (escrowPriv !== undefined) this.#setMeta('escrowPriv', escrowPriv);
+      if (escrowPriv !== undefined) {
+        if (prev && oldKid && escrowPriv !== prev) this.#setMeta('escrowPrivOld', JSON.stringify({ ...old, [oldKid]: prev }));
+        this.#setMeta('escrowPriv', escrowPriv);
+      }
+      if (escrowSignPriv !== undefined) this.#setMeta('escrowSignPriv', escrowSignPriv);
       if (escrowPin !== undefined) this.#setMeta('escrowPin', escrowPin);
-      if (handoffKey !== undefined) this.#setMeta('handoffKey', handoffKey);
       if (newPw) this.#setMeta('pwStale', null);
-      if (dropHandoff) this.#setMeta('handoffKey', null);
     });
     return { ok: true };
   }
 
   /**
-   * The account's password changed (`reset`: set by the owner). The `pw` wrap
-   * still opens with the old password, which may be the compromised one: after
-   * a reset it goes at once when another wrap remains that can open the Drive
-   * (a passkey or a recovery code; with `escrow`, the owner acting as the
-   * user, whose browser adds the new wrap through the escrow, also the escrow
-   * wrap), else it is marked stale; after the user's own change it is marked
+   * The account's password changed (`reset`: set by the owner, from Admin or
+   * while acting as the user). The `pw` wrap still opens with the old
+   * password, which may be the compromised one: after a reset it goes at once
+   * when another wrap of the user's own remains (a passkey or a recovery
+   * code), else it is marked stale; after the user's own change it is marked
    * stale (their browser writes the new one right away). A stale wrap may be
    * replaced without the step-up, and goes when it is.
    */
-  async passwordChanged(uid, { reset = false, escrow = false } = {}) {
+  async passwordChanged(uid, { reset = false } = {}) {
     this.#bind(uid);
     if (!this.sql.exec("SELECT 1 FROM wraps WHERE kind = 'pw'").toArray().length) return { ok: true, pw: 'none' };
-    const kinds = escrow ? "('passkey', 'recovery', 'escrow')" : "('passkey', 'recovery')";
-    const other = this.sql.exec(`SELECT COUNT(*) AS c FROM wraps WHERE kind IN ${kinds}`).one().c > 0;
+    const other = this.sql.exec("SELECT COUNT(*) AS c FROM wraps WHERE kind IN ('passkey', 'recovery')").one().c > 0;
     if (reset && other) {
       this.ctx.storage.transactionSync(() => {
         this.sql.exec("DELETE FROM wraps WHERE kind = 'pw'");

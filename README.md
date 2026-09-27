@@ -191,8 +191,10 @@ working.
   no admin file browser. Drive content is not exported. Owner escrow lets the owner open any
   user's Drive: from Admin after a password reset (with a reason), and while logged in as the
   user, where the owner has the user's whole Drive (the owner's own Drive unlocked in the tab);
-  both are recorded in the owner-only admin audit (`drive.escrow_used`) and never in the user's
-  own activity (see [SECURITY.md](./SECURITY.md) and [docs/DRIVE.md](./docs/DRIVE.md) §9).
+  the escrow use is recorded in the owner-only admin audit (`drive.escrow_used`) and never in the
+  user's own activity (see [SECURITY.md](./SECURITY.md) and [docs/DRIVE.md](./docs/DRIVE.md) §9).
+  A user's Drive sets itself up at their first sign-in once the owner's escrow key exists, always
+  with an escrow wrap; the server never holds a key that opens a Drive.
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
   *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).

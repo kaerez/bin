@@ -7,7 +7,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { owner, makeUser, fetchJson, intent, cookieOf, proofFor, salt16, USER_PW } from './helpers.js';
-import { someBytes, enc, newNodeId, driveLimits, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, node, drive, DIR_BYTES, FILE_BYTES } from './drive-helpers.js';
+import { someBytes, enc, newNodeId, driveLimits, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, node, drive, DIR_BYTES, FILE_BYTES, escrowWrap, ensureEscrow } from './drive-helpers.js';
 import { driveChunkSize, driveChunks } from '../src/drive-do.js';
 import { SCHEMA_VERSION, PUBLIC_ID } from '../src/directory-do.js';
 import { CHUNK } from '../public/js/files.js';
@@ -19,7 +19,7 @@ afterEach(() => vi.useRealTimers());
 
 const dirStub = () => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
 const driveOf = (uid) => env.DRIVE.get(env.DRIVE.idFromName(`drive:${uid}`));
-const JWK = { kty: 'EC', crv: 'P-256', x: 'A'.repeat(43), y: 'B'.repeat(43) };
+const JWK = { kty: 'EC', crv: 'P-256', x: 'A'.repeat(43), y: `${'B'.repeat(42)}A` }; // stand-in coordinates (32 bytes each)
 const keys = (cookie, body) => fetchJson('/api/private/drive/keys', { method: 'PUT', cookie, body });
 
 describe('Drive access', () => {
@@ -245,11 +245,12 @@ describe('Drive limits', () => {
 describe('Drive keys', () => {
   // Wrap data is opaque to the server: base64url segments joined by "." (docs/DRIVE.md §3).
   const W = (n = 1) => `1.${'A'.repeat(16)}.${'B'.repeat(64 + n)}`;
-  const ESC = `1.${'E'.repeat(87)}.${'K'.repeat(22)}.${'A'.repeat(16)}.${'C'.repeat(64)}`;
+  let ESC; // an escrow wrap for the owner's current escrow key (it exists before any user's Drive)
 
   it('sets and removes wraps and the salt; refuses unknown kinds, bad data and credentials the account does not have', async () => {
     const u = await makeUser('drv-keys');
     await enableDrive(u.id);
+    ESC = (await escrowWrap()).data;
     const salt = salt16();
     expect((await keys(u.cookie, { driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }], remove: [] })).status).toBe(200);
     let s = await drive(u.cookie);
@@ -264,9 +265,15 @@ describe('Drive keys', () => {
     expect((await drive(u.cookie)).wraps.find((w) => w.kind === 'pw').data).toBe(W(2));
     expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }] })).status).toBe(400);
     expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }], current: proofFor('not-the-password') })).status).toBe(403);
-    expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }], current: proofFor(USER_PW) })).status).toBe(200);
+    // Never without a wrap of the user's own, and never without the escrow wrap.
+    const own = await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }], current: proofFor(USER_PW) });
+    expect(own.status).toBe(409);
+    expect((await own.json()).error).toBe('last_own_wrap');
+    const esc = await keys(u.cookie, { remove: [{ kind: 'escrow', ref: 'escrow' }], current: proofFor(USER_PW) });
+    expect(esc.status).toBe(403);
+    expect((await esc.json()).error).toBe('escrow_required');
     s = await drive(u.cookie);
-    expect(s.wraps.map((w) => w.kind)).toEqual(['escrow']);
+    expect(s.wraps.map((w) => w.kind)).toEqual(['escrow', 'pw']);
     const bad = [
       { set: [{ kind: 'magic', ref: 'x', data: W() }] },
       { set: [{ kind: 'pw', ref: 'other', data: W() }] }, // one pw wrap: ref "pw"
@@ -282,9 +289,9 @@ describe('Drive keys', () => {
     for (const b of bad) expect((await keys(u.cookie, b)).status, JSON.stringify(b)).toBe(400);
     // Wraps of passkeys / codes the account no longer has are dropped by the server.
     await driveOf(u.id).setKeys(u.id, { set: [{ kind: 'passkey', ref: 'gone-credential-id', data: W() }, { kind: 'recovery', ref: 'f'.repeat(64), data: W() }] });
-    expect((await drive(u.cookie)).wraps).toHaveLength(3);
+    expect((await drive(u.cookie)).wraps).toHaveLength(4);
     await fetchJson(`/api/private/admin/users/${u.id}/passkeys`, { method: 'POST', cookie: oc, headers: intent, body: {} });
-    expect((await drive(u.cookie)).wraps.map((w) => w.kind)).toEqual(['escrow']);
+    expect((await drive(u.cookie)).wraps.map((w) => w.kind)).toEqual(['escrow', 'pw']);
   });
 
   it('cannot change keys while impersonating (the rest works as the user)', async () => {
@@ -310,7 +317,9 @@ describe('Drive keys', () => {
     expect((await keys(oc, { escrowPub: { kty: 'RSA', n: 'x', e: 'AQAB' } })).status).toBe(400);
     expect((await keys(oc, { escrowPriv: { iv: 'x', ct: 'y' } })).status).toBe(400);
     const priv = W(150);
-    expect((await keys(oc, { escrowPub: { ...JWK, ext: true, key_ops: [] }, escrowPriv: priv, set: [], remove: [] })).status).toBe(200);
+    await ensureEscrow(); // the owner's key exists (before any user's Drive): replacing it needs the owner's password
+    expect((await keys(oc, { escrowPub: { ...JWK, ext: true, key_ops: [] }, escrowPriv: priv, set: [], remove: [] })).status).toBe(400);
+    expect((await keys(oc, { escrowPub: { ...JWK, ext: true, key_ops: [] }, escrowPriv: priv, set: [], remove: [], current: proofFor('owner-password') })).status).toBe(200);
     expect((await drive(u.cookie)).escrowPub).toEqual(JWK);
     const o = await drive(oc);
     expect(o.escrowPub).toEqual(JWK);
@@ -322,6 +331,7 @@ describe('Drive keys', () => {
   it('the escrow route: owner only, needs a reason, logged', async () => {
     const u = await makeUser('drv-escuse');
     await enableDrive(u.id);
+    ESC = (await escrowWrap()).data;
     await keys(u.cookie, { set: [{ kind: 'escrow', ref: 'escrow', data: ESC }, { kind: 'pw', ref: 'pw', data: W() }] });
     const path = `/api/private/admin/drive/escrow/${u.id}`;
     expect((await fetchJson(path, { method: 'POST', cookie: u.cookie, body: { reason: 'curious' } })).status).toBe(403);
@@ -349,6 +359,7 @@ describe('Drive keys', () => {
   it('after a password reset the owner writes the user’s new pw wrap — only that, logged', async () => {
     const u = await makeUser('drv-reset');
     await enableDrive(u.id);
+    ESC = (await escrowWrap()).data;
     await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }] });
     const put = (body, cookie = oc, id = u.id) => fetchJson(`/api/private/admin/drive/keys/${id}`, { method: 'PUT', cookie, headers: intent, body });
     const salt = salt16();
