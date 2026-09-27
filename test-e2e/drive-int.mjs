@@ -61,8 +61,11 @@ async function audit(p, label) {
   check(`axe: ${label}`, v.length === 0, v.join('; '));
 }
 const rowNames = (p) => p.$$eval('#drive-rows tr', (trs) => trs.map((tr) => tr.children[1].textContent.trim()));
-const treeItem = (p, name) => p.locator('#drive-tree-pane .tree-item', { has: p.locator(`:scope > .tree-label .tree-text:text-is("${name}")`) });
-const rowOf = (p, name) => p.locator('#drive-rows tr', { has: p.locator(`td:nth-child(2) :text-is("${name}")`) });
+// A name is shown as a bidi isolate with its extension in its own element
+// (common.js nameEl), so it is matched by its whole text, exactly.
+const exact = (name) => new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+const treeItem = (p, name) => p.locator('#drive-tree-pane .tree-item', { has: p.locator(':scope > .tree-label .tree-text', { hasText: exact(name) }) });
+const rowOf = (p, name) => p.locator('#drive-rows tr', { has: p.locator('td:nth-child(2) bdi.fname', { hasText: exact(name) }) });
 const selectRow = async (p, name) => { await rowOf(p, name).locator('input[type="checkbox"]').check(); };
 const waitRows = (p, fn, arg) => p.waitForFunction(fn, arg, { timeout: 30000 });
 const hasRow = (n) => [...document.querySelectorAll('#drive-rows tr')].some((tr) => tr.children[1].textContent.trim() === n);
@@ -273,10 +276,10 @@ try {
   const pickNames = await p.$$eval('.drive-picker .tree-item', (l) => l.filter((x) => !x.parentElement.closest('.tree-group[hidden]')).map((x) => x.querySelector('.tree-text').textContent));
   check('move: picker tree collapsed by default (root open)', pickNames.join(',') === 'My Drive,Documents,Empty,Photos', pickNames.join(','));
   await audit(p, 'dialog: move');
-  await p.locator('.drive-picker .tree-item', { has: p.locator(':scope > .tree-label .tree-text:text-is("Documents")') }).locator(':scope > .tree-label .tree-twisty').click();
+  await p.locator('.drive-picker .tree-item', { has: p.locator(':scope > .tree-label .tree-text', { hasText: exact('Documents') }) }).locator(':scope > .tree-label .tree-twisty').click();
   await p.waitForFunction(() => [...document.querySelectorAll('.drive-picker .tree-text')].some((t) => t.textContent === 'Reports'));
   check('move: the folder being moved is not a target', !(await p.$$eval('.drive-picker .tree-text', (l) => l.map((x) => x.textContent))).includes('Renamed stuff'));
-  await p.locator('.drive-picker .tree-text:text-is("Photos")').click();
+  await p.locator('.drive-picker .tree-text', { hasText: exact('Photos') }).click();
   check('move: target shown', /Move to: My Drive \/ Photos/.test(await p.textContent('#drive-move-target')));
   await p.click('.drive-dialog button:has-text("Move here")');
   await waitRows(p, (n) => ![...document.querySelectorAll('#drive-rows tr')].some((tr) => tr.children[1].textContent.trim() === n), 'Renamed stuff');
