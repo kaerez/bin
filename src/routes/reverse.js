@@ -56,11 +56,11 @@ function bound(v, max) {
 // ── the user (session; called from src/routes/drive.js) ──────────────────────
 
 /**
- * /api/private/drive/reverse and /api/private/drive/received[/<id>]. `a` is
- * the session, `pol` the Directory's driveAccess answer (Drive enabled).
- * Returns null for any other path.
+ * /api/private/drive/reverse and /api/private/drive/received[/<id>] (the
+ * Drive route has checked the session and that the role has a Drive; creating
+ * also needs the reverse-share option). Returns null for any other path.
  */
-export async function handleReverseOwner(request, env, url, a, pol) {
+export async function handleReverseOwner(request, env, url, a) {
   const p = url.pathname;
   const uid = a.user.id;
   const dir = directory(env);

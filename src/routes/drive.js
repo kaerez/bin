@@ -113,7 +113,7 @@ export async function handleDrive(request, env, url) {
 
   // Reverse shares and the files they received (docs/REVERSE.md §6.1).
   if (p === '/api/private/drive/reverse' || p === '/api/private/drive/received' || p.startsWith('/api/private/drive/received/')) {
-    const r = await handleReverseOwner(request, env, url, a, pol);
+    const r = await handleReverseOwner(request, env, url, a);
     if (r) return withAuth(a, r);
   }
 

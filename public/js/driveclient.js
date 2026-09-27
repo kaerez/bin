@@ -780,10 +780,9 @@ export class DriveClient {
     let failed = 0;
     for (const it of items) {
       const priv = keys.get(it.rs);
-      let got = null;
       try {
         if (!priv) throw new Error('no key');
-        got = await openUpload(priv, it.rs, it);
+        const got = await openUpload(priv, it.rs, it);
         const path = checkPath(got.path);
         path.split('/').forEach(checkName);
         const cut = path.lastIndexOf('/');
