@@ -32,7 +32,8 @@ const DASH_PUBLIC = /^\/dashboard\/(login|setup)(\/|\/index\.html)?$/;
 const DASH_LOGIN = /^\/dashboard\/login(\/|\/index\.html)?$/;
 
 // Pages with a Turnstile widget (see src/lib/turnstile.js): login, account
-// (password change) and the home page's public composer when it is enabled.
+// (every change to one's own account) and the home page's public composer
+// when it is enabled.
 const TURNSTILE_DASH = /^\/dashboard\/(login|account)(\/|\/index\.html)?$/;
 const HOME = /^\/(index\.html)?$/;
 // The home page is public and cached: look up a session only when a cookie is there.
