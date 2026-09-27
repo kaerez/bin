@@ -19,7 +19,7 @@ import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, timingSafeEqualHex
 import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn.js';
 import { ARGON2 } from '../public/js/format.js';
 import {
-  SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
+  SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
@@ -27,6 +27,7 @@ import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
 import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
+import { publicStatement } from '../public/js/a11ystatement.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -2201,19 +2202,23 @@ export class Directory extends DurableObject {
     } catch (e) {
       return fail(400, 'invalid_setting', e.message);
     }
-    const merged = { ...this.#settings(), ...Object.fromEntries(ops) };
-    if (merged['session.idleSec'] > merged['session.absSec']) return fail(400, 'invalid_setting', 'The idle timeout cannot exceed the absolute timeout.');
+    const cur = this.#settings();
+    const merged = { ...cur, ...Object.fromEntries(ops) };
+    const bad = crossCheckSettings(merged);
+    if (bad) return fail(400, 'invalid_setting', bad);
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
     });
-    this.#log(actorId, null, 'settings.updated', ops.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', '));
+    // Every change is logged (long text by its length), in entries that fit.
+    const changed = ops.filter(([k, v]) => cur[k] !== v);
+    this.#logChunks(actorId, null, 'settings.updated', '', changed.length ? changed.map(([k, v]) => `${k}=${logValue(v)}`) : ['no changes']);
     return { ok: true, settings: this.#settings() };
   }
 
   /** Public, non-secret viewer policy (the recipient page intersects with it). */
   async publicConfig() {
     const s = this.#settings();
-    return { accessibility: { contact: s['a11y.contact'], coordinator: s['a11y.coordinator'] } };
+    return { accessibility: publicStatement(s) };
   }
 
   /**
@@ -2383,8 +2388,8 @@ export class Directory extends DurableObject {
       plan.system = { parts: [...S] };
       if (S.has('settings')) {
         const cur = this.#settings();
-        const merged = { ...cur, ...sys.settings };
-        if (merged['session.idleSec'] > merged['session.absSec']) plan.errors.push('system: the idle timeout would exceed the absolute timeout');
+        const bad = crossCheckSettings({ ...cur, ...sys.settings });
+        if (bad) plan.errors.push(`system: ${bad}`);
         // Security-relevant changes are called out in the preview.
         for (const [k, v] of Object.entries(sys.settings)) {
           if (/^(guard|lockout|public)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
@@ -2489,7 +2494,7 @@ export class Directory extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       if (S.has('settings')) {
         for (const [k, v] of Object.entries(sys.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
-        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${JSON.stringify(c.to)}`));
+        this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${logValue(c.to)}`));
       }
       if (S.has('roles')) {
         replaceScope('', sys.limits, sys.quotas, sys.viewerRules);
