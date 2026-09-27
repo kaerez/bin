@@ -64,7 +64,6 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile,
   the public account's configuration) are still never deleted automatically; clearing by hand is
   unchanged. The settings travel in the settings part of an export and are validated on import.
-  Check audit-trail retention duties (e.g. SOX) with Legal / Compliance before setting them.
 - **Export / import everything, part by part.**
   - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
     default) and the public account.
@@ -168,8 +167,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   default); a composer on the home page with an editable notice and the delete token on
   success; counting per browser tracker (cookie + ETag + localStorage + IndexedDB, self-healing,
   blocked on unresolvable conflicts, new senders rate-limited per network on first
-  creation), per network, or both (permissive / restrictive); tracker administration (unblock, block, forget). Requires Legal /
-  Compliance review before it is enabled.
+  creation), per network, or both (permissive / restrictive); tracker administration (unblock, block, forget).
 - **Works without WebAssembly** (iOS/macOS Lockdown Mode, including Chrome on iOS): Argon2id
   falls back to a pure-JavaScript build (@noble/hashes, pinned) with the same output, and a
   progress bar shows slow derivations.
@@ -279,7 +277,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   its length.
 - **Role editors:** the Sessions, File shares and Activity log sections carry the same kind of
   explanation as the Owner role, and log retention says "keep forever" rather than "no limit".
-- **Admin UI:** the Legal / Compliance warnings are removed from every admin screen.
+- **No Legal / Compliance notes:** removed from every admin screen and from the docs (README, SECURITY, CHANGELOG); `AGENTS.md` now says not to add them.
 - **Human check:** while the check is pending, "Waiting for the human check…" is shown under the
   protected button (and linked to it for screen readers) instead of only in a tooltip.
 - **Everything an account may do is on its role** (migration 12):

@@ -251,8 +251,7 @@ API keys are never challenged.
   off if that is unacceptable.
 - **Privacy.** Turnstile runs Cloudflare's client-side challenge and sends browser signals to
   Cloudflare. For GDPR, treat Cloudflare as a processor for this purpose and describe it in
-  your privacy notice. Confirm the lawful basis and any consent requirement with your Legal /
-  Compliance team; this document is not legal advice.
+  your privacy notice.
 
 ### Accessibility widget and statement
 
@@ -543,8 +542,7 @@ codes as safe as the password.
   shares are recorded for the admin only.
 - The share page tells recipients that opening is recorded: before they reveal or unlock a share,
   and on the note or files view itself (a share without a password or view limit opens at once).
-  These are recipients' personal data (GDPR): decide what senders may see, the retention period
-  and the notice wording with your Legal / Compliance team.
+  The admin decides what senders may see; receipts are kept as long as the activity log.
 
 ### Activity log retention and clearing
 
@@ -568,10 +566,7 @@ codes as safe as the password.
 - The owner can **clear** the log — everything, or one account's entries, optionally only those
   older than a date. It needs the owner's password again (like export), and, as configured, it
   **leaves no record**: after a clear, nothing in the system shows that entries existed or were
-  removed. Audit trails can be subject to retention duties (for example SOX record-keeping for
-  systems in scope, or PCI DSS audit-log retention); decide the retention settings — the
-  owner's own limits included, since they cover every admin action — and who may clear with
-  your Legal / Risk / Compliance team. This document is not legal or compliance advice.
+  removed. The owner's own limits cover every admin action.
 
 ### Admin export / import
 
@@ -598,8 +593,7 @@ codes as safe as the password.
   import can never create or replace an owner; the accounts it creates are plain users.
 - **Treat an export as a credential store.** One that holds verifiers, API key hashes and the
   Turnstile secret is as sensitive as the database. Keep the file and its passphrase apart,
-  export only the parts you need, and delete files you no longer need (recommendation). Where
-  exports may be kept at all is a decision for your Security and Compliance teams.
+  export only the parts you need, and delete files you no longer need (recommendation).
 - Imports are re-validated field by field on the server with the same checkers as the admin API
   (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
   previewed as a dry run, and are applied in one storage transaction or not at all. Replacing
@@ -611,21 +605,14 @@ codes as safe as the password.
   and `export.users` (which accounts, with or without verifiers), `import.system`,
   `settings.updated`, `limits.updated`, `quotas.updated`, `viewer_rules.updated`,
   `iprule.added` (with the values) and `user.imported`.
-- The passphrase is the only protection of the file: keep file and passphrase apart. Whether
-  exported verifiers may leave the environment at all is a policy decision for your Security /
-  Compliance function.
+- The passphrase is the only protection of the file: keep file and passphrase apart.
 
 ### Public (anonymous) access
 
-> [!IMPORTANT]
-> **Legal / Compliance review required before enabling.** Anonymous sharing lets anyone publish
-> content from your domain, and the tracker below stores an identifier on the visitor's device
-> for rate limiting. Storing or reading such an identifier is regulated in the EU/UK (ePrivacy
-> Directive art. 5(3), PECR) and the identifier and the keyed network hash are pseudonymous
-> personal data under GDPR. Whether the "strictly necessary" exemption applies, which lawful
-> basis and retention period apply, what the on-page notice must say, and how abuse reports are
-> handled are decisions for your Legal, Risk and Compliance functions — this document is not
-> legal or compliance advice.
+> [!NOTE]
+> Anonymous sharing lets anyone publish content from your domain, and the tracker below stores
+> an identifier on the visitor's device for rate limiting (see the notice setting on the Public
+> role).
 
 - **Off by default** (`public.enabled`). When off, every `/api/public/*` route except the
   profile answers `403 public_disabled` and the landing page shows no composer.
