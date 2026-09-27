@@ -5,7 +5,7 @@
 import './kdf-progress.js';
 import { setupStatus, setup } from './api.js';
 import { newCredential, checkOwnerPassword, randomHex } from './pwauth.js';
-import { showMsg, wirePeek, friendlyError } from './common.js';
+import { showMsg, markInvalid, wirePeek, friendlyError } from './common.js';
 import { copyText, flashCopied } from './ui.js';
 
 const $ = (s) => document.querySelector(s);
@@ -41,9 +41,13 @@ $('#setup-form').addEventListener('submit', async (e) => {
   const username = $('#setup-user').value.trim();
   const pw = $('#setup-pass').value;
   const bad = checkOwnerPassword(pw, $('#setup-pass2').value); // the owner chooses freely
-  if (!token) return showMsg(msg, 'Enter the setup token.');
-  if (!username) return showMsg(msg, 'Choose an owner username.');
-  if (bad) return showMsg(msg, bad);
+  // A problem with a field: the message is tied to it (aria-invalid + aria-describedby) and focus goes there.
+  const fields = ['#setup-token', '#setup-user', '#setup-pass', '#setup-pass2'].map((s) => $(s));
+  for (const f of fields) markInvalid(f, msg, false);
+  const fail = (field, text) => { showMsg(msg, text); markInvalid(field, msg); field.focus(); };
+  if (!token) return fail(fields[0], 'Enter the setup token.');
+  if (!username) return fail(fields[1], 'Choose an owner username.');
+  if (bad) return fail(/match/i.test(bad) ? fields[3] : fields[2], bad);
   btn.disabled = true;
   const label = btn.textContent;
   btn.textContent = 'Working…';

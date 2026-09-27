@@ -88,7 +88,7 @@ export async function renderShares(p) {
         h('div.btn-row', {}, apply, reset))),
     summary, msg,
     h('div.table-wrap', {}, h('table.table', {},
-      h('thead', {}, h('tr', {}, ...['User', 'Label', 'Type', 'Created', 'Expires', 'Views', 'Opened', 'Status', ''].map((c) => h('th', { text: c })))),
+      h('thead', {}, h('tr', {}, ...['User', 'Label', 'Type', 'Created', 'Expires', 'Views', 'Opened', 'Status', ''].map((c) => (c ? h('th', { text: c }) : h('th', {}, h('span.sr-only', { text: 'Actions' })))))),
       body)),
     more));
 

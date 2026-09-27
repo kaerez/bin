@@ -16,6 +16,70 @@ export function showView(name) {
   if (shown && !shown.contains(document.activeElement)) shown.focus();
 }
 
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Keep keyboard focus through a re-render of `container` that may remove the
+ * focused control (a table rebuilt after a delete, an editor re-opened after
+ * a save). Call it before the re-render and the returned function after:
+ * when focus was inside `container` and has been lost (to <body>), it goes to
+ * the control with the same `data-focus-key` in the new DOM — or, key by key,
+ * to the nearest enclosing key ("user:7:delete" → "user:7": the row) — and
+ * failing that to `fallback` (default: `container`), made focusable with
+ * tabindex="-1" if it is not already.
+ *
+ * `key` names the control explicitly, for callers whose control had already
+ * lost focus before the re-render (Chromium blurs a button as soon as it is
+ * disabled, e.g. while its action runs).
+ */
+export function keepFocus(container, { fallback = container, key: forced = null } = {}) {
+  const before = document.activeElement;
+  const had = !!forced || !!(container && before && before !== document.body && container.contains(before));
+  const key = forced || (had ? before.closest('[data-focus-key]')?.dataset.focusKey : null);
+  return () => {
+    if (!had) return;
+    const now = document.activeElement;
+    if (now && now !== document.body && now !== document.documentElement && now.isConnected && !now.disabled) return;
+    const scope = container.isConnected ? container : document;
+    for (let k = key; k; k = k.includes(':') ? k.slice(0, k.lastIndexOf(':')) : null) {
+      const el = [...scope.querySelectorAll('[data-focus-key]')].find((e) => e.dataset.focusKey === k);
+      const target = el && (el.matches(FOCUSABLE) ? el : el.querySelector(FOCUSABLE));
+      if (target && !target.disabled && target.getClientRects().length) { target.focus(); return; }
+    }
+    const f = typeof fallback === 'function' ? fallback() : fallback;
+    if (!f || !f.isConnected) return;
+    if (!f.matches(FOCUSABLE) && !f.hasAttribute('tabindex')) f.setAttribute('tabindex', '-1');
+    f.focus();
+  };
+}
+
+/**
+ * Keyboard behaviour of an ARIA tablist (WAI-ARIA APG "Tabs"): one Tab stop —
+ * the selected tab (roving tabindex) — and ←/→ (mirrored in RTL), Home and End
+ * between the visible tabs. `automatic`: the focused tab is selected at once
+ * (by clicking it); otherwise Enter / Space selects it (for panels that load).
+ * Returns `sync`: call it after aria-selected changes to move the Tab stop.
+ */
+export function tablistKeys(list, { automatic = false } = {}) {
+  const tabs = () => [...list.querySelectorAll('[role="tab"]')].filter((t) => !t.hidden);
+  const sync = () => { for (const t of list.querySelectorAll('[role="tab"]')) t.tabIndex = t.getAttribute('aria-selected') === 'true' ? 0 : -1; };
+  list.addEventListener('keydown', (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const all = tabs();
+    const i = all.indexOf(document.activeElement);
+    if (i < 0) return;
+    const rtl = getComputedStyle(list).direction === 'rtl';
+    const to = { ArrowRight: rtl ? i - 1 : i + 1, ArrowLeft: rtl ? i + 1 : i - 1, Home: 0, End: all.length - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    const t = all[(to + all.length) % all.length];
+    t.focus();
+    if (automatic) t.click();
+  });
+  sync();
+  return sync;
+}
+
 /**
  * Transient bottom toast (role="status", so it is announced). Every save
  * confirms with one. `{ error: true }` styles it as a failure and keeps it up
