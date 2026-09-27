@@ -12,6 +12,7 @@ import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
 import { ready } from './nav.js';
+import { escrowPasswordReset } from '../../js/driveclient.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { renderShares } from './admin-shares.js';
 import { renderPortable } from './admin-portable.js';
@@ -421,6 +422,27 @@ async function renderUsers() {
   p.appendChild(h('div', { id: 'user-detail' }));
 }
 
+/**
+ * After a password reset: re-key the user's Drive for the new password
+ * through the owner escrow (docs/DRIVE.md §3; the server logs the escrow use).
+ * Needs the owner's own Drive unlocked in this tab; otherwise the user unlocks
+ * their Drive with a recovery code or passkey. The reset never depends on it.
+ */
+async function driveAfterReset(userId, newPassword) {
+  let r;
+  try {
+    r = await escrowPasswordReset({ ownerId: profile.user.id, userId, newPassword, reason: 'password reset' });
+  } catch {
+    r = 'failed';
+  }
+  const note = {
+    ok: 'Their Drive now opens with the new password.',
+    locked: 'Their Drive was not re-keyed (your own Drive is locked in this tab): they open it with a recovery code or a passkey.',
+    failed: 'Their Drive could not be re-keyed: they open it with a recovery code or a passkey.',
+  }[r];
+  if (note) toast(note, r === 'ok' ? {} : { error: true });
+}
+
 async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   const box = clear($('#user-detail'));
   const d = await guard(() => admin.user(id));
@@ -434,10 +456,12 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
     const bad = checkOwnerPassword(npw.value, npw2.value);
     if (bad) return msg(bad, true);
     setBtn.disabled = true;
-    const cred = await newCredential(npw.value);
-    await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out; their passkeys and recovery codes still work.');
-    setBtn.disabled = false;
+    const newPassword = npw.value;
+    const cred = await newCredential(newPassword);
+    const done = await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out; their passkeys and recovery codes still work.');
     npw.value = npw2.value = '';
+    if (done && d.effective?.all?.driveEnabled !== false) await driveAfterReset(id, newPassword);
+    setBtn.disabled = false;
   };
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }),
     h('p.mono.muted', { text: 'This is account recovery: it also signs the user out everywhere. Their passkeys and recovery codes keep working; remove them below if the account may have been taken over.' }), h('div.toolbar', {}, npw, npw2, setBtn),

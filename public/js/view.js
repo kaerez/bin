@@ -16,7 +16,8 @@ import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill } from './ui.js';
 import { h, clear, showMsg, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
 import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
-import { ShareReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
+import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
+import { validateRefsManifest } from './refsmanifest.js';
 import { allowedRenderer, renderPreview } from './viewer.js';
 import { progressBar } from './progress.js';
 
@@ -137,11 +138,22 @@ async function doOpen({ id, kind, head, fragment, password }) {
   }
   const paste = validatePaste(res.paste);
   const { text } = await openPaste({ paste, access });
+  // v2: one packed stream under one key; v3 (a Drive share): each file its own
+  // chunk sequence under its own key (docs/DRIVE.md §7).
   let manifest;
-  try { manifest = validateManifest(JSON.parse(text)); } catch { throw new DecryptError('malformed manifest'); }
+  let reader;
+  try {
+    const m = JSON.parse(text);
+    if (m && m.v === 3) {
+      manifest = validateRefsManifest(m);
+      reader = RefsReader.forShare({ id, grant: res.grant, refs: res.refs, manifest });
+    } else {
+      manifest = validateManifest(m);
+    }
+  } catch { throw new DecryptError('malformed manifest'); }
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
-  const reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
+  if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
   renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires);
   $('#files-delete-row').hidden = !canDeleteNow(paste.meta);
   wireDeleteNow($('#files-delete'), paste.meta, del, $('#files-msg'));

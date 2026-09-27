@@ -58,6 +58,16 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the
+  Drive key, its sub-keys, sealed fields bound to their node, and the `pw`, `recovery`,
+  `passkey` (WebAuthn PRF) and owner `escrow` wraps), `public/js/driveclient.js` (unlock, list,
+  folders, chunked uploads, rename, move, delete, download, ZIP, Drive shares) and
+  `public/js/refsmanifest.js` (manifest v3). Sign-in unlocks the Drive for the tab with the
+  password, a passkey's PRF output or a recovery code (never blocking the sign-in); Account
+  keeps the wraps current on a password change, new recovery codes and added or removed
+  passkeys; an owner's password reset re-keys the user's Drive through the escrow when the
+  owner's Drive is unlocked; sign-out forgets the key. The viewer and downloads read manifest v3
+  (Drive shares: per-file keys and chunk sequences) for preview, single-file download and ZIP.
 - **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
   `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
   owner made (admin actions, impersonation). Both default to keep forever, as before. Server-wide

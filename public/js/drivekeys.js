@@ -1,0 +1,363 @@
+// drivekeys.js — the Drive's keys, in the browser only (docs/DRIVE.md §3).
+//
+// DK, the Drive key, is 32 random bytes per user. Two AES-256-GCM sub-keys come
+// from it by HKDF-SHA-256: "names" seals node names and metadata, "files" seals
+// each file's own key (fk). The server stores DK only as wraps it cannot open:
+//   pw       — Argon2id(NFC(password), driveSalt, 64 MiB, t=3, p=1) → HKDF → AES-GCM;
+//   recovery — HKDF over a recovery code's normalised text, one wrap per code;
+//   passkey  — HKDF over the WebAuthn PRF output for DRIVE_PRF_SALT;
+//   escrow   — ECDH P-256 (ephemeral × the owner's escrow key) → HKDF.
+// Every sealed value carries AAD "secbin-drive/v1\n<field>\n<nodeId>\n" so the
+// server cannot move a value to another node, field or wrap.
+//
+// Formats. A sealed field is { iv, ct } (base64url; 12-byte IV). A wrap's `data`
+// (and the owner's sealed escrow key) is an opaque string of base64url segments
+// joined by ".": "1.<iv>.<ct>", or for escrow "1.<epk>.<kid>.<iv>.<ct>" where epk
+// is the ephemeral public key (raw, 65 bytes) and kid identifies the owner's key.
+
+import { randomBytes, utf8, b64urlFromBytes, bytesFromB64url, sha256Hex } from './bytes.js';
+import { hkdf32, DecryptError } from './crypto.js';
+
+const EMPTY = new Uint8Array(0);
+const VERSION = '1';
+const DK_BYTES = 32;
+const SALT_BYTES = 16;
+/** The Drive's own Argon2id cost (fixed: never taken from the server). */
+export const DRIVE_ARGON2 = Object.freeze({ mKiB: 65536, t: 3, p: 1 });
+const SESSION_KEY = 'secbin_dk';
+const SESSION_UID = 'secbin_dk_uid';
+
+/** SHA-256("secbin-drive/v1 prf"): the fixed PRF input for passkey wraps (a test checks it). */
+export const DRIVE_PRF_SALT = new Uint8Array([
+  0x7c, 0x53, 0xc3, 0x1c, 0xb5, 0xb3, 0xcc, 0x57, 0xbd, 0x63, 0x2e, 0xda, 0x13, 0x81, 0x08, 0xe6,
+  0x8c, 0x8e, 0x04, 0xd2, 0x1b, 0x3c, 0x8a, 0x5f, 0x30, 0x04, 0x60, 0x70, 0xa4, 0x6c, 0xb3, 0x19,
+]);
+
+const info = (s) => utf8(`secbin-drive/v1 ${s}`);
+const aad = (field, nodeId) => utf8(`secbin-drive/v1\n${field}\n${nodeId}\n`);
+const isDk = (dk) => dk instanceof Uint8Array && dk.length === DK_BYTES;
+
+async function aesKey(raw, usages = ['encrypt', 'decrypt']) {
+  return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, usages);
+}
+
+async function seal(key, ad, bytes) {
+  const iv = randomBytes(12);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: ad, tagLength: 128 }, key, bytes));
+  return { iv, ct };
+}
+
+async function open(key, ad, iv, ct) {
+  try {
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: ad, tagLength: 128 }, key, ct));
+  } catch {
+    throw new DecryptError();
+  }
+}
+
+// ── DK and its sub-keys ────────────────────────────────────────────────────
+
+/** A new Drive key: 32 random bytes. */
+export function createDriveKey() {
+  return randomBytes(DK_BYTES);
+}
+
+/** { names, files }: the two AES-256-GCM sub-keys (HKDF, salt empty). */
+export async function deriveSubkeys(dk) {
+  if (!isDk(dk)) throw new TypeError('invalid Drive key');
+  const [names, files] = await Promise.all([hkdf32(dk, EMPTY, info('names')), hkdf32(dk, EMPTY, info('files'))]);
+  return { names: await aesKey(names), files: await aesKey(files) };
+}
+
+/** Seal `value` (bytes or a string) for `field` of node `nodeId` → { iv, ct } (base64url). */
+export async function sealField(key, field, nodeId, value) {
+  const bytes = typeof value === 'string' ? utf8(value) : value;
+  if (!(bytes instanceof Uint8Array)) throw new TypeError('bytes or string expected');
+  const { iv, ct } = await seal(key, aad(field, nodeId), bytes);
+  return { iv: b64urlFromBytes(iv), ct: b64urlFromBytes(ct) };
+}
+
+/** Open a sealed field → Uint8Array; DecryptError when it is not this node's `field`. */
+export async function openField(key, field, nodeId, sealed) {
+  let iv, ct;
+  try {
+    const s = typeof sealed === 'string' ? JSON.parse(sealed) : sealed;
+    iv = bytesFromB64url(s.iv);
+    ct = bytesFromB64url(s.ct);
+  } catch {
+    throw new DecryptError('invalid sealed field');
+  }
+  if (iv.length !== 12) throw new DecryptError('invalid sealed field');
+  return open(key, aad(field, nodeId), iv, ct);
+}
+
+// ── wraps ──────────────────────────────────────────────────────────────────
+
+const wrapAad = (kind, ref) => aad(`wrap:${kind}`, ref);
+
+async function kekFrom(ikm, label, salt = EMPTY) {
+  return aesKey(await hkdf32(ikm, salt, info(label)));
+}
+
+async function wrapWith(kek, kind, ref, dk) {
+  if (!isDk(dk)) throw new TypeError('invalid Drive key');
+  const { iv, ct } = await seal(kek, wrapAad(kind, ref), dk);
+  return { kind, ref, data: [VERSION, b64urlFromBytes(iv), b64urlFromBytes(ct)].join('.') };
+}
+
+/** Parse "1.<seg>…" into byte segments; null when malformed. */
+function segments(data, count) {
+  if (typeof data !== 'string' || data.length > 4096) return null;
+  const parts = data.split('.');
+  if (parts.length !== count + 1 || parts[0] !== VERSION) return null;
+  try { return parts.slice(1).map((p) => bytesFromB64url(p)); } catch { return null; }
+}
+
+/** DK from a symmetric wrap, or null (wrong key, other wrap, malformed). */
+async function unwrapWith(kek, w) {
+  const seg = segments(w && w.data, 2);
+  if (!seg || seg[0].length !== 12) return null;
+  try {
+    const dk = await open(kek, wrapAad(w.kind, w.ref), seg[0], seg[1]);
+    return isDk(dk) ? dk : null;
+  } catch {
+    return null;
+  }
+}
+
+const listOf = (wraps, kind) => (Array.isArray(wraps) ? wraps.filter((w) => w && w.kind === kind && typeof w.ref === 'string') : []);
+
+async function passwordKek(password, salt) {
+  if (typeof password !== 'string' || !password) throw new TypeError('password required');
+  const { argon2idRaw } = await import('./kdf.js'); // loaded only when a password is used
+  const raw = await argon2idRaw(utf8(password.normalize('NFC')), salt, { t: DRIVE_ARGON2.t, mKiB: DRIVE_ARGON2.mKiB, p: DRIVE_ARGON2.p });
+  return kekFrom(raw, 'kek-pw');
+}
+
+/** A new `pw` wrap under a fresh 16-byte driveSalt → { driveSalt, wrap }. */
+export async function wrapPassword(dk, password) {
+  const salt = randomBytes(SALT_BYTES);
+  const kek = await passwordKek(password, salt);
+  return { driveSalt: b64urlFromBytes(salt), wrap: await wrapWith(kek, 'pw', 'pw', dk) };
+}
+
+/** DK from the `pw` wrap, or null. */
+export async function unlockWithPassword(password, driveSalt, wraps) {
+  const pw = listOf(wraps, 'pw');
+  if (!pw.length || typeof password !== 'string' || !password) return null;
+  let salt;
+  try { salt = bytesFromB64url(driveSalt); } catch { return null; }
+  if (salt.length !== SALT_BYTES) return null;
+  const kek = await passwordKek(password, salt);
+  for (const w of pw) {
+    const dk = await unwrapWith(kek, w);
+    if (dk) return dk;
+  }
+  return null;
+}
+
+/**
+ * A recovery code as the server reads it (src/directory-do.js): case, dashes
+ * and spaces ignored, O → 0, I/L → 1; 16 Crockford base32 characters, or null.
+ */
+export function normalizeRecoveryCode(code) {
+  if (typeof code !== 'string' || code.length > 64) return null;
+  const v = code.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  return /^[0-9A-HJKMNP-TV-Z]{16}$/.test(v) ? v : null;
+}
+
+/** The server's id for a recovery code: hex SHA-256("secbin-recovery/v1:" ‖ normalised code). */
+export async function recoveryRef(code) {
+  const norm = normalizeRecoveryCode(code);
+  return norm ? sha256Hex(utf8(`secbin-recovery/v1:${norm}`)) : null;
+}
+
+async function recoveryKek(code) {
+  const norm = normalizeRecoveryCode(code);
+  if (!norm) return null;
+  return kekFrom(utf8(norm), 'kek-recovery');
+}
+
+/** A `recovery` wrap for one code; `ref` defaults to the code's server-side hash. */
+export async function wrapRecovery(dk, code, ref) {
+  const kek = await recoveryKek(code);
+  if (!kek) throw new TypeError('invalid recovery code');
+  return wrapWith(kek, 'recovery', typeof ref === 'string' && ref ? ref : await recoveryRef(code), dk);
+}
+
+/** DK from the wrap of this recovery code, or null. */
+export async function unlockWithRecovery(code, wraps) {
+  const kek = await recoveryKek(code);
+  if (!kek) return null;
+  const ref = await recoveryRef(code);
+  const all = listOf(wraps, 'recovery');
+  // The code's own wrap first; the others only when refs are not hashes.
+  for (const w of [...all.filter((x) => x.ref === ref), ...all.filter((x) => x.ref !== ref)]) {
+    const dk = await unwrapWith(kek, w);
+    if (dk) return dk;
+  }
+  return null;
+}
+
+function prfBytes(prfOutput) {
+  const b = prfOutput instanceof ArrayBuffer ? new Uint8Array(prfOutput)
+    : ArrayBuffer.isView(prfOutput) ? new Uint8Array(prfOutput.buffer, prfOutput.byteOffset, prfOutput.byteLength) : null;
+  if (!b || b.length < 32) throw new TypeError('invalid PRF output');
+  return b;
+}
+
+/** A `passkey` wrap from the PRF output for DRIVE_PRF_SALT; ref = the credential id. */
+export async function wrapPrf(dk, prfOutput, credentialId) {
+  if (typeof credentialId !== 'string' || !credentialId) throw new TypeError('credential id required');
+  return wrapWith(await kekFrom(prfBytes(prfOutput), 'kek-prf'), 'passkey', credentialId, dk);
+}
+
+/** DK from this passkey's wrap, or null. */
+export async function unlockWithPrf(prfOutput, credentialId, wraps) {
+  let kek;
+  try { kek = await kekFrom(prfBytes(prfOutput), 'kek-prf'); } catch { return null; }
+  for (const w of listOf(wraps, 'passkey').filter((x) => x.ref === credentialId)) {
+    const dk = await unwrapWith(kek, w);
+    if (dk) return dk;
+  }
+  return null;
+}
+
+// ── owner escrow ───────────────────────────────────────────────────────────
+
+const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
+
+/** A public JWK reduced to the fields that matter. */
+function cleanJwk(j) {
+  if (!j || j.kty !== 'EC' || j.crv !== 'P-256' || typeof j.x !== 'string' || typeof j.y !== 'string') throw new TypeError('invalid escrow public key');
+  return { kty: 'EC', crv: 'P-256', x: j.x, y: j.y };
+}
+
+/** kid: the first 16 bytes of SHA-256 over the raw public point, base64url. */
+async function keyId(rawPub) {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', rawPub));
+  return b64urlFromBytes(d.subarray(0, 16));
+}
+
+/** The owner's escrow key pair: { publicJwk, privateKey } (the private key is extractable, to be sealed). */
+export async function createEscrowKeyPair() {
+  const kp = await crypto.subtle.generateKey(ECDH, true, ['deriveBits']);
+  return { publicJwk: cleanJwk(await crypto.subtle.exportKey('jwk', kp.publicKey)), privateKey: kp.privateKey };
+}
+
+/** The escrow private key (PKCS#8) sealed under the owner's DK → data string. */
+export async function sealEscrowPriv(dk, privateKey) {
+  const { files } = await deriveSubkeys(dk);
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
+  const { iv, ct } = await seal(files, aad('escrowPriv', 'drive'), pkcs8);
+  return [VERSION, b64urlFromBytes(iv), b64urlFromBytes(ct)].join('.');
+}
+
+/** The escrow private key back (non-extractable) → CryptoKey; DecryptError on a wrong DK. */
+export async function openEscrowPriv(dk, data) {
+  const seg = segments(data, 2);
+  if (!seg || seg[0].length !== 12) throw new DecryptError('invalid escrow key');
+  const { files } = await deriveSubkeys(dk);
+  const pkcs8 = await open(files, aad('escrowPriv', 'drive'), seg[0], seg[1]);
+  try {
+    return await crypto.subtle.importKey('pkcs8', pkcs8, ECDH, false, ['deriveBits']);
+  } catch {
+    throw new DecryptError('invalid escrow key');
+  }
+}
+
+async function escrowKek(privateKey, publicKey, epkRaw) {
+  const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: publicKey }, privateKey, 256));
+  return kekFrom(shared, 'kek-escrow', epkRaw);
+}
+
+/** The kid of an escrow public JWK (to tell whether an escrow wrap is for the current key). */
+export async function escrowKeyId(publicJwk) {
+  const pub = await crypto.subtle.importKey('jwk', cleanJwk(publicJwk), ECDH, true, []);
+  return keyId(new Uint8Array(await crypto.subtle.exportKey('raw', pub)));
+}
+
+/** The kid an escrow wrap was made for, or null. */
+export function escrowWrapKeyId(wrap) {
+  const parts = wrap && typeof wrap.data === 'string' ? wrap.data.split('.') : [];
+  return parts.length === 5 && parts[0] === VERSION ? parts[2] : null;
+}
+
+/** An `escrow` wrap of DK for the owner's escrow public key (ref "escrow"). */
+export async function wrapEscrow(dk, publicJwk) {
+  if (!isDk(dk)) throw new TypeError('invalid Drive key');
+  const ownerPub = await crypto.subtle.importKey('jwk', cleanJwk(publicJwk), ECDH, true, []);
+  const kid = await keyId(new Uint8Array(await crypto.subtle.exportKey('raw', ownerPub)));
+  const eph = await crypto.subtle.generateKey(ECDH, true, ['deriveBits']);
+  const epk = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  const kek = await escrowKek(eph.privateKey, ownerPub, epk);
+  const { iv, ct } = await seal(kek, wrapAad('escrow', `escrow:${kid}`), dk);
+  return { kind: 'escrow', ref: 'escrow', data: [VERSION, b64urlFromBytes(epk), kid, b64urlFromBytes(iv), b64urlFromBytes(ct)].join('.') };
+}
+
+/** DK from an escrow wrap with the owner's escrow private key, or null. */
+export async function unlockWithEscrow(privateKey, wrap) {
+  const parts = wrap && typeof wrap.data === 'string' ? wrap.data.split('.') : [];
+  if (wrap?.kind !== 'escrow' || parts.length !== 5 || parts[0] !== VERSION) return null;
+  try {
+    const epk = bytesFromB64url(parts[1]);
+    const iv = bytesFromB64url(parts[3]);
+    const ct = bytesFromB64url(parts[4]);
+    if (epk.length !== 65 || iv.length !== 12) return null;
+    const ephPub = await crypto.subtle.importKey('raw', epk, ECDH, false, []);
+    const kek = await escrowKek(privateKey, ephPub, epk);
+    const dk = await open(kek, wrapAad('escrow', `escrow:${parts[2]}`), iv, ct);
+    return isDk(dk) ? dk : null;
+  } catch {
+    return null;
+  }
+}
+
+// ── the tab's copy of DK ───────────────────────────────────────────────────
+
+function storage() {
+  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage; } catch { return null; }
+}
+
+/**
+ * Keep DK for this tab (sessionStorage "secbin_dk", base64url) until sign-out
+ * or the tab closes. `userId` (optional) is kept next to it so another
+ * account's page (e.g. while impersonating) never picks it up.
+ */
+export function saveSessionKey(dk, userId) {
+  if (!isDk(dk)) return false;
+  const s = storage();
+  if (!s) return false;
+  try {
+    s.setItem(SESSION_KEY, b64urlFromBytes(dk));
+    if (typeof userId === 'string' && userId) s.setItem(SESSION_UID, userId);
+    else s.removeItem(SESSION_UID);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** This tab's DK, or null (none, malformed, or kept for another user). */
+export function loadSessionKey(userId) {
+  const s = storage();
+  if (!s) return null;
+  try {
+    const v = s.getItem(SESSION_KEY);
+    if (!v) return null;
+    const owner = s.getItem(SESSION_UID);
+    if (typeof userId === 'string' && userId && owner !== userId) return null;
+    const dk = bytesFromB64url(v);
+    return isDk(dk) ? dk : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Forget this tab's DK. */
+export function clearSessionKey() {
+  const s = storage();
+  if (!s) return;
+  try { s.removeItem(SESSION_KEY); } catch { /* storage refused */ }
+  try { s.removeItem(SESSION_UID); } catch { /* storage refused */ }
+}
