@@ -358,9 +358,13 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     rows are kept in the share index; they are not pruned.
 - **Brute-force protection** (admin-configurable, per IP; IPv6 aggregated to /64 by default):
   - `login`, `setup`, and `invalid` — share ids that never existed, **wrong `#` keys, wrong share
-    passwords**, bad download grants and bad delete/upload tokens. Fetching a share that did
-    exist but has expired, been used up, revoked or deleted (it is still in the share index,
-    which keeps ended shares for 30 days) is a recipient arriving late and is **not** counted;
+    passwords**, bad download grants and bad delete/upload tokens. Opening a share that did
+    exist but has expired, been used up, revoked or deleted, **with its correct link** (`#`
+    key), is a recipient arriving late and is **not** counted. The share index keeps each
+    share's link-proof hash (the same value the share's own record held) for the 30 days it
+    keeps ended shares, so a **wrong `#` key** for an ended share is still counted, as for a
+    live one. The first metadata fetch carries no proof and is not counted for a known share.
+    Shares created before this change have no stored hash and are never counted;
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking;
   - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges

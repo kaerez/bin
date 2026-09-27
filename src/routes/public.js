@@ -44,12 +44,16 @@ async function failed(env, g, res) {
 }
 
 /**
- * A well-formed id that found nothing. Counted as invalid only when the id
- * was never a share: fetching a share that expired, was used up, revoked or
- * deleted is a legitimate recipient arriving late, not a probe.
+ * A well-formed id whose content is gone (or never existed). Not counted as
+ * invalid when it was a share that expired, was used up, revoked or deleted
+ * and the request's link proof (the #key) is right: that is a legitimate
+ * recipient arriving late. Counted when the id was never a share, or when the
+ * link proof is wrong (a guess at a share that no longer exists). A request
+ * without a proof (the first metadata fetch) is not counted for a known share.
+ * The answer is the same "gone" either way.
  */
-async function goneFor(env, g, id, res) {
-  if (await directory(env).isKnownShare(id)) return res;
+async function goneFor(env, g, id, res, lh = null) {
+  if ((await directory(env).goneShare(id, lh)) === 'ok') return res;
   return failed(env, g, res);
 }
 
@@ -179,10 +183,10 @@ async function openPaste(env, g, id, info, { lh, kh }) {
       return json(r.paste);
     }
     if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
-    return goneFor(env, g, id, err(410, 'gone', GONE));
+    return goneFor(env, g, id, err(410, 'gone', GONE), lh);
   }
   const rec = await kvGet(env, id);
-  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE));
+  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE), lh);
   if (!eqB64(lh, rec.acc.lh)) return failed(env, g, proofFailure('bad_link'));
   if (!eqB64(kh, rec.acc.kh)) return failed(env, g, proofFailure('bad_password'));
   const p = rec.paste;
@@ -202,7 +206,7 @@ async function openFile(env, g, id, { lh, kh }) {
   if (r.status === 'busy') {
     return json({ error: 'busy', message: 'Too many downloads of this share are in progress. Try again in a few minutes.' }, 429, { 'retry-after': '300' });
   }
-  return goneFor(env, g, id, err(410, 'gone', GONE));
+  return goneFor(env, g, id, err(410, 'gone', GONE), lh);
 }
 
 /**
@@ -235,7 +239,7 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
   }
   if (status === 'bad_link' || status === 'bad_password') return failed(env, g, proofFailure(status));
   if (status === 'not_allowed') return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
-  return goneFor(env, g, id, err(410, 'gone', GONE));
+  return goneFor(env, g, id, err(410, 'gone', GONE), lh);
 }
 
 async function downloadChunk(request, env, g, id, i) {
