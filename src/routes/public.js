@@ -6,7 +6,7 @@
 
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
-import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig } from '../lib/guard.js';
 import { parseUserAgent, parseLanguages } from '../lib/ua.js';
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
@@ -111,7 +111,7 @@ export async function handlePublic(request, env, url) {
   if (pathname === '/api/config') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     // The site key is public by design; null means no human check anywhere.
-    return json({ ...(await directory(env).publicConfig()), turnstile: (await turnstileKeys(env))?.sitekey ?? null });
+    return json({ ...(await cachedPublicConfig(env)), turnstile: (await turnstileKeys(env))?.sitekey ?? null });
   }
 
   if (pathname === '/api/paste') {
@@ -124,6 +124,11 @@ export async function handlePublic(request, env, url) {
   const [, kind, rawId, action, idx] = m;
   const id = decodePathSegment(rawId);
 
+  // Before any Guard accounting: another site can make a visitor's browser
+  // send simple GETs here (<img src>, no preflight). Counted as "invalid",
+  // they would get the visitor's network blocked from opening shares. The
+  // app only ever calls these from its own pages; the CLI sends no header.
+  assertNotCrossSite(request);
   const g = await ipContext(env, request);
   const blocked = await blockedResponse(env, g);
   if (blocked) return blocked;
@@ -194,13 +199,14 @@ async function openPaste(env, g, id, info, { lh, kh }) {
 }
 
 async function openFile(env, g, id, { lh, kh }) {
-  const settings = g.settings;
   const grant = genToken();
   const client = (await hashToken(`grant-client:${g.key}`)).slice(0, 16);
-  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), settings['files.grantSec'], client);
+  // The sender's role decides the download window and the viewer policy, now.
+  const policy = await directory(env).shareOpenPolicy(id);
+  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client);
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
-    return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded });
+    return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded, viewer: policy.viewer });
   }
   if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
   if (r.status === 'busy') {

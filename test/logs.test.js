@@ -54,7 +54,7 @@ describe('activity log', () => {
   });
 
   it('never prunes server-wide configuration changes automatically', async () => {
-    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'viewer.enabled': false } });
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'a11y.contact': 'access@example.test' } });
     await runInDurableObject(dirStub(), async (_inst, state) => { state.storage.sql.exec('UPDATE activity SET ts = ts - ?', 400 * 86400); });
     await runInDurableObject(dirStub(), async (inst) => { await inst.alarm(); });
     expect((await audit()).some((r) => r.action === 'settings.updated' && r.subject_id === null)).toBe(true);

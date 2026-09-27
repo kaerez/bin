@@ -4,8 +4,8 @@
 // token works once: take() hands out the current one, and the next take()
 // starts a fresh challenge. The server side is src/lib/turnstile.js.
 //
-// The widget stays invisible unless Cloudflare needs the visitor to interact
-// ("interaction-only"); its script is the only third-party code secbin loads,
+// The widget is always shown ("always"), so the visitor sees the check pass
+// before the protected button enables; its script is the only third-party code secbin loads,
 // and only on those pages (see the CSP in src/lib/http.js).
 
 import { scriptURL, TURNSTILE_SCRIPT } from './tt.js';
@@ -42,24 +42,71 @@ export async function turnstileSiteKey() {
 }
 
 const OFF = Object.freeze({ active: false, take: async () => null });
+const WAITING = 'Waiting for the human check…';
+let noteSeq = 0;
+const BUTTON_DISABLED = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'disabled');
+
+/**
+ * Keep `btn` disabled while `waiting()` is true, whatever the page does: the
+ * page's own `btn.disabled = …` is remembered as its wish, and the button is
+ * enabled only when the page wants it enabled and the check is not waiting.
+ * Returns the function that re-applies the state.
+ */
+function gate(btn, waiting) {
+  let want = BUTTON_DISABLED.get.call(btn);
+  const apply = () => BUTTON_DISABLED.set.call(btn, want || waiting());
+  Object.defineProperty(btn, 'disabled', {
+    configurable: true,
+    get: () => BUTTON_DISABLED.get.call(btn),
+    set: (v) => { want = !!v; apply(); },
+  });
+  apply();
+  return apply;
+}
 
 /**
  * Mount the widget in `container` (a hidden element) for the form `action`.
  * Returns { active, take() } — take() resolves to a token, or to null when
  * the server has no human check; it throws with a readable message if the
- * check cannot be completed.
+ * check cannot be completed. The `gate` buttons stay disabled until the check
+ * has a fresh token (again after each use), so nothing is sent before the
+ * human check has passed; with no human check on the server they are left
+ * alone.
  */
-export async function humanCheck(container, action) {
-  const sitekey = container ? await turnstileSiteKey() : null;
-  if (!sitekey) return OFF;
-  container.hidden = false;
+export async function humanCheck(container, action, { gate: buttons = [] } = {}) {
   let token = null;
-  let used = false;
+  let state = 'pending'; // pending (site key unknown) | on | off
+  let broken = null;
+  const waiting = () => state === 'pending' || (state === 'on' && !token);
+  const gated = buttons.filter(Boolean);
+  const gates = gated.map((b) => gate(b, waiting));
+  // The reason, shown under the first protected button while the check is
+  // pending (only once the server is known to have one), and referenced by
+  // every protected button for screen readers.
+  let note = null;
+  if (gated.length) {
+    note = document.createElement('p');
+    note.className = 'mono muted human-wait';
+    note.id = `human-wait-${++noteSeq}`;
+    note.setAttribute('role', 'status');
+    note.textContent = WAITING;
+    note.hidden = true;
+    gated[0].insertAdjacentElement('afterend', note);
+    for (const b of gated) b.setAttribute('aria-describedby', [b.getAttribute('aria-describedby'), note.id].filter(Boolean).join(' '));
+  }
+  const update = () => {
+    for (const g of gates) g();
+    if (note) note.hidden = !(state === 'on' && !token && !broken);
+  };
+  const sitekey = container ? await turnstileSiteKey() : null;
+  if (!sitekey) { state = 'off'; update(); return OFF; }
+  state = 'on';
+  update();
+  container.hidden = false;
   let waiters = [];
   const settle = (fn) => { const w = waiters; waiters = []; for (const x of w) fn(x); };
   let ts;
   let id;
-  let broken = null;
   try {
     ts = await loadScript();
     id = ts.render(container, {
@@ -67,27 +114,37 @@ export async function humanCheck(container, action) {
       action,
       theme: 'auto',
       size: 'flexible',
-      appearance: 'interaction-only',
+      appearance: 'always',
       'refresh-expired': 'auto',
       language: 'auto',
-      callback: (t) => { token = t; used = false; settle((x) => x.resolve(t)); },
-      'expired-callback': () => { token = null; },
-      'error-callback': () => { token = null; },
+      callback: (t) => { token = t; update(); settle((x) => x.resolve(t)); },
+      'expired-callback': () => { token = null; update(); },
+      'error-callback': () => { token = null; update(); },
     });
   } catch (e) {
     broken = e instanceof Error ? e : new Error(LOAD_FAILED);
+    update();
+    // The buttons stay disabled: say why, where the widget would be.
+    const note = document.createElement('p');
+    note.className = 'msg error';
+    note.setAttribute('role', 'alert');
+    note.textContent = broken.message;
+    container.replaceChildren(note);
   }
   return {
     active: true,
     async take() {
       if (broken) throw broken;
-      if (used) { used = false; token = null; ts.reset(id); } // a token works once
       const t = token || await new Promise((resolve, reject) => {
         const w = { resolve, reject: () => reject(new Error(NOT_DONE)) };
         waiters.push(w);
         setTimeout(() => { if (waiters.includes(w)) { waiters = waiters.filter((x) => x !== w); w.reject(); } }, WAIT_MS);
       });
-      used = true;
+      // A token works once: start the next check now (an issued token stays
+      // valid), and keep the buttons disabled until it passes.
+      token = null;
+      update();
+      ts.reset(id);
       return t;
     },
   };

@@ -8,7 +8,7 @@ import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
 import { validateManifest, buildTree, basename } from './files.js';
-import { fetchHead, openShare, expireShare, fetchConfig, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
+import { fetchHead, openShare, expireShare, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
 import { humanCheck } from './turnstile.js';
 import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
@@ -71,7 +71,7 @@ async function initPublicComposer() {
   const n = $('#public-notice');
   if (prof.notice) { n.textContent = prof.notice; n.hidden = false; }
   // Loads alongside the composer; a share waits for the token only when created.
-  const check = humanCheck($('#public-turnstile'), 'public-share');
+  const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')] });
   setPublicHumanCheck(async () => (await check).take());
   const { startComposer } = await import('./composer.js');
   startComposer(prof, publicApi, { publicMode: true });
@@ -139,8 +139,8 @@ async function doOpen({ id, kind, head, fragment, password }) {
   const { text } = await openPaste({ paste, access });
   let manifest;
   try { manifest = validateManifest(JSON.parse(text)); } catch { throw new DecryptError('malformed manifest'); }
-  let viewerCfg = null;
-  try { viewerCfg = (await fetchConfig()).viewer; } catch { /* viewing just stays off */ }
+  // The sender's role's viewer policy, sent with the open (off when absent).
+  const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
   const reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
   renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires);
   $('#files-delete-row').hidden = !canDeleteNow(paste.meta);

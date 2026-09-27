@@ -185,6 +185,14 @@ const MIGRATIONS = [
       m.sql.exec("UPDATE limits SET value = ? WHERE user_id = ? AND channel = ? AND key = 'urlRules'", JSON.stringify(list), r.user_id, r.channel);
     }
   },
+  // 12: the server-wide share-size cap, viewer switch and largest previewable
+  // file are role options now: drop the old settings; the Default role gets a
+  // value for every option (the download window and upload deadline start
+  // from the current settings, which stay the owner's own).
+  (m) => {
+    for (const k of ['files.maxShareBytes', 'viewer.enabled', 'viewer.maxBytes']) m.sql.exec('DELETE FROM settings WHERE key = ?', k);
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -211,7 +219,8 @@ function materializeDefaultRole(sql) {
   const st = {};
   for (const r of sql.exec('SELECT key, value FROM settings').toArray()) { try { st[r.key] = JSON.parse(r.value); } catch { /* default applies */ } }
   const settings = settingsWithDefaults(st);
-  const start = { sessionIdleSec: settings['session.idleSec'], sessionAbsSec: settings['session.absSec'], viewerMaxBytes: settings['viewer.maxBytes'] };
+  const start = { sessionIdleSec: settings['session.idleSec'], sessionAbsSec: settings['session.absSec'],
+    fileGrantSec: settings['files.grantSec'], filePendingSec: settings['files.pendingSec'] };
   // The file-type mode and list go together: set both or neither.
   if (!('fileTypeMode' in rows) || !('fileTypeRules' in rows)) { delete rows.fileTypeMode; delete rows.fileTypeRules; }
   for (const [k, spec] of Object.entries(LIMITS)) {
@@ -224,7 +233,7 @@ function materializeDefaultRole(sql) {
 /** The storage scope of a role's limits, quotas and viewer rules. */
 const roleScope = (id) => `r:${id}`;
 const ROLE_ID_RE = /^[A-Za-z0-9_-]{16}$/;
-const RESERVED_ROLE_NAMES = ['owner', 'default'];
+const RESERVED_ROLE_NAMES = ['owner', 'default', 'public'];
 const TURNSTILE_KEY_RE = /^[A-Za-z0-9_-]{10,100}$/; // as src/lib/turnstile.js
 /** A key's scopes in canonical order, or null unless a non-empty list of known scopes. */
 const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x) => API_SCOPES.includes(x)) ? API_SCOPES.filter((x) => list.includes(x)) : null);
@@ -465,9 +474,12 @@ export class Directory extends DurableObject {
   #caps(u, L, s) {
     const owner = u.role === 'owner';
     return {
-      maxShareBytes: owner ? HARD_MAX_SHARE_BYTES : Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity),
-      viewerEnabled: owner ? true : s['viewer.enabled'] && L.viewer,
-      viewerMaxBytes: owner ? SETTINGS['viewer.maxBytes'].max : (L.viewerMaxBytes ?? s['viewer.maxBytes']),
+      // Per role now (migration 12 folded the old server-wide cap and switch in).
+      maxShareBytes: owner ? HARD_MAX_SHARE_BYTES : Math.min(HARD_MAX_SHARE_BYTES, L.maxShareBytes ?? HARD_MAX_SHARE_BYTES),
+      viewerEnabled: owner ? true : !!L.viewer,
+      viewerMaxBytes: owner ? LIMITS.viewerMaxBytes.max : (L.viewerMaxBytes ?? LIMITS.viewerMaxBytes.max),
+      grantSec: L.fileGrantSec ?? s['files.grantSec'],
+      pendingSec: L.filePendingSec ?? s['files.pendingSec'],
     };
   }
 
@@ -544,7 +556,7 @@ export class Directory extends DurableObject {
     const s = this.#settings();
     if (!u) {
       timingSafeEqualHex(String(verifier), '0'.repeat(64)); // similar work either way
-      return fail(401, 'invalid_login', 'Wrong username or password.');
+      return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or password.');
     }
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
@@ -561,6 +573,21 @@ export class Directory extends DurableObject {
     }
     this.#log(u.id, u.id, 'login');
     return this.#sessionFor(u, s);
+  }
+
+  /**
+   * A failed sign-in for a username that does not exist. It is counted and
+   * locked exactly like a real account (under a keyed hash of the name), so
+   * "423 locked" versus "401" does not reveal which usernames exist.
+   */
+  async #unknownLoginFailure(username, ts, s, lockoutOff, message) {
+    const key = await crypto.subtle.importKey('raw', utf8(`secbin-lockout/v1:${this.#meta('secret')}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(String(username).toLowerCase())));
+    const phantom = { id: `n:${b64urlFromBytes(mac.subarray(0, 18))}`, role: 'user' };
+    const locked = this.#lockedUntil(phantom, ts, lockoutOff);
+    if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
+    this.#passwordFailure(phantom, ts, s, lockoutOff);
+    return fail(401, 'invalid_login', message);
   }
 
   /** Account lockout end time, or 0. The owner is never locked out. */
@@ -580,7 +607,7 @@ export class Directory extends DurableObject {
     const lockedUntil = count >= s['lockout.max'] ? ts + s['lockout.lockSec'] : 0;
     this.sql.exec('INSERT INTO failures (user_id, count, start, locked_until) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start, locked_until = excluded.locked_until',
       u.id, lockedUntil ? 0 : count, lockedUntil ? ts : start, lockedUntil);
-    if (lockedUntil) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`);
+    if (lockedUntil && !u.id.startsWith('n:')) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`);
   }
 
   /** Session timeouts: the server-wide ones, or the account's role's (never for the owner). */
@@ -659,7 +686,7 @@ export class Directory extends DurableObject {
       apiLimits: eff.api,
       caps: {
         maxShareBytes: caps.maxShareBytes,
-        grantSec: s['files.grantSec'],
+        grantSec: caps.grantSec,
       },
       viewer: {
         enabled: caps.viewerEnabled,
@@ -1175,7 +1202,7 @@ export class Directory extends DurableObject {
     const ts = now();
     const s = this.#settings();
     const hash = await this.#codeHash(code);
-    if (!u) return fail(401, 'invalid_login', 'Wrong username or recovery code.');
+    if (!u) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.');
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     // A recovery code is the way back in when everything else is lost: it
@@ -1320,7 +1347,7 @@ export class Directory extends DurableObject {
         return fail(403, 'folder_too_deep', `Folders may be nested at most ${L.maxFolderDepth} levels deep${via}.`, { max: L.maxFolderDepth });
       }
     }
-    if (u.role === 'owner') return { ok: true, refund: [] };
+    if (u.role === 'owner') return { ok: true, refund: [], pendingSec: s['files.pendingSec'] };
 
     const ts = now();
     const applicable = this.#applicableQuotas(uid).filter((q) => (q.kind === 'all' || q.kind === req.kind) && (q.channel === 'all' || ch === 'api'));
@@ -1348,7 +1375,7 @@ export class Directory extends DurableObject {
           h.quota_id, h.key, h.bucket, ts);
       }
     });
-    return { ok: true, refund: hits };
+    return { ok: true, refund: hits, pendingSec: this.#caps(u, eff.all, s).pendingSec };
   }
 
   async refund(uid, hits) {
@@ -1371,8 +1398,8 @@ export class Directory extends DurableObject {
       tracking: s['public.tracking'],
       notice: s['public.notice'] ? s['public.noticeText'] : null,
       limits: { ...L, apiEnabled: false },
-      caps: { maxShareBytes: Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity), grantSec: s['files.grantSec'] },
-      viewer: { enabled: s['viewer.enabled'] && L.viewer, maxBytes: s['viewer.maxBytes'], rules: s['viewer.enabled'] && L.viewer ? this.#viewerRules(u, L) : [] },
+      caps: { maxShareBytes: this.#caps(u, L, s).maxShareBytes, grantSec: this.#caps(u, L, s).grantSec },
+      viewer: { enabled: !!L.viewer, maxBytes: this.#caps(u, L, s).viewerMaxBytes, rules: L.viewer ? this.#viewerRules(u, L) : [] },
       quotas: this.#applicableQuotas(PUBLIC_ID).map((q) => ({ kind: q.kind, n: q.n, unit: q.unit, max: q.max })),
     };
   }
@@ -2014,8 +2041,12 @@ export class Directory extends DurableObject {
     const users = this.sql.exec("SELECT COUNT(*) AS c FROM users WHERE role = 'user'").one().c;
     return {
       roles: [
+        // Owner: everything allowed, no limits; only the owner's own session
+        // timeouts and file-share windows can be changed. Public: the public
+        // (anonymous) account's; cannot be renamed, deleted or assigned.
         { id: 'owner', name: 'Owner', builtin: true, locked: true, users: this.#owner() ? 1 : 0 },
         { id: 'default', name: 'Default', builtin: true, users: users - assigned },
+        { id: 'public', name: 'Public', builtin: true, fixed: true, users: 0 },
         ...custom.map((r) => ({ id: r.id, name: r.name, builtin: false, ownQuotas: !!r.own_quotas, users: counts[r.id] || 0, created: r.created, updated: r.updated })),
       ],
     };
@@ -2123,8 +2154,9 @@ export class Directory extends DurableObject {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'owner') return fail(403, 'owner_role', 'The owner always has the Owner role.');
-    if (u.role !== 'user') return fail(403, 'forbidden', 'The public account has no role: set it under Public access.');
+    if (u.role !== 'user') return fail(403, 'forbidden', 'The public account always has the Public role.');
     if (roleId === 'owner') return fail(403, 'owner_role', 'The Owner role belongs to the owner only.');
+    if (roleId === 'public') return fail(403, 'public_role', 'The Public role belongs to the public (anonymous) account only.');
     let next = null;
     let label = 'Default';
     if (roleId !== 'default' && roleId !== null && roleId !== '') {
@@ -2179,10 +2211,23 @@ export class Directory extends DurableObject {
   /** Public, non-secret viewer policy (the recipient page intersects with it). */
   async publicConfig() {
     const s = this.#settings();
-    return {
-      viewer: { enabled: s['viewer.enabled'], maxBytes: s['viewer.maxBytes'], rules: s['viewer.enabled'] ? this.sql.exec("SELECT match, value, renderer FROM viewer_rules WHERE user_id = '' ORDER BY id").toArray() : [] },
-      accessibility: { contact: s['a11y.contact'], coordinator: s['a11y.coordinator'] },
-    };
+    return { accessibility: { contact: s['a11y.contact'], coordinator: s['a11y.coordinator'] } };
+  }
+
+  /**
+   * What opening a file share needs from its sender's role, now: the download
+   * window, and the viewer policy the recipient's page intersects with the
+   * share's own (so turning the viewer off in a role stops it for existing
+   * links at once).
+   */
+  async shareOpenPolicy(id) {
+    const s = this.#settings();
+    const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
+    const u = row && this.#user(row.user_id);
+    if (!u) return { grantSec: s['files.grantSec'], viewer: { enabled: false, maxBytes: 0, rules: [] } };
+    const L = this.#effective(u).all;
+    const c = this.#caps(u, L, s);
+    return { grantSec: c.grantSec, viewer: { enabled: c.viewerEnabled, maxBytes: c.viewerMaxBytes, rules: c.viewerEnabled ? this.#viewerRules(u, L) : [] } };
   }
 
   // ── admin: IP rules ──────────────────────────────────────────────────────
@@ -2191,10 +2236,17 @@ export class Directory extends DurableObject {
     return this.sql.exec('SELECT id, cidr, action, expires, note, created FROM ip_rules WHERE expires IS NULL OR expires > ? ORDER BY created DESC', ts).toArray();
   }
 
-  async addIpRule({ cidr, action, expires, note }, actorId) {
+  async addIpRule({ cidr, action, expires, note, callerIp = null }, actorId) {
     const c = normalizeRule(cidr);
     if (!c) return fail(400, 'invalid_cidr', 'Enter an IPv4/IPv6 address, a CIDR block (10.0.0.0/8) or a range (10.0.0.5-10.0.0.20).');
     if (action !== 'allow' && action !== 'block') return fail(400, 'invalid_action', 'action must be allow or block');
+    // Never lock out the owner adding the rule (as imports already check): a
+    // block covering their own address needs an allow rule for them first.
+    const me = parseIp(callerIp ?? '');
+    if (action === 'block' && me && ruleContains(parseRule(c), me)) {
+      const allowed = (await this.ipRules()).some((r) => r.action === 'allow' && (r.expires === null || r.expires > now()) && ruleContains(parseRule(r.cidr), me));
+      if (!allowed) return fail(409, 'blocks_yourself', `This rule would block your own address (${callerIp}). Add an allow rule for yourself first.`);
+    }
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
     const n = cleanLabel(note);
     if (n === null) return fail(400, 'invalid_note', 'Notes are up to 100 characters.');
@@ -2529,24 +2581,46 @@ export class Directory extends DurableObject {
   }
 
   /**
-   * Activity-log retention: the global age and size (log.* settings) and each
+   * Activity-log retention: the global age and size (log.* settings), each
    * account's own limits (logMaxAgeSec / logMaxEntries, for entries about that
-   * account). Entries about the owner are exempt: global settings never apply
-   * to the owner, who can clear them by hand.
+   * account) and the owner's own (log.ownerMaxAgeSec / log.ownerMaxEntries,
+   * for entries about the owner and entries the owner made). Global settings
+   * and role limits never apply to the owner's entries; server-wide
+   * configuration changes are never pruned automatically at all. The owner
+   * can clear any of them by hand.
    */
   #pruneLogs() {
     const s = this.#settings();
     const ts = now();
     const owner = this.#owner();
     const oid = owner ? owner.id : '';
-    // Never removed automatically: entries about the owner, entries the owner
-    // made (admin actions, impersonation) and server-wide entries with no
-    // subject (settings, global limits, IP rules, exports). Only the owner can
-    // clear those, by hand.
+    // Not removed by the global or per-account limits: entries about the
+    // owner, entries the owner made (admin actions, impersonation) and
+    // server-wide entries with no subject (settings, the Default role, roles,
+    // IP rules and blocks, exports and imports, Turnstile).
     const PRUNABLE = 'subject_id IS NOT NULL AND subject_id != ? AND (actor_id IS NULL OR actor_id != ?)';
     this.sql.exec(`DELETE FROM activity WHERE ts < ? AND ${PRUNABLE}`, ts - s['log.maxAgeSec'], oid, oid);
     // Read receipts live as long as the log does.
     this.sql.exec('DELETE FROM opens WHERE ts < ? AND user_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
+    // The owner's own limits (null: kept until cleared). They cover entries
+    // about the owner and those the owner made, never a configuration change:
+    // one with no subject, or the owner configuring the public account (its
+    // limits, quotas, viewer rules and browser ids).
+    if (owner) {
+      const PUBLIC_CONFIG = "subject_id = ? AND actor_id IS ? AND (action IN ('limits.updated', 'quotas.updated', 'viewer_rules.updated') OR action LIKE 'tracker.%')";
+      const OWNED = `subject_id IS NOT NULL AND (subject_id = ? OR actor_id IS ?) AND NOT (${PUBLIC_CONFIG})`;
+      const args = [oid, oid, PUBLIC_ID, oid];
+      if (s['log.ownerMaxAgeSec'] !== null) {
+        this.sql.exec(`DELETE FROM activity WHERE ts < ? AND ${OWNED}`, ts - s['log.ownerMaxAgeSec'], ...args);
+        this.sql.exec('DELETE FROM opens WHERE user_id = ? AND ts < ?', oid, ts - s['log.ownerMaxAgeSec']);
+      }
+      if (s['log.ownerMaxEntries'] !== null) {
+        const n = this.sql.exec(`SELECT COUNT(*) AS c FROM activity WHERE ${OWNED}`, ...args).one().c;
+        if (n > s['log.ownerMaxEntries']) {
+          this.sql.exec(`DELETE FROM activity WHERE id IN (SELECT id FROM activity WHERE ${OWNED} ORDER BY id ASC LIMIT ?)`, ...args, n - s['log.ownerMaxEntries']);
+        }
+      }
+    }
     // Per-account limits: visit only the accounts they apply to (every account
     // when a global value is set, otherwise those with their own value).
     // (A row holding null means "no per-account limit".)
@@ -2633,6 +2707,8 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM webauthn_challenges WHERE exp <= ?', ts);
     this.sql.exec('DELETE FROM webauthn_spent WHERE exp <= ?', ts);
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
+    // Lockout counters for usernames that do not exist, once they no longer matter.
+    this.sql.exec("DELETE FROM failures WHERE user_id LIKE 'n:%' AND locked_until < ? AND start < ?", ts, ts - this.#settings()['lockout.windowSec']);
     // Anonymous trackers expire after being idle, with their usage counters.
     const idleBefore = ts - this.#settings()['public.trackerIdleSec'];
     this.sql.exec("DELETE FROM usage WHERE user_id IN (SELECT 'pub:t:' || id_hash FROM trackers WHERE last_seen < ?)", idleBefore);

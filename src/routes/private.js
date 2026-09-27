@@ -146,6 +146,7 @@ export async function handlePrivate(request, env, url, ctx) {
   // A challenge for confirming a change with a passkey instead of the password.
   if (p === '/api/private/me/reauth') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertNotCrossSite(request);
     if (a.actor) return err(403, 'impersonating', 'Not available while impersonating.');
     const r = await dir.reauthOptions(a.user.id);
     return r.ok ? json({ challengeId: r.challengeId, publicKey: requestOptions(r, url.hostname) }) : fromDir(r);
@@ -168,6 +169,7 @@ export async function handlePrivate(request, env, url, ctx) {
       return withAuth(a, st.ok ? json(st) : fromDir(st));
     }
     if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertNotCrossSite(request);
     if (a.actor) return err(403, 'impersonating', 'Passkeys cannot be changed while impersonating.');
     if (p === '/api/private/me/passkeys/options') {
       const r = await dir.passkeyRegisterOptions(a.user.id);
@@ -300,7 +302,7 @@ export async function initFile(request, env, a) {
       id = genId('f');
       const ok = await fileStub(env, id).init({
         id, uid: a.user.id, uth: await hashToken(uploadToken), dth: await hashToken(deleteToken),
-        padded, views, expire, ttl, pendingSec: settings['files.pendingSec'], deletable: body.deletable === true,
+        padded, views, expire, ttl, pendingSec: auth.pendingSec ?? settings['files.pendingSec'], deletable: body.deletable === true,
       });
       if (ok) break;
       if (attempt >= 4) throw new Error('id allocation failed');
@@ -329,9 +331,16 @@ export async function putChunk(request, env, a, id, i) {
   if (auth.status === 'bad_index') return err(400, 'bad_index', 'No such chunk index.');
   if (auth.status === 'bad_size') return err(400, 'bad_size', `Chunk ${i} must be exactly ${auth.expected} bytes.`);
   if (auth.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
-  await binding(env, 'FILES').put(r2Key(id, i), bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
+  const files = binding(env, 'FILES');
+  await files.put(r2Key(id, i), bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
   const c = await stub.commitChunk(a.user.id, uth, i, bytes.length);
-  if (c.status !== 'ok') return err(410, 'gone', 'This upload has expired.');
+  if (c.status !== 'ok') {
+    // The upload ended (deadline, revoke, purge) between the check and the
+    // write: its purge may already have run, so remove the chunk just written
+    // rather than leave ciphertext in R2 that nothing refers to.
+    await files.delete(r2Key(id, i));
+    return err(410, 'gone', 'This upload has expired.');
+  }
   return json({ ok: true });
 }
 

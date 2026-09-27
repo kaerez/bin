@@ -19,9 +19,11 @@ const settings = (patch) => fetchJson('/api/private/admin/settings', { method: '
 const me = async (cookie) => (await fetchJson('/api/private/me', { cookie })).json();
 
 describe('global settings never apply to the owner', () => {
-  it('share-size cap and viewer switch restrict users, not the owner', async () => {
+  it("the Default role's share-size cap and viewer restrict users, not the owner", async () => {
     const u = await makeUser('ux-cap');
-    expect((await settings({ 'files.maxShareBytes': MiB, 'viewer.enabled': false })).status).toBe(200);
+    const before = (await (await fetchJson('/api/private/admin/overview', { cookie: oc })).json()).limits.all;
+    const setDefault = (patch) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: 'global', channel: 'all', patch } });
+    expect((await setDefault({ maxShareBytes: MiB, viewer: false })).status).toBe(200);
     const mine = await me(oc);
     expect(mine.caps.maxShareBytes).toBe(HARD_MAX_SHARE_BYTES);
     expect(mine.viewer.enabled).toBe(true);
@@ -32,7 +34,7 @@ describe('global settings never apply to the owner', () => {
     const init = (cookie) => fetchJson('/api/private/file', { method: 'POST', cookie, body: { views: 1, expire: '1h', padded: 4 * MiB, files: 1, maxFile: 4 * MiB } });
     expect((await init(oc)).status).toBe(201);
     expect((await init(u.cookie)).status).toBe(413);
-    await settings({ 'files.maxShareBytes': 100 * MiB });
+    await setDefault({ maxShareBytes: before.maxShareBytes, viewer: before.viewer });
   });
 });
 

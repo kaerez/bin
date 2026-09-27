@@ -470,6 +470,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
 @keyframes timerPulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 
 /* ── messages / toast / footer ───────────────────────────────────────────── */
+.human-wait { margin: .4rem 0 0; font-size: .78rem; text-align: center; }
 .msg { font-family: var(--mono); font-size: .8125rem; color: var(--ink-2); letter-spacing: .01em; padding: 1.25rem 0; text-align: center; }
 .msg.error { color: var(--seal); }
 /* Always in the page (a live region must exist before it speaks); no box while empty. */
@@ -566,6 +567,8 @@ button.back { cursor: pointer; }
 .kv dd { overflow-wrap: anywhere; }
 .kv dt { color: var(--ink-3); }
 .limits-grid { display: flex; flex-direction: column; gap: .45rem; }
+.limit-section { margin: .9rem 0 .1rem; font-family: var(--mono); font-size: .72rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-2); }
+.limit-section:first-child { margin-top: 0; }
 .limit-row { display: grid; grid-template-columns: minmax(10rem, 15rem) auto auto 1fr; align-items: center; gap: .5rem; }
 @media (max-width: 640px) { .limit-row { grid-template-columns: 1fr; } }
 .table-wrap { width: 100%; overflow-x: auto; }

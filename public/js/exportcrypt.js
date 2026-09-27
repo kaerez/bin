@@ -13,7 +13,6 @@ import { argon2idRaw } from './kdf.js';
 import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, fromUtf8 } from './bytes.js';
 
 export const ENVELOPE_FORMAT = 'secbin-export-enc/v1';
-export const MIN_PASSPHRASE = 12;
 const KDF = Object.freeze({ alg: 'argon2id', m: 65536, t: 3, p: 1 });
 const B64_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -23,16 +22,22 @@ export class ExportCryptError extends Error {
 
 const header = (salt, iv) => `${ENVELOPE_FORMAT}\n${KDF.alg}\nm=${KDF.m}\nt=${KDF.t}\np=${KDF.p}\nsalt=${salt}\niv=${iv}\n`;
 
+// Argon2 (hash-wasm) refuses an empty input: no passphrase is derived from a
+// single 0xFF byte instead, which no UTF-8 text can produce (so it matches no
+// real passphrase).
+const NO_PASSPHRASE = Uint8Array.of(0xff);
+
 async function keyFrom(passphrase, saltBytes) {
-  const raw = await argon2idRaw(utf8(String(passphrase).normalize('NFC')), saltBytes, { t: KDF.t, mKiB: KDF.m, p: KDF.p });
+  const text = String(passphrase).normalize('NFC');
+  const raw = await argon2idRaw(text === '' ? NO_PASSPHRASE : utf8(text), saltBytes, { t: KDF.t, mKiB: KDF.m, p: KDF.p });
   return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
 /** Encrypt a plaintext export document → the envelope as pretty JSON text. */
 export async function sealExport(doc, passphrase) {
-  if (typeof passphrase !== 'string' || passphrase.length < MIN_PASSPHRASE) {
-    throw new ExportCryptError(`Use a passphrase of at least ${MIN_PASSPHRASE} characters.`);
-  }
+  // Any passphrase the owner chooses, empty included (then anyone with the
+  // file can read it: the UI warns). Its strength is the owner's call.
+  if (typeof passphrase !== 'string') throw new ExportCryptError('The export passphrase must be text.');
   const salt = randomBytes(16);
   const iv = randomBytes(12);
   const s = b64urlFromBytes(salt);

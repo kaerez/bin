@@ -118,7 +118,7 @@ function wirePassword() {
     form.hidden = true;
     return;
   }
-  const check = humanCheck($('#pw-turnstile'), 'password');
+  const check = humanCheck($('#pw-turnstile'), 'password', { gate: [$('#pw-btn')] });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const msg = $('#pw-msg');

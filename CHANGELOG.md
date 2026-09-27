@@ -15,6 +15,17 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Security audit fixes** (OWASP-style review of the whole code base; no Critical or High
+  findings):
+  - cross-site requests to the public share routes are refused before any Guard accounting
+    (another site could get a visitor's network blocked); the passkey challenge POSTs refuse
+    cross-site callers like every other POST;
+  - the account lockout no longer reveals which usernames exist: unknown names lock the same way;
+  - an IP block rule covering the owner's own address is refused unless an allow rule covers them;
+  - a chunk written to R2 for an upload that ended meanwhile is deleted instead of left orphaned;
+  - `/api/config` is cached per isolate, and `/api/public/profile` answers "off" without reaching
+    the Directory, so anonymous floods do not all land on the single Directory object;
+  - the CLI escapes C1 control characters in sender-chosen file names before printing them.
 - **Link, receipt and log hardening** (from a review of the new features):
   - recipients can open only web, mail, phone and SMS links; any other app link a sender's rules
     allow (`vscode:`, `ssh:`, `smb:`…) is shown in full with Copy only;
@@ -47,6 +58,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
+  `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
+  owner made (admin actions, impersonation). Both default to keep forever, as before. Server-wide
+  configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile,
+  the public account's configuration) are still never deleted automatically; clearing by hand is
+  unchanged. The settings travel in the settings part of an export and are validated on import.
+  Check audit-trail retention duties (e.g. SOX) with Legal / Compliance before setting them.
 - **Export / import everything, part by part.**
   - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
     default) and the public account.
@@ -247,6 +265,28 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Role editors:** the Sessions, File shares and Activity log sections carry the same kind of
+  explanation as the Owner role, and log retention says "keep forever" rather than "no limit".
+- **Admin UI:** the Legal / Compliance warnings are removed from every admin screen.
+- **Human check:** while the check is pending, "Waiting for the human check…" is shown under the
+  protected button (and linked to it for screen readers) instead of only in a tooltip.
+- **Everything an account may do is on its role** (migration 12):
+  - the session timeouts, the file-share download window and the unfinished-upload deadline are
+    role options; the owner's own are edited on the Owner role;
+  - the server-wide share-size cap, viewer switch and largest previewable file are gone (role
+    options only; their old values are not carried over);
+  - the Viewer tab is gone: each file open carries the sender's role's current viewer policy, so
+    turning it off in a role still takes effect on existing links at once;
+  - a built-in **Public** role (cannot be renamed, deleted or assigned) holds the public account's
+    limits, quotas, viewer rules, counting mode, notice and browser ids; Admin → Public access is
+    only the on/off switch;
+  - Settings keeps only server-wide items (brute-force protection, lockout, log retention, the
+    accessibility statement); export files with the removed settings are refused.
+- **Human check:** the buttons Turnstile protects stay disabled until the check has passed (again
+  after each use).
+- **Password policy:** a role's minimum length may be anything from 1 (12 by default).
+- **Export passphrase:** optional, with no minimum length (its strength is the owner's call); with
+  none, the export form warns that anyone who gets the file can read it.
 - **Security hardening** (items reported by the review sweep):
   - **Disabled accounts** get an explicit `403 account_disabled`, and their session cookie is
     cleared, on every authenticated route. The dashboard sends them to login with a message.
