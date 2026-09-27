@@ -1,8 +1,8 @@
 // shares.test.js — "My shares": ownership-scoped listing with live status,
 // labels, increases (views / expiry) capped by the user's limits and never
-// decreasing, irreversible revoke, and session-only access.
+// decreasing, irreversible revoke; API keys only with the read / manage scope.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson, createNote, openNote, intent } from './helpers.js';
+import { owner, makeUser, fetchJson, createNote, openNote, intent, proofFor, USER_PW } from './helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -59,8 +59,16 @@ describe('my shares', () => {
     expect((await list(oc)).rows.find((r) => r.id === n.id).status).toBe('revoked');
   });
 
-  it('is session-only (API keys are refused)', async () => {
-    const r = await fetchJson('/api/private/shares', { headers: { authorization: `Bearer sbk_${'A'.repeat(43)}` } });
-    expect(r.status).toBe(403);
+  it('takes an API key only with the matching scope (the full matrix is in api-scopes.test.js)', async () => {
+    const u = await makeUser('sharer-key');
+    expect((await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { apiEnabled: true } } })).status).toBe(200);
+    const { key } = await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'create-only', current: proofFor(USER_PW) } })).json();
+    // A create-only key (the default scopes) is refused; an unknown key is not a key.
+    const denied = await fetchJson('/api/private/shares', { headers: { authorization: `Bearer ${key}` } });
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).error).toBe('scope_denied');
+    const unknown = await fetchJson('/api/private/shares', { headers: { authorization: `Bearer sbk_${'A'.repeat(43)}` } });
+    expect(unknown.status).toBe(401);
+    expect((await unknown.json()).error).toBe('invalid_api_key');
   });
 });

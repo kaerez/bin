@@ -251,8 +251,7 @@ API keys are never challenged.
   off if that is unacceptable.
 - **Privacy.** Turnstile runs Cloudflare's client-side challenge and sends browser signals to
   Cloudflare. For GDPR, treat Cloudflare as a processor for this purpose and describe it in
-  your privacy notice. Confirm the lawful basis and any consent requirement with your Legal /
-  Compliance team; this document is not legal advice.
+  your privacy notice.
 
 ### Accessibility widget and statement
 
@@ -262,8 +261,10 @@ API keys are never challenged.
   strings, no third party.
 - **What is stored.** Only the viewer's display choices, kept in `localStorage`
   (`secbin:a11y`); malformed values are ignored. Nothing is sent to the server.
-- **The statement page.** `/accessibility/` is static and uses the strict policy. It inserts
-  the admin's contact text with `textContent`, never as markup.
+- **The statement page.** `/accessibility/` uses the strict policy. The whole statement is
+  admin-set plain text (validated settings: lengths, one-line headings, list items, a checked
+  language code, `ltr`/`rtl`, a date, 32,000 characters in all), served by `/api/config` and
+  built with DOM calls and `textContent` (`public/js/statement.js`), never as markup.
 
 ### Service worker and install banner (PWA)
 
@@ -359,12 +360,28 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
 - **CSRF**: state-changing calls must be non-simple (JSON content type or `X-Secbin-Intent`), are
   refused when `Sec-Fetch-Site` is `cross-site` **or `same-site`** (a sibling subdomain is not
   trusted), and cookies are SameSite=Strict. The API has no CORS.
-- **API keys** (`sbk_…`, stored hashed) authenticate share creation only — never account or
-  admin endpoints. The owner decides who may hold keys and how many; API limits and quotas can
-  only narrow the account's limits. Revoking API permission disables existing keys at once.
-  - **Scopes:** each key carries a subset of `notes`, `files` and `policy`, chosen at creation
-    and fixed for its lifetime; a call outside them is `403 scope_denied`. Issue each automation
-    the narrowest key it needs (least privilege) and an expiry.
+- **API keys** (`sbk_…`, stored hashed) authenticate share creation, the policy read and the
+  key user's own shares (list, receipts, label, extend, revoke) — never the account itself
+  (profile, password, passkeys, keys, activity) or admin endpoints (`403 api_key_not_allowed`).
+  The owner decides who may hold keys and how many; API limits and quotas can only narrow the
+  account's limits. Revoking API permission disables existing keys at once.
+  - **Scopes:** each key carries a subset of `notes`, `files`, `policy` (create), `read` (list
+    the user's shares, one share, and its read receipts) and `manage` (label, extend views /
+    expiry, revoke). A key created without a choice gets the three creation scopes only; `read`
+    and `manage` are always an explicit choice. Scopes are chosen at creation and can be changed
+    later (by the user with their password or a passkey, or by the owner); a call
+    outside them is `403 scope_denied`. Issue each automation the narrowest key it needs (least
+    privilege) and an expiry.
+  - **Same rules as the dashboard:** a key sees and changes only its user's shares (anything
+    else is `404`), cannot touch a share the owner has locked (`423`), can only grow views and
+    expiry, and is held to the account's **API** limits when extending. A revoke needs
+    `X-Secbin-Intent: 1`. Every change made with a key is logged with the key's id
+    (`apikey=<id>`), never the key.
+  - **Exposure:** a leaked `read` key reveals the user's share labels (not encrypted), sizes,
+    dates and read receipts (which may include recipients' network addresses, locations and
+    browsers, as far as the owner enables receipt details — personal data); a leaked `manage`
+    key can revoke the user's shares (availability) but can never read their content, which
+    stays encrypted with keys the server never holds.
   - **Storage:** the key is shown once. Keep it in a secrets manager (for example HashiCorp Vault
     or AWS Secrets Manager) and pass it through the environment, never in source code, shell
     history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`
@@ -542,8 +559,7 @@ codes as safe as the password.
   shares are recorded for the admin only.
 - The share page tells recipients that opening is recorded: before they reveal or unlock a share,
   and on the note or files view itself (a share without a password or view limit opens at once).
-  These are recipients' personal data (GDPR): decide what senders may see, the retention period
-  and the notice wording with your Legal / Compliance team.
+  The admin decides what senders may see; receipts are kept as long as the activity log.
 
 ### Activity log retention and clearing
 
@@ -567,10 +583,7 @@ codes as safe as the password.
 - The owner can **clear** the log — everything, or one account's entries, optionally only those
   older than a date. It needs the owner's password again (like export), and, as configured, it
   **leaves no record**: after a clear, nothing in the system shows that entries existed or were
-  removed. Audit trails can be subject to retention duties (for example SOX record-keeping for
-  systems in scope, or PCI DSS audit-log retention); decide the retention settings — the
-  owner's own limits included, since they cover every admin action — and who may clear with
-  your Legal / Risk / Compliance team. This document is not legal or compliance advice.
+  removed. The owner's own limits cover every admin action.
 
 ### Admin export / import
 
@@ -609,8 +622,7 @@ codes as safe as the password.
   plain users.
 - **Treat an export as a credential store.** One that holds verifiers, API key hashes and the
   Turnstile secret is as sensitive as the database. Keep the file and its passphrase apart,
-  export only the parts you need, and delete files you no longer need (recommendation). Where
-  exports may be kept at all is a decision for your Security and Compliance teams.
+  export only the parts you need, and delete files you no longer need (recommendation).
 - Imports are re-validated field by field on the server with the same checkers as the admin API
   (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
   previewed as a dry run, and are applied in one storage transaction or not at all. Replacing
@@ -622,21 +634,14 @@ codes as safe as the password.
   and `export.users` (which accounts, with or without verifiers), `import.system`,
   `settings.updated`, `limits.updated`, `quotas.updated`, `viewer_rules.updated`,
   `iprule.added` (with the values) and `user.imported`.
-- The passphrase is the only protection of the file: keep file and passphrase apart. Whether
-  exported verifiers may leave the environment at all is a policy decision for your Security /
-  Compliance function.
+- The passphrase is the only protection of the file: keep file and passphrase apart.
 
 ### Public (anonymous) access
 
-> [!IMPORTANT]
-> **Legal / Compliance review required before enabling.** Anonymous sharing lets anyone publish
-> content from your domain, and the tracker below stores an identifier on the visitor's device
-> for rate limiting. Storing or reading such an identifier is regulated in the EU/UK (ePrivacy
-> Directive art. 5(3), PECR) and the identifier and the keyed network hash are pseudonymous
-> personal data under GDPR. Whether the "strictly necessary" exemption applies, which lawful
-> basis and retention period apply, what the on-page notice must say, and how abuse reports are
-> handled are decisions for your Legal, Risk and Compliance functions — this document is not
-> legal or compliance advice.
+> [!NOTE]
+> Anonymous sharing lets anyone publish content from your domain, and the tracker below stores
+> an identifier on the visitor's device for rate limiting (see the notice setting on the Public
+> role).
 
 - **Off by default** (`public.enabled`). When off, every `/api/public/*` route except the
   profile answers `403 public_disabled` and the landing page shows no composer.

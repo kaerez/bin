@@ -129,11 +129,11 @@ describe('every page', () => {
     }
   });
 
-  it('the statement is bilingual and claims only partial conformance', () => {
+  it('the statement page is rendered from the settings (see statement.test.js), with a fallback', () => {
     const s = read('public/accessibility/index.html');
-    expect(s).toMatch(/lang="he" dir="rtl"/);
-    expect(s).toContain('partial conformance');
-    expect(s).toContain('התאמה חלקית');
+    expect(s).toContain('<script type="module" src="/js/statement.js"></script>');
+    expect(s).toMatch(/<div id="statement">\s*<article [^>]*lang="en" dir="ltr"[^>]*>\s*<h1 class="title" id="st-title">/);
+    expect(s).toContain('id="st-fallback"');
     expect(s).not.toMatch(/fully (conforms|compliant)|full conformance/i);
   });
 });
