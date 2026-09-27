@@ -5,6 +5,8 @@
 //   /api/private/*   everything that needs an account (session or API key)
 //   /api/public/*    anonymous creation (the public account), when enabled
 //   /api/paste/*, /api/file/*, /api/config   capability-gated public reads
+//   /api/reverse/*   anonymous uploads to a user's reverse share (docs/REVERSE.md)
+//   /r/<id>          the reverse-share uploader page (Turnstile headers when on)
 //   /dashboard*      the signed-in app (login/setup pages are the exceptions)
 //   everything else  Workers Static Assets (landing page + viewer)
 //
@@ -22,6 +24,7 @@ import { handleAuth } from './routes/auth.js';
 import { handlePrivate } from './routes/private.js';
 import { handlePublic } from './routes/public.js';
 import { handlePublicApi } from './routes/publicapi.js';
+import { handleReversePublic, REVERSE_ID_RE } from './routes/reverse.js';
 
 export { BurnPaste } from './burn-do.js';
 export { FileShare } from './fileshare-do.js';
@@ -36,6 +39,8 @@ const DASH_LOGIN = /^\/dashboard\/login(\/|\/index\.html)?$/;
 // (password change) and the home page's public composer when it is enabled.
 const TURNSTILE_DASH = /^\/dashboard\/(login|account)(\/|\/index\.html)?$/;
 const HOME = /^\/(index\.html)?$/;
+// The reverse-share uploader page: /r/<id> (the key is in the #fragment).
+const REVERSE_PAGE = /^\/r\/([^/]+)\/?$/;
 // The home page is public and cached: look up a session only when a cookie is there.
 const hasSessionCookie = (request) => (request.headers.get('cookie') || '').includes(`${SESSION_COOKIE}=`);
 
@@ -95,8 +100,24 @@ async function handleDashboard(request, env, url) {
   return res;
 }
 
+/**
+ * /r/<id>: the uploader page (public/r/index.html), with the Turnstile CSP when
+ * the human check is on (its widget is on the page) and the strict one
+ * otherwise; never stored. Any other /r/ path is not found.
+ */
+async function reversePage(request, env, url) {
+  const m = url.pathname.match(REVERSE_PAGE);
+  if (!m || !REVERSE_ID_RE.test(m[1]) || (request.method !== 'GET' && request.method !== 'HEAD')) {
+    return withSecurityHeaders(new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } }));
+  }
+  if (!env.ASSETS) return new Response('Not found', { status: 404 });
+  const page = await env.ASSETS.fetch(new Request(new URL('/r/', url), { method: request.method, headers: request.headers }));
+  return withSecurityHeaders(page, { turnstile: !!(await turnstileKeys(env)) });
+}
+
 async function route(request, env, url, ctx) {
   const { pathname } = url;
+  if (pathname === '/r' || pathname.startsWith('/r/')) return reversePage(request, env, url);
   const isApi = pathname.startsWith('/api/');
   const isDash = pathname === '/dashboard' || pathname.startsWith('/dashboard/');
   if (!isApi && !isDash) {
@@ -115,6 +136,7 @@ async function route(request, env, url, ctx) {
   if (pathname.startsWith('/api/auth/')) return (await handleAuth(request, env, url)) ?? err(404, 'not_found', 'Not found.');
   if (pathname.startsWith('/api/private/') || pathname === '/api/private') return handlePrivate(request, env, url, ctx);
   if (pathname.startsWith('/api/public/')) return handlePublicApi(request, env, url);
+  if (pathname.startsWith('/api/reverse/')) return handleReversePublic(request, env, url);
   return (await handlePublic(request, env, url)) ?? err(404, 'not_found', 'Not found.');
 }
 

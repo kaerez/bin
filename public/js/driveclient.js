@@ -24,6 +24,7 @@ import { RefsReader, saveFile, saveZip } from './downloads.js';
 import { buildRefsManifest, refChunks } from './refsmanifest.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
 import { passkeyPrfOnly } from './passkeys.js';
+import { createReverseKey, sealReversePriv, openReversePriv, linkHash, passwordGate, sealNote, fragmentOf, openUpload, newReverseId } from './reversekeys.js';
 
 /**
  * No usable DK in this tab (`reason`: 'locked' | 'wrong' | 'setup' |
@@ -32,11 +33,13 @@ import { passkeyPrfOnly } from './passkeys.js';
  * offer the passkey unlock only when one exists.
  */
 export class DriveLocked extends Error {
-  constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = []) {
+  constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = [], received = 0) {
     super(message);
     this.name = 'DriveLocked';
     this.reason = reason;
     this.credentialIds = credentialIds;
+    /** Received files (reverse shares) waiting for the Drive to be unlocked. */
+    this.received = received;
   }
 }
 
@@ -131,7 +134,7 @@ export async function openDrive({ user } = {}) {
     throw new DriveLocked('Set up your Drive with your password.', 'setup');
   }
   const dk = loadSessionKey(u.id);
-  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st));
+  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st), Number(st.received) || 0);
   const client = await DriveClient.create(dk, u);
   if (!u.impersonating) await client.maintain(st).catch(() => {});
   return client;
@@ -699,4 +702,111 @@ export class DriveClient {
     const r = await api.shares(nodeId);
     return Array.isArray(r.shares) ? r.shares : [];
   }
+
+  // ── reverse shares (docs/REVERSE.md) ───────────────────────────────────
+
+  /**
+   * A reverse share on folder `folderId` → { url, id, expires }: a new link key
+   * pair (its private key sealed with this Drive's key), the link proof's
+   * hash, the note sealed with the link key, and — with a password — the
+   * gate the server checks (it only lets the uploader in; it protects nothing).
+   * opts: label, note, password, expire ("7d"), maxFiles, maxBytes,
+   * maxFileBytes (null = none), types ({ mode, rules } or null).
+   */
+  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null } = {}) {
+    const id = newReverseId();
+    const { pub, privateKey } = await createReverseKey();
+    const body = {
+      id, folder: folderId, priv: await sealReversePriv(this.dk, id, privateKey), lh: await linkHash(pub), expire,
+      maxFiles, maxBytes, maxFileBytes, types,
+    };
+    if (note) body.note = await sealNote(pub, id, note);
+    if (password) body.password = await passwordGate(password, pub);
+    if (label) body.label = label;
+    const r = await api.createReverse(body);
+    if (r.id !== id) throw malformed();
+    return { url: reverseUrl(id, pub), id, expires: r.expires };
+  }
+
+  /**
+   * Reverse shares (of one folder, or all) → rows as the server lists them,
+   * each with `url` (the link, rebuilt from its private key here) or null.
+   */
+  async reverseShares(folderId = null) {
+    const r = await api.reverse(folderId);
+    const rows = Array.isArray(r.reverse) ? r.reverse : [];
+    return Promise.all(rows.map(async (x) => {
+      let url = null;
+      try { url = reverseUrl(x.id, (await openReversePriv(this.dk, x.id, x.priv)).pub); } catch { /* not this Drive's key */ }
+      const { priv, ...rest } = x; // eslint-disable-line no-unused-vars
+      return { ...rest, url };
+    }));
+  }
+
+  /**
+   * Take in the files reverse shares have received: open each with its
+   * share's private key, create (or reuse, by name) the upload's folders in
+   * the target folder, and re-wrap its name, metadata and key into the normal
+   * Drive format (the content is not touched) → { added, failed, more }.
+   * Items that do not open are left as they are (counted in `failed`).
+   */
+  async receivePending({ onItem } = {}) {
+    const r = await api.received();
+    const items = Array.isArray(r.items) ? r.items : [];
+    const keys = new Map();
+    for (const k of Array.isArray(r.keys) ? r.keys : []) {
+      try { keys.set(k.id, (await openReversePriv(this.dk, k.id, k.priv)).privateKey); } catch { /* sealed under another key */ }
+    }
+    const folders = new Map(); // `${parent}\n${path}` → id
+    const listed = new Map(); // parent → Map(name → dir id)
+    const ensure = async (parent, dirPath) => {
+      if (!dirPath) return parent;
+      const key = `${parent}\n${dirPath}`;
+      if (folders.has(key)) return folders.get(key);
+      const cut = dirPath.lastIndexOf('/');
+      const up = await ensure(parent, cut < 0 ? '' : dirPath.slice(0, cut));
+      const leaf = dirPath.slice(cut + 1);
+      if (!listed.has(up)) {
+        const { children } = await this.list(up).catch(() => ({ children: [] }));
+        listed.set(up, new Map(children.filter((c) => c.kind === 'dir' && c.name !== null).map((c) => [c.name, c.id])));
+      }
+      const known = listed.get(up);
+      const id = known.get(leaf) ?? await this.mkdir(up, leaf);
+      known.set(leaf, id);
+      folders.set(key, id);
+      return id;
+    };
+    let added = 0;
+    let failed = 0;
+    for (const it of items) {
+      const priv = keys.get(it.rs);
+      let got = null;
+      try {
+        if (!priv) throw new Error('no key');
+        got = await openUpload(priv, it.rs, it);
+        const path = checkPath(got.path);
+        path.split('/').forEach(checkName);
+        const cut = path.lastIndexOf('/');
+        const parent = await ensure(it.parent, cut < 0 ? '' : path.slice(0, cut));
+        const type = normalizeMime(got.type) || OCTET;
+        await api.acceptReceived(it.id, {
+          parent,
+          name: await sealField(this.keys.names, 'name', it.id, path.slice(cut + 1)),
+          // The server's size is the one the chunks have: the metadata says the same.
+          meta: await sealField(this.keys.names, 'meta', it.id, JSON.stringify({ type, mtime: got.mtime, size: it.size })),
+          fk: await sealField(this.keys.files, 'fk', it.id, got.fk),
+        });
+        added++;
+        if (onItem) onItem({ id: it.id, path, parent });
+      } catch {
+        failed++;
+      }
+    }
+    return { added, failed, more: !!r.more };
+  }
+}
+
+/** The uploader's link of a reverse share: /r/<id>#<the raw public key>. */
+function reverseUrl(id, pub) {
+  return `${location.origin}/r/${id}#${fragmentOf(pub)}`;
 }

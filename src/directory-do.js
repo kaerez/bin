@@ -20,7 +20,7 @@ import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn
 import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, PASSWORD_POLICY_KEYS,
-  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES,
+  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES, MAX_REVERSE_ACTIVE,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
@@ -202,6 +202,10 @@ const MIGRATIONS = [
     m.sql.exec('CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL)');
     materializeDefaultRole(m.sql);
   },
+  // 14: reverse shares (docs/REVERSE.md): their role options join the Default
+  // role (reverseEnabled off, 10 active, 1 GiB each). The shares themselves
+  // live in the user's Drive DO; the index row is an ordinary shares row.
+  (m) => materializeDefaultRole(m.sql),
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -260,7 +264,8 @@ export const PUBLIC_ID = 'public-user-0000';
  */
 export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
   'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax',
-  'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes']);
+  'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes',
+  'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes']);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -698,6 +703,8 @@ export class Directory extends DurableObject {
         grantSec: caps.grantSec,
         // The Drive (docs/DRIVE.md): never for the public account.
         driveEnabled: u.role !== 'public' && !!eff.all.driveEnabled,
+        // Reverse shares (docs/REVERSE.md) need the Drive too.
+        reverseEnabled: u.role !== 'public' && !!eff.all.driveEnabled && !!eff.all.reverseEnabled,
       },
       viewer: {
         enabled: caps.viewerEnabled,
@@ -1926,6 +1933,84 @@ export class Directory extends DurableObject {
     }
     if (n) this.#log(actorId, uid, 'share.revoked', `drive item deleted: ${n} share${n === 1 ? '' : 's'}`);
     return { ok: true, ended: n };
+  }
+
+  // ── reverse shares (docs/REVERSE.md; the shares live in the Drive DO) ───
+  /**
+   * May `uid` create a reverse share now, with this expiry and byte limit?
+   * → { ok, maxBytes (the share's effective limit, null: none), drive } where
+   * `drive` is what the Drive route needs (capacity etc., as driveAccess).
+   */
+  async authorizeReverse(uid, { expireSec, maxBytes = null }) {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
+    const L = this.#effective(u).all;
+    if (!L.driveEnabled) return fail(403, 'drive_disabled', 'Your role does not include a Drive.');
+    if (!L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
+    if (L.maxExpireSec !== null && expireSec > L.maxExpireSec) {
+      return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds.`, { max: L.maxExpireSec });
+    }
+    const roleMax = L.reverseMaxBytes ?? null;
+    if (roleMax !== null && maxBytes !== null && maxBytes > roleMax) {
+      return fail(403, 'reverse_too_large', `A reverse share may receive at most ${roleMax} bytes.`, { max: roleMax });
+    }
+    const ts = now();
+    const active = this.sql.exec("SELECT COUNT(*) AS c FROM shares WHERE user_id = ? AND kind = 'reverse' AND status = 'active' AND expires > ?", uid, ts).one().c;
+    const cap = Math.min(MAX_REVERSE_ACTIVE, L.reverseMaxActive ?? MAX_REVERSE_ACTIVE);
+    if (active >= cap) return fail(409, 'too_many_reverse', `At most ${cap} active reverse shares at once.`, { max: cap });
+    return { ok: true, maxBytes: maxBytes ?? roleMax };
+  }
+
+  /**
+   * The reverse share `id` as an anonymous upload sees it: whose it is, and
+   * whether uploads are allowed now (not ended, not locked, the account and
+   * its role still allow it), with the Drive limits that apply. A share that
+   * was one (in the index) but is gone: 'gone'; never one: 'unknown'.
+   */
+  async reverseTarget(id) {
+    const r = this.sql.exec("SELECT user_id, status, expires, locked, lh FROM shares WHERE id = ? AND kind = 'reverse'", id).toArray()[0];
+    if (!r) return { ok: false, state: 'unknown' };
+    const gone = { ok: false, state: 'gone', uid: r.user_id, lh: r.lh };
+    if (r.status !== 'active' || r.expires <= now()) return gone;
+    if (r.locked) return { ok: false, state: 'locked', uid: r.user_id, lh: r.lh };
+    const u = this.#user(r.user_id);
+    if (!u || u.disabled || u.role === 'public') return gone;
+    const L = this.#effective(u).all;
+    if (!L.driveEnabled || !L.reverseEnabled) return gone;
+    const cap = (v) => (v === null || v === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, v));
+    return {
+      ok: true, uid: r.user_id, lh: r.lh, expires: r.expires,
+      capacity: cap(L.driveMaxBytes), maxFile: cap(L.driveMaxFileBytes), roleMaxBytes: cap(L.reverseMaxBytes),
+      pendingSec: this.#caps(u, L, this.#settings()).pendingSec,
+    };
+  }
+
+  /** The user a share belongs to (the Worker needs it to reach a reverse share's Drive). */
+  async shareOwner(id) {
+    return this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0]?.user_id ?? null;
+  }
+
+  /**
+   * Log a reverse-share event for its user: `received` (files and bytes of a
+   * finished upload session — count and size only) or `bad_password` (at most
+   * one entry per share per minute; the Guard limits the attempts).
+   */
+  async reverseEvent(id, event, { files = 0, bytes = 0 } = {}) {
+    const r = this.sql.exec("SELECT user_id FROM shares WHERE id = ? AND kind = 'reverse'", id).toArray()[0];
+    if (!r) return { ok: false };
+    if (event === 'received') {
+      if (!Number.isSafeInteger(files) || files <= 0 || !Number.isSafeInteger(bytes) || bytes < 0) return { ok: false };
+      this.#log(null, r.user_id, 'reverse.received', `id=${id} files=${files} bytes=${bytes}`);
+      return { ok: true };
+    }
+    if (event === 'bad_password') {
+      const recent = this.sql.exec("SELECT 1 FROM activity WHERE subject_id = ? AND action = 'reverse.bad_password' AND detail = ? AND ts > ? LIMIT 1",
+        r.user_id, `id=${id}`, now() - 60).toArray().length;
+      if (!recent) this.#log(null, r.user_id, 'reverse.bad_password', `id=${id}`);
+      return { ok: true };
+    }
+    return { ok: false };
   }
 
   async createUser({ username, salt, t, verifier }, actorId) {

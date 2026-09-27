@@ -4,7 +4,7 @@
 
 import { listShares, updateShare, revokeShare, shareOpens } from '../../js/api.js';
 import { opensButton } from './receipts.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, viewsText } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { ready } from './nav.js';
 
@@ -49,9 +49,7 @@ function render() {
   const body = clear($('#shares-body'));
   for (const [i, r] of rows.entries()) {
     const active = r.status === 'active';
-    const views = r.views_total === null || r.views_total === undefined
-      ? 'unlimited'
-      : `${r.left ?? '—'} left of ${r.views_total}`;
+    const views = viewsText(r);
     const expires = r.expires ? (active && r.expires > now() ? `in ${formatCoarse(r.expires - now())}` : formatDate(r.expires)) : '—';
     const locked = !!r.locked;
     const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': 'Label', placeholder: '(no label)', disabled: locked });

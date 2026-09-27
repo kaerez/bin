@@ -7,6 +7,7 @@ import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
 import { deriveSubkeys, sealField } from '../public/js/drivekeys.js';
 import { randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
+import { sealUpload, newNodeId } from '../public/js/reversekeys.js';
 
 /** An in-memory Drive server for one user (plus an owner) and a fetch that talks to it. */
 export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 } = {}) {
@@ -26,11 +27,13 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     requests: [],
     userWraps: null, // the "other user" for the escrow route
     adminKeys: [],
+    reverse: [], // reverse shares: the create bodies plus { status, files, bytes, created, expires }
   };
   const ok = (data, status = 200) => ({ ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) });
   const bin = (bytes) => ({ ok: true, status: 200, type: 'basic', json: async () => null, arrayBuffer: async () => bytes.slice().buffer });
   const fail = (status, error) => ok({ error, message: error }, status);
-  const kids = (id) => [...S.nodes.values()].filter((n) => n.parent === id);
+  // Received files (reverse shares) are not in the tree until the browser re-wraps them.
+  const kids = (id) => [...S.nodes.values()].filter((n) => n.parent === id && !n.rs);
   const ancestors = (n) => { const out = []; let p = n.parent; while (p) { const a = S.nodes.get(p); out.unshift(a); p = a.parent; } return out; };
   const within = (id, anc) => { for (let x = S.nodes.get(id); x; x = S.nodes.get(x.parent)) if (x.id === anc) return true; return false; };
   const pub = (n) => ({ ...n });
@@ -46,7 +49,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: null });
     if (p === '/api/private/drive' && method === 'GET') {
       if (!S.enabled) return ok({ enabled: false });
-      return ok({ enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps: [...S.wraps.values()], escrowPub: S.escrowPub, ...(role === 'owner' ? { escrowPriv: S.escrowPriv } : {}) });
+      const received = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready').length;
+      return ok({ enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps: [...S.wraps.values()], escrowPub: S.escrowPub, received, ...(role === 'owner' ? { escrowPriv: S.escrowPriv } : {}) });
     }
     if (p === '/api/private/drive/keys' && method === 'PUT') {
       if (body.driveSalt) S.driveSalt = body.driveSalt;
@@ -77,7 +81,36 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       // A node's active shares: those referencing it, or (for a folder) a file under it.
       return ok({ shares: S.shares.filter((s) => s.status === 'active' && s.nodes.some((x) => within(x, m[1]))).map(shareRow) });
     }
+    if (p === '/api/private/drive/reverse' && method === 'POST') {
+      if (!/^r[A-Za-z0-9_-]{22}$/.test(body.id) || S.reverse.some((r) => r.id === body.id)) return fail(409, 'exists');
+      const now = Math.floor(Date.now() / 1000);
+      S.reverse.push({ ...body, status: 'active', files: 0, bytes: 0, created: now, expires: now + 7 * 86400 });
+      return ok({ id: body.id, expires: now + 7 * 86400 }, 201);
+    }
+    if (p === '/api/private/drive/reverse' && method === 'GET') {
+      const folder = u.searchParams.get('folder');
+      const rows = S.reverse.filter((r) => !folder || r.folder === folder).map((r) => ({
+        id: r.id, folder: r.folder, label: r.label || '', created: r.created, expires: r.expires, status: r.status, locked: false, priv: r.priv,
+        password: !!r.password, note: !!r.note, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
+      }));
+      return ok({ reverse: rows });
+    }
+    if (p === '/api/private/drive/received' && method === 'GET') {
+      const items = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready').map((n) => ({ id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created }));
+      const keys = [...new Set(items.map((i) => i.rs))].map((id) => S.reverse.find((r) => r.id === id)).filter(Boolean).map((r) => ({ id: r.id, priv: r.priv }));
+      return ok({ items, keys, more: false });
+    }
+    if ((m = p.match(/^\/api\/private\/drive\/received\/([^/]+)$/)) && method === 'POST') {
+      const n = S.nodes.get(m[1]);
+      if (!n || !n.rs) return fail(409, 'not_received');
+      if (!S.nodes.has(body.parent) || S.nodes.get(body.parent).kind !== 'dir') return fail(404, 'not_found');
+      Object.assign(n, { parent: body.parent, name: body.name, meta: body.meta, fk: body.fk, rs: null });
+      S.accepted = (S.accepted || []).concat([{ id: n.id, body }]);
+      return ok({ ok: true });
+    }
     if ((m = p.match(/^\/api\/private\/shares\/([^/]+)\/revoke$/)) && method === 'POST') {
+      const rv = S.reverse.find((x) => x.id === m[1]);
+      if (rv) { rv.status = 'revoked'; S.revoked.push(rv.id); return ok({ ok: true }); }
       const s = S.shares.find((x) => x.id === m[1]);
       if (!s) return fail(404, 'not_found');
       s.status = 'revoked';
@@ -162,4 +195,24 @@ export async function seedTree(S, dk, tree, parent = 'root', prefix = '', ids = 
     ids.set(path, id);
   }
   return ids;
+}
+
+/**
+ * A file received through reverse share `rid` (public key `pub`), stored as
+ * the uploader's browser would have sent it: content under a fresh file key,
+ * path and metadata sealed with a metadata key, both wrapped to `pub`.
+ * `bad: true` stores a wrap that does not open. → the node id.
+ */
+export async function seedReceived(S, { rid, pub, folder = 'root', path, bytes, type = 'text/plain', bad = false }) {
+  const id = newNodeId();
+  const fk = randomBytes(32);
+  const n = Math.ceil(bytes.length / CHUNK);
+  const key = await importFileKey(b64urlFromBytes(fk));
+  for (let i = 0; i < n; i++) S.chunks.set(`${id}/${i}`, await encryptChunk(key, i, n, bytes.slice(i * CHUNK, (i + 1) * CHUNK)));
+  const sealed = await sealUpload(pub, bad ? `r${'A'.repeat(22)}` : rid, id, fk, { path, type, mtime: 1700000000000, size: bytes.length });
+  S.nodes.set(id, {
+    id, parent: folder, kind: 'file', name: sealed.name, meta: sealed.meta, fk: { kind: 'rs', data: sealed.wrap },
+    size: bytes.length, chunks: n, state: 'ready', created: 1700000000, updated: 1700000000, rs: rid,
+  });
+  return id;
 }

@@ -26,7 +26,7 @@ const TOKEN_MAX = 2048; // Cloudflare's documented maximum
 const VERIFY_TIMEOUT_MS = 10000;
 
 /** The form each token is issued for (the widget's `action`). */
-export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', public: 'public-share' });
+export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', public: 'public-share', reverse: 'reverse-upload' });
 
 /** { sitekey, secret } when both are set and well-formed, else null (Turnstile off). */
 let warned = false;

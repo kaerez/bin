@@ -19,6 +19,7 @@ import { MAX_CHUNK_CT } from '../../public/js/files.js';
 import { binding } from '../lib/config.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { NODE_ID_RE, ROOT } from '../drive-do.js';
+import { handleReverseOwner } from './reverse.js';
 
 const fromDir = (r) => {
   const extra = {};
@@ -102,13 +103,19 @@ export async function handleDrive(request, env, url) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     if (!pol.enabled) return withAuth(a, json({ enabled: false, capacity: pol.capacity, maxFile: pol.maxFile, used: pol.used, driveSalt: null, wraps: [], escrowPub: escrowPub() }));
     const s = await drive().summary(uid);
-    const out = { enabled: true, capacity: pol.capacity, maxFile: pol.maxFile, used: s.used, driveSalt: s.driveSalt, wraps: s.wraps, escrowPub: escrowPub() };
+    const out = { enabled: true, capacity: pol.capacity, maxFile: pol.maxFile, used: s.used, driveSalt: s.driveSalt, wraps: s.wraps, escrowPub: escrowPub(), received: s.received };
     if (pol.owner) out.escrowPriv = s.escrowPriv;
     if (s.used !== pol.used) await dir.setDriveUsed(uid, s.used);
     return withAuth(a, json(out));
   }
 
   if (!pol.enabled) return err(403, 'drive_disabled', 'Your role does not include a Drive.');
+
+  // Reverse shares and the files they received (docs/REVERSE.md §6.1).
+  if (p === '/api/private/drive/reverse' || p === '/api/private/drive/received' || p.startsWith('/api/private/drive/received/')) {
+    const r = await handleReverseOwner(request, env, url, a, pol);
+    if (r) return withAuth(a, r);
+  }
 
   if (p === '/api/private/drive/keys') {
     if (request.method !== 'PUT') return methodNotAllowed('PUT');
@@ -210,6 +217,8 @@ export async function handleDrive(request, env, url) {
       const r = await drive().deleteNode(uid, id);
       if (!r.ok) return withAuth(a, fromDir(r));
       await endShares(env, dir, uid, r.shares, actorId(a));
+      // Reverse shares of a deleted folder end with it (no FileShare record to revoke).
+      if (r.reverse.length) await dir.endDriveShares(uid, r.reverse, actorId(a));
       await dir.setDriveUsed(uid, r.used);
       return withAuth(a, json({ ok: true, deleted: r.deleted, sharesEnded: r.shares.length }));
     }
@@ -453,4 +462,5 @@ export async function destroyDrive(env, uid) {
   binding(env, 'FILES');
   const r = await driveStub(env, uid).destroy(uid);
   for (const id of r.shares) await fileStub(env, id).revoke();
+  if (r.reverse.length) await directory(env).endDriveShares(uid, r.reverse);
 }

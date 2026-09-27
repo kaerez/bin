@@ -32,7 +32,15 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS refs (share_id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY (share_id, node_id));
 CREATE INDEX IF NOT EXISTS refs_node ON refs(node_id);
 CREATE TABLE IF NOT EXISTS upchunks (node_id TEXT NOT NULL, i INTEGER NOT NULL, PRIMARY KEY (node_id, i));
+CREATE TABLE IF NOT EXISTS reverse (id TEXT PRIMARY KEY, folder TEXT NOT NULL, priv TEXT NOT NULL, lh TEXT NOT NULL,
+  ph TEXT, salt TEXT, t INTEGER, note TEXT, opts TEXT NOT NULL, files INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active');
+CREATE TABLE IF NOT EXISTS rsessions (hash TEXT PRIMARY KEY, rid TEXT NOT NULL, expires INTEGER NOT NULL,
+  files INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS rsessions_rid ON rsessions(rid);
 `;
+// Columns added after the Drive first shipped (fresh objects get them from here too).
+const COLUMNS = [['nodes', 'rs', 'TEXT']];
 
 export const ROOT = 'root';
 /** Node ids: 16 random bytes, base64url (chosen by the browser so it can bind encrypted fields to them). */
@@ -44,6 +52,10 @@ export const MAX_DEPTH = 64;
 export const MAX_WRAPS = 64;
 /** Shares referencing one item at most (each share is a separate link). */
 export const MAX_SHARES_PER_NODE = 1000;
+/** Reverse shares per Drive (ended ones included until their files are taken in), open upload sessions per share, files per share. */
+export const MAX_REVERSE = 1000;
+export const MAX_SESSIONS = 100;
+export const MAX_REVERSE_FILES = 10000;
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
@@ -64,6 +76,11 @@ export class Drive extends DurableObject {
     this.sql = ctx.storage.sql;
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(SCHEMA);
+      for (const [table, col, decl] of COLUMNS) {
+        const have = new Set(this.sql.exec(`PRAGMA table_info(${table})`).toArray().map((c) => c.name));
+        if (!have.has(col)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+      }
+      this.sql.exec('CREATE INDEX IF NOT EXISTS nodes_rs ON nodes(rs)');
       const t = nowSec();
       this.sql.exec("INSERT OR IGNORE INTO nodes (id, parent, kind, name, state, created, updated) VALUES (?, NULL, 'dir', 'null', 'ready', ?, ?)", ROOT, t, t);
     });
@@ -160,8 +177,10 @@ export class Drive extends DurableObject {
   async #schedulePurge() {
     const sec = Number(this.#meta('pendingSec')) || 3600;
     const r = this.sql.exec("SELECT MIN(updated) AS t FROM nodes WHERE state = 'pending'").one();
-    if (r.t === null) return;
-    const at = (r.t + sec) * 1000;
+    const s = this.sql.exec('SELECT MIN(expires) AS t FROM rsessions').one();
+    const times = [r.t === null ? null : r.t + sec, s.t].filter((x) => x !== null);
+    if (!times.length) return;
+    const at = Math.min(...times) * 1000;
     const cur = await this.ctx.storage.getAlarm();
     if (cur === null || cur > at) await this.ctx.storage.setAlarm(at);
   }
@@ -179,7 +198,7 @@ export class Drive extends DurableObject {
   async summary(uid) {
     this.#bind(uid);
     const wraps = this.sql.exec('SELECT kind, ref, data FROM wraps ORDER BY kind, ref').toArray().map((w) => ({ kind: w.kind, ref: w.ref, data: w.data }));
-    return { used: this.#used(), items: this.#count() - 1, driveSalt: this.#meta('driveSalt'), wraps, escrowPriv: this.#meta('escrowPriv') };
+    return { used: this.#used(), items: this.#count() - 1, driveSalt: this.#meta('driveSalt'), wraps, escrowPriv: this.#meta('escrowPriv'), received: this.#receivedCount() };
   }
 
   /**
@@ -235,9 +254,10 @@ export class Drive extends DurableObject {
   async getNode(uid, id) {
     this.#bind(uid);
     const n = this.#node(id);
-    if (!n) return fail(404, 'not_found', 'No such item.');
+    // A received file is not part of the tree until the user's browser has re-wrapped it.
+    if (!n || n.rs) return fail(404, 'not_found', 'No such item.');
     const children = n.kind === 'dir'
-      ? this.sql.exec("SELECT * FROM nodes WHERE parent = ? ORDER BY kind = 'file', created, id", id).toArray().map((r) => this.#out(r))
+      ? this.sql.exec("SELECT * FROM nodes WHERE parent = ? AND rs IS NULL ORDER BY kind = 'file', created, id", id).toArray().map((r) => this.#out(r))
       : [];
     const path = this.#ancestors(id).map((r) => this.#out(r));
     return { ok: true, node: this.#out(n), children, path };
@@ -319,7 +339,7 @@ export class Drive extends DurableObject {
   async chunkKey(uid, id, i) {
     this.#bind(uid);
     const n = this.#node(id);
-    if (!n || n.kind !== 'file' || n.state !== 'ready') return { status: 'gone' };
+    if (!n || n.kind !== 'file' || n.state !== 'ready' || n.rs) return { status: 'gone' };
     if (!Number.isInteger(i) || i < 0 || i >= n.chunks) return { status: 'bad_index' };
     return { status: 'ok', key: driveChunkKey(uid, id, i), size: driveChunkSize(n.size, i) };
   }
@@ -329,7 +349,7 @@ export class Drive extends DurableObject {
     this.#bind(uid);
     if (id === ROOT) return fail(400, 'root', 'The top folder cannot be moved or renamed.');
     const n = this.#node(id);
-    if (!n) return fail(404, 'not_found', 'No such item.');
+    if (!n || n.rs) return fail(404, 'not_found', 'No such item.');
     if (parent !== undefined && parent !== n.parent) {
       const bad = this.#checkParent(parent);
       if (bad) return bad;
@@ -360,7 +380,14 @@ export class Drive extends DurableObject {
       await this.#deleteObjects(uid, rows.filter((r) => r.kind === 'file'));
       const ids = rows.map((r) => r.id);
       const shares = new Set();
+      // Reverse shares whose folder goes end with it (their received files go too).
+      const dirs = new Set(rows.filter((r) => r.kind === 'dir').map((r) => r.id));
+      const reverse = this.sql.exec("SELECT id, folder FROM reverse WHERE status = 'active'").toArray().filter((r) => dirs.has(r.folder)).map((r) => r.id);
       this.ctx.storage.transactionSync(() => {
+        for (const rid of reverse) {
+          this.sql.exec("UPDATE reverse SET status = 'revoked' WHERE id = ?", rid);
+          this.sql.exec('DELETE FROM rsessions WHERE rid = ?', rid);
+        }
         for (let k = 0; k < ids.length; k += 100) {
           const part = ids.slice(k, k + 100);
           const q = part.map(() => '?').join(', ');
@@ -371,7 +398,8 @@ export class Drive extends DurableObject {
         // An ended share references nothing any more.
         for (const s of shares) this.sql.exec('DELETE FROM refs WHERE share_id = ?', s);
       });
-      return { ok: true, deleted: ids.length, shares: [...shares], used: this.#used() };
+      this.#dropEndedReverse();
+      return { ok: true, deleted: ids.length, shares: [...shares], reverse, used: this.#used() };
     });
   }
 
@@ -389,7 +417,7 @@ export class Drive extends DurableObject {
       const n = this.#node(id);
       if (!n) return fail(404, 'not_found', 'A file to share does not exist.');
       if (n.kind !== 'file') return fail(400, 'not_a_file', 'List the files to share (a folder\'s files, not the folder).');
-      if (n.state !== 'ready') return fail(409, 'not_ready', 'A file to share has not finished uploading.');
+      if (n.state !== 'ready' || n.rs) return fail(409, 'not_ready', 'A file to share has not finished uploading.');
       refs.push({ node: n.id, key: driveKey(uid, n.id), chunks: n.chunks, size: n.size });
       if (this.sql.exec('SELECT COUNT(*) AS c FROM refs WHERE node_id = ?', id).one().c >= MAX_SHARES_PER_NODE) {
         return fail(409, 'too_many_shares', `An item can have at most ${MAX_SHARES_PER_NODE} shares.`);
@@ -438,10 +466,286 @@ export class Drive extends DurableObject {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.#deleteObjects(uid, this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file'").toArray());
       const shares = this.sql.exec('SELECT DISTINCT share_id FROM refs').toArray().map((r) => r.share_id);
+      const reverse = this.sql.exec("SELECT id FROM reverse WHERE status = 'active'").toArray().map((r) => r.id);
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
-      return { ok: true, shares };
+      return { ok: true, shares, reverse };
     });
+  }
+
+  // ── reverse shares (docs/REVERSE.md) ─────────────────────────────────────
+  #receivedCount() {
+    return this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready'").one().c;
+  }
+  #reverse(id) {
+    return this.sql.exec('SELECT * FROM reverse WHERE id = ?', id).toArray()[0] || null;
+  }
+  /** A reverse share's state now: 'active' | 'expired' | 'revoked' (the row may say active past its expiry). */
+  #reverseState(r) {
+    if (!r) return 'gone';
+    if (r.status !== 'active') return r.status;
+    if (r.expires <= nowSec()) return 'expired';
+    if (!this.#node(r.folder)) return 'revoked';
+    return 'active';
+  }
+  #reverseOut(r, { priv = true } = {}) {
+    let opts = {};
+    try { opts = JSON.parse(r.opts); } catch { /* none */ }
+    const o = {
+      id: r.id, folder: r.folder, created: r.created, expires: r.expires, status: this.#reverseState(r),
+      password: !!r.ph, note: !!r.note, maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null,
+      maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, files: r.files, bytes: r.bytes,
+      pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready'", r.id).one().c,
+    };
+    if (priv) o.priv = JSON.parse(r.priv);
+    return o;
+  }
+  /** Give a pending (reserved) upload's allowance back and delete its rows (inside a transaction). */
+  #dropPending(f) {
+    this.sql.exec('DELETE FROM upchunks WHERE node_id = ?', f.id);
+    const gone = this.sql.exec("DELETE FROM nodes WHERE id = ? AND state = 'pending'", f.id).rowsWritten;
+    if (gone && f.rs) this.sql.exec('UPDATE reverse SET files = MAX(0, files - 1), bytes = MAX(0, bytes - ?) WHERE id = ?', f.size, f.rs);
+  }
+  /** Ended reverse shares whose received files have all been taken in: their key is no longer needed. */
+  #dropEndedReverse() {
+    const t = nowSec();
+    this.sql.exec(`DELETE FROM reverse WHERE (status != 'active' OR expires <= ? OR folder NOT IN (SELECT id FROM nodes))
+      AND id NOT IN (SELECT rs FROM nodes WHERE rs IS NOT NULL)`, t);
+    this.sql.exec('DELETE FROM rsessions WHERE rid NOT IN (SELECT id FROM reverse)');
+  }
+  /** Upload sessions past their time: log what they received (count and size), then forget them. */
+  async #lapseSessions() {
+    const stale = this.sql.exec('SELECT * FROM rsessions WHERE expires <= ?', nowSec()).toArray();
+    if (!stale.length) return;
+    this.sql.exec('DELETE FROM rsessions WHERE expires <= ?', nowSec());
+    const ns = this.env.DIRECTORY;
+    for (const x of stale) {
+      if (!x.files) continue;
+      try { await ns.get(ns.idFromName('directory')).reverseEvent(x.rid, 'received', { files: x.files, bytes: x.bytes }); } catch (e) {
+        console.warn('secbin: reverse upload not logged', e && e.message ? e.message : e);
+      }
+    }
+  }
+
+  /** A new reverse share on folder `rec.folder` (values arrive validated). */
+  async createReverse(uid, rec) {
+    this.#bind(uid);
+    const f = this.#node(rec.folder);
+    if (!f || f.rs) return fail(404, 'not_found', 'The folder does not exist.');
+    if (f.kind !== 'dir') return fail(400, 'not_a_folder', 'Files can only be received into a folder.');
+    if (this.#reverse(rec.id)) return fail(409, 'exists', 'A reverse share with this id already exists.');
+    this.#dropEndedReverse();
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM reverse').one().c >= MAX_REVERSE) return fail(409, 'too_many_reverse', `A Drive holds at most ${MAX_REVERSE} reverse shares.`);
+    const t = nowSec();
+    this.sql.exec(`INSERT INTO reverse (id, folder, priv, lh, ph, salt, t, note, opts, created, expires, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+      rec.id, rec.folder, rec.priv, rec.lh, rec.ph ?? null, rec.salt ?? null, rec.t ?? null, rec.note ?? null, JSON.stringify(rec.opts), t, t + rec.ttl);
+    return { ok: true, id: rec.id, created: t, expires: t + rec.ttl };
+  }
+
+  /** Every reverse share (or one folder's), newest first, with its sealed private key. */
+  async listReverse(uid, folder = null) {
+    this.#bind(uid);
+    const rows = folder === null
+      ? this.sql.exec('SELECT * FROM reverse ORDER BY created DESC').toArray()
+      : this.sql.exec('SELECT * FROM reverse WHERE folder = ? ORDER BY created DESC', folder).toArray();
+    return { ok: true, reverse: rows.map((r) => this.#reverseOut(r)) };
+  }
+
+  /** A reverse share's state and counters (My shares' live status). */
+  async reverseStatus(uid, id) {
+    this.#bind(uid);
+    const r = this.#reverse(id);
+    if (!r) return { status: 'gone' };
+    const st = this.#reverseState(r);
+    return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires } : { status: 'gone', state: st, files: r.files, bytes: r.bytes };
+  }
+
+  /**
+   * End a reverse share (revoked, or its account's role no longer allows it):
+   * no more uploads; unfinished uploads are deleted now, received files stay.
+   */
+  async endReverse(uid, id, status = 'revoked') {
+    this.#bind(uid);
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const r = this.#reverse(id);
+      if (!r) return { ok: true, ended: false };
+      const pending = this.sql.exec("SELECT id, chunks, size, rs FROM nodes WHERE rs = ? AND state = 'pending'", id).toArray();
+      await this.#deleteObjects(uid, pending);
+      this.ctx.storage.transactionSync(() => {
+        for (const f of pending) this.#dropPending(f);
+        this.sql.exec('UPDATE reverse SET status = ? WHERE id = ?', status, id);
+        this.sql.exec('DELETE FROM rsessions WHERE rid = ?', id);
+      });
+      this.#dropEndedReverse();
+      if (pending.length) await this.#reportUsage();
+      return { ok: true, ended: true, used: this.#used() };
+    });
+  }
+
+  /** A later expiry (My shares' Extend). */
+  async extendReverse(uid, id, expires) {
+    this.#bind(uid);
+    const r = this.#reverse(id);
+    if (!r || this.#reverseState(r) !== 'active') return { status: 'gone' };
+    if (!Number.isSafeInteger(expires) || expires <= r.expires) return { status: 'invalid', message: 'Expiry can only be extended.' };
+    this.sql.exec('UPDATE reverse SET expires = ? WHERE id = ?', expires, id);
+    return { status: 'ok', expires };
+  }
+
+  /**
+   * What the uploader's page needs (after the Worker checked the link proof
+   * against `lh`): the sealed note, the password parameters and the limits
+   * left. 'gone' unless active.
+   */
+  async reverseOpen(uid, id) {
+    this.#bind(uid);
+    const r = this.#reverse(id);
+    const st = this.#reverseState(r);
+    if (st !== 'active') return { status: st === 'gone' ? 'unknown' : 'gone', lh: r ? r.lh : null };
+    const o = this.#reverseOut(r, { priv: false });
+    return {
+      status: 'ok', lh: r.lh, ph: r.ph,
+      head: {
+        note: r.note ? JSON.parse(r.note) : null,
+        password: r.ph ? { salt: r.salt, t: r.t } : null,
+        expires: r.expires,
+        limits: { maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types,
+          filesLeft: o.maxFiles === null ? null : Math.max(0, o.maxFiles - r.files), bytesLeft: o.maxBytes === null ? null : Math.max(0, o.maxBytes - r.bytes) },
+      },
+    };
+  }
+
+  /** A new upload session (the Worker checked link, password and human check) → { status, expires }. */
+  async reverseBegin(uid, id, hash, ttl) {
+    this.#bind(uid);
+    const r = this.#reverse(id);
+    if (this.#reverseState(r) !== 'active') return { status: 'gone' };
+    const t = nowSec();
+    this.sql.exec('DELETE FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0', id, t);
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND expires > ?', id, t).one().c >= MAX_SESSIONS) return { status: 'busy' };
+    const expires = Math.min(r.expires, t + ttl);
+    this.sql.exec('INSERT INTO rsessions (hash, rid, expires) VALUES (?, ?, ?)', hash, id, expires);
+    await this.#schedulePurge();
+    return { status: 'ok', expires };
+  }
+
+  #session(id, hash) {
+    const x = this.sql.exec('SELECT * FROM rsessions WHERE hash = ?', hash).toArray()[0];
+    return x && x.rid === id && x.expires > nowSec() ? x : null;
+  }
+  #touch(x, ttl) {
+    const r = this.#reverse(x.rid);
+    this.sql.exec('UPDATE rsessions SET expires = ? WHERE hash = ?', Math.min(r.expires, Math.max(x.expires, nowSec() + ttl)), x.hash);
+  }
+
+  /**
+   * Reserve one received file in the share's folder: every limit is checked
+   * here at once — the share's (files, bytes, file size, declared types, as
+   * checked by the Worker), the Drive's capacity and largest file, and the
+   * tree's ceilings.
+   */
+  async reverseCreateFile(uid, id, hash, { node, name, meta, size, wrap, uploadHash, capacity, maxFile, pendingSec }) {
+    this.#bind(uid);
+    const r = this.#reverse(id);
+    if (this.#reverseState(r) !== 'active') return fail(410, 'gone', 'This link no longer accepts files.');
+    const x = this.#session(id, hash);
+    if (!x) return fail(403, 'bad_grant', 'This upload session has ended. Reload the page to start again.');
+    const opts = JSON.parse(r.opts);
+    if (opts.maxFiles !== null && opts.maxFiles !== undefined && r.files + 1 > opts.maxFiles) return fail(409, 'too_many_files', `This link accepts at most ${opts.maxFiles} files.`, { max: opts.maxFiles });
+    if (r.files + 1 > MAX_REVERSE_FILES) return fail(409, 'too_many_files', `A link accepts at most ${MAX_REVERSE_FILES} files.`, { max: MAX_REVERSE_FILES });
+    if (opts.maxFileBytes !== null && opts.maxFileBytes !== undefined && size > opts.maxFileBytes) return fail(413, 'file_too_large', `Each file may be at most ${opts.maxFileBytes} bytes.`, { max: opts.maxFileBytes });
+    if (size > maxFile) return fail(413, 'file_too_large', `Each file may be at most ${maxFile} bytes.`, { max: maxFile });
+    if (opts.maxBytes !== null && opts.maxBytes !== undefined && r.bytes + size > opts.maxBytes) return fail(413, 'share_full', 'This link has no room left for that file.', { max: opts.maxBytes, used: r.bytes });
+    const bad = this.#checkNew(node) || this.#checkParent(r.folder);
+    if (bad) return bad.error === 'exists' ? bad : fail(bad.status === 404 ? 410 : bad.status, bad.status === 404 ? 'gone' : bad.error, bad.message);
+    const used = this.#used();
+    if (used + size > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
+    const chunks = driveChunks(size);
+    const t = nowSec();
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated, rs) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+        node, r.folder, name, meta, size, chunks, JSON.stringify({ kind: 'rs', data: wrap }), uploadHash, t, t, id);
+      this.sql.exec('UPDATE reverse SET files = files + 1, bytes = bytes + ? WHERE id = ?', size, id);
+      this.#touch(x, pendingSec);
+    });
+    this.#setMeta('pendingSec', String(pendingSec));
+    await this.#schedulePurge();
+    return { ok: true, id: node, chunks, used: used + size };
+  }
+
+  /** A chunk of a received file being uploaded (only one of this share's). */
+  async reversePutChunk(uid, id, node, uploadHash, i, bytes) {
+    this.#bind(uid);
+    const n = this.#node(node);
+    if (!n || n.rs !== id) return { status: 'gone' };
+    if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
+    return this.putChunk(uid, node, uploadHash, i, bytes);
+  }
+
+  /** Finish a received file: counted in the session (for the log). */
+  async reverseFinalize(uid, id, hash, node, uploadHash, pendingSec) {
+    this.#bind(uid);
+    const x = this.#session(id, hash);
+    if (!x) return { status: 'bad_grant' };
+    const n = this.#node(node);
+    if (!n || n.rs !== id) return { status: 'gone' };
+    if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
+    const r = await this.finalize(uid, node, uploadHash);
+    if (r.status !== 'ok') return r;
+    this.sql.exec('UPDATE rsessions SET files = files + 1, bytes = bytes + ? WHERE hash = ?', n.size, hash);
+    this.#touch(x, pendingSec);
+    return { status: 'ok' };
+  }
+
+  /** The uploader cancels an unfinished file: its reservation is given back. */
+  async reverseCancel(uid, id, hash, node, uploadHash) {
+    this.#bind(uid);
+    if (!this.#session(id, hash)) return { status: 'bad_grant' };
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const n = this.#node(node);
+      if (!n || n.rs !== id || n.state !== 'pending') return { status: 'gone' };
+      if (!safeEq(uploadHash, n.upload_hash)) return { status: 'forbidden' };
+      await this.#deleteObjects(uid, [n]);
+      this.ctx.storage.transactionSync(() => this.#dropPending(n));
+      await this.#reportUsage();
+      return { status: 'ok' };
+    });
+  }
+
+  /** The uploader is done: → { files, bytes } finalized in the session (the Worker logs them); the session ends. */
+  async reverseDone(uid, id, hash) {
+    this.#bind(uid);
+    const x = this.#session(id, hash);
+    if (!x) return { status: 'bad_grant' };
+    this.sql.exec('DELETE FROM rsessions WHERE hash = ?', hash);
+    return { status: 'ok', files: x.files, bytes: x.bytes };
+  }
+
+  /** Received files the user's browser has not re-wrapped yet (finished uploads only), with their shares' sealed keys. */
+  async received(uid, limit = 500) {
+    this.#bind(uid);
+    const rows = this.sql.exec("SELECT * FROM nodes WHERE rs IS NOT NULL AND state = 'ready' ORDER BY created, id LIMIT ?", limit + 1).toArray();
+    const more = rows.length > limit;
+    const items = rows.slice(0, limit).map((r) => ({
+      id: r.id, parent: r.parent, rs: r.rs, name: JSON.parse(r.name), meta: r.meta ? JSON.parse(r.meta) : null,
+      fk: JSON.parse(r.fk), size: r.size, chunks: r.chunks, created: r.created,
+    }));
+    const keys = [...new Set(items.map((i) => i.rs))].map((rid) => this.#reverse(rid)).filter(Boolean).map((r) => ({ id: r.id, priv: JSON.parse(r.priv) }));
+    return { ok: true, items, keys, more };
+  }
+
+  /** A received file re-wrapped by the user's browser: from now on an ordinary Drive file (in `parent`). */
+  async acceptReceived(uid, node, { parent, name, meta, fk }) {
+    this.#bind(uid);
+    const n = this.#node(node);
+    if (!n || !n.rs || n.state !== 'ready') return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    if (parent !== n.parent) {
+      const bad = this.#checkParent(parent);
+      if (bad) return bad;
+    }
+    this.sql.exec('UPDATE nodes SET parent = ?, name = ?, meta = ?, fk = ?, rs = NULL, updated = ? WHERE id = ?', parent, name, meta, fk, nowSec(), node);
+    this.#dropEndedReverse();
+    return { ok: true };
   }
 
   // ── pending-upload purge ──────────────────────────────────────────────────
@@ -452,18 +756,17 @@ export class Drive extends DurableObject {
     const sec = Number(this.#meta('pendingSec')) || 3600;
     let purged = 0;
     await this.ctx.blockConcurrencyWhile(async () => {
-      const stale = this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file' AND state = 'pending' AND updated <= ?", nowSec() - sec).toArray();
+      const stale = this.sql.exec("SELECT id, chunks, size, rs FROM nodes WHERE kind = 'file' AND state = 'pending' AND updated <= ?", nowSec() - sec).toArray();
       if (!stale.length) return;
       await this.#deleteObjects(uid, stale);
       this.ctx.storage.transactionSync(() => {
-        for (const f of stale) {
-          this.sql.exec('DELETE FROM upchunks WHERE node_id = ?', f.id);
-          this.sql.exec("DELETE FROM nodes WHERE id = ? AND state = 'pending'", f.id);
-        }
+        for (const f of stale) this.#dropPending(f);
       });
       purged = stale.length;
     });
     if (purged) await this.#reportUsage();
+    await this.#lapseSessions();
+    this.#dropEndedReverse();
     await this.#schedulePurge();
   }
 }

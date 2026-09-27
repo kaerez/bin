@@ -729,6 +729,15 @@ input[type="checkbox"], input[type="radio"] { width: 1.125rem; height: 1.125rem;
 /* The whole link, wrapped (a scroller would need to be focusable). */
 .modal-body .linkrow .url { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .drive-qr { margin: 1rem auto 0; width: max-content; }
+/* Reverse shares ("Receive files", docs/REVERSE.md): the Drive dialog and the uploader page /r/. */
+.drive-reverse-form { display: flex; flex-direction: column; gap: .75rem; margin-top: 1rem; }
+.drive-reverse-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: .75rem 1rem; }
+.drive-reverse-list { margin-top: 1rem; }
+.drive-received { margin: .5rem 0; }
+.reverse .dropzone { margin: 0; }
+.reverse-list { margin: 0; padding: 0 0 0 1.1rem; max-height: 280px; overflow: auto; font-size: .78rem; overflow-wrap: anywhere; }
+.reverse-list:empty { display: none; }
+.reverse-note-text { margin: .4rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .drive-layout { grid-template-columns: 1fr; }
   .drive-tree-toggle { display: inline-flex; justify-self: start; }
