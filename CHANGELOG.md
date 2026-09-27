@@ -345,7 +345,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   per-entrypoint override is set (the default export is the only fetch entrypoint), and no
   Worker response opts into the cache (see Security).
 - **Accessibility statement:** the default text and the admin help no longer name a country or a
-  national standard; the default states the WCAG 2.2 AA target (AAA where possible).
+  national standard; the default states WCAG 2.2 AA as the minimum and AAA wherever possible.
 - **Imports never remove or overwrite an existing account's credentials** (the owner's
   included). An account that already exists only gets its role set (if that part is chosen;
   never the owner's) and the imported passkeys added (if that part is chosen); its password,
