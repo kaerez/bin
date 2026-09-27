@@ -19,7 +19,7 @@ import {
 } from './drivekeys.js';
 import { encryptPaste } from './crypto.js';
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from './bytes.js';
-import { CHUNK, encryptChunk, importFileKey, checkPath, MAX_ENTRIES } from './files.js';
+import { CHUNK, encryptChunk, importFileKey, checkPath, MAX_ENTRIES, INVISIBLE_RE } from './files.js';
 import { detectMime, normalizeMime, OCTET } from './mime.js';
 import { RefsReader, saveFile, saveZip } from './downloads.js';
 import { buildRefsManifest, refChunks } from './refsmanifest.js';
@@ -88,11 +88,14 @@ function uniqueName(taken, name) {
   return n;
 }
 
-/** A node name as typed, or throws: no "/", "\", control characters, "." or ".."; 1–255 bytes. */
+/**
+ * A node name as typed, or throws: no "/", "\", control characters, bidi or
+ * invisible characters (files.js INVISIBLE_RE), "." or ".."; 1–255 bytes.
+ */
 export function checkName(name) {
   // eslint-disable-next-line no-control-regex
-  if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\u0000-\u001f\u007f/\\]/.test(name)) {
-    throw new Error('Names cannot be empty, "." or "..", or contain "/", "\\" or control characters.');
+  if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\u0000-\u001f\u007f/\\]/.test(name) || INVISIBLE_RE.test(name)) {
+    throw new Error('Names cannot be empty, "." or "..", or contain "/", "\\", control characters or invisible (bidi, zero-width) characters.');
   }
   if (utf8(name).length > MAX_NAME_BYTES) throw new Error(`Names can be at most ${MAX_NAME_BYTES} bytes long.`);
   return name;
@@ -169,7 +172,7 @@ export async function openDrive({ user } = {}) {
  */
 export async function unlockDrive(creds = {}, { user, passwordVerified = false, spentWraps = [] } = {}) {
   const u = await whoAmI(user);
-  const st = await loadState();
+  let st = await loadState();
   if (u.impersonating) return openAsOwner(u, st);
   let dk = null;
   let via = null;
@@ -177,6 +180,7 @@ export async function unlockDrive(creds = {}, { user, passwordVerified = false, 
     if (!creds.password) throw new DriveLocked('Set up your Drive with your password.', 'setup');
     dk = await setUp(u, st, creds);
     via = 'pw';
+    st = await loadState(); // what the set-up stored (the owner's first escrow key pair included)
   } else {
     if (creds.password) { dk = await unlockWithPassword(creds.password, st.driveSalt, st.wraps); via = 'pw'; }
     if (!dk && creds.prfOutput && creds.credentialId) { dk = await unlockWithPrf(creds.prfOutput, creds.credentialId, st.wraps); via = 'passkey'; }

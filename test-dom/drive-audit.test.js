@@ -153,6 +153,25 @@ describe('L-6: a file needs its sealed metadata', () => {
   }, 30000);
 });
 
+describe('names: no bidi or invisible characters (audit round 3, L-5)', () => {
+  it('checkPath, the client’s checkName and the page’s checkName refuse them; ordinary names pass', async () => {
+    const { checkPath } = await import('../public/js/files.js');
+    const { checkName } = await import('../public/js/driveclient.js');
+    const page = await import('../public/dashboard/js/drive-app.js');
+    for (const bad of ['invoice\u202efdp.exe', 'a\u200bb.txt', 'x\u2028y', 'nel\u0085.txt', 'rtl\u2067x', 'b\ufeffom', 'lrm\u200e.txt']) {
+      expect(() => checkPath(bad), JSON.stringify(bad)).toThrow();
+      expect(() => checkPath(`dir/${bad}`)).toThrow();
+      expect(() => checkName(bad)).toThrow(/invisible/);
+      expect(page.checkName(bad).error).toMatch(/invisible/);
+    }
+    for (const ok of ['report.pdf', 'café résumé.txt', 'עברית.txt', '日本語.md']) {
+      expect(checkPath(ok)).toBe(ok);
+      expect(checkName(ok)).toBe(ok);
+      expect(page.checkName(ok)).toEqual({ name: ok });
+    }
+  });
+});
+
 describe('DK exposure: pages with third-party script', () => {
   it('holdSessionKeys moves the tab’s keys out of sessionStorage (still usable); release puts them back', () => {
     const dk = createDriveKey();

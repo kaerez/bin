@@ -10,6 +10,7 @@
 
 import { scriptURL, TURNSTILE_SCRIPT } from './tt.js';
 import { fetchConfig } from './api.js';
+import { holdSessionKeys } from './drivekeys.js';
 
 const WAIT_MS = 120000;
 const LOAD_FAILED = 'The human check (Cloudflare Turnstile) could not load. Check your connection or content blocker, then reload the page.';
@@ -25,6 +26,9 @@ function loadScript() {
       s.onload = () => (globalThis.turnstile ? resolve(globalThis.turnstile) : reject(new Error(LOAD_FAILED)));
       s.onerror = () => { loader = null; s.remove(); reject(new Error(LOAD_FAILED)); };
       s.src = scriptURL(TURNSTILE_SCRIPT);
+      // Third-party script from here on: the tab's Drive keys leave
+      // sessionStorage for drivekeys.js's memory first (SECURITY.md, "Drive keys").
+      holdSessionKeys();
       document.head.appendChild(s);
     });
   }

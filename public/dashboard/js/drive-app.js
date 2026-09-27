@@ -25,6 +25,7 @@ import { walkEntry } from '../../js/walk.js';
 import { expireSeconds, MAX_VIEWS } from '../../js/format.js';
 import { passkeysSupported } from '../../js/passkeys.js';
 import { utf8 } from '../../js/bytes.js';
+import { INVISIBLE_RE } from '../../js/files.js';
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
@@ -41,6 +42,7 @@ export function checkName(raw) {
   if (/[/\\]/.test(name)) return { error: 'Names cannot contain / or \\.' };
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(name)) return { error: 'Names cannot contain control characters.' };
+  if (INVISIBLE_RE.test(name)) return { error: 'Names cannot contain invisible characters (direction marks, zero-width characters, line separators).' };
   if (name === '.' || name === '..') return { error: 'That name is reserved.' };
   return { name };
 }

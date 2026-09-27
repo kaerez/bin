@@ -11,7 +11,7 @@
 import '../../js/kdf-progress.js';
 import { changePassword, listKeys, createKey, updateKey, revokeKey, myActivity, ApiError, myPasskeys, passkeyRegisterOptions, addPasskey, removePasskey, regenerateRecoveryCodes, setSecondFactor, changeUsername } from '../../js/api.js';
 import { passkeysSupported, createPasskeyPrf } from '../../js/passkeys.js';
-import { DRIVE_PRF_SALT, holdSessionKeys, releaseSessionKeys } from '../../js/drivekeys.js';
+import { DRIVE_PRF_SALT } from '../../js/drivekeys.js';
 import { updatePasswordWrap, replaceRecoveryWraps, addPasskeyWrap } from '../../js/driveclient.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
@@ -19,15 +19,11 @@ import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, forma
 import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
-import { humanCheck, turnstileSiteKey } from '../../js/turnstile.js';
-
-// This page may load Cloudflare's Turnstile script: before anything can load
-// it, the tab's Drive keys leave sessionStorage for this module's memory (the
-// changes below still use them); they go back only if the page turns out not
-// to load that script. Otherwise the Drive page asks to unlock again after a
+import { humanCheck } from '../../js/turnstile.js';
+// With the human check on, loading its script moves the tab's Drive keys out of
+// sessionStorage into memory (turnstile.js → drivekeys.js holdSessionKeys): the
+// changes below still use them, and the Drive page asks to unlock again after a
 // visit here (SECURITY.md, Drive keys in the tab).
-holdSessionKeys();
-turnstileSiteKey().then((key) => { if (!key) releaseSessionKeys(); }).catch(() => {});
 
 const $ = (s) => document.querySelector(s);
 let profile;

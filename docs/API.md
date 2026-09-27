@@ -439,8 +439,9 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 | Method & path | Body → result |
 | --- | --- |
-| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowPriv? }` (`capacity` / `maxFile` null = no limit) |
-| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPriv?, escrowPub? }` — key wraps (not while impersonating; the escrow keys owner only) |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowPin, pwStale, handoffKey?, escrowPriv? }` (`capacity` / `maxFile` null = no limit) |
+| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, handoffKey?, escrowPriv?, escrowPub?, current? \| reauth? }` — key wraps; removing a wrap, replacing the password wrap or the salt, and changing the escrow keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); while impersonating, only the first set-up and added wraps |
+| `POST /api/private/drive/escrow` | the owner impersonating the user: `{}` → `{ ownerId, escrowPub, escrowPriv, wrap, wraps }` (in the admin audit) |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
 | `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta? }` — move / rename |
 | `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
@@ -448,11 +449,11 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/folders` | `{ id?, parent, name, meta? }` → `201 { id }` |
 | `POST /api/private/drive/files` | `{ id?, parent, name, meta?, size, fk }` → `201 { id, uploadToken, chunks }` |
 | `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
-| `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` |
+| `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
-| `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (logged) |
-| `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (logged) |
+| `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (in the admin audit) |
+| `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (in the admin audit) |
 
 `name`, `meta` and `fk` are `{ iv, ct }` values encrypted in the browser; the server never sees
 names, types or keys. A Drive share is opened like a file share (`POST /api/file/:id/open`, which

@@ -1643,13 +1643,17 @@ export class Directory extends DurableObject {
   // ── shares index ("My shares") ───────────────────────────────────────────
   async recordShare({ id, uid, kind, label, created, expires, views, lh = null }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
-    // Upsert that never touches the lock columns: re-recording an id must not
-    // silently unlock it.
-    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
-      ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, kind = excluded.kind, label = excluded.label, created = excluded.created,
-        expires = excluded.expires, views_total = excluded.views_total, status = 'active', lh = excluded.lh`,
-      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null);
+    // Upsert that never touches the lock columns (re-recording an id must not
+    // silently unlock it) and never moves an id to another user: a row that
+    // belongs to someone else stays theirs, and this call fails.
+    const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+      ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, label = excluded.label, created = excluded.created,
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active', lh = excluded.lh
+      WHERE shares.user_id = excluded.user_id`,
+      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null).rowsWritten;
+    if (!w) return fail(409, 'exists', 'That share id belongs to another account.');
     this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
+    return { ok: true };
   }
 
   async listShares(uid, { q = '', status = '', limit = 50, offset = 0 } = {}) {

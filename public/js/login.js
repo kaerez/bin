@@ -9,7 +9,7 @@ import { loginProof } from './pwauth.js';
 import { showMsg, markInvalid, wirePeek, friendlyError } from './common.js';
 import { humanCheck } from './turnstile.js';
 import { passkeysSupported, usePasskeyPrf } from './passkeys.js';
-import { DRIVE_PRF_SALT, clearSessionKey } from './drivekeys.js';
+import { DRIVE_PRF_SALT, clearSessionKey, releaseSessionKeys } from './drivekeys.js';
 import { unlockAtSignIn } from './driveclient.js';
 
 const $ = (s) => document.querySelector(s);
@@ -41,6 +41,10 @@ const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'
  */
 async function done(r, creds = {}) {
   if (r && r.user && typeof r.user.id === 'string') await unlockAtSignIn({ user: r.user, ...creds, spentWraps: r.driveSpent });
+  // The next page needs the key: with the human check's script loaded here, it
+  // was kept in memory (turnstile.js); it goes to sessionStorage now, as the
+  // page is left (the script on this page saw the password anyway).
+  releaseSessionKeys();
   $('#login-pass').value = '';
   if (r && typeof r.recoveryLeft === 'number') location.replace(`/dashboard/account/?recovery=${r.recoveryLeft}`);
   else location.replace('/dashboard/');
