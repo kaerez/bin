@@ -7,10 +7,12 @@
 // when the tab has no Drive key; a plain notice when the role has no Drive.
 //
 // Everything cryptographic lives behind the Drive client (public/js/
-// driveclient.js); this module only moves names and bytes between it and the
-// DOM, which is built with h() only (strict CSP + Trusted Types).
-// `startDrive(mount, deps)` is the entry point (public/dashboard/js/drive.js
-// passes the client module); it is separate from the boot so it can be tested.
+// driveclient.js, docs/DRIVE.md §3, §8.1), including the passkey unlock (its
+// WebAuthn PRF helper is the sign-in's, public/js/passkeys.js); this module
+// only moves names and bytes between it and the DOM, which is built with h()
+// only (strict CSP + Trusted Types). `startDrive(mount, deps)` is the entry
+// point (public/dashboard/js/drive.js passes the client module); it is
+// separate from the boot so it can be tested.
 
 import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
@@ -19,13 +21,12 @@ import { progressBar } from '../../js/progress.js';
 import { walkEntry } from '../../js/walk.js';
 import { expireSeconds, MAX_VIEWS } from '../../js/format.js';
 import { passkeysSupported } from '../../js/passkeys.js';
-import { utf8, bytesFromB64url, randomBytes } from '../../js/bytes.js';
+import { utf8 } from '../../js/bytes.js';
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
 const UNIT_WORDS = { m: ['minute', 'minutes'], h: ['hour', 'hours'], d: ['day', 'days'] };
-// The fixed WebAuthn PRF salt input for the Drive (docs/DRIVE.md §3).
-const PRF_LABEL = 'secbin-drive/v1 prf';
+const MAX_NAME_BYTES = 255; // as the client (driveclient.js checkName)
 
 // ── pure helpers (unit-tested) ──────────────────────────────────────────────
 
@@ -33,7 +34,7 @@ const PRF_LABEL = 'secbin-drive/v1 prf';
 export function checkName(raw) {
   const name = String(raw ?? '').trim().normalize('NFC');
   if (!name) return { error: 'Enter a name.' };
-  if (name.length > 255) return { error: 'Names can be at most 255 characters.' };
+  if (utf8(name).length > MAX_NAME_BYTES) return { error: `Names can be at most ${MAX_NAME_BYTES} bytes long.` };
   if (/[/\\]/.test(name)) return { error: 'Names cannot contain / or \\.' };
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(name)) return { error: 'Names cannot contain control characters.' };
@@ -64,15 +65,11 @@ export function shareOptions({ views, unlimited, n, unit }, L = {}) {
   return { views: v, expire, expiryText: `${k} ${UNIT_WORDS[unit][k === 1 ? 0 : 1]}` };
 }
 
-/** Progress from the client → a fraction in [0, 1]: a number, or { loaded | done, total }. */
-export function toFraction(p) {
-  if (typeof p === 'number') return Number.isFinite(p) ? Math.max(0, Math.min(1, p)) : 0;
-  if (p && typeof p === 'object') {
-    const a = Number(p.loaded ?? p.done ?? 0);
-    const t = Number(p.total ?? 0);
-    return t > 0 ? Math.max(0, Math.min(1, a / t)) : 0;
-  }
-  return 0;
+/** The client's progress, onProgress(bytesDone, total) → a fraction in [0, 1]. */
+export function toFraction(done, total) {
+  const d = Number(done);
+  const t = Number(total);
+  return Number.isFinite(d) && Number.isFinite(t) && t > 0 ? Math.max(0, Math.min(1, d / t)) : 0;
 }
 
 /** When a node was last modified, in seconds (mtime may be ms, updated s). */
@@ -204,7 +201,8 @@ function nameDialog({ title, sub, value = '', action, submit, fallback }) {
 
 /**
  * Mount the Drive in `mount`. `deps`: { drive: the client module (openDrive,
- * unlockDrive, DriveLocked, DriveDisabled), profile (/api/private/me),
+ * unlockDrive, unlockDriveWithPasskey, DriveLocked, DriveDisabled), profile
+ * (/api/private/me), user ({ id, role, impersonating }, from the profile),
  * revoke(shareId) }. Resolves to { state: 'open' | 'locked' | 'disabled' |
  * 'error', app?, unlocked? } (unlocked: a promise of the app once unlocked).
  */
@@ -212,7 +210,7 @@ export async function startDrive(mount, deps) {
   mount.replaceChildren(h('p.msg', { role: 'status', text: 'Opening your Drive…' }));
   let client;
   try {
-    client = await deps.drive.openDrive();
+    client = await deps.drive.openDrive({ user: deps.user });
   } catch (e) {
     if (deps.drive.DriveDisabled && e instanceof deps.drive.DriveDisabled) { mount.replaceChildren(disabledNotice()); return { state: 'disabled' }; }
     if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) return { state: 'locked', unlocked: unlockView(mount, deps, e) };
@@ -231,39 +229,23 @@ function disabledNotice() {
 
 // ── unlock ──────────────────────────────────────────────────────────────────
 
-/** WebAuthn with the PRF extension → { prfOutput, credentialId } for unlockDrive. */
-export async function passkeyPrf(credentialIds = []) {
-  const salt = new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(PRF_LABEL)));
-  let cred;
-  try {
-    cred = await navigator.credentials.get({
-      publicKey: {
-        challenge: randomBytes(32), // not sent anywhere: the PRF output is all that is used
-        allowCredentials: credentialIds.map((id) => ({ type: 'public-key', id: bytesFromB64url(id) })),
-        userVerification: 'required',
-        timeout: 120000,
-        extensions: { prf: { eval: { first: salt } } },
-      },
-    });
-  } catch (e) {
-    if (e && e.name === 'NotAllowedError') throw new Error('The passkey request was cancelled or timed out.', { cause: e });
-    throw e;
-  }
-  const out = cred && typeof cred.getClientExtensionResults === 'function' ? cred.getClientExtensionResults()?.prf?.results?.first : null;
-  if (!out) throw new Error('This passkey cannot unlock the Drive (it does not support the PRF extension). Use your password or a recovery code.');
-  return { prfOutput: new Uint8Array(out instanceof ArrayBuffer ? out : out.buffer ?? out), credentialId: cred.id };
-}
-
+/**
+ * The unlock prompt (docs/DRIVE.md §3): the password, a passkey with a Drive
+ * wrap (PRF) or a recovery code. The first time (`reason` 'setup': no key yet)
+ * only the password can create the Drive's key.
+ */
 function unlockView(mount, deps, lockedErr) {
+  const setup = !!lockedErr && lockedErr.reason === 'setup';
+  const withPasskey = !setup && !(lockedErr && Array.isArray(lockedErr.credentialIds) && !lockedErr.credentialIds.length);
   return new Promise((resolve) => {
     const msg = h('p.msg.error', { id: 'drive-unlock-msg', role: 'alert', hidden: true });
     const pw = h('input.input', { id: 'drive-unlock-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false' });
     const code = h('input.input.mono', { id: 'drive-unlock-code', autocomplete: 'off', spellcheck: 'false', maxlength: '64', placeholder: 'xxxx-xxxx-xxxx' });
-    const pwBtn = h('button.cta', { type: 'submit', id: 'drive-unlock-btn', text: 'Unlock with password' });
+    const pwBtn = h('button.cta', { type: 'submit', id: 'drive-unlock-btn', text: setup ? 'Set up with password' : 'Unlock with password' });
     const codeBtn = h('button.cta', { type: 'submit', id: 'drive-unlock-code-btn', text: 'Unlock with recovery code' });
-    const pkBtn = h('button.btn', { type: 'button', id: 'drive-unlock-passkey', text: 'Unlock with a passkey', hidden: !passkeysSupported() || !(globalThis.crypto && crypto.subtle) });
+    const pkBtn = h('button.btn', { type: 'button', id: 'drive-unlock-passkey', text: 'Unlock with a passkey', hidden: !withPasskey || !passkeysSupported() });
     const codeForm = h('form.form.drive-unlock-form', { id: 'drive-code-form', hidden: true, novalidate: true }, field('Recovery code', code), codeBtn);
-    const codeToggle = h('button.linkbtn', { type: 'button', id: 'drive-code-toggle', 'aria-expanded': 'false', 'aria-controls': 'drive-code-form', text: 'Use a recovery code instead' });
+    const codeToggle = h('button.linkbtn', { type: 'button', id: 'drive-code-toggle', 'aria-expanded': 'false', 'aria-controls': 'drive-code-form', text: 'Use a recovery code instead', hidden: setup });
     const pwForm = h('form.form.drive-unlock-form', { id: 'drive-pw-form', novalidate: true }, field('Account password', pw), pwBtn);
     const all = [pwBtn, codeBtn, pkBtn];
     let inFlight = false;
@@ -275,15 +257,16 @@ function unlockView(mount, deps, lockedErr) {
       pw.removeAttribute('aria-invalid');
       code.removeAttribute('aria-invalid');
       try {
-        const c = await deps.drive.unlockDrive(typeof creds === 'function' ? await creds() : creds);
+        const client = creds === 'passkey'
+          ? await deps.drive.unlockDriveWithPasskey({ user: deps.user })
+          : await deps.drive.unlockDrive(creds, { user: deps.user });
         pw.value = '';
         code.value = '';
-        const client = c && typeof c.list === 'function' ? c : await deps.drive.openDrive();
         resolve(mountApp(mount, client, deps));
       } catch (e) {
         inFlight = false;
         for (const b of all) b.disabled = false;
-        showMsg(msg, e && e.name === 'OperationError' ? 'That did not unlock your Drive — check it and try again.' : friendlyError(e));
+        showMsg(msg, deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked && e.reason === 'wrong' ? 'That does not unlock your Drive — check it and try again.' : friendlyError(e));
         if (input) { input.setAttribute('aria-invalid', 'true'); input.setAttribute('aria-describedby', 'drive-unlock-msg'); input.focus(); input.select?.(); }
       }
     };
@@ -297,7 +280,7 @@ function unlockView(mount, deps, lockedErr) {
       if (!code.value.trim()) { showMsg(msg, 'Enter one of your recovery codes.'); code.setAttribute('aria-invalid', 'true'); code.focus(); return; }
       attempt({ code: code.value.trim() }, code);
     });
-    pkBtn.addEventListener('click', () => attempt(() => passkeyPrf((lockedErr && lockedErr.credentialIds) || []), null));
+    pkBtn.addEventListener('click', () => attempt('passkey', null));
     codeToggle.addEventListener('click', () => {
       const show = codeForm.hidden;
       codeForm.hidden = !show;
@@ -305,8 +288,12 @@ function unlockView(mount, deps, lockedErr) {
       if (show) code.focus();
     });
     mount.replaceChildren(h('div.card.drive-unlock', { id: 'drive-unlock' },
-      h('h2.section-title', { text: 'Unlock your Drive' }),
-      h('p.modal-sub', { text: 'Your Drive is encrypted with a key that only you can open, and this tab does not have it yet. Confirm it is you: the key is unlocked here, in your browser, and kept only until you sign out or close the tab.' }),
+      h('h2.section-title', { text: setup ? 'Set up your Drive' : 'Unlock your Drive' }),
+      h('p.modal-sub', {
+        text: setup
+          ? 'Your Drive is encrypted with a key that only you can open. Enter your account password to create it: the key is made here, in your browser, and kept only until you sign out or close the tab.'
+          : 'Your Drive is encrypted with a key that only you can open, and this tab does not have it yet. Confirm it is you: the key is unlocked here, in your browser, and kept only until you sign out or close the tab.',
+      }),
       pwForm,
       h('div.login-alt', {}, pkBtn, codeToggle),
       codeForm,
@@ -432,17 +419,16 @@ function mountApp(mount, client, deps) {
     pane.classList.remove('over');
     if (busy) return;
     const entries = [];
-    let emptyDirs = 0;
     const walks = [];
     for (const item of e.dataTransfer?.items || []) {
       const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
       if (entry) walks.push(entry);
       else if (item.kind === 'file') { const f = item.getAsFile(); if (f) entries.push({ path: f.name, file: f }); }
     }
-    for (const entry of walks) await walkEntry(entry, (path, file) => { entries.push({ path, file }); }, () => { emptyDirs++; });
+    // Empty folders are kept (the client creates them: { path, dir: true }).
+    for (const entry of walks) await walkEntry(entry, (path, file) => { entries.push({ path, file }); }, (path) => { entries.push({ path, dir: true }); });
     if (!walks.length && !entries.length) for (const f of e.dataTransfer?.files || []) entries.push({ path: f.name, file: f });
-    if (emptyDirs) toast(`${emptyDirs} empty ${emptyDirs === 1 ? 'folder was' : 'folders were'} skipped.`);
-    if (entries.some((x) => x.path.includes('/'))) uploadEntries(entries);
+    if (entries.some((x) => x.dir || x.path.includes('/'))) uploadEntries(entries);
     else uploadFiles(entries.map((x) => x.file));
   });
 
@@ -454,7 +440,10 @@ function mountApp(mount, client, deps) {
     try {
       r = await fetchList(id);
     } catch (e) {
-      if (n === openSeq) showMsg(paneMsg, `This folder could not be opened: ${friendlyError(e)}`);
+      if (n !== openSeq) return false;
+      // The tab's key does not open this Drive (the client dropped it): ask again.
+      if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) { unlockView(mount, deps, e); return false; }
+      showMsg(paneMsg, `This folder could not be opened: ${friendlyError(e)}`);
       return false;
     }
     if (n !== openSeq) return false;
@@ -652,7 +641,7 @@ function mountApp(mount, client, deps) {
     cancelBtn.onclick = () => ctl.abort();
     bar.set(`${label}…`, 0);
     try {
-      await fn((p) => bar.set(`${label}…`, toFraction(p)), ctl.signal);
+      await fn((done, total) => bar.set(`${label}…`, toFraction(done, total)), ctl.signal);
       bar.done(`${label}: done`);
       return true;
     } catch (e) {
@@ -676,7 +665,7 @@ function mountApp(mount, client, deps) {
     const label = files.length === 1 ? `Uploading ${files[0].name}` : `Uploading ${files.length} files`;
     const ok = await transfer(label, async (progress, signal) => {
       for (const f of files) {
-        await client.upload(target, f, { signal, onProgress: (p) => progress(total ? (done + toFraction(p) * f.size) / total : toFraction(p)) });
+        await client.upload(target, f, { signal, onProgress: (d) => progress(done + d, total) });
         done += f.size;
       }
     });
@@ -687,7 +676,8 @@ function mountApp(mount, client, deps) {
     if (!entries.length) return;
     const target = current;
     const top = new Set(entries.map((e) => e.path.split('/')[0]));
-    const label = top.size === 1 && entries[0].path.includes('/') ? `Uploading ${[...top][0]}/` : `Uploading ${entries.length} files`;
+    const files = entries.filter((e) => !e.dir).length;
+    const label = top.size === 1 && (entries[0].dir || entries[0].path.includes('/')) ? `Uploading ${[...top][0]}/` : `Uploading ${files} ${files === 1 ? 'file' : 'files'}`;
     await transfer(label, (progress, signal) => client.uploadTree(target, entries, { signal, onProgress: progress }));
     await refresh([target]);
   }
@@ -696,7 +686,7 @@ function mountApp(mount, client, deps) {
     const [it] = selectedItems();
     if (!it) return;
     if (it.kind === 'dir') transfer(`Preparing ${it.name}.zip`, (progress, signal) => client.downloadFolder(it.id, { onProgress: progress, signal }));
-    else transfer(`Downloading ${it.name}`, (progress, signal) => client.download(it.id, { onProgress: progress, signal }));
+    else transfer(`Downloading ${it.name}`, async (progress, signal) => (await client.download(it.id, { onProgress: progress, signal })).save());
   }
 
   // ── share ──────────────────────────────────────────────────────────────
@@ -716,6 +706,8 @@ function mountApp(mount, client, deps) {
     const pwBox = h('div.drive-share-pw', { hidden: true }, field('Password', pw1), field('Repeat the password', pw2));
     pwOn.addEventListener('change', () => { pwBox.hidden = !pwOn.checked; if (pwOn.checked) pw1.focus(); });
     const del = h('input', { type: 'checkbox', id: 'drive-share-deletable' });
+    const viewer = deps.profile && deps.profile.viewer;
+    const allowView = h('input', { type: 'checkbox', id: 'drive-share-view' });
     const label = h('input.input', { id: 'drive-share-label', maxlength: '100', placeholder: 'e.g. Contract for ACME' });
     const hint = unencryptedHint('drive-share-label-hint', label);
     const form = h('div.drive-share-form', {},
@@ -725,6 +717,7 @@ function mountApp(mount, client, deps) {
       h('label.viewer-opt', {}, pwOn, 'Protect with a password (recipients need it in addition to the link)'),
       pwBox,
       L.openerDelete ? h('label.viewer-opt', {}, del, 'Let the recipient delete it at once (“Delete now”)') : null,
+      viewer && viewer.enabled ? h('label.viewer-opt', {}, allowView, 'Allow recipients to view files in the browser') : null,
       h('div.label-row', {}, h('label.field-label', { for: 'drive-share-label', text: 'Label (optional, for your own reference)' }), label, hint));
     const d = openDialog({
       title: `Share ${describe(items)}`,
@@ -747,7 +740,10 @@ function mountApp(mount, client, deps) {
       create.disabled = true;
       create.querySelector('.send-txt').textContent = 'Creating…';
       try {
-        const r = await client.share(items.map((i) => i.id), { views: o.views, expire: o.expire, password, deletable: !!L.openerDelete && del.checked, label: label.value.trim() });
+        // `limits` applies the administrator's file-type and folder-depth policy (as the composer
+        // does); `view` is the viewer snapshot the composer's "view in the browser" option sends.
+        const view = viewer && viewer.enabled && allowView.checked ? { rules: viewer.rules, maxBytes: viewer.maxBytes } : null;
+        const r = await client.share(items.map((i) => i.id), { views: o.views, expire: o.expire, password, deletable: !!L.openerDelete && del.checked, label: label.value.trim(), limits: L, view });
         pw1.value = pw2.value = '';
         shareResult(d, r, o, items);
       } catch (e) {
@@ -790,7 +786,6 @@ function mountApp(mount, client, deps) {
     let rows;
     try {
       rows = await client.shares(it.id);
-      if (!Array.isArray(rows)) rows = (rows && rows.rows) || [];
     } catch (e) {
       status.textContent = '';
       d.error(friendlyError(e));
@@ -817,7 +812,7 @@ function mountApp(mount, client, deps) {
         }
         tb.appendChild(h('tr', { dataset: { status: s.status || '' } },
           h('td', { dataset: { label: 'Label' }, text: s.label || '(no label)' }),
-          h('td.mono', { dataset: { label: 'Type' }, text: KIND_NAMES[s.kind] || 'files' }),
+          h('td.mono', { dataset: { label: 'Type' }, text: KIND_NAMES[s.kind] || 'drive' }),
           h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),
           h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
           h('td.mono', { dataset: { label: 'Views' }, text: views }),

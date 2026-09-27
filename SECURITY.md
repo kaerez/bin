@@ -545,9 +545,7 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
   escrow public key (ECDH P-256 with an ephemeral key); the owner's escrow private key is stored
   sealed under the owner's own DK. The owner can therefore decrypt any user's Drive. It is used
   to re-key a user's Drive after an admin password reset, and every use is logged
-  (`drive.escrow_used`, with the user and the reason). **This needs review by Legal /
-  Compliance before production use** (GDPR transparency towards users, access-control and audit
-  requirements); nothing here is legal or compliance advice.
+  (`drive.escrow_used`, with the user and the reason).
 - **Failure modes.** A sign-in never fails because the Drive cannot be unlocked; the Drive page
   asks. A Drive that has content but no wraps is never given a new key (that would make its
   content unreadable). After an admin reset without escrow (the owner's Drive locked), the user

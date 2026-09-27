@@ -24,10 +24,9 @@ export async function loadMe() {
   }
 }
 
-/** Whether the signed-in account's role has a Drive (docs/DRIVE.md §5, §8). */
+/** Whether the signed-in account's role has a Drive: `caps.driveEnabled` (docs/DRIVE.md §5, §8.1). */
 export function driveAllowed(profile) {
-  const caps = profile && profile.caps;
-  return !!caps && (caps.driveEnabled === true || caps.drive === true || (!!caps.drive && caps.drive.enabled === true));
+  return !!(profile && profile.caps && profile.caps.driveEnabled === true);
 }
 
 export const ready = (async () => {

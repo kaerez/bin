@@ -1,12 +1,20 @@
-// drive.test.js — the Drive page logic (public/dashboard/js/drive-app.js)
-// against the temporary in-memory client (public/js/driveclient.mock.js):
-// disabled / locked / open states, the tree + right pane, the dialogs (new
-// folder, rename, delete, share, an item's shares with revoke), plus the pure
-// helpers and the nav's Drive switch.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+// drive.test.js — the Drive page (public/dashboard/js/drive-app.js) with the
+// real Drive client (public/js/driveclient.js) against the in-memory §6 API
+// behind a mocked fetch (drive-fake-server.js): disabled / set-up / locked /
+// open states, the unlock (password, recovery code, passkey PRF), the tree +
+// right pane, the dialogs (new folder, rename, move, delete, share, an item's
+// shares with revoke), upload and download, plus the pure helpers and the
+// nav's Drive switch.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startDrive, checkName, shareOptions, toFraction, modifiedOf, pathOf, sortChildren, successNote } from '../public/dashboard/js/drive-app.js';
+import * as drive from '../public/js/driveclient.js';
+import { createDriveKey, saveSessionKey, loadSessionKey, clearSessionKey, wrapRecovery, recoveryRef, wrapPrf, DRIVE_PRF_SALT } from '../public/js/drivekeys.js';
+import { deriveAccess, openPaste } from '../public/js/crypto.js';
+import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
+import { TAG } from '../public/js/files.js';
+import { fakeServer, seedTree } from './drive-fake-server.js';
 
-const until = async (fn, ms = 3000) => {
+const until = async (fn, ms = 5000) => {
   const t0 = Date.now();
   for (;;) {
     const v = fn();
@@ -21,26 +29,53 @@ const treeItem = (name) => [...document.querySelectorAll('#drive-tree-pane .tree
 const row = (name) => [...document.querySelectorAll('#drive-rows tr')].find((tr) => tr.children[1].textContent.trim() === name);
 const dialog = () => document.querySelector('.drive-dialog [role="dialog"]');
 const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === text);
-const PROFILE = { limits: { maxViews: 100, allowUnlimitedViews: true, maxExpireSec: null, openerDelete: true, files: true }, caps: {} };
+const LIMITS = { maxViews: 100, allowUnlimitedViews: true, maxExpireSec: null, openerDelete: true, files: true };
+const PROFILE = { limits: LIMITS, caps: { driveEnabled: true }, viewer: { enabled: true, rules: [], maxBytes: 1000 } };
+const CODE = 'ABCD-EFGH-JKMN-PQRS';
+const enc = (s) => new TextEncoder().encode(s);
+const TREE = {
+  Documents: { Reports: { 'q1.txt': enc('Q1 numbers\n'), Archive: {} }, 'notes.md': enc('# Notes\nhello\n') },
+  Photos: { 'cat.png': new Uint8Array(2048) },
+  Empty: {},
+  'readme.txt': enc('Welcome to the Drive.\n'),
+};
 
-async function freshMock() {
-  vi.resetModules();
-  return import('../public/js/driveclient.mock.js');
+let S;
+let dk;
+let ids;
+
+/** A server holding TREE under a Drive key with a recovery-code wrap; the tab has the key unless `locked`. */
+async function server({ locked = false, capacity = 50 * 1024 * 1024 } = {}) {
+  S = fakeServer({ capacity });
+  globalThis.fetch = S.fetch;
+  dk = createDriveKey();
+  const w = await wrapRecovery(dk, CODE, await recoveryRef(CODE));
+  S.wraps.set(`${w.kind}|${w.ref}`, w);
+  ids = await seedTree(S, dk, TREE);
+  if (!locked) saveSessionKey(dk, S.user.id);
+  return S;
 }
 
-async function openApp(extra = {}) {
-  const drive = await freshMock();
-  sessionStorage.setItem('secbin_mock_dk', '1');
+function mountPoint() {
   const mount = document.createElement('div');
   document.body.replaceChildren(document.createElement('main'), mount);
   document.body.firstChild.id = 'main';
-  const revoked = [];
-  const r = await startDrive(mount, { drive, profile: PROFILE, revoke: async (id) => { revoked.push(id); return drive.revokeShare(id); }, ...extra });
-  await r.app.ready;
-  return { ...r, drive, mount, revoked };
+  return mount;
 }
 
-beforeEach(() => { document.body.replaceChildren(); try { sessionStorage.clear(); } catch { /* */ } });
+const deps = (extra = {}) => ({ drive, profile: PROFILE, user: S.user, revoke: (id) => fetch(`/api/private/shares/${id}/revoke`, { method: 'POST' }), ...extra });
+
+async function openApp(extra = {}) {
+  await server();
+  const mount = mountPoint();
+  const r = await startDrive(mount, deps(extra));
+  expect(r.state).toBe('open');
+  await r.app.ready;
+  return { ...r, mount };
+}
+
+beforeEach(() => { document.body.replaceChildren(); clearSessionKey(); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('pure helpers', () => {
   it('checkName', () => {
@@ -51,6 +86,8 @@ describe('pure helpers', () => {
     expect(checkName('a\u0001').error).toMatch(/control/);
     expect(checkName('..').error).toMatch(/reserved/);
     expect(checkName('x'.repeat(256)).error).toMatch(/255/);
+    expect(checkName('x'.repeat(255))).toEqual({ name: 'x'.repeat(255) });
+    expect(checkName('é'.repeat(128)).error).toMatch(/255 bytes/); // 256 bytes in UTF-8, as the client counts
     expect(checkName('é').name).toBe('é'); // NFC
   });
 
@@ -64,61 +101,128 @@ describe('pure helpers', () => {
     expect(shareOptions({ views: '', unlimited: true, n: '1', unit: 'd' }, { allowUnlimitedViews: true })).toEqual({ views: null, expire: '1d', expiryText: '1 day' });
   });
 
-  it('toFraction, modifiedOf, sortChildren, pathOf, successNote', () => {
-    expect(toFraction(0.5)).toBe(0.5);
-    expect(toFraction(7)).toBe(1);
-    expect(toFraction({ loaded: 1, total: 4 })).toBe(0.25);
-    expect(toFraction({ done: 3, total: 0 })).toBe(0);
+  it('toFraction (the client\'s bytesDone, total), modifiedOf, sortChildren, pathOf, successNote', () => {
+    expect(toFraction(1, 2)).toBe(0.5);
+    expect(toFraction(7, 4)).toBe(1);
+    expect(toFraction(3, 0)).toBe(0); // an empty file
     expect(toFraction(undefined)).toBe(0);
     expect(modifiedOf({ kind: 'file', mtime: 1700000000000 })).toBe(1700000000);
-    expect(modifiedOf({ kind: 'dir', updated: 1700000000 })).toBe(1700000000);
+    expect(modifiedOf({ kind: 'dir', mtime: 0, updated: 1700000000 })).toBe(1700000000);
     expect(sortChildren([{ kind: 'file', name: 'a' }, { kind: 'dir', name: 'z' }, { kind: 'dir', name: 'b' }]).map((c) => c.name)).toEqual(['b', 'z', 'a']);
-    expect(pathOf({ node: { id: 'x', name: 'X' }, path: [{ id: 'root', name: '' }] })).toEqual([{ id: 'root', name: '' }, { id: 'x', name: 'X' }]);
-    expect(pathOf({ node: { id: 'root', name: '' }, path: [] })).toEqual([{ id: 'root', name: '' }]);
+    expect(pathOf({ node: { id: 'x', name: 'X' }, path: [{ id: 'root', name: 'Drive' }, { id: 'x', name: 'X' }] })).toEqual([{ id: 'root', name: 'Drive' }, { id: 'x', name: 'X' }]);
+    expect(pathOf({ node: { id: 'root', name: 'Drive' }, path: [{ id: 'root', name: 'Drive' }] })).toEqual([{ id: 'root', name: 'Drive' }]);
     expect(successNote({ views: 1, expiryText: '1 hour', what: 'the file' })).toMatch(/open the file once/);
   });
 });
 
 describe('startDrive states', () => {
   it('disabled: says Drive is not enabled', async () => {
-    const drive = await freshMock();
-    const mount = document.createElement('div');
-    document.body.append(mount);
-    const r = await startDrive(mount, { drive: { ...drive, openDrive: async () => { throw new drive.DriveDisabled(); } }, profile: PROFILE, revoke: async () => {} });
+    S = fakeServer({ enabled: false });
+    globalThis.fetch = S.fetch;
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps());
     expect(r.state).toBe('disabled');
     expect(mount.textContent).toMatch(/Drive is not enabled for your account/);
   });
 
   it('other errors are shown as an alert', async () => {
-    const drive = await freshMock();
-    const mount = document.createElement('div');
-    const r = await startDrive(mount, { drive: { ...drive, openDrive: async () => { throw new Error('boom'); } }, profile: PROFILE, revoke: async () => {} });
+    S = fakeServer();
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, type: 'basic', json: async () => ({ error: 'boom', message: 'boom' }) }));
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps());
     expect(r.state).toBe('error');
     expect(mount.querySelector('[role="alert"]').textContent).toMatch(/boom/);
   });
 
-  it('locked: the unlock prompt; a wrong password is refused, a recovery code unlocks', async () => {
-    const drive = await freshMock();
-    const mount = document.createElement('div');
-    document.body.append(mount);
-    const r = await startDrive(mount, { drive, profile: PROFILE, revoke: async () => {} });
+  it('set-up (no key yet): only the password is offered', async () => {
+    S = fakeServer();
+    globalThis.fetch = S.fetch;
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps());
     expect(r.state).toBe('locked');
+    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Set up your Drive');
+    expect(mount.querySelector('#drive-unlock-btn').textContent).toBe('Set up with password');
+    expect(mount.querySelector('#drive-code-toggle').hidden).toBe(true);
+    expect(mount.querySelector('#drive-unlock-passkey').hidden).toBe(true);
+  });
+
+  it('locked: the unlock prompt; a wrong password is refused, a recovery code unlocks', async () => {
+    await server({ locked: true });
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps());
+    expect(r.state).toBe('locked');
+    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Unlock your Drive');
+    expect(mount.querySelector('#drive-unlock-passkey').hidden).toBe(true); // no passkey has a Drive wrap
     const pw = mount.querySelector('#drive-unlock-pw');
     expect(pw.type).toBe('password');
-    expect(mount.querySelector(`label[for="drive-unlock-pw"]`)).not.toBeNull();
+    expect(mount.querySelector('label[for="drive-unlock-pw"]')).not.toBeNull();
     pw.value = 'wrong';
     mount.querySelector('#drive-pw-form').dispatchEvent(new Event('submit', { cancelable: true }));
-    await until(() => !mount.querySelector('#drive-unlock-msg').hidden);
-    expect(mount.querySelector('#drive-unlock-msg').textContent).toMatch(/did not unlock/);
+    await until(() => !mount.querySelector('#drive-unlock-msg').hidden, 30000);
+    expect(mount.querySelector('#drive-unlock-msg').textContent).toMatch(/does not unlock your Drive/);
     expect(pw.getAttribute('aria-invalid')).toBe('true');
     mount.querySelector('#drive-code-toggle').click();
     expect(mount.querySelector('#drive-code-form').hidden).toBe(false);
-    mount.querySelector('#drive-unlock-code').value = 'AAAA-BBBB';
+    mount.querySelector('#drive-unlock-code').value = CODE.toLowerCase();
     mount.querySelector('#drive-code-form').dispatchEvent(new Event('submit', { cancelable: true }));
     const app = await r.unlocked;
     await app.ready;
     expect(mount.querySelector('#drive-app')).not.toBeNull();
     expect(pw.value).toBe('');
+    expect(loadSessionKey(S.user.id)).toEqual(dk);
+    expect(names()).toEqual(['Documents', 'Empty', 'Photos', 'readme.txt']);
+  }, 60000);
+
+  it('locked: a passkey with a Drive wrap unlocks through the shared PRF helper (passkeys.js)', async () => {
+    await server({ locked: true });
+    const rawId = randomBytes(16);
+    const credId = b64urlFromBytes(rawId);
+    const prf = randomBytes(32);
+    const w = await wrapPrf(dk, prf, credId);
+    S.wraps.set(`${w.kind}|${w.ref}`, w);
+    let asked = null;
+    vi.stubGlobal('PublicKeyCredential', function PublicKeyCredential() {});
+    const creds = {
+      create: async () => null,
+      get: async (o) => {
+        asked = o.publicKey;
+        return {
+          id: credId, rawId: rawId.slice().buffer, type: 'public-key',
+          response: { clientDataJSON: new ArrayBuffer(1), authenticatorData: new ArrayBuffer(1), signature: new ArrayBuffer(1), userHandle: null },
+          getClientExtensionResults: () => ({ prf: { results: { first: prf.slice().buffer } } }),
+        };
+      },
+    };
+    Object.defineProperty(navigator, 'credentials', { configurable: true, value: creds });
+    try {
+      const mount = mountPoint();
+      const r = await startDrive(mount, deps());
+      const pk = mount.querySelector('#drive-unlock-passkey');
+      expect(pk.hidden).toBe(false);
+      pk.click();
+      const app = await r.unlocked;
+      await app.ready;
+      expect(Array.from(asked.extensions.prf.eval.first)).toEqual(Array.from(DRIVE_PRF_SALT));
+      expect(asked.allowCredentials.map((c) => b64urlFromBytes(new Uint8Array(c.id)))).toEqual([credId]);
+      expect(loadSessionKey(S.user.id)).toEqual(dk);
+      // Neither the PRF output nor the key went to the server.
+      const wire = JSON.stringify(S.requests.map((x) => x.body));
+      expect(wire).not.toContain(b64urlFromBytes(prf));
+      expect(wire).not.toContain(b64urlFromBytes(dk));
+    } finally {
+      delete navigator.credentials;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a tab key that does not open this Drive goes back to the unlock prompt', async () => {
+    await server({ locked: true });
+    saveSessionKey(createDriveKey(), S.user.id);
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps());
+    expect(r.state).toBe('open');
+    await until(() => mount.querySelector('#drive-unlock'));
+    expect(loadSessionKey(S.user.id)).toBeNull();
   });
 });
 
@@ -167,7 +271,7 @@ describe('the Drive', () => {
     expect(document.getElementById('drive-selinfo').textContent).toBe('2 selected');
   });
 
-  it('new folder and rename (dialogs, validation, focus back)', async () => {
+  it('new folder and rename (dialogs, validation, focus back); names are sealed on the wire', async () => {
     await openApp();
     const mk = document.getElementById('drive-mkdir');
     mk.focus();
@@ -196,6 +300,8 @@ describe('the Drive', () => {
     await until(() => row('Fresher'));
     await until(() => treeItem('Fresher'));
     expect(treeItem('Fresh')).toBeUndefined();
+    const wire = JSON.stringify(S.requests.map((r) => r.body));
+    expect(wire).not.toContain('Fresh');
   });
 
   it('Escape closes a dialog', async () => {
@@ -205,7 +311,7 @@ describe('the Drive', () => {
     expect(dialog()).toBeNull();
   });
 
-  it('delete asks first, then removes (and its shares end)', async () => {
+  it('delete asks first, then removes', async () => {
     const { app } = await openApp();
     row('Empty').querySelector('input[type="checkbox"]').click();
     document.getElementById('drive-del').click();
@@ -215,6 +321,7 @@ describe('the Drive', () => {
     await until(() => !row('Empty'));
     await until(() => !treeItem('Empty'));
     expect(app.selected.size).toBe(0);
+    expect(S.nodes.has(ids.get('Empty'))).toBe(false);
   });
 
   it('move into another folder via the picker tree', async () => {
@@ -229,12 +336,13 @@ describe('the Drive', () => {
     expect(d.querySelector('#drive-move-target').textContent).toBe('Move to: My Drive / Photos');
     button(d, 'Move here').click();
     await until(() => !row('readme.txt'));
+    expect(S.nodes.get(ids.get('readme.txt')).parent).toBe(ids.get('Photos'));
     treeItem('Photos').querySelector('.tree-label').click();
     await until(() => title() === 'Photos' && row('readme.txt'));
   });
 
-  it('share: options, validation and the link; the item\'s shares with revoke', async () => {
-    const { revoked } = await openApp();
+  it('share: options, validation and the link (manifest v3, viewer snapshot); the item\'s shares with revoke', async () => {
+    await openApp();
     row('readme.txt').querySelector('input[type="checkbox"]').click();
     document.getElementById('drive-share').click();
     let d = dialog();
@@ -245,10 +353,20 @@ describe('the Drive', () => {
     expect(d.querySelector('.modal-msg').textContent).toMatch(/Views must be/);
     d.querySelector('#drive-share-views').value = '2';
     d.querySelector('#drive-share-label').value = 'for Bob';
+    d.querySelector('#drive-share-view').checked = true;
     button(d, 'Create link').click();
     await until(() => d.querySelector('#drive-share-url'));
-    expect(d.querySelector('#drive-share-url').textContent).toMatch(/\/p\/fMOCK/);
+    const url = d.querySelector('#drive-share-url').textContent;
+    expect(url).toMatch(/\/p\/fSHARE1#/);
     expect(d.querySelector('.modal-sub').textContent).toMatch(/up to 2 times/);
+    const [body] = S.shareBodies;
+    expect(body).toMatchObject({ nodes: [ids.get('readme.txt')], views: 2, expire: '24h', label: 'for Bob' });
+    const access = await deriveAccess({ adata: body.paste.adata, fragment: url.split('#')[1] });
+    const { acc, ...paste } = body.paste;
+    void acc;
+    const manifest = JSON.parse((await openPaste({ paste, access })).text);
+    expect(manifest).toMatchObject({ v: 3, kind: 'refs', view: { rules: [], maxBytes: 1000 } });
+    expect(manifest.entries.map((e) => e.path)).toEqual(['readme.txt']);
     button(d, 'Done').click();
     expect(dialog()).toBeNull();
     button(row('readme.txt'), 'Shares').click();
@@ -257,12 +375,24 @@ describe('the Drive', () => {
     const tr = d.querySelector('#drive-shares-table tbody tr');
     expect(tr.textContent).toMatch(/for Bob/);
     expect(tr.textContent).toMatch(/2 left of 2/);
+    expect(tr.textContent).toMatch(/drive/);
     const rv = button(tr, 'Revoke');
     rv.click(); // arms
     expect(rv.textContent).toMatch(/irreversible/);
     rv.click();
     await until(() => /revoked/.test(d.querySelector('#drive-shares-table tbody tr').textContent));
-    expect(revoked).toHaveLength(1);
+    expect(S.revoked).toEqual(['fSHARE1']);
+  });
+
+  it('share: the administrator\'s file-type policy applies (limits reach the client)', async () => {
+    await openApp({ profile: { ...PROFILE, limits: { ...LIMITS, fileTypeMode: 'block', fileTypeRules: ['ext:txt'] } } });
+    row('readme.txt').querySelector('input[type="checkbox"]').click();
+    document.getElementById('drive-share').click();
+    const d = dialog();
+    button(d, 'Create link').click();
+    await until(() => !d.querySelector('.modal-msg').hidden);
+    expect(d.querySelector('.modal-msg').textContent).toMatch(/does not allow/);
+    expect(S.shareBodies).toHaveLength(0);
   });
 
   it('upload files into the open folder, with progress', async () => {
@@ -274,6 +404,23 @@ describe('the Drive', () => {
     input.dispatchEvent(new Event('change'));
     await until(() => row('hi.txt'));
     expect(document.querySelector('.drive-transfer .progress-label').textContent).toMatch(/Uploading hi\.txt: done/);
+    const put = S.requests.find((r) => r.method === 'PUT' && r.path.includes('/chunk/'));
+    expect(put.body.length).toBe(5 + TAG);
+    const node = [...S.nodes.values()].find((n) => n.kind === 'file' && n.parent === ids.get('Photos') && n.size === 5);
+    expect(node.state).toBe('ready');
+  });
+
+  it('download a file (decrypted in the browser), with progress', async () => {
+    await openApp();
+    let saved = null;
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => { saved = b; return 'blob:x'; });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() { saved.name = this.download; });
+    row('readme.txt').querySelector('input[type="checkbox"]').click();
+    document.getElementById('drive-download').click();
+    await until(() => /done/.test(document.querySelector('.drive-transfer .progress-label')?.textContent || ''));
+    expect(saved.name).toBe('readme.txt');
+    expect(new TextDecoder().decode(new Uint8Array(await saved.arrayBuffer()))).toBe('Welcome to the Drive.\n');
   });
 
   it('names are shown as text, never markup', async () => {
@@ -286,14 +433,34 @@ describe('the Drive', () => {
   });
 });
 
+describe('the client\'s progress and cancel for downloads', () => {
+  it('download(id, { onProgress, signal }) reports (bytesDone, total) and stops on abort', async () => {
+    await server();
+    const c = await drive.openDrive({ user: S.user });
+    const seen = [];
+    const blob = await (await c.download(ids.get('readme.txt'), { onProgress: (d, t) => seen.push([d, t]) })).blob();
+    expect(await blob.text()).toBe('Welcome to the Drive.\n');
+    expect(seen).toEqual([[0, 22], [22, 22]]);
+    const ctl = new AbortController();
+    ctl.abort();
+    await expect((await c.download(ids.get('readme.txt'), { signal: ctl.signal })).blob()).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('openDrive\'s DriveLocked names the passkeys that can unlock', async () => {
+    await server({ locked: true });
+    const w = await wrapPrf(dk, randomBytes(32), 'cred-9');
+    S.wraps.set(`${w.kind}|${w.ref}`, w);
+    await expect(drive.openDrive({ user: S.user })).rejects.toMatchObject({ name: 'DriveLocked', reason: 'locked', credentialIds: ['cred-9'] });
+  });
+});
+
 describe('nav: Drive link', () => {
-  it('driveAllowed reads caps.driveEnabled (and caps.drive)', async () => {
+  it('driveAllowed reads caps.driveEnabled', async () => {
     vi.resetModules();
     vi.doMock('../public/js/api.js', () => ({ me: () => new Promise(() => {}), logout: async () => {}, admin: {}, ApiError: class extends Error {} }));
     const { driveAllowed } = await import('../public/dashboard/js/nav.js');
     expect(driveAllowed({ caps: { driveEnabled: true } })).toBe(true);
-    expect(driveAllowed({ caps: { drive: { enabled: true } } })).toBe(true);
-    expect(driveAllowed({ caps: { drive: true } })).toBe(true);
+    expect(driveAllowed({ caps: { driveEnabled: 1 } })).toBe(false);
     expect(driveAllowed({ caps: {} })).toBe(false);
     expect(driveAllowed({})).toBe(false);
     vi.doUnmock('../public/js/api.js');

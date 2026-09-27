@@ -1,10 +1,6 @@
 // drive.js — the Drive page's entry (/dashboard/drive/): the signed-in
-// profile, the Drive client, then the page itself (drive-app.js).
-//
-// TEMPORARY: `?mock=1` loads the in-memory stand-in client
-// (public/js/driveclient.mock.js) instead of the real one, for building and
-// testing the page before the Drive client and server land. It is removed at
-// integration together with that file.
+// profile, the Drive client (public/js/driveclient.js), then the page itself
+// (drive-app.js).
 import '../../js/kdf-progress.js';
 import { revokeShare } from '../../js/api.js';
 import { h, friendlyError } from '../../js/common.js';
@@ -13,15 +9,16 @@ import { startDrive } from './drive-app.js';
 
 const mount = document.getElementById('drive-root');
 const profile = await ready;
-const mock = new URLSearchParams(location.search).get('mock') === '1';
 let drive;
 try {
-  drive = mock ? await import('../../js/driveclient.mock.js') : await import('../../js/driveclient.js');
+  drive = await import('../../js/driveclient.js');
 } catch (e) {
   drive = null;
   mount.replaceChildren(h('p.msg.error', { role: 'alert', text: `The Drive is unavailable right now: ${friendlyError(e)}` }));
 }
 if (drive) {
-  if (mock) { const a = document.getElementById('nav-drive'); if (a) a.hidden = false; }
-  startDrive(mount, { drive, profile, revoke: mock && drive.revokeShare ? drive.revokeShare : revokeShare });
+  // The profile names the account, so the client needs no session lookup; while
+  // the owner acts as a user, the tab's key slot keeps the owner's own key.
+  const user = { id: profile.user.id, role: profile.user.role, impersonating: !!profile.impersonatedBy };
+  startDrive(mount, { drive, profile, user, revoke: revokeShare });
 }

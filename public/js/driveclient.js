@@ -25,12 +25,18 @@ import { buildRefsManifest, refChunks } from './refsmanifest.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
 import { passkeyPrfOnly } from './passkeys.js';
 
-/** No usable DK in this tab (`reason`: 'locked' | 'wrong' | 'setup' | 'impersonating' | 'no_passkey'). */
+/**
+ * No usable DK in this tab (`reason`: 'locked' | 'wrong' | 'setup' |
+ * 'impersonating' | 'no_passkey'). `credentialIds` (from openDrive) lists the
+ * passkeys (base64url credential ids) that have a Drive wrap, so a page can
+ * offer the passkey unlock only when one exists.
+ */
 export class DriveLocked extends Error {
-  constructor(message = 'Unlock your Drive to continue.', reason = 'locked') {
+  constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = []) {
     super(message);
     this.name = 'DriveLocked';
     this.reason = reason;
+    this.credentialIds = credentialIds;
   }
 }
 
@@ -48,6 +54,23 @@ const MAX_NAME_BYTES = 255;
 const MAX_DEPTH = 64;
 const newId = () => b64urlFromBytes(randomBytes(16));
 const malformed = () => new ApiError('Malformed response from the server.', 502, 'malformed');
+
+const aborted = (signal, what) => signal.reason ?? new DOMException(`${what} cancelled.`, 'AbortError');
+
+/**
+ * downloads.js reports each chunk's plaintext length (onBytes(n)); this turns
+ * that into onProgress(bytesDone, total), as uploads report it, and stops the
+ * transfer (with the signal's AbortError) once `signal` is aborted.
+ */
+function byteCounter(total, onProgress, signal) {
+  let done = 0;
+  if (onProgress) onProgress(0, total);
+  return (n) => {
+    if (signal?.aborted) throw aborted(signal, 'Download');
+    done += n;
+    if (onProgress) onProgress(done, total);
+  };
+}
 
 /** `name`, or "name (2).ext", "name (3).ext"… when `taken` already has it. */
 function uniqueName(taken, name) {
@@ -108,7 +131,7 @@ export async function openDrive({ user } = {}) {
     throw new DriveLocked('Set up your Drive with your password.', 'setup');
   }
   const dk = loadSessionKey(u.id);
-  if (!dk) throw new DriveLocked();
+  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st));
   const client = await DriveClient.create(dk, u);
   if (!u.impersonating) await client.maintain(st).catch(() => {});
   return client;
@@ -148,10 +171,16 @@ export async function unlockDrive(creds = {}, { user, passwordVerified = false, 
   return client;
 }
 
-/** Unlock with a passkey that has a Drive wrap (a local WebAuthn prompt; the PRF output stays here). */
+const passkeyRefs = (st) => st.wraps.filter((w) => w.kind === 'passkey').map((w) => w.ref);
+
+/**
+ * Unlock with a passkey that has a Drive wrap: a local WebAuthn prompt with the
+ * PRF extension (passkeys.js, the same helper the sign-in uses; the PRF output
+ * stays in this tab), limited to those passkeys.
+ */
 export async function unlockDriveWithPasskey({ user } = {}) {
   const st = await loadState();
-  const ids = st.wraps.filter((w) => w.kind === 'passkey').map((w) => w.ref);
+  const ids = passkeyRefs(st);
   if (!ids.length) throw new DriveLocked('None of your passkeys can unlock the Drive.', 'no_passkey');
   const { credentialId, prf } = await passkeyPrfOnly(DRIVE_PRF_SALT, ids);
   if (!prf) throw new DriveLocked('This passkey cannot unlock the Drive.', 'no_passkey');
@@ -450,7 +479,7 @@ export class DriveClient {
       let done = 0;
       if (onProgress) onProgress(0, size);
       for (let i = 0; i < n; i++) {
-        if (signal?.aborted) throw signal.reason ?? new DOMException('Upload cancelled.', 'AbortError');
+        if (signal?.aborted) throw aborted(signal, 'Upload');
         const plain = new Uint8Array(await file.slice(i * CHUNK, Math.min(size, (i + 1) * CHUNK)).arrayBuffer());
         const ct = await encryptChunk(key, i, n, plain);
         try {
@@ -462,7 +491,7 @@ export class DriveClient {
         done += plain.length;
         if (onProgress) onProgress(done, size);
       }
-      if (signal?.aborted) throw signal.reason ?? new DOMException('Upload cancelled.', 'AbortError');
+      if (signal?.aborted) throw aborted(signal, 'Upload');
       await api.finalize(id, token);
     } catch (e) {
       api.remove(id).catch(() => {}); // free the capacity now (the server purges it later anyway)
@@ -498,7 +527,7 @@ export class DriveClient {
     const ids = [];
     let before = 0;
     for (const e of entries) {
-      if (signal?.aborted) throw signal.reason ?? new DOMException('Upload cancelled.', 'AbortError');
+      if (signal?.aborted) throw aborted(signal, 'Upload');
       const path = checkPath(e.path);
       path.split('/').forEach(checkName);
       if (e.dir) { await ensure(path); continue; }
@@ -542,20 +571,23 @@ export class DriveClient {
   }
 
   /**
-   * One file → { entry, reader, save(onBytes), blob(onBytes) }: `reader` and
+   * One file → { entry, reader, save(onBytes?), blob(onBytes?) }: `reader` and
    * `entry` work with downloads.js saveFile; save() streams it to disk (or a
-   * download), blob() returns it in memory (small files, previews).
+   * download), blob() returns it in memory (small files, previews). Options
+   * (used when save/blob get no onBytes): onProgress(bytesDone, total) and
+   * signal (AbortSignal: the transfer stops with its AbortError).
    */
-  async download(id) {
+  async download(id, { onProgress, signal } = {}) {
     const r = await api.node(id);
     if (!r || !r.node) throw malformed();
     const entry = { ...(await this.#fileEntry(r.node)), ref: 0 };
     const reader = this.#reader([entry], entry.size);
+    const counter = () => byteCounter(entry.size, onProgress, signal);
     return {
       entry,
       reader,
-      save: (onBytes) => saveFile(reader, entry, onBytes),
-      blob: async (onBytes) => new Blob([await reader.bytes(entry, onBytes)], { type: entry.type }),
+      save: (onBytes) => saveFile(reader, entry, onBytes ?? counter()),
+      blob: async (onBytes) => new Blob([await reader.bytes(entry, onBytes ?? counter())], { type: entry.type }),
     };
   }
 
@@ -607,16 +639,20 @@ export class DriveClient {
     }
   }
 
-  /** Save a folder as a ZIP of its content (downloads.js saveZip) → resolves when saved. */
-  async downloadFolder(id, { onProgress, zipName } = {}) {
+  /**
+   * Save a folder as a ZIP of its content (downloads.js saveZip) → resolves
+   * when saved. opts: onProgress(bytesDone, total), signal, zipName.
+   */
+  async downloadFolder(id, { onProgress, signal, zipName } = {}) {
     const r = await api.node(id);
     if (!r || !r.node) throw malformed();
     const d = await this.decode(r.node);
     const out = { files: [], dirs: [], count: 0 };
     await this.#walk(id, '', out, 1);
     const entries = [...out.files.map((f, ref) => ({ ...f, ref })), ...out.dirs.map((path) => ({ path, dir: true }))];
-    const reader = this.#reader(entries, out.files.reduce((s, f) => s + f.size, 0));
-    await saveZip(reader, '', zipName || `${d.name || 'drive'}.zip`, onProgress);
+    const total = out.files.reduce((s, f) => s + f.size, 0);
+    const reader = this.#reader(entries, total);
+    await saveZip(reader, '', zipName || `${d.name || 'drive'}.zip`, byteCounter(total, onProgress, signal));
   }
 
   /**

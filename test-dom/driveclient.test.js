@@ -1,5 +1,6 @@
 // driveclient.test.js — the Drive client (public/js/driveclient.js) against an
-// in-memory stand-in for the §6 API (docs/DRIVE.md) behind a mocked fetch:
+// in-memory stand-in for the §6 API (docs/DRIVE.md) behind a mocked fetch
+// (drive-fake-server.js):
 // first-time setup and unlock, the owner's escrow key, names decrypted on
 // list (and never sent in the clear), exact chunk sizes on upload, download
 // round trips, manifest v3 contents of a share (decrypted as a recipient
@@ -18,6 +19,7 @@ import { validateRefsManifest } from '../public/js/refsmanifest.js';
 import { RefsReader } from '../public/js/downloads.js';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
+import { fakeServer } from './drive-fake-server.js';
 
 const PASSWORD = 'drive password 1';
 const CODE = 'ABCD-EFGH-JKMN-PQRS';
@@ -34,107 +36,6 @@ function pattern(n, seed = 1) {
   const b = new Uint8Array(n);
   for (let i = 0; i < n; i++) b[i] = (i * 31 + seed) & 0xff;
   return b;
-}
-
-/** An in-memory Drive server for one user (plus an owner) and a fetch that talks to it. */
-function fakeServer({ role = 'user', enabled = true } = {}) {
-  const S = {
-    user: { id: role === 'owner' ? 'owner1' : 'u1', role },
-    enabled,
-    driveSalt: null,
-    wraps: new Map(),
-    escrowPub: null,
-    escrowPriv: null,
-    nodes: new Map([['root', { id: 'root', parent: null, kind: 'dir', name: '', size: 0, chunks: 0, state: 'ready', created: 1, updated: 1 }]]),
-    chunks: new Map(),
-    shareBodies: [],
-    requests: [],
-    userWraps: null, // the "other user" for the escrow route
-    adminKeys: [],
-  };
-  const ok = (data, status = 200) => ({ ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) });
-  const bin = (bytes) => ({ ok: true, status: 200, type: 'basic', json: async () => null, arrayBuffer: async () => bytes.slice().buffer });
-  const fail = (status, error) => ok({ error, message: error }, status);
-  const kids = (id) => [...S.nodes.values()].filter((n) => n.parent === id);
-  const ancestors = (n) => { const out = []; let p = n.parent; while (p) { const a = S.nodes.get(p); out.unshift(a); p = a.parent; } return out; };
-  const pub = (n) => ({ ...n });
-  S.fetch = vi.fn(async (url, init = {}) => {
-    const method = init.method || 'GET';
-    const u = new URL(url, 'https://bin.example');
-    const p = u.pathname;
-    const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
-    S.requests.push({ method, path: p, body, headers: init.headers || {} });
-    let m;
-    if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: null });
-    if (p === '/api/private/drive' && method === 'GET') {
-      if (!S.enabled) return ok({ enabled: false });
-      const used = [...S.nodes.values()].reduce((s, n) => s + n.size, 0);
-      return ok({ enabled: true, capacity: 1 << 30, used, driveSalt: S.driveSalt, wraps: [...S.wraps.values()], escrowPub: S.escrowPub, ...(role === 'owner' ? { escrowPriv: S.escrowPriv } : {}) });
-    }
-    if (p === '/api/private/drive/keys' && method === 'PUT') {
-      if (body.driveSalt) S.driveSalt = body.driveSalt;
-      for (const w of body.remove || []) S.wraps.delete(`${w.kind}|${w.ref}`);
-      for (const w of body.set || []) S.wraps.set(`${w.kind}|${w.ref}`, w);
-      if (body.escrowPriv) S.escrowPriv = body.escrowPriv;
-      if (body.escrowPub) S.escrowPub = body.escrowPub;
-      return ok({ ok: true });
-    }
-    if ((m = p.match(/^\/api\/private\/drive\/nodes\/([^/]+)$/))) {
-      const n = S.nodes.get(m[1]);
-      if (!n) return fail(404, 'not_found');
-      if (method === 'GET') return ok({ node: pub(n), children: kids(n.id).map(pub), path: ancestors(n).map(pub) });
-      if (method === 'PATCH') { if (body.name) n.name = body.name; if (body.parent) n.parent = body.parent; return ok({ ok: true }); }
-      if (method === 'DELETE') {
-        const drop = (id) => { kids(id).forEach((c) => drop(c.id)); S.nodes.delete(id); };
-        drop(n.id);
-        return ok({ ok: true });
-      }
-    }
-    if (/^\/api\/private\/drive\/nodes\/[^/]+\/shares$/.test(p)) return ok({ shares: [{ id: 'fS1', label: 'x' }] });
-    if (p === '/api/private/drive/folders' && method === 'POST') {
-      if (!/^[A-Za-z0-9_-]{22}$/.test(body.id) || S.nodes.has(body.id)) return fail(409, 'bad_id');
-      S.nodes.set(body.id, { id: body.id, parent: body.parent, kind: 'dir', name: body.name, size: 0, chunks: 0, state: 'ready', created: 2, updated: 2 });
-      return ok({ id: body.id });
-    }
-    if (p === '/api/private/drive/files' && method === 'POST') {
-      if (!/^[A-Za-z0-9_-]{22}$/.test(body.id) || S.nodes.has(body.id)) return fail(409, 'bad_id');
-      const chunks = Math.ceil(body.size / CHUNK);
-      S.nodes.set(body.id, { id: body.id, parent: body.parent, kind: 'file', name: body.name, meta: body.meta, fk: body.fk, size: body.size, chunks, state: 'pending', created: 3, updated: 3 });
-      return ok({ id: body.id, uploadToken: `tok-${body.id}`, chunks });
-    }
-    if ((m = p.match(/^\/api\/private\/drive\/files\/([^/]+)\/chunk\/(\d+)$/))) {
-      const n = S.nodes.get(m[1]);
-      const i = Number(m[2]);
-      if (method === 'PUT') {
-        if (init.headers['x-upload-token'] !== `tok-${n.id}`) return fail(403, 'bad_token');
-        if (i >= n.chunks || body.length !== Math.min(CHUNK, n.size - i * CHUNK) + TAG) return fail(400, 'bad_size');
-        S.chunks.set(`${n.id}/${i}`, body.slice());
-        return ok({ ok: true });
-      }
-      const c = S.chunks.get(`${n.id}/${i}`);
-      return c ? bin(c) : fail(404, 'not_found');
-    }
-    if ((m = p.match(/^\/api\/private\/drive\/files\/([^/]+)\/finalize$/))) {
-      const n = S.nodes.get(m[1]);
-      for (let i = 0; i < n.chunks; i++) if (!S.chunks.has(`${n.id}/${i}`)) return fail(409, 'incomplete');
-      n.state = 'ready';
-      return ok({ ok: true });
-    }
-    if (p === '/api/private/drive/shares' && method === 'POST') {
-      S.shareBodies.push(body);
-      return ok({ id: 'fSHARE1', deletetoken: 'dt1' });
-    }
-    if (/^\/api\/private\/admin\/drive\/escrow\/[^/]+$/.test(p)) {
-      const wraps = S.userWraps || [];
-      return ok({ wrap: wraps.find((w) => w.kind === 'escrow') || null, wraps });
-    }
-    if ((m = p.match(/^\/api\/private\/admin\/drive\/keys\/([^/]+)$/))) {
-      S.adminKeys.push({ userId: m[1], body });
-      return ok({ ok: true });
-    }
-    return fail(404, `unrouted ${method} ${p}`);
-  });
-  return S;
 }
 
 let S;
@@ -415,7 +316,7 @@ describe('shares (manifest v3)', () => {
     const reader = new RefsReader({ manifest: m, fetch: (e, i) => Promise.resolve(S.chunks.get(`${body.nodes[e.ref]}/${i}`)), refs: body.nodes.map((id) => ({ chunks: S.nodes.get(id).chunks })) });
     expect(Buffer.from(await reader.bytes(files[1])).equals(Buffer.from(two))).toBe(true);
     expect(Buffer.from(await reader.bytes(files[0])).equals(Buffer.from(one))).toBe(true);
-    expect((await d.shares(photos))[0].id).toBe('fS1');
+    expect((await d.shares(photos)).map((x) => x.id)).toEqual(['fSHARE1']); // a folder's shares: those of the files under it
   }, 60000);
 
   it('a password share needs the password; policy limits are applied and declared', async () => {

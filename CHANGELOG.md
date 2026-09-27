@@ -77,7 +77,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   download progress with cancel; an unlock prompt (password, passkey with PRF, recovery code);
   "Drive is not enabled for your account" when the role has none; on phones the tree folds
   into a "Folders" toggle. The nav shows **drive** only when the profile's
-  `caps.driveEnabled` is true.
+  `caps.driveEnabled` is true. The page runs on the real Drive client (docs/DRIVE.md §8.1):
+  the unlock prompt becomes "Set up your Drive" (password only) the first time, offers the
+  passkey only when one has a Drive wrap (the sign-in's PRF helper), and returns when the tab's
+  key does not open the Drive; transfers report bytes and can be cancelled (downloads too);
+  dropped empty folders are kept; Share… applies the file-type and folder-depth policy and can
+  allow in-browser viewing, like the composer. My shares and Admin → Shares name drive shares
+  "drive".
 - **Folder tree component** (`public/js/tree.js`): a WAI-ARIA tree (roving tabindex, arrow
   keys, Home/End, Enter/Space, `*`, type-ahead; `aria-expanded`/`aria-selected`/levels) with a
   right-pane folder browser. The composer's file list and the recipient's file view now show
