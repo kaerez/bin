@@ -14,9 +14,9 @@
 // a file name or a file type. See SPEC.md §10 and SECURITY.md.
 
 import { err, HttpError, withSecurityHeaders, redirect } from './lib/http.js';
-import { readSession, logoutCookie } from './lib/auth.js';
+import { readSession, logoutCookie, SESSION_COOKIE } from './lib/auth.js';
 import { ipContext, cachedSettings } from './lib/guard.js';
-import { turnstileConfig } from './lib/turnstile.js';
+import { turnstileKeys } from './lib/turnstile.js';
 import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
 import { handlePrivate } from './routes/private.js';
@@ -29,14 +29,17 @@ export { Directory } from './directory-do.js';
 export { Guard } from './guard-do.js';
 
 const DASH_PUBLIC = /^\/dashboard\/(login|setup)(\/|\/index\.html)?$/;
+const DASH_LOGIN = /^\/dashboard\/login(\/|\/index\.html)?$/;
 
 // Pages with a Turnstile widget (see src/lib/turnstile.js): login, account
 // (password change) and the home page's public composer when it is enabled.
 const TURNSTILE_DASH = /^\/dashboard\/(login|account)(\/|\/index\.html)?$/;
 const HOME = /^\/(index\.html)?$/;
+// The home page is public and cached: look up a session only when a cookie is there.
+const hasSessionCookie = (request) => (request.headers.get('cookie') || '').includes(`${SESSION_COOKIE}=`);
 
 async function showsTurnstile(env, pathname) {
-  if (!turnstileConfig(env)) return false;
+  if (!(await turnstileKeys(env))) return false;
   if (TURNSTILE_DASH.test(pathname)) return true;
   if (HOME.test(pathname)) {
     // The landing page must render even if settings are unreachable (strict headers then).
@@ -54,7 +57,29 @@ async function serveAsset(env, request, url, { noStore = true } = {}) {
   return withSecurityHeaders(await env.ASSETS.fetch(request), { turnstile, noStore });
 }
 
+/**
+ * Someone already signed in who opens the home page or the login page goes
+ * straight to the dashboard. Only a valid session redirects; anything else
+ * (no cookie, expired, disabled, unreachable) shows the page as usual.
+ */
+async function signedInRedirect(request, env) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return null;
+  try {
+    const s = await readSession(request, env);
+    if (!s.ok) return null;
+    const res = redirect('/dashboard/');
+    if (s.setCookie) res.headers.append('set-cookie', s.setCookie);
+    return res;
+  } catch {
+    return null;
+  }
+}
+
 async function handleDashboard(request, env, url) {
+  if (DASH_LOGIN.test(url.pathname)) {
+    const to = await signedInRedirect(request, env);
+    if (to) return to;
+  }
   if (DASH_PUBLIC.test(url.pathname)) return serveAsset(env, request, url);
   const s = await readSession(request, env);
   if (!s.ok) {
@@ -73,7 +98,13 @@ async function route(request, env, url, ctx) {
   const { pathname } = url;
   const isApi = pathname.startsWith('/api/');
   const isDash = pathname === '/dashboard' || pathname.startsWith('/dashboard/');
-  if (!isApi && !isDash) return serveAsset(env, request, url, { noStore: false });
+  if (!isApi && !isDash) {
+    if (HOME.test(pathname) && hasSessionCookie(request)) {
+      const to = await signedInRedirect(request, env);
+      if (to) return to;
+    }
+    return serveAsset(env, request, url, { noStore: false });
+  }
 
   // Manual admin block rules apply to the whole API and app surface.
   const g = await ipContext(env, request);

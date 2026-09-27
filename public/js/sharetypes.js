@@ -90,18 +90,31 @@ export function urlRulesOf(value) {
 
 const schemeOf = (u) => u.protocol.slice(0, -1).toLowerCase();
 
-/** True when a parsed URL is allowed by `rules` (forbidden schemes never are). */
-export function urlAllowed(u, rules = DEFAULT_URL_RULES) {
+/**
+ * The first of `rules` that allows a parsed URL, or null (forbidden schemes
+ * never match). re: rules are JavaScript regular expressions, tested
+ * case-insensitively (flags "iu") against the whole normalized link; they
+ * match anywhere in it unless anchored with ^ (and $).
+ */
+export function matchingUrlRule(u, rules = DEFAULT_URL_RULES) {
   const scheme = schemeOf(u);
-  if (FORBIDDEN_SCHEMES.has(scheme)) return false;
+  if (FORBIDDEN_SCHEMES.has(scheme)) return null;
   for (const r of rules) {
-    if (r === 'scheme:*' || r === `scheme:${scheme}`) return true;
+    if (r === 'scheme:*' || r === `scheme:${scheme}`) return r;
     if (r.startsWith('re:')) {
-      try { if (new RegExp(r.slice(3), 'iu').test(u.href)) return true; } catch { /* invalid rule: ignore */ }
+      try { if (new RegExp(r.slice(3), 'iu').test(u.href)) return r; } catch { /* invalid rule: ignore */ }
     }
   }
-  return false;
+  return null;
 }
+
+/** True when a parsed URL is allowed by `rules` (forbidden schemes never are). */
+export function urlAllowed(u, rules = DEFAULT_URL_RULES) {
+  return matchingUrlRule(u, rules) !== null;
+}
+
+/** re: rules that are not anchored at the start: they match anywhere in a link. */
+export const unanchoredRules = (rules) => rules.filter((r) => r.startsWith('re:') && !r.slice(3).startsWith('^'));
 
 /** A short description of what the rules allow ("http, https and tel links"). */
 export function describeUrlRules(rules = DEFAULT_URL_RULES) {
@@ -124,7 +137,10 @@ export function parseShareUrl(text, { rules = DEFAULT_URL_RULES, recipient = fal
   const raw = String(text ?? '').trim();
   if (!raw || raw.length > MAX_URL_LENGTH || CONTROL.test(raw) || /\s/.test(raw)) throw new ShareTypeError('Enter a single link, with no spaces.');
   let u;
-  try { u = new URL(raw); } catch { throw new ShareTypeError('That is not a valid link.'); }
+  try { u = new URL(raw); } catch {
+    if (/^[a-z][a-z0-9+.-]{0,31}:\/{0,2}$/i.test(raw)) throw new ShareTypeError('That link is incomplete: add the address after the scheme, e.g. https://example.com/page.');
+    throw new ShareTypeError('That is not a valid link.');
+  }
   const scheme = schemeOf(u);
   if (FORBIDDEN_SCHEMES.has(scheme)) throw new ShareTypeError(`${scheme}: links can never be shared.`);
   if (!recipient && !urlAllowed(u, rules)) throw new ShareTypeError(`This link is not allowed for your account: you may share ${describeUrlRules(rules)}.`);

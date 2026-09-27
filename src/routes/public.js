@@ -12,7 +12,7 @@ import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
 import { b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { binding } from '../lib/config.js';
-import { turnstileConfig } from '../lib/turnstile.js';
+import { turnstileKeys } from '../lib/turnstile.js';
 
 const GONE = 'This share does not exist, has expired, or has no views left.';
 
@@ -111,7 +111,7 @@ export async function handlePublic(request, env, url) {
   if (pathname === '/api/config') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     // The site key is public by design; null means no human check anywhere.
-    return json({ ...(await directory(env).publicConfig()), turnstile: turnstileConfig(env)?.sitekey ?? null });
+    return json({ ...(await directory(env).publicConfig()), turnstile: (await turnstileKeys(env))?.sitekey ?? null });
   }
 
   if (pathname === '/api/paste') {

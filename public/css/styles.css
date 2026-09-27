@@ -929,3 +929,18 @@ p a:not(.btn):not(.cta):not(.skip-link), li a:not(.btn):not(.cta) { text-decorat
 .progress-bar { display: block; width: 100%; height: 8px; margin-top: .35rem; accent-color: var(--accent-fill); }
 .progress-block.done .progress-bar { accent-color: var(--ok); }
 #preview-progress .progress-block { margin: .8rem 1rem; }
+
+/* The "Private · End-to-end encrypted · Notes & files" line, once, in every footer. */
+.foot .foot-feats { justify-content: center; margin: .2rem 0 .35rem; }
+@media (max-width: 480px) {
+  .foot .foot-feats { display: flex; }
+  .foot .foot-feats .feat + .feat::before { content: '·'; margin-right: .6rem; }
+}
+
+/* Link rules: the help panel and the "not anchored" warning next to the tester. */
+.rules-help { font-size: .8rem; color: var(--ink-2); }
+.rules-help summary { cursor: pointer; min-height: 24px; font-family: var(--mono); font-size: .75rem; }
+.rules-help ul { margin: .4rem 0 .4rem 1.1rem; padding: 0; }
+.rules-help li { margin: .25rem 0; }
+.rules-help code { overflow-wrap: anywhere; }
+.url-rules > .warn { font-size: .75rem; }

@@ -186,7 +186,24 @@ compromise. Defenses:
 
 ### Cloudflare Turnstile (optional human check)
 
-Off unless both `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET` are set. When on, it protects the
+Off unless a site key and a secret key are both configured. They are set either as the
+deployment's `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or by the owner in Admin → Security
+("Human check"). The deployment's keys always win.
+
+- **Keys set in the admin panel** need the owner's password or a passkey, and are logged
+  (`turnstile.updated` with the site key; never the secret).
+- **Where the panel's secret lives.** It is stored in the Directory Durable Object's SQLite (the
+  `meta` table), which Cloudflare encrypts at rest. The Worker reads it; no API returns it, and
+  the admin panel shows only whether one is saved. Anyone who can run code in the Worker, or
+  read the Durable Object, can read it. A Worker secret (`wrangler secret put TURNSTILE_SECRET`)
+  or Cloudflare Secrets Store remains the recommended place (recommendation), so the panel is
+  for deployments where editing secrets is not practical. The secret is not included in exports.
+- **Propagation.** Each Worker isolate caches the panel's keys for 30 seconds, so a change reaches
+  every server within about 30 seconds. If the Directory cannot be read, the last keys seen stay
+  in use; a first lookup that fails leaves Turnstile off, but then sign-in fails anyway,
+  because it needs the Directory.
+
+When on, it protects the
 forms automated attacks target: login, a signed-in password change (Account) and starting an
 anonymous share. Setup, admin password resets, recipients opening links, file chunks and
 API keys are never challenged.

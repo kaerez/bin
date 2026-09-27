@@ -133,3 +133,23 @@ describe('what a recipient may open', () => {
     }
   });
 });
+
+describe('link rule tester helpers', () => {
+  it('names the rule that allows a link, and none for a refused one', async () => {
+    const { matchingUrlRule, unanchoredRules } = await import('../public/js/sharetypes.js');
+    const rules = ['scheme:mailto', 're:^https://([a-z0-9-]+\\.)*example\\.com(/|$)', 're:intranet'];
+    expect(matchingUrlRule(new URL('https://docs.example.com/a'), rules)).toBe('re:^https://([a-z0-9-]+\\.)*example\\.com(/|$)');
+    expect(matchingUrlRule(new URL('mailto:a@b.c'), rules)).toBe('scheme:mailto');
+    expect(matchingUrlRule(new URL('https://evil.test/?intranet'), rules)).toBe('re:intranet'); // unanchored: matches anywhere
+    expect(matchingUrlRule(new URL('https://evil.test/'), rules)).toBeNull();
+    expect(matchingUrlRule(new URL('javascript:alert(1)'), ['scheme:*'])).toBeNull();
+    expect(unanchoredRules(rules)).toEqual(['re:intranet']);
+  });
+
+  it('explains an incomplete link', async () => {
+    const { parseShareUrl } = await import('../public/js/sharetypes.js');
+    for (const x of ['https://', 'https:', 'http:/']) expect(() => parseShareUrl(x)).toThrow(/incomplete/);
+    expect(() => parseShareUrl('not a link')).toThrow(/single link/);
+    expect(() => parseShareUrl('%%%')).toThrow(/not a valid link/);
+  });
+});

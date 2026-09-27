@@ -124,7 +124,8 @@ secbin is a single Cloudflare Worker: Static Assets, KV, R2 and four Durable Obj
 
 **Optional: Cloudflare Turnstile.** Create a widget in the Cloudflare dashboard (Turnstile →
 Add widget, with your hostname), then set `TURNSTILE_SITEKEY` (public; a plain variable is fine)
-and `TURNSTILE_SECRET` (a secret). With both set, login, password changes on the Account page
+and `TURNSTILE_SECRET` (a secret). Alternatively, paste both keys in Admin → Security → Human
+check; the deployment's keys win when both are set. With both set, login, password changes on the Account page
 and anonymous share creation need a passing human check (usually invisible). Setup, admin password
 resets, recipients and API keys never do. Unset either one to turn it off.
 

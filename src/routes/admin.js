@@ -10,6 +10,7 @@ import { GUARD_SCOPES } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
 import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
+import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib/turnstile.js';
 import { parseId } from '../lib/ids.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS } from '../lib/portable.js';
 
@@ -168,6 +169,21 @@ export async function handleAdmin(request, env, url) {
     const r = await dir.setSettings(body, me);
     invalidateGuardCaches();
     return r.ok ? json(r) : fromDir(r);
+  }
+
+  // Turnstile keys set here apply when the deployment sets none.
+  if (p === '/api/private/admin/turnstile') {
+    if (request.method === 'GET') {
+      const k = await turnstileKeys(env);
+      return json({ ...(await dir.turnstileStatus()), active: k ? k.source : null, deployment: !!turnstileConfig(env) });
+    }
+    if (request.method !== 'PUT') return methodNotAllowed('GET, PUT');
+    const body = await readJsonBody(request);
+    const g = await ipContext(env, request);
+    const step = await stepUpFrom(body, url);
+    const r = await dir.setTurnstileKeys(me, { sitekey: body.sitekey, secret: body.secret, clear: body.clear === true, ...step, lockoutOff: g.off.all });
+    invalidateTurnstileCache();
+    return r.ok ? json(r) : afterRefusal(env, g, r, fromDir(r));
   }
 
   if (p === '/api/private/admin/limits') {

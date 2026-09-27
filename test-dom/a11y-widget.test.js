@@ -120,6 +120,15 @@ describe('every page', () => {
     }
   });
 
+  it('shows "Private · End-to-end encrypted · Notes & files" once, in the footer', () => {
+    for (const p of pages()) {
+      const s = read(p);
+      expect(s.match(/class="features\b/g) || [], p).toHaveLength(1);
+      const foot = s.slice(s.indexOf('<footer'), s.indexOf('</footer>'));
+      expect(foot, p).toMatch(/class="features foot-feats"[\s\S]*Private[\s\S]*End-to-end encrypted[\s\S]*Notes &amp; files/);
+    }
+  });
+
   it('the statement is bilingual and claims only partial conformance', () => {
     const s = read('public/accessibility/index.html');
     expect(s).toMatch(/lang="he" dir="rtl"/);

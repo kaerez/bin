@@ -52,6 +52,19 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   Passkey" (default) or "Password and passkey". A recovery code always signs in on its own.
 - **Admin → Users:** the owner creates, edits and revokes a user's API keys (a new key is shown
   once).
+- **Signed in:** opening the home page or the login page goes straight to the dashboard.
+- **Footer:** "Private · End-to-end encrypted · Notes & files" appears once, in every page's
+  footer (it was in the page body, and differed between pages).
+- **Link rules editor:** the tester is always shown, including while the rules are inherited. It
+  names the rule that allows a link, or says why it is refused (e.g. an incomplete `https://`),
+  and flags patterns that are not anchored. A help panel explains schemes and the regex engine
+  (JavaScript `RegExp`, case-insensitive, matched against the whole link). The default is
+  unchanged: http and https only.
+- **Admin → Users** no longer lists the owner (whose account is on Account).
+- **Admin → Public access** no longer offers settings that cannot apply to the anonymous account
+  (API keys, read receipts, log limits, password policy, passkeys); the server refuses them too.
+- **Admin → Security → Human check:** set or remove the Turnstile site key and secret key in the
+  panel (with your password or a passkey). The deployment's keys still win.
 - **Passwords the owner sets** (setup, the owner's own, a new user's, a reset) no longer follow the
   password policy, which applies to users changing their own. The length counts every
   character as typed. The impersonation banner is shorter.
