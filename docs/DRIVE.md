@@ -141,6 +141,44 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
   the composer's file list and the recipient's file view (task #23, item 15).
 - The owner's Admin → Users shows each user's Drive usage; there is no admin file browser.
 
+### 8.1 What the UI assumes (shard C, built against the shard B interface)
+
+Clarifications of the above, as implemented (`public/js/tree.js`, `public/dashboard/js/drive-app.js`,
+`public/dashboard/js/drive.js`, `public/dashboard/drive/index.html`):
+
+- **"Collapsed by default"** means: the root ("My Drive" / "All files") is open and shows its
+  top-level folders, and every folder under it is closed. The + / − toggle is a pointer target
+  only (`aria-hidden`); the state is `aria-expanded` on the treeitem, and the keyboard uses → / ←.
+  In the composer and the recipient view the tree appears only when there are folders; a flat
+  list of files stays a flat list (a single file stays the file card).
+- **Nav:** the **drive** link is shown when `/api/private/me` has `caps.driveEnabled === true`
+  (`caps.drive === true` or `caps.drive.enabled === true` are accepted too); hidden otherwise.
+- **Client module** (`public/js/driveclient.js`): `openDrive()` resolves to a client or throws
+  `DriveLocked` / `DriveDisabled`; `unlockDrive(creds)` resolves to a client (or anything, after
+  which `openDrive()` is called again). `DriveLocked` may carry `credentialIds` (base64url ids of
+  the passkeys that have a PRF wrap) for `allowCredentials`; without it the browser offers any
+  passkey. The page runs WebAuthn itself for the passkey unlock: `navigator.credentials.get` with
+  `extensions.prf.eval.first = SHA-256("secbin-drive/v1 prf")` and passes
+  `{ prfOutput: Uint8Array, credentialId: <credential.id, base64url> }`.
+- `list(id)` → `{ node, path, children }`: `path` is root first and may or may not end with the
+  node itself; the root's name may be empty (shown as "My Drive"). `children[].mtime` may be in
+  ms or s and `updated` in s (shown as "Modified": a file's `mtime`, else `updated`).
+- `usage()` → `{ used, capacity }` (`capacity: null` = no limit).
+- Progress callbacks (`upload`, `uploadTree`, `download`, `downloadFolder` get
+  `{ onProgress, signal }`) may pass a fraction in [0, 1] or `{ loaded | done, total }`; the
+  `signal` is the page's Cancel. Aborts reject with an `AbortError`.
+- `share(ids, { views, expire, password, deletable, label })`: `views` is a number or `null`
+  (unlimited), `expire` the composer's string form (`"24h"`, `"30m"`, `"7d"`); the page checks
+  the role's `maxViews`, `allowUnlimitedViews`, `maxExpireSec`, `openerDelete` and `files` like the
+  composer. File-type / folder-depth rules for drive shares are left to `share()`.
+- `shares(id)` → an array of My-shares-like rows (`id, label, kind, created, expires,
+  views_total, left, status, locked`); revoke uses `POST /api/private/shares/<id>/revoke`.
+- Names typed in the UI are trimmed and NFC-normalised; empty, `.`/`..`, `/`, `\`, control
+  characters and more than 255 characters are refused, and so is a name already used in the same
+  folder (the server cannot check encrypted names).
+- **Temporary:** `?mock=1` on the Drive page loads `public/js/driveclient.mock.js` (in memory, no
+  network) instead of the real client; both it and the switch in `drive.js` go at integration.
+
 ## 9. Security notes
 
 - Owner escrow means the owner can decrypt every user's Drive: this is a deliberate choice by

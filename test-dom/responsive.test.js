@@ -220,7 +220,7 @@ describe('theme-init.js — explicit choice wins, else prefers-color-scheme', ()
 
 // ── static page / stylesheet contract ────────────────────────────────────────
 describe('pages and stylesheet — responsive contract', () => {
-  const pages = ['public/index.html', 'public/dashboard/index.html', 'public/dashboard/shares/index.html', 'public/dashboard/account/index.html',
+  const pages = ['public/index.html', 'public/dashboard/index.html', 'public/dashboard/shares/index.html', 'public/dashboard/drive/index.html', 'public/dashboard/account/index.html',
     'public/dashboard/admin/index.html', 'public/dashboard/login/index.html', 'public/dashboard/setup/index.html'];
   const css = read('public/css/styles.css');
 

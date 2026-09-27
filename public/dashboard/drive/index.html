@@ -7,7 +7,7 @@
         <meta name="referrer" content="no-referrer" />
         <meta name="color-scheme" content="dark light" />
         <meta name="theme-color" content="#0d1117" />
-        <title>My shares · secbin</title>
+        <title>Drive · secbin</title>
         <meta name="description" content="Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it." />
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="secbin" />
@@ -26,7 +26,8 @@
         <link rel="stylesheet" href="/css/styles.css" />
         <!-- CSP is a response header (public/_headers + the Worker). First-party only. -->
         <script defer src="/js/theme.js"></script>
-        <script type="module" src="/dashboard/js/shares.js"></script>
+        <script defer src="/js/qrcode.js"></script>
+        <script type="module" src="/dashboard/js/drive.js"></script>
         <!-- Service worker + install banner (public/js/pwa.js). -->
         <script type="module" src="/js/pwa.js"></script>
         <script type="module" src="/js/a11y.js"></script>
@@ -103,30 +104,15 @@
         </header>
 
         <main class="wrap wrap-wide" id="main" tabindex="-1">
-            <section id="view-shares" tabindex="-1">
+            <section id="view-drive" tabindex="-1">
                 <div class="head reveal d1">
-                    <p class="eyebrow">my shares</p>
-                    <h1 class="title">What you <span class="title-em">sent.</span></h1>
-                    <p class="subtitle">Extend views or expiry within your limits, revoke a share instantly, or rename your labels. Labels are for your own reference — unlike the shares themselves, they are not encrypted.</p>
+                    <p class="eyebrow">drive</p>
+                    <h1 class="title">Your files, <span class="title-em">sealed.</span></h1>
+                    <p class="subtitle">Private storage, end-to-end encrypted. Names, folders and contents are encrypted in your browser; the server sees only sizes and the shape of the folder tree. Share any file or folder with the same options as a new share.</p>
                 </div>
-                <div class="toolbar reveal d2">
-                    <input class="input" id="shares-q" type="search" placeholder="Search labels" aria-label="Search labels" maxlength="100" />
-                    <select class="input" id="shares-status" aria-label="Status">
-                        <option value="">all</option>
-                        <option value="active">active</option>
-                        <option value="ended">ended</option>
-                        <option value="expired">expired</option>
-                        <option value="revoked">revoked</option>
-                        <option value="deleted">deleted</option>
-                        <option value="consumed">consumed</option>
-                    </select>
+                <div class="reveal d2" id="drive-root">
+                    <p class="msg" role="status">Opening your Drive…</p>
                 </div>
-                <div class="table-wrap reveal d2"><table class="table" id="shares-table">
-                    <thead><tr><th>Label</th><th>Type</th><th>Created</th><th>Expires</th><th>Views</th><th>Opened</th><th>Status</th><th></th></tr></thead>
-                    <tbody id="shares-body"></tbody>
-                </table></div>
-                <div class="btn-row"><button type="button" class="btn" id="shares-more" hidden>Load more</button></div>
-                <p class="msg" id="shares-msg" role="status" hidden></p>
             </section>
             <footer class="foot reveal d4">
                 <nav class="foot-links" id="foot-links" aria-label="Project">
