@@ -310,8 +310,13 @@ stand-in. What each side relies on:
   `openerDelete` and `files` like the composer; the server enforces them again.
 - `shares(id)` → the server's rows (§6), shown with their label, type ("drive"), created,
   expiry, views and status; revoke uses `POST /api/private/shares/<id>/revoke`.
-- Names typed in the UI are trimmed and NFC-normalised; empty, `.`/`..`, `/`, `\`, control
-  characters and more than 255 UTF-8 bytes are refused (as `checkName` in the client), and so is
+- Names (typed, uploaded, or read back) are cleaned: the bidi overrides, embeddings and
+  isolates, U+200B, U+FEFF, U+0085, U+2028 and U+2029 are removed, then NFC (`files.js`
+  `cleanName`; the page says when a name was changed, and an older stored name shows cleaned).
+  Hebrew, Arabic, ZWNJ / ZWJ and LRM / RLM stay. Every name is shown in a bidi isolate with its
+  extension as its own LTR isolate (`common.js` `nameEl`). Typed names are also trimmed; empty,
+  `.`/`..`, `/`, `\`, control characters and more than 255 UTF-8 bytes are refused (as
+  `checkName` in the client), and so is
   a name already used in the same folder when creating or renaming (the server cannot check
   encrypted names). An upload keeps the file's own name unless the folder already has it: then it
   becomes "name (2).ext", "name (3).ext"… (`upload(…, { taken })` with the set from
