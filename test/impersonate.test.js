@@ -215,6 +215,19 @@ describe('what stays out of reach while impersonating', () => {
     });
   });
 
+  it('admin actions on the user (created, disabled, enabled) are in the admin audit only', async () => {
+    const u = await makeUser('adm-invisible');
+    for (const disabled of [true, false]) {
+      expect((await fetchJson(`/api/private/admin/users/${u.id}`, { method: 'PATCH', cookie: oc, body: { disabled } })).status).toBe(200);
+    }
+    const uc = await login('adm-invisible', USER_PW, freshIp());
+    const own = (await ownLog(uc)).map((r) => r.action);
+    expect(own).toContain('login');
+    for (const a of ['user.created', 'user.disabled', 'user.enabled']) expect(own).not.toContain(a);
+    const actions = (await audit(u.id)).map((r) => r.action);
+    for (const a of ['user.created', 'user.disabled', 'user.enabled']) expect(actions).toContain(a);
+  });
+
   it('start and end are in the admin audit only', async () => {
     const u = await makeUser('imp-audit');
     const ic = await impersonate(u.id);
