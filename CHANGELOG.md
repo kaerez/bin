@@ -68,8 +68,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   offer and list the new scopes; exports and imports carry them. `docs/API.md` and the
   Account page's "Using the API" help document every endpoint a key can use, with examples for
   every use case in curl, Node.js and Python (new `examples/api/create-files.mjs` /
-  `create_files.py` for the file upload flow, `--encrypt-only` modes for curl; the Python
-  examples use `requests`). The CLI gains `secbin list` and `secbin revoke`.
+  `create_files.py` for the file upload flow, `--encrypt-only` modes for curl, and
+  `shares.mjs` / `shares.py` for list, show, receipts, label, extend, revoke, policy and delete;
+  the Python examples use `requests`). The CLI gains `secbin list`, `show`, `receipts` (`read`)
+  and `label`, `extend`, `revoke` (`manage`). Existing keys keep exactly the creation scopes
+  they had. Note for Compliance: a `read` key can fetch read receipts, which may hold
+  recipients' network addresses and locations as far as the owner enables receipt details.
 
 - **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
   `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the

@@ -57,7 +57,7 @@ export class Client {
   /**
    * @param {string} server   validated origin (url.js normalizeServer)
    * @param {Function} fetchImpl
-   * @param {{apiKey?: string}} opts  API key for the account endpoints (creation, list, revoke) only
+   * @param {{apiKey?: string}} opts  API key for the account endpoints (creation, and the account's own shares) only
    */
   constructor(server, fetchImpl = globalThis.fetch, { apiKey } = {}) {
     this.server = server;
@@ -194,7 +194,7 @@ export class Client {
     return data;
   }
 
-  // ── the key user's shares (API key: "read" to list, "manage" to revoke) ──
+  // ── the key user's shares (API key: "read" to look, "manage" to change) ──
 
   /** One page of the account's shares → { rows, total } (rows are untrusted server data). */
   async listShares({ status = '', offset = 0 } = {}) {
@@ -205,6 +205,27 @@ export class Client {
     const d = await this.request(`/api/private/shares${q ? `?${q}` : ''}`, { auth: true, fallback: 'Could not list the shares.' });
     if (!Array.isArray(d.rows) || !Number.isSafeInteger(d.total)) throw malformed();
     return d;
+  }
+
+  /** One of the account's shares → its row (untrusted server data). */
+  async getShare(id) {
+    const d = await this.request(`/api/private/shares/${encodeURIComponent(id)}`, { auth: true, fallback: 'Share not found.' });
+    if (!isPlainObject(d.share) || typeof d.share.id !== 'string') throw malformed();
+    return d.share;
+  }
+
+  /** A share's read receipts → { total, fields, rows } (untrusted server data). */
+  async shareOpens(id) {
+    const d = await this.request(`/api/private/shares/${encodeURIComponent(id)}/opens`, { auth: true, fallback: 'Could not read the receipts.' });
+    if (!Array.isArray(d.rows) || !Array.isArray(d.fields) || !Number.isSafeInteger(d.total)) throw malformed();
+    return d;
+  }
+
+  /** Label ({label}) or extend ({views, expires}) one of the account's shares. */
+  updateShare(id, patch) {
+    return this.request(`/api/private/shares/${encodeURIComponent(id)}`, {
+      method: 'PATCH', auth: true, body: patch, fallback: 'The change failed.',
+    });
   }
 
   /** Revoke one of the account's shares: its content is destroyed at once. */

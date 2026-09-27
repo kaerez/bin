@@ -203,6 +203,83 @@ describe('"manage": label, extend and revoke the key user\'s shares', () => {
   });
 });
 
+describe('revoked shares', () => {
+  it('stay readable (list, one share, receipts) but can no longer be changed', async () => {
+    const u = await apiUser('revoked-shares', { read: ['read'], manage: ['manage'] });
+    const n = await createNote(u.cookie, { views: 3, bar: true }, { label: 'to revoke' });
+    const keep = await createNote(u.cookie, { views: 3, bar: true }, { label: 'to keep' });
+    expect((await openNote(n.id, n.fragment)).res.status).toBe(200);
+    const revoke = (id) => fetchJson(`/api/private/shares/${id}/revoke`, { method: 'POST', headers: { ...bearer(u.keys.manage), ...intent } });
+    expect((await revoke(n.id)).status).toBe(200);
+
+    // "read" still sees it, as revoked, with no views left to report and its receipts kept.
+    const revoked = await (await fetchJson('/api/private/shares?status=revoked', { headers: bearer(u.keys.read) })).json();
+    expect(revoked.rows.map((r) => r.id)).toEqual([n.id]);
+    expect(revoked.rows[0]).toMatchObject({ status: 'revoked', left: null, label: 'to revoke', opens: 1 });
+    const active = await (await fetchJson('/api/private/shares?status=active', { headers: bearer(u.keys.read) })).json();
+    expect(active.rows.map((r) => r.id)).toEqual([keep.id]);
+    expect((await (await fetchJson(`/api/private/shares/${n.id}`, { headers: bearer(u.keys.read) })).json()).share).toMatchObject({ status: 'revoked', left: null });
+    expect((await (await fetchJson(`/api/private/shares/${n.id}/opens`, { headers: bearer(u.keys.read) })).json()).total).toBe(1);
+
+    // "manage" cannot extend it; revoking again only re-runs the purge (idempotent).
+    const ext = await fetchJson(`/api/private/shares/${n.id}`, { method: 'PATCH', headers: bearer(u.keys.manage), body: { views: 9 } });
+    expect(ext.status).toBe(409);
+    expect((await ext.json()).error).toBe('not_active');
+    expect((await revoke(n.id)).status).toBe(200);
+    expect([404, 410]).toContain((await fetchJson(`/api/paste/${n.id}`)).status);
+    // The other share is untouched.
+    expect((await openNote(keep.id, keep.fragment)).res.status).toBe(200);
+  });
+});
+
+describe('the owner\'s own keys', () => {
+  const OWNER_PROOF = proofFor('owner-password');
+  it('reach only the owner\'s own shares, never other users\' or the admin routes', async () => {
+    const mk = async (name, scopes) => {
+      const r = await fetchJson('/api/private/me/keys', { method: 'POST', cookie: oc, body: { name, scopes, current: OWNER_PROOF } });
+      expect(r.status).toBe(201);
+      return (await r.json()).key;
+    };
+    const rw = await mk('owner-read-manage', ['read', 'manage']);
+    const create = await mk('owner-default');
+    const u = await makeUser('owner-keys-victim');
+    const theirs = await createNote(u.cookie, { views: 2, bar: true }, { label: 'a user\'s share' });
+    const mine = await createNote(oc, { views: 2, bar: true }, { label: 'owner via session' });
+
+    // "read": only the owner's own shares, although the owner sees everyone's in the admin panel.
+    const all = [];
+    for (let off = 0; ; off += 50) {
+      const page = await (await fetchJson(`/api/private/shares?offset=${off}`, { headers: bearer(rw) })).json();
+      all.push(...page.rows);
+      if (!page.rows.length || all.length >= page.total) break;
+    }
+    expect(all.some((r) => r.id === mine.id)).toBe(true);
+    expect(all.some((r) => r.id === theirs.id)).toBe(false);
+    expect((await fetchJson(`/api/private/shares/${theirs.id}`, { headers: bearer(rw) })).status).toBe(404);
+    expect((await fetchJson(`/api/private/shares/${theirs.id}/opens`, { headers: bearer(rw) })).status).toBe(404);
+
+    // "manage" gives no admin powers: another user's share is not found, the admin routes refuse keys.
+    expect((await fetchJson(`/api/private/shares/${theirs.id}`, { method: 'PATCH', headers: bearer(rw), body: { label: 'owned' } })).status).toBe(404);
+    expect((await fetchJson(`/api/private/shares/${theirs.id}/revoke`, { method: 'POST', headers: { ...bearer(rw), ...intent } })).status).toBe(404);
+    for (const [path, init] of [['/api/private/admin/shares', {}], ['/api/private/admin/users', {}], [`/api/private/admin/shares/${theirs.id}/revoke`, { method: 'POST', headers: intent }],
+      [`/api/private/admin/shares/${theirs.id}/lock`, { method: 'POST', body: { locked: true } }], ['/api/private/admin/export', { method: 'POST', body: { current: OWNER_PROOF } }]]) {
+      const r = await fetchJson(path, { ...init, headers: { ...init.headers, ...bearer(rw) } });
+      expect(r.status).toBe(403);
+      expect((await r.json()).error).toBe('api_key_not_allowed');
+    }
+    expect((await openNote(theirs.id, theirs.fragment)).res.status).toBe(200);
+
+    // The owner's own share: allowed, and the owner's create-only key is refused like anyone's.
+    expect((await fetchJson(`/api/private/shares/${mine.id}`, { method: 'PATCH', headers: bearer(rw), body: { label: 'owner via key' } })).status).toBe(200);
+    const denied = await fetchJson(`/api/private/shares/${mine.id}/revoke`, { method: 'POST', headers: { ...bearer(create), ...intent } });
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).error).toBe('scope_denied');
+    expect((await fetchJson('/api/private/shares', { headers: bearer(create) })).status).toBe(403);
+    expect((await fetchJson(`/api/private/shares/${mine.id}/revoke`, { method: 'POST', headers: { ...bearer(rw), ...intent } })).status).toBe(200);
+    expect((await (await fetchJson(`/api/private/shares/${mine.id}`, { headers: bearer(rw) })).json()).share).toMatchObject({ status: 'revoked', label: 'owner via key' });
+  });
+});
+
 describe('what stops a key', () => {
   it('API use turned off for the account, a disabled account, and admin routes', async () => {
     const u = await apiUser('stop-user', { all: ['notes', 'files', 'policy', 'read', 'manage'] });

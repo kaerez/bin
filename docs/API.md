@@ -108,6 +108,13 @@ token from `SECBIN_DELETE_TOKEN`; replace `https://bin.example.com` with your se
 shared machine, prefer passing headers from a file (`curl -H @headers.txt`) so the key does not
 appear in the process list.
 
+Ready-made scripts for every use case are in [`examples/api/`](../examples/api/):
+`create-note.mjs` / `create_note.py` and `create-files.mjs` / `create_files.py` create shares,
+and `shares.mjs` / `shares.py` list, show, read receipts of, label, extend and revoke your
+shares, read your policy, and delete with a delete token. The [`secbin` CLI](../cli/README.md)
+does the same from the command line: `secbin create`, `send`, `list`, `show`, `receipts`,
+`label`, `extend`, `revoke` and `delete`.
+
 ### Create a note
 
 Scope: `notes`.
