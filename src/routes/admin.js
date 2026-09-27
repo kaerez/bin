@@ -374,7 +374,8 @@ export async function handleAdmin(request, env, url) {
     if (request.method === 'POST') {
       const body = await readJsonBody(request);
       const expires = body.expiresInSec ? now() + Number(body.expiresInSec) : null;
-      const r = await dir.addIpRule({ cidr: body.cidr, action: body.action, expires, note: body.note }, me);
+      const g = await ipContext(env, request);
+      const r = await dir.addIpRule({ cidr: body.cidr, action: body.action, expires, note: body.note, callerIp: g.ip }, me);
       invalidateGuardCaches();
       return r.ok ? json(r, 201) : fromDir(r);
     }

@@ -402,10 +402,18 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking;
   - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges
-    (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard);
+    (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard). A block rule
+    that covers the owner's own address is refused unless an allow rule covers them first;
   - account lockout after X failed logins (owner exempt — recover via setup if needed). Per-IP
     protection and account lockout are complementary: the first stops one source guessing
-    (any account), the second stops many sources guessing one account;
+    (any account), the second stops many sources guessing one account. Usernames that do not
+    exist are counted and locked the same way (under a keyed hash of the name), so "locked"
+    versus "wrong password" does not reveal which accounts exist. Anyone can still lock a
+    known account by failing its logins (that is what a lockout is); Turnstile and the per-IP
+    guard limit how cheaply;
+  - **cross-site requests** to the public share routes (`/api/paste/…`, `/api/file/…`) are
+    refused before any failure is counted, so another site cannot make a visitor's browser
+    spend their "invalid fetch" budget and get their network blocked;
   - **the owner and global settings:** limits, quotas, the global share-size cap, the viewer
     switch and size, and lockout never apply to the owner. Security controls that protect the
     owner do: session timeouts, per-IP brute-force protection and IP rules (so an owner with no
@@ -539,20 +547,29 @@ codes as safe as the password.
 ### Activity log retention and clearing
 
 - The activity/audit log is kept for at most `log.maxAgeSec` (default 365 days) and
-  `log.maxEntries` (default 500 000, oldest deleted first); per-user limits
-  (`logMaxAgeSec`, `logMaxEntries`) can keep less about an account. Pruning runs hourly and
-  every 500 writes. Three kinds of entry are never pruned automatically, only removed by hand:
-  - entries about the owner (global settings never apply to the owner);
-  - entries the owner made, meaning admin actions including impersonation;
-  - server-wide entries with no subject: settings, global limits, IP rules, exports.
+  `log.maxEntries` (default 500 000, oldest deleted first); a role's limits
+  (`logMaxAgeSec`, `logMaxEntries`) can keep less about its users. Pruning runs hourly and
+  every 500 writes. Neither the global settings nor role limits ever touch:
+  - entries about the owner;
+  - entries the owner made, meaning admin actions including impersonation.
 
-  So a flood of anonymous activity cannot push the record of configuration changes out.
+  Those follow the owner's own limits instead, `log.ownerMaxAgeSec` and
+  `log.ownerMaxEntries` (Admin → Roles → Owner, "Your activity log"). Both default to
+  **keep forever** (null); when set (at least 1 day and 1 000 entries), older entries and the
+  oldest beyond the count are deleted automatically, counting only these entries.
+- **Server-wide configuration changes are never pruned automatically**, whatever any limit
+  says: entries with no subject (settings, the Default role, roles, IP rules and blocks, exports
+  and imports, Turnstile) and the owner's changes to the public account's configuration (its
+  limits, quotas, viewer rules and browser ids). So neither a flood of anonymous activity nor a
+  short owner limit can push the record of configuration changes out; only clearing by hand
+  removes them.
 - The owner can **clear** the log — everything, or one account's entries, optionally only those
   older than a date. It needs the owner's password again (like export), and, as configured, it
   **leaves no record**: after a clear, nothing in the system shows that entries existed or were
   removed. Audit trails can be subject to retention duties (for example SOX record-keeping for
-  systems in scope); decide the retention settings and who may clear with your Legal / Risk /
-  Compliance team — this document is not legal or compliance advice.
+  systems in scope, or PCI DSS audit-log retention); decide the retention settings — the
+  owner's own limits included, since they cover every admin action — and who may clear with
+  your Legal / Risk / Compliance team. This document is not legal or compliance advice.
 
 ### Admin export / import
 
