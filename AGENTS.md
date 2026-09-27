@@ -26,7 +26,9 @@ described in [README.md](./README.md); the threat model and security design in
   parallel branches must not both append one; the second to merge renumbers after rebasing on
   `main`.
 - **One PR per coherent change**, as a draft first, from a branch off `main`. Merge only when CI
-  is green (the maintainer allows merging your own green PRs); use a merge commit. After a PR is
+  is green (the maintainer allows merging your own green PRs); use a merge commit. Turn on
+  auto-merge for each PR (when the repository allows it) so it merges itself once green, and
+  delete the branch after the merge (GitHub's "Automatically delete head branches"). After a PR is
   merged, follow-up work starts on a new branch from the latest `main`.
 - **Track every request.** Break the maintainer's messages into atomic requirements, keep them in
   the task list, and before calling work finished check each one against the code (not against
