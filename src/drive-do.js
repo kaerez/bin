@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS refs_node ON refs(node_id);
 CREATE TABLE IF NOT EXISTS upchunks (node_id TEXT NOT NULL, i INTEGER NOT NULL, PRIMARY KEY (node_id, i));
 CREATE TABLE IF NOT EXISTS reverse (id TEXT PRIMARY KEY, folder TEXT NOT NULL, priv TEXT NOT NULL, lh TEXT NOT NULL,
   ph TEXT, salt TEXT, t INTEGER, note TEXT, opts TEXT NOT NULL, files INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
-  created INTEGER NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active');
+  created INTEGER NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', ended INTEGER);
 CREATE TABLE IF NOT EXISTS rsessions (hash TEXT PRIMARY KEY, rid TEXT NOT NULL, expires INTEGER NOT NULL,
   files INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS rsessions_rid ON rsessions(rid);
@@ -56,6 +56,8 @@ export const MAX_SHARES_PER_NODE = 1000;
 export const MAX_REVERSE = 1000;
 export const MAX_SESSIONS = 100;
 export const MAX_REVERSE_FILES = 10000;
+/** An ended reverse share is kept (for its lists) this long — as long as the share index keeps its row. */
+const REVERSE_KEEP_SEC = 30 * 86400;
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
@@ -385,7 +387,7 @@ export class Drive extends DurableObject {
       const reverse = this.sql.exec("SELECT id, folder FROM reverse WHERE status = 'active'").toArray().filter((r) => dirs.has(r.folder)).map((r) => r.id);
       this.ctx.storage.transactionSync(() => {
         for (const rid of reverse) {
-          this.sql.exec("UPDATE reverse SET status = 'revoked' WHERE id = ?", rid);
+          this.sql.exec("UPDATE reverse SET status = 'revoked', ended = ? WHERE id = ?", nowSec(), rid);
           this.sql.exec('DELETE FROM rsessions WHERE rid = ?', rid);
         }
         for (let k = 0; k < ids.length; k += 100) {
@@ -506,11 +508,15 @@ export class Drive extends DurableObject {
     const gone = this.sql.exec("DELETE FROM nodes WHERE id = ? AND state = 'pending'", f.id).rowsWritten;
     if (gone && f.rs) this.sql.exec('UPDATE reverse SET files = MAX(0, files - 1), bytes = MAX(0, bytes - ?) WHERE id = ?', f.size, f.rs);
   }
-  /** Ended reverse shares whose received files have all been taken in: their key is no longer needed. */
+  /**
+   * Reverse shares that ended more than REVERSE_KEEP_SEC ago (as long as the
+   * share index lists them) and whose received files have all been taken in:
+   * their key is no longer needed.
+   */
   #dropEndedReverse() {
-    const t = nowSec();
-    this.sql.exec(`DELETE FROM reverse WHERE (status != 'active' OR expires <= ? OR folder NOT IN (SELECT id FROM nodes))
-      AND id NOT IN (SELECT rs FROM nodes WHERE rs IS NOT NULL)`, t);
+    const before = nowSec() - REVERSE_KEEP_SEC;
+    this.sql.exec(`DELETE FROM reverse WHERE ((status != 'active' AND COALESCE(ended, 0) < ?) OR expires < ?)
+      AND id NOT IN (SELECT rs FROM nodes WHERE rs IS NOT NULL)`, before, before);
     this.sql.exec('DELETE FROM rsessions WHERE rid NOT IN (SELECT id FROM reverse)');
   }
   /** Upload sessions past their time: log what they received (count and size), then forget them. */
@@ -573,7 +579,7 @@ export class Drive extends DurableObject {
       await this.#deleteObjects(uid, pending);
       this.ctx.storage.transactionSync(() => {
         for (const f of pending) this.#dropPending(f);
-        this.sql.exec('UPDATE reverse SET status = ? WHERE id = ?', status, id);
+        this.sql.exec('UPDATE reverse SET status = ?, ended = ? WHERE id = ?', status, nowSec(), id);
         this.sql.exec('DELETE FROM rsessions WHERE rid = ?', id);
       });
       this.#dropEndedReverse();

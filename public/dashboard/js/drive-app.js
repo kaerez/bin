@@ -846,6 +846,7 @@ function mountApp(mount, client, deps) {
     const expN = h('input.input.opt-num', { id: 'drive-rev-expire', type: 'number', min: '1', step: '1', value: '7', inputmode: 'numeric' });
     const expU = h('select.input.opt-sel', { id: 'drive-rev-unit', 'aria-label': 'Expiry unit' },
       h('option', { value: 'm', text: 'minutes' }), h('option', { value: 'h', text: 'hours' }), h('option', { value: 'd', text: 'days', selected: true }));
+    expU.value = 'd';
     const files = h('input.input', { id: 'drive-rev-files', type: 'number', min: '1', max: '10000', step: '1', inputmode: 'numeric', placeholder: 'no limit' });
     const roleMax = L.reverseMaxBytes ?? null;
     const maxMb = h('input.input', { id: 'drive-rev-bytes', inputmode: 'decimal', placeholder: roleMax ? `up to ${formatBytes(roleMax)}` : 'no limit' });
