@@ -152,9 +152,16 @@ showing it as inert text.
 
 - **`url`** — exactly one absolute URL, at most 2048 characters, no whitespace or control
   characters, **no user name or password** (`https://user:pw@…` is refused: use a credential
-  share). The sender's client checks it against the account's `urlRules` (`scheme:<name>`,
-  `scheme:*`, `re:<pattern>` matched case-insensitively against the `href`; default
-  `["scheme:http", "scheme:https"]`); `javascript:`, `data:`, `vbscript:`, `file:`, `blob:`,
+  share). The sender's client checks it against the account's `urlRules`:
+  - `scheme:<name>://`: the scheme, followed by `//` in the `href`;
+  - `scheme:<name>:`: the scheme, not followed by `//`;
+  - `scheme:*`: any scheme, either form;
+  - `re:<pattern>`: matched case-insensitively against the `href`.
+
+  A bare `scheme:<name>` is refused (400 `invalid_limit`). `http` / `https` (and `ws`, `wss`,
+  `ftp`) take only the `//` form. The default is `["scheme:http://", "scheme:https://"]`. Older
+  rules are upgraded (migration 11; on import; and in clients reading an older server's
+  policy): http-like schemes → `://`; `mailto`, `tel`, `sms` and the like → `:`; others → both. `javascript:`, `data:`, `vbscript:`, `file:`, `blob:`,
   `about:` and browser-internal schemes are refused by senders and recipients alike. `http:` /
   `https:` links need a host. Clients store the parsed `href`. Recipients are shown the host as the
   browser resolves it (punycode, e.g. `xn--80ak6aa92e.com`) with a warning when it differs from

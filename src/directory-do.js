@@ -26,6 +26,7 @@ import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
 import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from '../public/js/filepolicy.js';
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
+import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -173,6 +174,16 @@ const MIGRATIONS = [
         `accounts=${counts[3]} limits=${counts[0]} quotas=${counts[1]} viewer_rules=${counts[2]}`);
     }
     materializeDefaultRole(m.sql);
+  },
+  // 11: link rules say which form a scheme takes: scheme:name:// or
+  // scheme:name: ("scheme:tel" → "scheme:tel:", "scheme:https" →
+  // "scheme:https://", other schemes → both forms, so nothing changes)
+  (m) => {
+    for (const r of m.sql.exec("SELECT user_id, channel, value FROM limits WHERE key = 'urlRules'").toArray()) {
+      let list;
+      try { list = normalizeUrlRules(upgradeUrlRules(JSON.parse(r.value))); } catch { list = [...DEFAULT_URL_RULES]; }
+      m.sql.exec("UPDATE limits SET value = ? WHERE user_id = ? AND channel = ? AND key = 'urlRules'", JSON.stringify(list), r.user_id, r.channel);
+    }
   },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;

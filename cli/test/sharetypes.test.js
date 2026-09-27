@@ -49,9 +49,9 @@ describe('link shares (--fmt url)', () => {
     const plain = makeServer();
     const refused = await make(plain, ['--fmt', 'url', '--text', 'tel:+15551234']);
     expect(refused.code).toBe(2); // an older server without /policy: the default rules apply
-    expect(refused.err).toMatch(/not allowed for your account: you may share http and https links/);
+    expect(refused.err).toMatch(/not allowed for your account: you may share http:\/\/ and https:\/\/ links/);
     expect(plain.calls.filter((c) => c.path === '/api/private/paste')).toHaveLength(0);
-    const server = makeServer({ policy: { urlRules: ['scheme:https', 'scheme:tel'] } });
+    const server = makeServer({ policy: { urlRules: ['scheme:https://', 'scheme:tel:'] } });
     const c = await make(server, ['--fmt', 'url', '--text', 'tel:+15551234']);
     expect(c.code).toBe(0);
     const g = await get(server, c.url);
@@ -63,7 +63,7 @@ describe('link shares (--fmt url)', () => {
   });
 
   it('explains a key without the policy scope', async () => {
-    const server = makeServer({ policy: { urlRules: ['scheme:https'], noPolicyScope: true } });
+    const server = makeServer({ policy: { urlRules: ['scheme:https://'], noPolicyScope: true } });
     const c = await make(server, ['--fmt', 'url', '--text', 'https://example.com/']);
     expect(c.code).toBe(2);
     expect(c.err).toMatch(/scope "policy"/);
