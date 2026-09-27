@@ -1,5 +1,5 @@
 // admin.test.js — owner administration: users, password reset without the
-// current password, impersonation (restrictions + dual activity views),
+// current password, impersonation (what stays out of reach + dual activity views),
 // capability limits, API-channel restriction semantics, quotas with windows,
 // settings validation, and the Guard (scopes, blocks, IP rules, lockout,
 // DISABLE_BFP kill switches).
@@ -48,7 +48,7 @@ describe('users', () => {
 });
 
 describe('impersonation', () => {
-  it('acts as the user, blocks admin + key minting, and logs truthfully', async () => {
+  it('acts as the user, blocks the admin panel (and keys for the owner), and logs truthfully', async () => {
     const u = await makeUser('carol');
     const imp = await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent });
     expect(imp.status).toBe(200);
@@ -57,7 +57,12 @@ describe('impersonation', () => {
     expect(me.user.username).toBe('carol');
     expect(me.impersonatedBy).toBe('owner');
     expect((await fetchJson('/api/private/admin/users', { cookie: ic })).status).toBe(403);
-    expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: ic, body: { current: proofFor(USER_PW), name: 'x' } })).status).toBe(403);
+    // No key can be minted for the owner from inside impersonation (the admin
+    // panel is out of reach); /me/keys makes keys of the user (impersonate.test.js).
+    const ownerId = (await (await fetchJson('/api/private/me', { cookie: oc })).json()).user.id;
+    const mint = await fetchJson(`/api/private/admin/users/${ownerId}/keys`, { method: 'POST', cookie: ic, body: { current: proofFor('owner-password'), name: 'x' } });
+    expect(mint.status).toBe(403);
+    expect((await mint.json()).error).toBe('impersonating');
     const n = await createNote(ic, { text: 'made while impersonated' }, { label: 'imp' });
     expect(n.res.status).toBe(201);
     // The user's own log shows the action as theirs (no actor field at all)…

@@ -3,8 +3,8 @@
 // password change, every other change to one's own account (username, API
 // keys, passkeys, recovery codes, the sign-in steps) and starting an anonymous
 // share need a token that siteverify accepts for this hostname and this form's
-// action. Admin password resets, file chunks/finalize and API keys never need
-// one. Only the pages that show the widget get the relaxed CSP (and no COEP).
+// action (the owner acting as the user, too). Admin password resets, file
+// chunks/finalize and API keys never need one. Only the pages that show the widget get the relaxed CSP (and no COEP).
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker from '../src/index.js';
@@ -201,6 +201,29 @@ describe('account changes', () => {
     // Reading needs none.
     expect((await send('GET', '/api/private/me/keys')).status).toBe(200);
     expect((await send('GET', '/api/private/me/passkeys')).status).toBe(200);
+  });
+
+  it('while impersonating, the same human check applies (and no confirmation)', async () => {
+    withFake();
+    const u = await makeUser('ts-acct-imp');
+    await allowApi(u.id);
+    const imp = await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: await owner(), headers: intent });
+    const send = client(cookieOf(imp));
+    await guarded(send, 'POST', '/api/private/me/username', { username: 'ts-acct-imp-2' }, 200);
+    const { id } = await (await guarded(send, 'POST', '/api/private/me/keys', { name: 'k' }, 201)).json();
+    await guarded(send, 'PATCH', `/api/private/me/keys/${id}`, { name: 'k2', scopes: ['notes'] }, 200);
+    await guarded(send, 'DELETE', `/api/private/me/keys/${id}`, {}, 200);
+    const auth = new SoftAuthenticator();
+    const { challengeId, publicKey } = await (await send('POST', '/api/private/me/passkeys/options', {})).json();
+    await guarded(send, 'POST', '/api/private/me/passkeys', { challengeId, credential: await auth.create(publicKey, ORIGIN), name: 'Laptop' }, 201);
+    await guarded(send, 'POST', '/api/private/me/second-factor', { on: true }, 200);
+    await guarded(send, 'POST', '/api/private/me/recovery-codes', {}, 200);
+    await guarded(send, 'POST', `/api/private/me/passkeys/${auth.id}/remove`, {}, 200);
+    // The password needs a "password" token, as on the user's own session.
+    const pwBody = { salt: salt16(), t: 3, proof: proofFor('any') };
+    expect(await errorOf(await send('POST', '/api/private/me/password', pwBody))).toBe('turnstile_required');
+    expect(await errorOf(await send('POST', '/api/private/me/password', pwBody, once('account')))).toBe('turnstile_failed');
+    expect((await send('POST', '/api/private/me/password', pwBody, once('password'))).status).toBe(200);
   });
 
   it('a token works once, and is checked before the password (a bot learns nothing)', async () => {

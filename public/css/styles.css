@@ -558,7 +558,8 @@ body > .foot { position: relative; z-index: 10; width: 100%; max-width: 680px; m
 .dash-nav { display: inline-flex; flex-wrap: wrap; gap: .4rem; }
 .dash-nav .back[aria-current="page"] { color: var(--accent-fg); background: var(--accent-fill); border-color: var(--accent-fill); }
 button.back { cursor: pointer; }
-.imp-banner { position: relative; z-index: 20; display: flex; align-items: center; justify-content: center; gap: 1rem; flex-wrap: wrap;
+/* Acting as another user: the banner stays in view while the page scrolls. */
+.imp-banner { position: sticky; top: 0; z-index: 20; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 1rem; flex-wrap: wrap;
   padding: .55rem 1rem; background: color-mix(in oklab, var(--paper), var(--warn) 18%); border-bottom: 1px solid color-mix(in oklab, var(--rule-2), var(--warn) 45%);
   font-size: .82rem; color: var(--ink); }
 .banner { border: 1px solid var(--rule-2); border-radius: 4px; padding: .7rem 1rem; margin-bottom: 1rem; font-size: .85rem; }

@@ -254,6 +254,12 @@ const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x
  */
 export const PUBLIC_ID = 'public-user-0000';
 /**
+ * Most users the admin share list filters by at once. The ids are bound as one
+ * JSON array (`json_each(?)`), not one parameter each, so the list stays well
+ * clear of SQLite's bound-parameter limit (about 100 in a Durable Object).
+ */
+export const MAX_SHARE_FILTER_USERS = 500; // ~19 bytes per id in the URL: stays well under the 16 KB URL limit
+/**
  * Limits that mean nothing for the public account: it has no API keys, no
  * dashboard to see read receipts in, no password or passkeys, and its log
  * entries are the server's. They cannot be set for it (inheriting is fine).
@@ -742,32 +748,32 @@ export class Directory extends DurableObject {
    * within `lockout.windowSec`, every session of the account is ended —
    * owner included — and the holder must log in again.
    */
-  async changePassword(uid, { current, reauth, origin, rpId, salt, t, verifier, lockoutOff = false }) {
+  async changePassword(uid, { current, reauth, origin, rpId, salt, t, verifier, actorId = uid, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
-    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
     this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), uid);
-    this.#log(uid, uid, 'password.changed');
+    this.#log(actorId, uid, 'password.changed');
     // Passkeys and recovery codes are not tied to the password: tell the user
     // they still work (Account asks them to review them).
     return { ok: true, ver: u.sess_ver + 1, passkeys: this.#passkeyCount(uid), recoveryLeft: this.#recoveryLeft(uid) };
   }
 
-  /** Change one's own username (needs the password or a passkey). */
-  async changeUsername(uid, { username, current, reauth, origin, rpId, lockoutOff = false }) {
+  /** Change one's own username (needs the password or a passkey, unless impersonated). */
+  async changeUsername(uid, { username, current, reauth, origin, rpId, actorId = uid, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
     if (typeof username !== 'string' || !USERNAME_RE.test(username)) return fail(400, 'invalid_username', 'Username must be 3–64 characters: letters, digits, . _ @ -');
-    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const clash = this.#userByName(username);
     if (clash && clash.id !== uid) return fail(409, 'username_taken', 'That username is taken.');
     if (u.username === username) return { ok: true, username };
     this.sql.exec('UPDATE users SET username = ?, updated = ? WHERE id = ?', username, now(), uid);
-    this.#log(uid, uid, 'username.changed', `from=${u.username} to=${username}`);
+    this.#log(actorId, uid, 'username.changed', `from=${u.username} to=${username}`);
     return { ok: true, username };
   }
 
@@ -834,6 +840,22 @@ export class Directory extends DurableObject {
     return fail(403, code, message);
   }
 
+  /**
+   * The confirmation for a change to `u`'s own account, made by `actor`: the
+   * user themselves (a user id: the password or a passkey, see #stepUp) or
+   * the owner impersonating them ({ id, imp: true }). The owner acting on
+   * another account needs no confirmation (the owner's session is the
+   * authority), but must still be the enabled owner and not `u`.
+   * Returns null when confirmed, else the failure to return.
+   */
+  async #confirmChange(u, actor, step, lockoutOff) {
+    if (actor && typeof actor === 'object') {
+      const o = actor.imp ? this.#user(actor.id) : null;
+      return o && o.role === 'owner' && !o.disabled && o.id !== u.id ? null : fail(403, 'forbidden', 'Not allowed.');
+    }
+    return this.#stepUp(u, step, lockoutOff);
+  }
+
   /** A challenge to confirm a change to one's own account with a passkey. */
   async reauthOptions(uid) {
     const u = this.#user(uid);
@@ -844,12 +866,18 @@ export class Directory extends DurableObject {
 
   async activity(uid, { before = null, limit = 50 } = {}) {
     const lim = Math.max(1, Math.min(200, limit | 0));
+    // Impersonation is invisible to the user: their own view never names the
+    // actor, so actions the owner took while impersonating appear as the
+    // user's own, and the start and end of an impersonation are not shown
+    // (the owner-only admin audit keeps the start, the end and the real
+    // actor). Admin actions on the user (created, disabled, role changed,
+    // password reset, …) and on their shares (adm) are never shown: only what
+    // the user did, what was done as them, and system events (no actor).
+    const where = "subject_id = ? AND adm = 0 AND (actor_id = subject_id OR actor_id IS NULL OR imp = 1)"
+      + " AND action NOT IN ('impersonate.start', 'impersonate.end')";
     const rows = before
-      ? this.sql.exec('SELECT id, ts, action, detail FROM activity WHERE subject_id = ? AND adm = 0 AND id < ? ORDER BY id DESC LIMIT ?', uid, before, lim).toArray()
-      : this.sql.exec('SELECT id, ts, action, detail FROM activity WHERE subject_id = ? AND adm = 0 ORDER BY id DESC LIMIT ?', uid, lim).toArray();
-    // The user's own view never names the actor: actions the owner took while
-    // impersonating appear as the user's own (the admin audit shows the truth).
-    // Direct admin-panel actions on the user's shares (adm) are not shown.
+      ? this.sql.exec(`SELECT id, ts, action, detail FROM activity WHERE ${where} AND id < ? ORDER BY id DESC LIMIT ?`, uid, before, lim).toArray()
+      : this.sql.exec(`SELECT id, ts, action, detail FROM activity WHERE ${where} ORDER BY id DESC LIMIT ?`, uid, lim).toArray();
     return rows;
   }
 
@@ -861,14 +889,16 @@ export class Directory extends DurableObject {
 
   /**
    * Create an API key. On one's own account (`actorId` = `uid`) it needs the
-   * password or a passkey; the owner creates keys for other users freely.
+   * password or a passkey; the owner creates keys for other users freely,
+   * from the admin panel (`actorId` = the owner's id) or while impersonating
+   * them (`actorId` = { id, imp: true }).
    */
   async createKey(uid, { name, hash, expires, scopes, actorId = uid, current, reauth, origin, rpId, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'public') return fail(403, 'api_disabled', 'The public account never has API keys.');
-    if (actorId === uid) {
-      const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    if (actorId === uid || typeof actorId === 'object') {
+      const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
       if (wrong) return wrong;
     }
     const eff = this.#effective(u).all;
@@ -901,8 +931,8 @@ export class Directory extends DurableObject {
     if (label === null || label === '') return fail(400, 'invalid_name', 'Give the key a name (up to 100 characters).');
     const sc = scopes === undefined ? String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) : keyScopes(scopes);
     if (!sc) return fail(400, 'invalid_scopes', `Choose one or more scopes: ${API_SCOPES.join(', ')}.`);
-    if (actorId === uid) {
-      const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    if (actorId === uid || typeof actorId === 'object') {
+      const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
       if (wrong) return wrong;
     }
     this.sql.exec('UPDATE api_keys SET name = ?, scopes = ? WHERE user_id = ? AND id = ?', label, sc.join(','), uid, String(id));
@@ -913,9 +943,8 @@ export class Directory extends DurableObject {
   async revokeKey(uid, id, actorId = uid, { current, reauth, origin, rpId, lockoutOff = false } = {}) {
     const r = this.sql.exec('SELECT name FROM api_keys WHERE user_id = ? AND id = ?', uid, id).toArray()[0];
     if (!r) return fail(404, 'not_found', 'Key not found.');
-    if (actorId === uid) {
-      const u = this.#user(uid);
-      const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    if (actorId === uid || typeof actorId === 'object') {
+      const wrong = await this.#confirmChange(this.#user(uid), actorId, { current, reauth, origin, rpId }, lockoutOff);
       if (wrong) return wrong;
     }
     this.sql.exec('DELETE FROM api_keys WHERE user_id = ? AND id = ?', uid, id);
@@ -1089,7 +1118,7 @@ export class Directory extends DurableObject {
     return { ok: true, ...this.#newChallenge('register', uid), user: { handle: this.#webauthnHandle(u), name: u.username }, exclude: this.#allowList(uid) };
   }
 
-  async addPasskey(uid, { challengeId, credential, name, current, reauth, origin, rpId, lockoutOff = false }) {
+  async addPasskey(uid, { challengeId, credential, name, current, reauth, origin, rpId, actorId = uid, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     const c = this.#takeChallenge(challengeId, 'register');
@@ -1097,7 +1126,7 @@ export class Directory extends DurableObject {
     if (this.#passkeyMode(u) === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
     const label = cleanLabel(name);
     if (label === null || label === '') return fail(400, 'invalid_name', 'Give the passkey a name (up to 100 characters).');
-    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const r = await verifyRegistration(credential, { challenge: c.challenge, origin, rpId });
     if (!r.ok) return fail(400, 'invalid_passkey', `The passkey could not be verified (${r.reason}).`);
@@ -1112,61 +1141,61 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM meta WHERE k = ?', handleAlias(r.credentialId)); // registered here: the account's own handle
     this.sql.exec('INSERT INTO passkeys (id, user_id, name, public_key, alg, sign_count, transports, backup_eligible, backed_up, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       r.credentialId, uid, label, r.publicKey, r.alg, r.signCount, r.transports.join(','), r.backupEligible ? 1 : 0, r.backedUp ? 1 : 0, now());
-    this.#log(uid, uid, 'passkey.added', `name=${label}`);
+    this.#log(actorId, uid, 'passkey.added', `name=${label}`);
     // The first passkey comes with a fresh set of recovery codes, shown once.
     let codes = null;
     if (first || this.#recoveryLeft(uid) === 0) {
       this.#storeCodes(uid, prepared);
       codes = prepared.codes;
-      this.#log(uid, uid, 'recovery.issued', `count=${codes.length}`);
+      this.#log(actorId, uid, 'recovery.issued', `count=${codes.length}`);
     }
     return { ok: true, id: r.credentialId, codes };
   }
 
-  async removePasskey(uid, id, { current, reauth, origin, rpId, lockoutOff = false }) {
+  async removePasskey(uid, id, { current, reauth, origin, rpId, actorId = uid, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
-    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const p = this.sql.exec('SELECT name FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid).toArray()[0];
     if (!p) return fail(404, 'not_found', 'Passkey not found.');
     this.sql.exec('DELETE FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid);
     this.sql.exec('DELETE FROM meta WHERE k = ?', handleAlias(String(id)));
-    this.#log(uid, uid, 'passkey.removed', `name=${p.name}`);
+    this.#log(actorId, uid, 'passkey.removed', `name=${p.name}`);
     // Without passkeys, recovery codes and the second-factor choice mean nothing.
     if (!this.#passkeyCount(uid)) {
       this.#dropPasskeys(uid);
-      this.#log(uid, uid, 'recovery.revoked', 'last passkey removed');
+      this.#log(actorId, uid, 'recovery.revoked', 'last passkey removed');
     }
     return { ok: true };
   }
 
-  async regenerateRecoveryCodes(uid, { current, reauth, origin, rpId, lockoutOff = false }) {
+  async regenerateRecoveryCodes(uid, { current, reauth, origin, rpId, actorId = uid, lockoutOff = false }) {
     const prepared = await this.#prepareCodes();
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
-    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     // No await after the step-up: the checks and the store run in one step.
     if (wrong) return wrong;
     if (!this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'Add a passkey first: recovery codes stand in for a passkey.');
     this.#storeCodes(uid, prepared);
-    this.#log(uid, uid, 'recovery.issued', `count=${prepared.codes.length} (old codes revoked)`);
+    this.#log(actorId, uid, 'recovery.issued', `count=${prepared.codes.length} (old codes revoked)`);
     return { ok: true, codes: prepared.codes };
   }
 
   /** The user's choice (mode "any"): should a password login also need a passkey? */
-  async setSecondFactor(uid, { on, current, reauth, origin, rpId, lockoutOff = false }) {
+  async setSecondFactor(uid, { on, current, reauth, origin, rpId, actorId = uid, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (typeof on !== 'boolean') return fail(400, 'invalid', 'on must be true or false');
     const mode = this.#passkeyMode(u);
     if (mode === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
     if (mode === 'second' && !on) return fail(403, 'second_factor_required', 'The administrator requires a passkey after the password.');
-    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     if (on && !this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'Add a passkey first.');
     this.sql.exec('UPDATE users SET mfa = ? WHERE id = ?', on ? 1 : 0, uid);
-    this.#log(uid, uid, on ? 'mfa.enabled' : 'mfa.disabled');
+    this.#log(actorId, uid, on ? 'mfa.enabled' : 'mfa.disabled');
     return { ok: true };
   }
 
@@ -1799,8 +1828,9 @@ export class Directory extends DurableObject {
     const off = Math.max(0, offset | 0);
     const where = [];
     const args = [];
-    const ids = (Array.isArray(users) ? users : []).filter((u) => typeof u === 'string').slice(0, 100);
-    if (ids.length) { where.push(`s.user_id IN (${ids.map(() => '?').join(', ')})`); args.push(...ids); }
+    const ids = (Array.isArray(users) ? users : []).filter((u) => typeof u === 'string').slice(0, MAX_SHARE_FILTER_USERS);
+    // One JSON array parameter for any number of users (one `?` each would exceed the limit).
+    if (ids.length) { where.push('s.user_id IN (SELECT value FROM json_each(?))'); args.push(JSON.stringify(ids)); }
     if (kind) { where.push('s.kind = ?'); args.push(String(kind)); }
     if (status) { where.push('s.status = ?'); args.push(String(status)); }
     if (q) { where.push("s.label LIKE ? ESCAPE '\\'"); args.push(`%${String(q).slice(0, 100).replace(/[%_\\]/g, (c) => '\\' + c)}%`); }

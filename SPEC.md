@@ -334,18 +334,18 @@ spaces are ignored, O/I/L read as 0/1/1).
 | `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
 | `GET /api/private/policy` | session / key | what the client must check itself before creating: `{url, urlRules}` for the channel used |
 | `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy, `passwordPolicy` `{pwMinLength, pwUpper, pwLower, pwDigit, pwSymbol}` (the browser enforces it; the server cannot) |
-| `POST /api/private/me/reauth` | session, not impersonating | `{challengeId, publicKey}` request options for confirming a change with one of the account's passkeys; 409 `no_passkeys` |
-| `POST /api/private/me/password` `{step…, salt, t, proof}` | session | change password (ends other sessions). Never blocked by a login lockout. Success → `{ok, passkeys, recoveryLeft}` (they are not tied to the password) |
-| `POST /api/private/me/username` `{username, step…}` | session, not impersonating | `{ok, username}`; 409 `username_taken`, 400 `invalid_username`. Sessions carry on |
-| `GET /api/private/me/activity` | session | own activity (never shows the actor) |
+| `POST /api/private/me/reauth` | session, not impersonating | `{challengeId, publicKey}` request options for confirming a change with one of the account's passkeys; 409 `no_passkeys`; 409 `not_needed` while impersonating (nothing is confirmed then) |
+| `POST /api/private/me/password` `{step…, salt, t, proof}` | session | change password (ends other sessions). Never blocked by a login lockout. Success → `{ok, passkeys, recoveryLeft}` (they are not tied to the password). Impersonating: no `step…`, the user's sessions end and the owner's carries on (no new cookie) |
+| `POST /api/private/me/username` `{username, step…}` | session | `{ok, username}`; 409 `username_taken`, 400 `invalid_username`. Sessions carry on |
+| `GET /api/private/me/activity` | session | own activity (never shows the actor; the start and end of an impersonation are not listed) |
 | `GET /api/private/me/passkeys` | session | `{mode, mfa, required, max, recoveryLeft, passkeys: [{id, name, created, lastUsed, synced}]}` |
-| `POST /api/private/me/passkeys/options` | session, not impersonating | `{challengeId, publicKey}` creation options (discoverable, user verification required, attestation `none`) |
+| `POST /api/private/me/passkeys/options` | session | `{challengeId, publicKey}` creation options (discoverable, user verification required, attestation `none`) |
 | `POST /api/private/me/passkeys` `{challengeId, credential, name, step…}` | session | 201 `{id, codes}` (`codes`: the 20 recovery codes, with the first passkey only) |
 | `POST /api/private/me/passkeys/:id/remove` `{step…}` | session | the last one also removes the codes and the second step |
 | `POST /api/private/me/recovery-codes` `{step…}` | session | `{codes}` (20 new; the old ones stop working) |
 | `POST /api/private/me/second-factor` `{on, step…}` | session | password logins also need a passkey / code (limit `any`; forced on with `second`) |
 | `POST /api/private/admin/users/:id/passkeys` (`X-Secbin-Intent`) | owner | remove all of an account's passkeys and codes → `{removed}`. No confirmation for another user; `{step…}` on the owner's own account. An admin password reset (`…/password`) keeps them |
-| `GET/POST /api/private/me/keys` `{name, expiresInSec?, scopes?, step…}`, `PATCH …/keys/:id` `{name?, scopes?, step…}`, `DELETE …/keys/:id` `{step…}` (`X-Secbin-Intent`) | session, not impersonating (except `GET`) | API keys; `scopes` is a subset of `notes`, `files`, `policy`, `read`, `manage` (default `notes`, `files`, `policy`; empty or unknown → 400 `invalid_scopes`). Listing returns each key's `scopes` |
+| `GET/POST /api/private/me/keys` `{name, expiresInSec?, scopes?, step…}`, `PATCH …/keys/:id` `{name?, scopes?, step…}`, `DELETE …/keys/:id` `{step…}` (`X-Secbin-Intent`) | session | API keys; `scopes` is a subset of `notes`, `files`, `policy`, `read`, `manage` (default `notes`, `files`, `policy`; empty or unknown → 400 `invalid_scopes`). Listing returns each key's `scopes` |
 | `GET /api/private/admin/turnstile` | owner | `{sitekey, secretSet, active: 'env'\|'admin'\|null, deployment}`; never the secret |
 | `PUT /api/private/admin/turnstile` `{sitekey, secret?, step…}` or `{clear: true, step…}` | owner | set (an empty `secret` keeps the saved one) or remove the panel's keys; 400 `invalid_sitekey` / `invalid_secret`. The deployment's keys still win |
 | `GET/POST /api/private/admin/roles` `{name}` or `{from, name}` | owner | list (Owner, Default, custom: `{id, name, builtin, locked?, ownQuotas?, users}`); create, or duplicate `from` a role id or `"default"` (Default's values copied as explicit settings); 409 `name_taken` (unique, case-insensitive; "Owner" and "Default" are reserved) |
@@ -360,7 +360,9 @@ at login) **or** `reauth: {challengeId, credential}` (an assertion for a `…/me
 challenge). Missing → 400 `reauth_required`; wrong password → 403 `wrong_password`; a passkey
 that does not verify → 403 `reauth_failed`. Both failures count against the IP's login guard,
 and the 10th failure in the window (default) → 401 `session_revoked`, which ends every session
-of the account.
+of the account. The owner impersonating the account sends no `step…`: the owner's session is the
+authority (the change is recorded with the owner as the real actor in the admin audit, and as the
+user's own in their activity).
 | `GET /api/private/shares`, `GET /api/private/shares/:id`, `PATCH /api/private/shares/:id`, `POST …/:id/revoke` | session / key (`read` for GET, `manage` otherwise) | My shares: `{rows, total}`; `{share}`; `{label?, views?, expires?}` (increase-only; a key is held to the API limits); revoke with `X-Secbin-Intent`. Only the caller's own shares (else 404); 423 when locked. See docs/API.md |
 | `/api/private/admin/*` | owner session, not impersonating | overview, settings, limits, quotas, viewer rules, users (+ password, unlock, impersonate, keys), unimpersonate, audit, guard, ip-rules, shares |
 | `GET /api/private/shares/:id/opens` | session / key (`read`) | read receipts of my share → `{total, fields, rows: [{ts, …allowed fields}]}` (newest first, at most 200). `total` counts every open, including those not stored individually (at most one receipt per address per minute is stored), except floods of more than 5 a minute from one address |

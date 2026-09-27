@@ -5,7 +5,9 @@
 // as the deployment's TURNSTILE_SITEKEY and TURNSTILE_SECRET (preferred: a
 // Worker secret), or else in the admin panel (Security → Human check), where
 // the owner enters them. Admin password resets, the owner's changes to other
-// accounts, owner setup and API-key calls never need it.
+// accounts in the admin panel, owner setup and API-key calls never need it.
+// The owner acting as a user ("Log in as") changes that account on its
+// Account page, and passes the same human check there as anyone else.
 //
 // The browser sends the widget's token in X-Secbin-Turnstile. The server
 // redeems it with Cloudflare's siteverify and accepts it only when it

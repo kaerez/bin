@@ -95,6 +95,9 @@ never committed) and `node_modules`.
   region or national standard.
 - **Reverse shares:** an optional password gates the anonymous uploader only; uploads land in the
   user's chosen drive folder; the user never needs that password.
+- **Impersonation:** the owner can do everything the user can, the Drive included; it is
+  invisible to the user (the user's activity shows the actions as theirs), and the owner-only
+  admin audit keeps the start, end and real actor.
 
 ## No Legal / Compliance notes
 
