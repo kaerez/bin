@@ -92,6 +92,12 @@ export async function handlePrivate(request, env, url, ctx) {
   // ── session-only surfaces ─────────────────────────────────────────────────
   const a = await authenticate(request, env);
   const dir = directory(env);
+  // The confirmation of a change to the signed-in account. The owner
+  // impersonating the user needs none (the owner's session is the authority):
+  // the change is made as the user, with the owner recorded as the real
+  // actor for the owner-only admin audit (the user's own activity shows it as
+  // theirs). Everyone else confirms with the password or a passkey.
+  const confirmation = async (body) => (a.actor ? { actorId: actorId(a) } : stepUpFrom(body, url));
 
   if (p === '/api/private/me') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -101,15 +107,17 @@ export async function handlePrivate(request, env, url, ctx) {
 
   if (p === '/api/private/me/password') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    if (a.actor) return err(403, 'impersonating', 'Use the admin panel to reset this user’s password.');
     await requireTurnstile(env, request, TURNSTILE_ACTIONS.password);
     const g = await ipContext(env, request);
     const body = await readJsonBody(request);
-    const step = await stepUpFrom(body, url); // the current password, or a passkey
+    const step = await confirmation(body); // the current password or a passkey (none while impersonating)
     const next = await verifierFrom(body.proof);
     if (!next) return err(400, 'invalid_credential', 'Invalid password proof.');
     const r = await dir.changePassword(a.user.id, { ...step, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
     if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
+    // Impersonating: the user's sessions end, the owner's session (bound to
+    // the owner's own session version) carries on unchanged.
+    if (a.actor) return withAuth(a, json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }));
     // The session version moved on (all other sessions end); keep this device signed in.
     const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env) });
     return json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }, 200, { 'set-cookie': cookie });
@@ -127,56 +135,55 @@ export async function handlePrivate(request, env, url, ctx) {
   // so that guessing the password costs a token per attempt.
   const human = () => requireTurnstile(env, request, TURNSTILE_ACTIONS.account);
 
-  // API keys: every change needs the password or a passkey.
+  // API keys: every change needs the password or a passkey (not while impersonating).
   if (p === '/api/private/me/keys') {
     if (request.method === 'GET') return withAuth(a, json({ keys: await dir.listKeys(a.user.id) }));
     if (request.method === 'POST') {
-      if (a.actor) return err(403, 'impersonating', 'API keys cannot be created while impersonating.');
       await human();
       const body = await readJsonBody(request);
       const g = await ipContext(env, request);
-      const step = await stepUpFrom(body, url);
+      const step = await confirmation(body);
       const r = await createApiKey(dir, a.user.id, body, { ...step, lockoutOff: g.off.all });
-      return r.ok ? json({ ok: true, id: r.id, key: r.key }, 201) : afterRefusal(env, g, r, fromDir(r));
+      return r.ok ? withAuth(a, json({ ok: true, id: r.id, key: r.key }, 201)) : afterRefusal(env, g, r, fromDir(r));
     }
     return methodNotAllowed('GET, POST');
   }
   const km = p.match(/^\/api\/private\/me\/keys\/([A-Za-z0-9_-]{16})$/);
   if (km) {
     if (request.method !== 'DELETE' && request.method !== 'PATCH') return methodNotAllowed('PATCH, DELETE');
-    if (a.actor) return err(403, 'impersonating', 'API keys cannot be changed while impersonating (use Admin → Users).');
     if (request.method === 'DELETE') assertIntent(request);
     await human();
     const body = await readJsonBody(request);
     const g = await ipContext(env, request);
-    const step = { ...(await stepUpFrom(body, url)), lockoutOff: g.off.all };
+    const { actorId: by = a.user.id, ...step } = { ...(await confirmation(body)), lockoutOff: g.off.all };
     const r = request.method === 'DELETE'
-      ? await dir.revokeKey(a.user.id, km[1], a.user.id, step)
-      : await dir.updateKey(a.user.id, km[1], { name: body.name, scopes: body.scopes, ...step });
-    return r.ok ? json({ ok: true }) : afterRefusal(env, g, r, fromDir(r));
+      ? await dir.revokeKey(a.user.id, km[1], by, step)
+      : await dir.updateKey(a.user.id, km[1], { name: body.name, scopes: body.scopes, actorId: by, ...step });
+    return r.ok ? withAuth(a, json({ ok: true })) : afterRefusal(env, g, r, fromDir(r));
   }
 
   // A challenge for confirming a change with a passkey instead of the password.
+  // Impersonating, nothing is confirmed (and the passkeys are the user's).
   if (p === '/api/private/me/reauth') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
-    if (a.actor) return err(403, 'impersonating', 'Not available while impersonating.');
+    if (a.actor) return err(409, 'not_needed', 'No confirmation is needed while acting as this user.');
     const r = await dir.reauthOptions(a.user.id);
     return r.ok ? json({ challengeId: r.challengeId, publicKey: requestOptions(r, url.hostname) }) : fromDir(r);
   }
 
   if (p === '/api/private/me/username') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    if (a.actor) return err(403, 'impersonating', 'The username cannot be changed while impersonating.');
     await human();
     const body = await readJsonBody(request);
     const g = await ipContext(env, request);
-    const step = await stepUpFrom(body, url);
+    const step = await confirmation(body);
     const r = await dir.changeUsername(a.user.id, { username: body.username, ...step, lockoutOff: g.off.all });
-    return r.ok ? json(r) : afterRefusal(env, g, r, fromDir(r));
+    return r.ok ? withAuth(a, json(r)) : afterRefusal(env, g, r, fromDir(r));
   }
 
-  // ── passkeys and recovery codes (every change needs the password or a passkey) ──
+  // ── passkeys and recovery codes (every change needs the password or a passkey,
+  //    except while impersonating; the new codes are then shown to the owner) ──
   if (p === '/api/private/me/passkeys' || p.startsWith('/api/private/me/passkeys/') || p === '/api/private/me/recovery-codes' || p === '/api/private/me/second-factor') {
     if (p === '/api/private/me/passkeys' && request.method === 'GET') {
       const st = await dir.passkeyStatus(a.user.id);
@@ -184,7 +191,6 @@ export async function handlePrivate(request, env, url, ctx) {
     }
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
-    if (a.actor) return err(403, 'impersonating', 'Passkeys cannot be changed while impersonating.');
     if (p === '/api/private/me/passkeys/options') {
       const r = await dir.passkeyRegisterOptions(a.user.id);
       return r.ok ? json({ challengeId: r.challengeId, publicKey: creationOptions(r, url.hostname) }) : fromDir(r);
@@ -194,7 +200,7 @@ export async function handlePrivate(request, env, url, ctx) {
     await human();
     const g = await ipContext(env, request);
     const body = await readJsonBody(request);
-    const step = { ...(await stepUpFrom(body, url)), lockoutOff: g.off.all };
+    const step = { ...(await confirmation(body)), origin: url.origin, rpId: url.hostname, lockoutOff: g.off.all };
     const rm = p.match(/^\/api\/private\/me\/passkeys\/([A-Za-z0-9_-]{16,1400})\/remove$/);
     let r;
     if (p === '/api/private/me/passkeys') {
@@ -209,7 +215,7 @@ export async function handlePrivate(request, env, url, ctx) {
       return err(404, 'not_found', 'Not found.');
     }
     if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
-    return json(r, p === '/api/private/me/passkeys' ? 201 : 200);
+    return withAuth(a, json(r, p === '/api/private/me/passkeys' ? 201 : 200));
   }
 
   return err(404, 'not_found', 'Not found.');

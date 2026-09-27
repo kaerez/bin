@@ -15,6 +15,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **The user's own activity no longer lists the start and end of an impersonation**
+  (`impersonate.start`, `impersonate.end`); they stay in the owner-only admin audit.
 - **Nothing the Worker serves is stored in Cloudflare's cache** (with Workers Caching on, see
   Changed): the top-level fetch handler adds `Cloudflare-CDN-Cache-Control: no-store` to every
   response it returns, errors and exceptions included, and `Cache-Control: no-store` to any
@@ -338,6 +340,18 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Log in as covers the whole account:** acting as a user, the owner can now do everything the
+  user can, the Drive included. The Account page shows every form (username, password,
+  passkeys, recovery codes, the sign-in choice, API keys) without the "confirm it's you"
+  fields: none of these changes asks for a password or passkey while impersonating (the
+  owner's session is the authority). A password the owner sets there is exempt from the
+  password policy and ends the user's sessions, not the owner's; new recovery codes are shown to
+  the owner; existing passkeys and recovery codes stay unless removed. The human check applies
+  as on any Account change. The admin panel (and so minting keys for the owner) and nested
+  impersonation stay refused, and `POST /api/private/me/reauth` answers 409 `not_needed`. The
+  banner stays in view while scrolling, and the Account page is titled with the user's name.
+  Impersonation is invisible to the user (the user's activity shows the actions as theirs), and
+  the owner-only admin audit keeps the start, end and real actor.
 - **Smart Placement and Workers Caching** are on in `wrangler.toml` (and
   `wrangler.toml.example`): `[placement] mode = "smart"` runs the fetch handler where it is
   fastest overall (near the Directory Durable Object for most API calls), and
