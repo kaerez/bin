@@ -161,8 +161,8 @@ working.
   window and upload deadline, quotas and viewer rules. Turning the viewer off in a role takes
   effect on that role's existing links at once (each open carries the sender's current policy).
   The Default role holds a value for everything; other roles follow it for whatever they leave
-  unset. The locked Owner role never restricts the owner; only the owner's own session timeouts
-  and file-share windows are set there (per-IP protection still applies). The built-in Public
+  unset. The locked Owner role never restricts the owner; only the owner's own session timeouts,
+  file-share windows and activity-log retention are set there (per-IP protection still applies). The built-in Public
   role holds the public account's options (below); it cannot be renamed, deleted or assigned.
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
@@ -186,7 +186,9 @@ working.
   are on the Public role (Admin → Roles). **Get Legal / Compliance sign-off first**
   (ePrivacy/GDPR); see [SECURITY.md](./SECURITY.md).
 - **Activity log** — kept for at most a set age and number of entries (defaults 365 days and
-  500 000), with per-user limits; entries about the owner are kept until cleared. The owner can
+  500 000), with per-role limits. Entries about the owner and the owner's own actions
+  (impersonation included) follow the owner's limits instead (Owner role; kept until cleared by
+  default); server-wide configuration changes are never deleted automatically. The owner can
   clear everything, one account's entries or entries older than a date (password required; no
   record is kept of the clearing — check retention duties with Legal / Compliance first).
 - **Passkeys:** each account can add passkeys (Account) and sign in with one instead of the
