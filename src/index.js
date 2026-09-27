@@ -13,7 +13,8 @@
 // expiry and brute-force protection. It never sees a decryption key, a password,
 // a file name or a file type. See SPEC.md §10 and SECURITY.md.
 
-import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, SECURITY_HEADERS } from './lib/http.js';
+import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, appendCookies, SECURITY_HEADERS } from './lib/http.js';
+import { csrfCookieFor } from './lib/csrf.js';
 import { readSession, logoutCookie, SESSION_COOKIE } from './lib/auth.js';
 import { ipContext, cachedSettings } from './lib/guard.js';
 import { turnstileKeys } from './lib/turnstile.js';
@@ -71,9 +72,7 @@ async function signedInRedirect(request, env) {
   try {
     const s = await readSession(request, env);
     if (!s.ok) return null;
-    const res = redirect('/dashboard/');
-    if (s.setCookie) res.headers.append('set-cookie', s.setCookie);
-    return res;
+    return appendCookies(redirect('/dashboard/'), s.setCookie);
   } catch {
     return null;
   }
@@ -88,14 +87,13 @@ async function handleDashboard(request, env, url) {
   const s = await readSession(request, env);
   if (!s.ok) {
     if (s.reason !== 'disabled') return redirect('/dashboard/login/');
-    const res = redirect('/dashboard/login/?disabled=1');
-    res.headers.append('set-cookie', logoutCookie());
-    return res;
+    return appendCookies(redirect('/dashboard/login/?disabled=1'), logoutCookie());
   }
   if (/^\/dashboard\/admin(\/|$)/.test(url.pathname) && (s.user.role !== 'owner' || s.actor)) return redirect('/dashboard/');
   const res = await serveAsset(env, request, url);
-  if (s.setCookie) res.headers.append('set-cookie', s.setCookie);
-  return res;
+  // Every signed-in page load (re)sets the session's CSRF token cookie, so a
+  // reload always leaves the page with the current token (src/lib/csrf.js).
+  return appendCookies(res, s.setCookie ?? await csrfCookieFor(env, s.claims));
 }
 
 async function route(request, env, url, ctx) {

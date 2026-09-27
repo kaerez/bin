@@ -76,10 +76,17 @@ const JSON_HEADERS = {
   'x-content-type-options': 'nosniff',
 };
 
+/** `extraHeaders` values may be arrays (several Set-Cookie headers). */
 export function json(obj, status = 200, extraHeaders) {
   const headers = new Headers(JSON_HEADERS);
-  if (extraHeaders) for (const [k, v] of Object.entries(extraHeaders)) headers.append(k, v);
+  if (extraHeaders) for (const [k, v] of Object.entries(extraHeaders)) for (const x of [].concat(v)) if (x) headers.append(k, x);
   return new Response(JSON.stringify(obj), { status, headers });
+}
+
+/** Append one or more Set-Cookie values (a string, an array, or nothing) to a response. */
+export function appendCookies(res, cookies) {
+  for (const c of [].concat(cookies ?? [])) if (c) res.headers.append('set-cookie', c);
+  return res;
 }
 
 /** Error response: { error: <code>, message: <human text> [, ...extra] }. */
@@ -173,7 +180,7 @@ export class HttpError extends Error {
   }
   toResponse() {
     const res = err(this.status, this.code, this.message, this.extra);
-    if (this.headers) for (const [k, v] of Object.entries(this.headers)) res.headers.append(k, v);
+    if (this.headers) for (const [k, v] of Object.entries(this.headers)) for (const x of [].concat(v)) if (x) res.headers.append(k, x);
     return res;
   }
 }
@@ -225,6 +232,21 @@ export function assertIntent(request) {
   if ((request.headers.get('x-secbin-intent') || '') !== '1') {
     throw new HttpError(400, 'missing_intent', 'This request requires the "X-Secbin-Intent: 1" header.');
   }
+}
+
+/**
+ * Does a state-changing request have the shape the routes' own guards demand
+ * (readJsonBody, assertIntent, the chunk upload)? A JSON body, an
+ * application/octet-stream chunk, or X-Secbin-Intent: 1; a DELETE always
+ * needs the intent header. A request that fails this is refused by the
+ * route's guard with its usual error; authenticate() checks the CSRF token
+ * only after it (src/lib/csrf.js).
+ */
+export function hasStateChangeShape(request) {
+  const intent = (request.headers.get('x-secbin-intent') || '') === '1';
+  if (request.method === 'DELETE') return intent;
+  const ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  return intent || ct === 'application/json' || ct === 'application/octet-stream';
 }
 
 // ── cookies ──────────────────────────────────────────────────────────────────

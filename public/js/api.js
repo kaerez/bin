@@ -23,13 +23,81 @@ async function readJson(res) {
   try { return await res.json(); } catch { return null; }
 }
 
+// ── CSRF token ────────────────────────────────────────────────────────────────
+// Every state-changing request of a signed-in page carries the session's CSRF
+// token in X-Secbin-CSRF (src/lib/csrf.js). It is read from its cookie at the
+// moment of each request, never kept from page load: the token belongs to the
+// session, not to the page, so back/forward, a restore from the back-forward
+// cache, a reload, several tabs and a sign-in elsewhere always use the current
+// one. The header goes only where the server checks it (/api/private and
+// logout); anonymous routes have no session and ignore it.
+export const CSRF_COOKIE = '__Host-secbin_csrf';
+const CSRF_HEADER = 'x-secbin-csrf';
+const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+export const SESSION_CHANGED = 'Your session changed in another tab; reload the page.';
+
+/** The current token from its cookie ('' when there is none). */
+export function csrfToken() {
+  let jar;
+  try { jar = document.cookie || ''; } catch { return ''; }
+  for (const part of jar.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === CSRF_COOKIE) {
+      const v = part.slice(i + 1).trim();
+      return TOKEN_RE.test(v) ? v : '';
+    }
+  }
+  return '';
+}
+
+const needsCsrf = (path, method) => STATE_CHANGING.has(method) && (path.startsWith('/api/private/') || path === '/api/auth/logout');
+
+/**
+ * Send `init` to `path`; a signed-in state-changing request gets the current
+ * token. If the server refuses it (403 csrf_mismatch, which it answers before
+ * changing anything), fetch /api/private/me (which re-sets the cookie and
+ * returns the token) and retry exactly once. A signed-out session gets the
+ * usual 401 from /me instead; a second refusal becomes SESSION_CHANGED.
+ */
+async function send(path, init) {
+  if (!needsCsrf(path, init.method)) return fetch(path, init);
+  const withToken = (token) => {
+    const headers = { ...init.headers };
+    if (token) headers[CSRF_HEADER] = token; else delete headers[CSRF_HEADER];
+    return fetch(path, { ...init, headers });
+  };
+  const res = await withToken(csrfToken());
+  if (!(await isCsrfMismatch(res))) return res;
+  const fresh = await refreshCsrf();
+  const again = await withToken(fresh);
+  if (await isCsrfMismatch(again)) throw new ApiError(SESSION_CHANGED, 403, 'csrf_mismatch');
+  return again;
+}
+
+async function isCsrfMismatch(res) {
+  if (res.status !== 403) return false;
+  try {
+    const d = await res.clone().json();
+    return isPlainObject(d) && d.error === 'csrf_mismatch';
+  } catch {
+    return false;
+  }
+}
+
+/** The session's token from /api/private/me (a 401 here is the normal signed-out flow). */
+async function refreshCsrf() {
+  const d = await request('/api/private/me');
+  return typeof d.csrf === 'string' && TOKEN_RE.test(d.csrf) ? d.csrf : csrfToken();
+}
+
 async function request(path, { method = 'GET', body, headers = {}, raw = false } = {}) {
   const init = { method, headers: { ...headers }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual' };
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(path, init);
+  const res = await send(path, init);
   if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
   if (raw && res.ok) return res;
   const data = await readJson(res);
@@ -168,7 +236,7 @@ export const admin = {
 export const uploadChunk = (id, i, bytes, uploadToken) => putChunkTo(`/api/private/file/${enc(id)}/chunk/${i}`, bytes, uploadToken);
 
 async function putChunkTo(path, bytes, uploadToken) {
-  const res = await fetch(path, {
+  const res = await send(path, {
     method: 'PUT', body: bytes, cache: 'no-store', credentials: 'same-origin', redirect: 'manual',
     headers: { 'content-type': 'application/octet-stream', 'x-upload-token': uploadToken },
   });

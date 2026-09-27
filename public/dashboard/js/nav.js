@@ -50,3 +50,15 @@ export const ready = (async () => {
   }
   return profile;
 })();
+
+// Back-forward cache: a page can come back exactly as it was left. Its CSRF
+// token is never stale (api.js reads the cookie per request), but the session
+// may have changed meanwhile: back at the login page if it ended, a reload if
+// it is now someone else's (another sign-in, impersonation started or ended).
+addEventListener('pageshow', async (ev) => {
+  if (!ev.persisted) return;
+  let was;
+  let now;
+  try { was = await ready; now = await loadMe(); } catch { return; /* offline: the next request says so */ }
+  if (now.user.id !== was.user.id || (now.impersonatedBy ?? null) !== (was.impersonatedBy ?? null)) location.reload();
+});

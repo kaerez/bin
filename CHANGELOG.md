@@ -15,6 +15,30 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **CSRF tokens (defence in depth)**, on top of the SameSite=Strict session cookie, the
+  `Sec-Fetch-Site` check, the JSON / `X-Secbin-Intent` requirement and the absence of CORS
+  (all kept as they were).
+  - **The token:** stateless and bound to the session, an HMAC of the session id and version
+    under a subkey of `SIG`. It is the same for every tab and request of a session and changes
+    with it (sign-in, sign-out, a session-version bump, impersonation start or end).
+  - **Delivery:** in a readable `__Host-secbin_csrf` cookie (Secure, SameSite=Strict, `Path=/`)
+    whenever the session cookie is set or refreshed and on every signed-in page load, and in
+    `GET /api/private/me` (`csrf`).
+  - **The check:** every cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` (and sign-out) must
+    send it in `X-Secbin-CSRF`. It is compared timing-safely, after the existing checks and
+    before any change or Turnstile verification. A mismatch gets `403 csrf_mismatch`.
+  - **Exempt:** API keys (the CLI) and the anonymous routes.
+  - **The client** (`public/js/api.js`) reads the token from the cookie at every request. On a
+    mismatch it refreshes through `/api/private/me` and retries once, then shows "Your session
+    changed in another tab; reload the page." A dashboard page restored from the back-forward
+    cache re-checks its session.
+  - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default). Changes are
+    audited as `settings.csrf`; the setting is exported and imported with the settings, and the
+    import preview warns when it would be turned off.
+  - **Tighter guards:** `POST /api/private/me/reauth` and `POST /api/private/me/passkeys/options`
+    now need a JSON body (`{}`), like every other change.
+  - **Tests:** workerd, DOM and end-to-end suites (`test/csrf.test.js`, `test-dom/csrf.test.js`,
+    `test-e2e/csrf.mjs`).
 - **The user's own activity no longer lists the start and end of an impersonation**
   (`impersonate.start`, `impersonate.end`); they stay in the owner-only admin audit.
 - **Nothing the Worker serves is stored in Cloudflare's cache** (with Workers Caching on, see

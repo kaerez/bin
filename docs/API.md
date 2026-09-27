@@ -50,6 +50,28 @@ scopes — under the same rules as the dashboard's **My shares** page:
 - Every change made with a key (label, extension, revocation) is recorded in your activity log
   with the key's id (`apikey=<id>`; never the key itself); creations are recorded as usual.
 
+### Browser sessions: `X-Secbin-CSRF`
+
+API-key requests **never** need a CSRF token. It applies only to requests authenticated by the
+browser's session cookie, for example a script running in the signed-in dashboard.
+Such a request that changes something (`POST`, `PUT`, `PATCH` or `DELETE` on
+`/api/private/*`, and `POST /api/auth/logout`) must send:
+
+```
+X-Secbin-CSRF: <token>
+```
+
+- **The token:** the value of the `__Host-secbin_csrf` cookie, or `csrf` in
+  `GET /api/private/me`.
+- **Lifetime:** it belongs to the session and changes only when the session does (sign-in,
+  sign-out, a password change, impersonation start or end).
+- **Refusal:** a missing or stale token gets `403 csrf_mismatch` and nothing changes. Fetch
+  `/api/private/me` for the current token and send the request again.
+- **Other routes:** reads (`GET`) and the anonymous routes (share open and delete, public
+  creation, login, setup) never need it.
+- **Owner switch:** the owner can turn the requirement off in Admin → Settings → CSRF tokens.
+  The header is then ignored; the JSON / `X-Secbin-Intent` and cross-site rules still apply.
+
 ## Endpoints
 
 All bodies and results are JSON unless stated. `:id` is a share id (`k…`/`b…` notes, `f…` file
@@ -96,6 +118,7 @@ SPEC.md §10). The ones specific to keys and shares:
 | 409 | `not_active` | extending a share that is no longer active |
 | 400 | `invalid`, `invalid_views`, `invalid_expiry`, `invalid_label` | nothing to change, a smaller or invalid value, a label over 100 characters |
 | 400 | `missing_intent` | revoke without `X-Secbin-Intent: 1` |
+| 403 | `csrf_mismatch` | browser session only (never an API key): a change without the session's `X-Secbin-CSRF` token (see above) |
 | 403 | `too_many_views`, `unlimited_views_disabled`, `expiry_too_long` | beyond the account's limits (for a key: its API limits); `max` is attached |
 | 403 | `bad_token` | wrong delete token |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |

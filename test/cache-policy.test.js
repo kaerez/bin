@@ -18,7 +18,7 @@ import { setSiteverify } from '../src/lib/turnstile.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk } from '../public/js/files.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { utf8 } from '../public/js/bytes.js';
-import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, csrfHeaders, STATE_CHANGING } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
 
 let oc, user;
@@ -48,10 +48,11 @@ async function direct(path, envPatch, init = {}) {
 // The Worker with Turnstile on (SELF runs without it), for the Account page's
 // human checks; a fake siteverify accepts each "ok:<action>#n" token once.
 const TS_ENV = { TURNSTILE_SITEKEY: '0x4AAAAAAAtestsitekey', TURNSTILE_SECRET: '0x4AAAAAAAtestsecretvalue' };
-function tsFetch(path, { method = 'GET', body, cookie, headers = {}, token } = {}) {
+async function tsFetch(path, { method = 'GET', body, cookie, headers = {}, token } = {}) {
   const h = { 'cf-connecting-ip': freshIp(), ...headers };
   if (body !== undefined) h['content-type'] = 'application/json';
   if (cookie) h.cookie = cookie;
+  if (cookie && STATE_CHANGING.has(method)) Object.assign(h, await csrfHeaders(cookie));
   if (token) h['x-secbin-turnstile'] = token;
   return direct(path, TS_ENV, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
 }
@@ -78,7 +79,7 @@ async function uploadFile(cookie) {
   const sources = [{ off: 0, size: bytes.length, read: async (a, b) => bytes.slice(a, b) }];
   for (let i = 0; i < chunks; i++) {
     const ct = await encryptChunk(key, i, chunks, await readStreamChunk(sources, i, l.total));
-    record(`PUT chunk ${i}`, await raw(`/api/private/file/${id}/chunk/${i}`, { method: 'PUT', headers: { cookie, 'content-type': 'application/octet-stream', 'x-upload-token': uploadtoken }, body: ct }));
+    record(`PUT chunk ${i}`, await raw(`/api/private/file/${id}/chunk/${i}`, { method: 'PUT', headers: { cookie, ...(await csrfHeaders(cookie)), 'content-type': 'application/octet-stream', 'x-upload-token': uploadtoken }, body: ct }));
   }
   const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', expire: '1h' });
   record('POST finalize', await fetchJson(`/api/private/file/${id}/finalize`, { method: 'POST', cookie, headers: { 'x-upload-token': uploadtoken }, body: { paste: body } }));

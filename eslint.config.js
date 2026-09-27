@@ -58,6 +58,13 @@ export default [
     languageOptions: { globals: { ...globals.node } },
   },
 
+  // End-to-end suites (manual, Playwright): Node scripts whose page.evaluate()
+  // callbacks run in the browser.
+  {
+    files: ['test-e2e/**/*.mjs'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
+  },
+
   // Build-time asset tooling (tools/render-og.mjs): plain Node scripts, never shipped.
   {
     files: ['tools/**/*.mjs', 'examples/**/*.mjs'],

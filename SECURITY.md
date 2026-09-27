@@ -381,9 +381,56 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - Disabling also bumps the session version, so re-enabling never brings old sessions back.
   - Capabilities held by link holders (a share's delete token, an open download grant) are
     not account credentials, so they keep working.
-- **CSRF**: state-changing calls must be non-simple (JSON content type or `X-Secbin-Intent`), are
-  refused when `Sec-Fetch-Site` is `cross-site` **or `same-site`** (a sibling subdomain is not
-  trusted), and cookies are SameSite=Strict. The API has no CORS.
+- **CSRF**: layered guards, every one enforced on its own.
+  - The session cookie is `__Host-`, HttpOnly, Secure and SameSite=Strict.
+  - State-changing calls must be non-simple: a JSON content type, or `X-Secbin-Intent: 1`
+    (every `DELETE` and every action without a body). File chunks are
+    `application/octet-stream` with `X-Upload-Token`.
+  - Requests with `Sec-Fetch-Site: cross-site` **or `same-site`** are refused (`403
+    cross_site`); a sibling subdomain is not trusted.
+  - The API sends no CORS headers.
+  - **CSRF tokens** (`src/lib/csrf.js`), on top of the guards above. The token is stateless and
+    bound to the session: `HMAC-SHA256(K, "secbin-csrf/v1:" ‖ session id ‖ ":" ‖ session
+    version)`, base64url. `K = HMAC-SHA256(SIG, "secbin-csrf-key/v1")` is a subkey of the
+    session signing secret, used for nothing else. While impersonating, the version is the
+    owner's.
+    - One token per session, the same in every tab and request. It changes only when the
+      session does: sign-in, sign-out, a session-version bump (password change or reset,
+      disable), impersonation start or end.
+    - Delivered in a readable cookie `__Host-secbin_csrf` (Secure, SameSite=Strict, `Path=/`,
+      not HttpOnly) whenever the session cookie is set or refreshed, on every signed-in
+      dashboard page load, and in `GET /api/private/me` (`csrf`, with the cookie re-set).
+      Sign-out and a disabled account clear it. It is never logged or put in an error message.
+    - Every cookie-authenticated `POST`, `PUT`, `PATCH` and `DELETE` (`/api/private/*`,
+      `POST /api/auth/logout`) must send it in `X-Secbin-CSRF`. The check comes after the
+      `Sec-Fetch-Site` check and the request-shape check, which keep their errors, and before
+      anything changes state or spends a single-use token (Turnstile). The comparison is
+      timing-safe (`crypto.subtle.timingSafeEqual`). A missing, wrong, other-session or
+      old-session-version token gets `403 csrf_mismatch`, and nothing changes. A request
+      without a live session gets the usual `401`.
+    - The browser client (`public/js/api.js`) reads the token from the cookie at the moment of
+      every state-changing request, never a copy from page load. Back and forward, restores
+      from the back-forward cache, reloads, several tabs and a sign-in in another tab therefore
+      all use the current token. On `403 csrf_mismatch` it fetches `/api/private/me` (which
+      re-sets the cookie and returns the token) and retries once. That is safe because the
+      refused request changed nothing. A second refusal shows "Your session changed in another
+      tab; reload the page." A dashboard page restored from the back-forward cache re-checks the
+      session and reloads if it now belongs to someone else.
+    - **Exempt, with their reasons:**
+      - API-key (`Authorization: Bearer sbk_…`) requests from the CLI and scripts: the key is
+        sent explicitly and never attached by a browser on its own, and no cookie is involved.
+      - The anonymous routes: opening, "delete now" and deleting a share by its capabilities,
+        public creation, login, passkey and recovery sign-in, prelogin and setup. There is no
+        session to bind a token to. They keep their own guards (the cross-site check, JSON
+        bodies or custom headers, access proofs and tokens, Turnstile, rate limits).
+    - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default,
+      server-wide). Off, the server stops requiring `X-Secbin-CSRF` (the header is ignored); the
+      cookie is still issued, and every other guard above stays enforced. The value is read
+      with the session in the same Directory call, so the switch adds no round trip and takes
+      effect on the next request. Turning it on again covers open pages through the one retry.
+      Each change is recorded in the owner-only admin audit as `settings.csrf` (old and new
+      value). The setting travels in an export's settings part, and the import preview warns
+      when an import would turn tokens off.
 - **API keys** (`sbk_…`, stored hashed) authenticate share creation, the policy read and the
   key user's own shares (list, receipts, label, extend, revoke) — never the account itself
   (profile, password, passkeys, keys, activity) or admin endpoints (`403 api_key_not_allowed`).

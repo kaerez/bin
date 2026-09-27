@@ -650,8 +650,11 @@ export class Directory extends DurableObject {
     } else if (u.sess_ver !== ver) {
       return null;
     }
-    // Impersonating, the owner's own (server-wide) timeouts apply.
-    return { user: this.#publicUser(u), actor: this.#publicUser(actor), settings: this.#sessionSettings(undefined, actor ? null : u) };
+    // Impersonating, the owner's own (server-wide) timeouts apply. `csrf`: the
+    // csrfTokens setting, read here with the session so that the Worker needs
+    // no extra round trip and a change applies to the very next request.
+    const s = this.#settings();
+    return { user: this.#publicUser(u), actor: this.#publicUser(actor), settings: this.#sessionSettings(s, actor ? null : u), csrf: s.csrfTokens !== false };
   }
 
   async revokeSession(sid, exp, actorId, subjectId) {
@@ -2251,9 +2254,13 @@ export class Directory extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
     });
-    // Every change is logged (long text by its length), in entries that fit.
+    // Every change is logged (long text by its length), in entries that fit;
+    // turning CSRF tokens on or off has an entry of its own.
     const changed = ops.filter(([k, v]) => cur[k] !== v);
-    this.#logChunks(actorId, null, 'settings.updated', '', changed.length ? changed.map(([k, v]) => `${k}=${logValue(v)}`) : ['no changes']);
+    const csrf = changed.find(([k]) => k === 'csrfTokens');
+    if (csrf) this.#log(actorId, null, 'settings.csrf', `from=${cur.csrfTokens} to=${csrf[1]}`);
+    const rest = changed.filter(([k]) => k !== 'csrfTokens');
+    if (rest.length || !csrf) this.#logChunks(actorId, null, 'settings.updated', '', rest.length ? rest.map(([k, v]) => `${k}=${logValue(v)}`) : ['no changes']);
     return { ok: true, settings: this.#settings() };
   }
 
@@ -2469,6 +2476,7 @@ export class Directory extends DurableObject {
         for (const [k, v] of Object.entries(sys.settings)) {
           if (/^(guard|lockout|public)\./.test(k) && cur[k] !== v) plan.warnings.push(`security setting ${k}: ${cur[k]} → ${v}`);
         }
+        if (cur.csrfTokens !== false && sys.settings.csrfTokens === false) plan.warnings.push('security setting csrfTokens: true → false (CSRF tokens would be turned off)');
         plan.system.settings = Object.entries(sys.settings).filter(([k, v]) => cur[k] !== v).map(([key, to]) => ({ key, from: cur[key], to }));
       }
       if (S.has('roles')) {
@@ -2673,6 +2681,8 @@ export class Directory extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       if (S.has('settings')) {
         for (const [k, v] of Object.entries(sys.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
+        const csrf = plan.system.settings.find((c) => c.key === 'csrfTokens');
+        if (csrf) this.#log(actorId, null, 'settings.csrf', `import: from=${csrf.from} to=${csrf.to}`);
         this.#logChunks(actorId, null, 'settings.updated', 'import: ', plan.system.settings.map((c) => `${c.key}=${logValue(c.to)}`));
       }
       if (S.has('roles')) {

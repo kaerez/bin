@@ -3,7 +3,7 @@
 // "reauth" challenge (POST /api/private/me/reauth). The Directory checks it;
 // these helpers read it from a request body and handle a failed attempt.
 
-import { HttpError } from '../lib/http.js';
+import { HttpError, appendCookies } from '../lib/http.js';
 import { logoutCookie } from '../lib/auth.js';
 import { recordFailure } from '../lib/guard.js';
 import { verifierFrom } from './auth.js';
@@ -35,6 +35,6 @@ const COUNTED = new Set(['wrong_password', 'reauth_failed', 'session_revoked']);
  */
 export async function afterRefusal(env, g, r, res) {
   if (COUNTED.has(r.error)) await recordFailure(env, g, 'login');
-  if (r.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
+  if (r.error === 'session_revoked') appendCookies(res, logoutCookie());
   return res;
 }

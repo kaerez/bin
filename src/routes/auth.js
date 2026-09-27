@@ -5,7 +5,7 @@
 
 import { json, err, readJsonBody, assertIntent, methodNotAllowed } from '../lib/http.js';
 import { authnToken, sessionKeys } from '../lib/config.js';
-import { readSession, issueSession, logoutCookie, unconfigured } from '../lib/auth.js';
+import { readSession, issueSession, logoutCookie, unconfigured, checkCsrf } from '../lib/auth.js';
 import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
@@ -147,6 +147,9 @@ export async function handleAuth(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
     const s = await readSession(request, env);
+    // Signing out is a change too: a live session must present its CSRF token
+    // (no session, nothing to end: the cookies are cleared either way).
+    if (s.ok) await checkCsrf(request, env, s);
     if (s.ok) await directory(env).revokeSession(s.claims.sid, s.claims.exp, s.actor ? { id: s.actor.id, imp: true } : s.user.id, s.user.id);
     return json({ ok: true }, 200, { 'set-cookie': logoutCookie() });
   }

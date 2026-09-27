@@ -28,7 +28,7 @@ const userRoles = new Map();
 async function roleForUser(uid, cookie) {
   if (userRoles.has(uid)) return userRoles.get(uid);
   const name = `user ${uid}`;
-  const call = (p, init) => SELF.fetch(`${ORIGIN}${p}`, { ...init, headers: { 'content-type': 'application/json', cookie, 'x-secbin-intent': '1' }, redirect: 'manual' });
+  const call = async (p, init) => SELF.fetch(`${ORIGIN}${p}`, { ...init, headers: { 'content-type': 'application/json', cookie, 'x-secbin-intent': '1', ...(await csrfHeaders(cookie)) }, redirect: 'manual' });
   let r = await call('/api/private/admin/roles', { method: 'POST', body: JSON.stringify({ name }) });
   let id = r.status === 201 ? (await r.json()).id : null;
   if (!id) id = (await (await call('/api/private/admin/roles', { method: 'GET' })).json()).roles.find((x) => x.name === name)?.id;
@@ -38,11 +38,33 @@ async function roleForUser(uid, cookie) {
   return id;
 }
 
-export async function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip } = {}) {
+// CSRF tokens (src/lib/csrf.js): like the browser client (public/js/api.js),
+// a signed-in state-changing request carries the session's token. The helpers
+// get it from GET /api/private/me (once per cookie) and send it unless the
+// test passes `csrf: false` or sets X-Secbin-CSRF itself.
+export const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const csrfCache = new Map();
+/** The session's CSRF token for `cookie` (null when the session is not valid). */
+export async function csrfFor(cookie, ip) {
+  if (!cookie) return null;
+  if (csrfCache.has(cookie)) return csrfCache.get(cookie);
+  const r = await SELF.fetch(`${ORIGIN}/api/private/me`, { headers: { cookie, ...(ip ? { 'cf-connecting-ip': ip } : {}) }, redirect: 'manual' });
+  const token = r.status === 200 ? (await r.json()).csrf ?? null : null;
+  if (token) csrfCache.set(cookie, token);
+  return token;
+}
+/** { 'x-secbin-csrf': token } for `cookie`, or {}. */
+export async function csrfHeaders(cookie, ip) {
+  const t = await csrfFor(cookie, ip);
+  return t ? { 'x-secbin-csrf': t } : {};
+}
+
+export async function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip, csrf = true } = {}) {
   if (ROLE_SCOPED.test(path) && body && typeof body.scope === 'string' && /^[A-Za-z0-9_-]{16}$/.test(body.scope) && body.scope !== 'public-user-0000') {
     body = { ...body, scope: `role:${await roleForUser(body.scope, cookie)}` };
   }
   const h = { ...headers };
+  if (csrf && cookie && STATE_CHANGING.has(method) && !Object.keys(h).some((k) => k.toLowerCase() === 'x-secbin-csrf')) Object.assign(h, await csrfHeaders(cookie, ip));
   if (body !== undefined) h['content-type'] = 'application/json';
   if (cookie) h.cookie = cookie;
   if (ip) h['cf-connecting-ip'] = ip;

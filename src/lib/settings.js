@@ -38,6 +38,10 @@ export const SETTINGS = {
   'lockout.max':         { type: 'int', min: 1, max: 100000, def: 10 },
   'lockout.windowSec':   { type: 'int', min: 1, max: 30 * DAY, def: 10 * MIN },
   'lockout.lockSec':     { type: 'int', min: 1, max: 365 * DAY, def: 15 * MIN },
+  // CSRF tokens (src/lib/csrf.js): cookie-authenticated changes must echo the
+  // session's token in X-Secbin-CSRF. Off, every other CSRF guard still applies
+  // (SameSite=Strict cookies, the Sec-Fetch-Site check, JSON or X-Secbin-Intent).
+  csrfTokens:            { type: 'bool', def: true },
   // Public (anonymous) share creation — off by default. See SECURITY.md §6
   // "Public access": tracking anonymous creators is a regulated activity.
   // Activity log retention (everything except the owner's entries and

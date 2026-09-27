@@ -4,7 +4,8 @@
 // with the matching scope; the account, its keys and credentials and the admin
 // surfaces are session-only.
 
-import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
+import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, appendCookies } from '../lib/http.js';
+import { csrfTokenFor, csrfCookie } from '../lib/csrf.js';
 import { authenticate, issueSession, actorId } from '../lib/auth.js';
 import { directory, cachedSettings, ipContext } from '../lib/guard.js';
 import { genId, parseId, genDeleteToken, genToken, genApiKey, hashToken } from '../lib/ids.js';
@@ -27,10 +28,9 @@ const fromDir = (r) => {
   return err(r.status, r.error, r.message, Object.keys(extra).length ? extra : undefined);
 };
 
-/** Attach a sliding-session cookie refresh to any JSON response. */
+/** Attach a sliding-session cookie refresh (session + CSRF token cookies) to any JSON response. */
 function withAuth(a, res) {
-  if (a.setCookie) res.headers.append('set-cookie', a.setCookie);
-  return res;
+  return appendCookies(res, a.setCookie);
 }
 
 function parseCreatePaste(body) {
@@ -102,7 +102,11 @@ export async function handlePrivate(request, env, url, ctx) {
   if (p === '/api/private/me') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const me = await dir.me(a.user.id, { impersonating: !!a.actor });
-    return withAuth(a, json({ ...me, impersonatedBy: a.actor ? a.actor.username : null }));
+    // The session's CSRF token, in the body and (re)set as its cookie: how a
+    // page recovers after its token was refused (public/js/api.js).
+    const csrf = await csrfTokenFor(env, a.claims);
+    const res = json({ ...me, impersonatedBy: a.actor ? a.actor.username : null, csrf });
+    return appendCookies(res, a.setCookie ?? (csrf && csrfCookie(csrf, a.claims.exp - now())));
   }
 
   if (p === '/api/private/me/password') {
@@ -166,7 +170,8 @@ export async function handlePrivate(request, env, url, ctx) {
   // Impersonating, nothing is confirmed (and the passkeys are the user's).
   if (p === '/api/private/me/reauth') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    assertNotCrossSite(request);
+    // A JSON body ({}), like every other change: it stores a challenge.
+    await readJsonBody(request);
     if (a.actor) return err(409, 'not_needed', 'No confirmation is needed while acting as this user.');
     const r = await dir.reauthOptions(a.user.id);
     return r.ok ? json({ challengeId: r.challengeId, publicKey: requestOptions(r, url.hostname) }) : fromDir(r);
@@ -192,6 +197,7 @@ export async function handlePrivate(request, env, url, ctx) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
     if (p === '/api/private/me/passkeys/options') {
+      await readJsonBody(request); // {}: a JSON body, like every other change (it stores a challenge)
       const r = await dir.passkeyRegisterOptions(a.user.id);
       return r.ok ? json({ challengeId: r.challengeId, publicKey: creationOptions(r, url.hostname) }) : fromDir(r);
     }

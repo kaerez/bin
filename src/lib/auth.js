@@ -6,10 +6,16 @@
 // revoked? user disabled? session version bumped by a password change/reset?),
 // then against the admin-configured idle and absolute timeouts. Activity slides
 // the idle window by re-issuing the cookie at most once a minute.
+//
+// Every time the session cookie is set or refreshed, the session's CSRF token
+// cookie (csrf.js) goes with it, and cookie-authenticated state-changing
+// requests must echo the token in X-Secbin-CSRF (unless the owner turned
+// `csrfTokens` off in Admin → Settings).
 
 import { sessionKeys } from './config.js';
 import { sealToken, openToken } from './jwt.js';
-import { getCookie, sessionCookie, clearCookie, HttpError } from './http.js';
+import { getCookie, sessionCookie, clearCookie, HttpError, assertNotCrossSite, hasStateChangeShape } from './http.js';
+import { csrfTokenFor, csrfCookie, clearCsrfCookie, assertCsrf } from './csrf.js';
 import { genSessionId, hashToken } from './ids.js';
 import { directory } from './guard.js';
 
@@ -21,7 +27,18 @@ export function unconfigured() {
   return new HttpError(503, 'server_not_configured', 'Server not configured: set the SIG and ENC secrets (64 hex characters each).');
 }
 
-/** Mint a session cookie header value for `uid` (optionally impersonated by `act`). */
+/** The session cookie and its CSRF token cookie, with the same lifetime. */
+async function sessionCookies(env, keys, claims, maxAgeSec) {
+  const cookies = [sessionCookie(SESSION_COOKIE, await sealToken(keys, claims), maxAgeSec)];
+  const csrf = await csrfTokenFor(env, claims);
+  if (csrf) cookies.push(csrfCookie(csrf, maxAgeSec));
+  return cookies;
+}
+
+/**
+ * Mint the Set-Cookie values for a new session of `uid` (optionally
+ * impersonated by `act`): the session cookie, then its CSRF token cookie.
+ */
 export async function issueSession(env, { uid, act = null, ver, settings, sid = genSessionId(), iat = now() }) {
   const keys = sessionKeys(env);
   if (!keys) throw unconfigured();
@@ -29,19 +46,22 @@ export async function issueSession(env, { uid, act = null, ver, settings, sid = 
   const exp = iat + settings.absSec;
   const claims = { sid, uid, ver, iat, lat: t, exp };
   if (act) claims.act = act;
-  const token = await sealToken(keys, claims);
-  return { cookie: sessionCookie(SESSION_COOKIE, token, Math.min(exp - t, settings.idleSec)), claims };
+  return { cookie: await sessionCookies(env, keys, claims, Math.min(exp - t, settings.idleSec)), claims };
 }
 
-export const logoutCookie = () => clearCookie(SESSION_COOKIE);
+/** Set-Cookie values that sign the browser out: the session and its CSRF token. */
+export const logoutCookie = () => [clearCookie(SESSION_COOKIE), clearCsrfCookie()];
 
 /** A disabled account: refused everywhere, even with a still-valid session or key. */
 export const accountDisabled = (headers) => new HttpError(403, 'account_disabled', 'This account is disabled. Contact the administrator.', undefined, headers);
 
 /**
  * Resolve the session on a request. Returns
- *   { ok: true, user, actor, claims, setCookie? }  or
- *   { ok: false, reason: 'none' | 'unconfigured' | 'invalid' }.
+ *   { ok: true, user, actor, claims, csrf, setCookie? }  or
+ *   { ok: false, reason: 'none' | 'unconfigured' | 'invalid' | 'disabled' }.
+ * `csrf` is the `csrfTokens` setting (read by the Directory with the session,
+ * so it costs no extra round trip); `setCookie` is an array of Set-Cookie
+ * values (the refreshed session cookie and its CSRF token cookie).
  */
 export async function readSession(request, env) {
   const token = getCookie(request, SESSION_COOKIE);
@@ -63,9 +83,28 @@ export async function readSession(request, env) {
   let setCookie;
   if (t - c.lat >= SLIDE_SEC) {
     const next = { ...c, lat: t, exp: Math.min(c.exp, c.iat + absSec) };
-    setCookie = sessionCookie(SESSION_COOKIE, await sealToken(keys, next), Math.min(next.exp - t, idleSec));
+    setCookie = await sessionCookies(env, keys, next, Math.min(next.exp - t, idleSec));
   }
-  return { ok: true, user: res.user, actor: res.actor, claims: c, setCookie };
+  // Fail closed: only an explicit `false` turns the token check off.
+  return { ok: true, user: res.user, actor: res.actor, claims: c, csrf: res.csrf !== false, setCookie };
+}
+
+const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/**
+ * The CSRF token check for a cookie-authenticated request (`s`: a resolved
+ * session). Only state-changing methods, and only while the `csrfTokens`
+ * setting is on. It runs after the existing guards, whose errors stay as they
+ * were: the Sec-Fetch-Site check first, then the request shape (a request
+ * without a JSON body, a chunk or X-Secbin-Intent is left to the route's own
+ * guard, which refuses it). It runs before anything that changes state or
+ * spends a single-use token (Turnstile), so a refused request can be retried.
+ */
+export async function checkCsrf(request, env, s) {
+  if (!STATE_CHANGING.has(request.method) || !s.csrf) return;
+  assertNotCrossSite(request);
+  if (!hasStateChangeShape(request)) return;
+  await assertCsrf(request, env, s.claims);
 }
 
 /**
@@ -87,6 +126,9 @@ export async function authenticate(request, env, { allowApiKey = false, scope = 
     if (scope && !(res.scopes || []).includes(scope)) {
       throw new HttpError(403, 'scope_denied', `This API key does not have the "${scope}" scope.`);
     }
+    // No CSRF token: the key travels in the Authorization header, which a
+    // browser never attaches on its own (cookies play no part here), so a
+    // forged cross-site request cannot carry it.
     return { user: res.user, actor: null, channel: 'api', scopes: res.scopes, keyId: res.keyId };
   }
   const s = await readSession(request, env);
@@ -95,6 +137,7 @@ export async function authenticate(request, env, { allowApiKey = false, scope = 
     if (s.reason === 'disabled') throw accountDisabled({ 'set-cookie': logoutCookie() });
     throw new HttpError(401, 'unauthenticated', 'Please log in.');
   }
+  await checkCsrf(request, env, s);
   return { user: s.user, actor: s.actor, claims: s.claims, setCookie: s.setCookie, channel: 'all' };
 }
 
