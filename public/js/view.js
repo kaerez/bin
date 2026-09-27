@@ -8,12 +8,12 @@ import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
 import { validateManifest, buildTree, basename } from './files.js';
-import { fetchHead, openShare, expireShare, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
+import { fetchHead, openShare, expireShare, extendDownloads, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
 import { humanCheck } from './turnstile.js';
 import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
-import { $, showView, toast, copyText, pill } from './ui.js';
+import { $, showView, toast, copyText, pill, countdownSwitch } from './ui.js';
 import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
 import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
 import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
@@ -23,6 +23,12 @@ import { progressBar } from './progress.js';
 import { folderBrowser } from './tree.js';
 
 let timer = null;
+let expirySwitch = null; // the share-expiry countdown's "Stop the countdown" switch
+let expiryRender = null; // …and what it re-renders
+/** The local date and time `ms` (the fixed form of a stopped countdown). */
+const atTime = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+// The warning before a download window closes comes this long before (at least 20 s: WCAG 2.2.1).
+const WINDOW_WARN_MS = 5 * 60 * 1000;
 let totpTimer = null;
 
 // ── boot ─────────────────────────────────────────────────────────────────────
@@ -73,7 +79,7 @@ async function initPublicComposer() {
   const n = $('#public-notice');
   if (prof.notice) { n.textContent = prof.notice; n.hidden = false; }
   // Loads alongside the composer; a share waits for the token only when created.
-  const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')] });
+  const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')], alternative: 'With an account, you can sign in with a passkey (no human check) and share from your dashboard.' });
   setPublicHumanCheck(async () => (await check).take());
   const { startComposer } = await import('./composer.js');
   startComposer(prof, publicApi, { publicMode: true });
@@ -155,7 +161,7 @@ async function doOpen({ id, kind, head, fragment, password }) {
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
   if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
-  renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires);
+  renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires, { id, grant: res.grant });
   $('#files-delete-row').hidden = !canDeleteNow(paste.meta);
   wireDeleteNow($('#files-delete'), paste.meta, del, $('#files-msg'));
 }
@@ -368,6 +374,9 @@ function secretCard(text) {
   if (sec.totp !== undefined) {
     const code = h('span.totp-code', { text: '······' });
     const left = h('span.mono.muted', { 'aria-live': 'off' });
+    // The seconds countdown can be stopped (WCAG 2.2.2); the code itself keeps
+    // changing when it has to (that is what it is for).
+    const totpSwitch = countdownSwitch(() => tick());
     let current = '';
     const copy = h('button.btn', { type: 'button', text: 'Copy code', on: { click: async () => { if (current) toast((await copyText(current)) ? 'code copied' : 'copy failed'); } } });
     const tick = async () => {
@@ -375,7 +384,7 @@ function secretCard(text) {
         const r = await totpCode(sec.totp);
         current = r.code;
         code.textContent = r.code;
-        left.textContent = `changes in ${r.remaining}s`;
+        left.textContent = totpSwitch.stopped() ? `changes every ${r.period} seconds` : `changes in ${r.remaining}s`;
       } catch (e) {
         stopTotp();
         code.textContent = '—';
@@ -384,13 +393,13 @@ function secretCard(text) {
     };
     tick();
     totpTimer = setInterval(tick, 1000);
-    card.appendChild(h('div.secret-row', {}, h('span.field-label', { text: 'One-time code' }), h('span', {}, code, ' ', left), h('div.btn-row', {}, copy)));
+    card.appendChild(h('div.secret-row', {}, h('span.field-label', { text: 'One-time code' }), h('span', {}, code, ' ', left), h('div.btn-row', {}, copy, totpSwitch.el)));
   }
   return card;
 }
 
 // ── file rendering ───────────────────────────────────────────────────────────
-function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
+function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, grant } = {}) {
   showView('files');
   const pills = clear($('#files-pills'));
   lifetimePills(pills, paste.meta, paste.adata.bar);
@@ -399,9 +408,47 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   pills.appendChild(pill(`${files.length} ${files.length === 1 ? 'file' : 'files'} · ${formatBytes(manifest.total)}`));
 
   const windowEl = $('#files-window');
+  // The countdown can be stopped (WCAG 2.2.2): it then shows the closing time.
+  const windowSwitch = countdownSwitch(() => tick());
+  // Before the window closes, a warning with "Keep downloads open" (WCAG
+  // 2.2.1): the server moves the end again, up to ten times, without a view.
+  const warn = h('p.msg.files-window-warn', { role: 'alert', hidden: true });
+  const keep = h('button.btn', { type: 'button', text: 'Keep downloads open', hidden: true });
+  let extendable = !!(id && grant);
+  let warned = 0; // the end already warned about
+  keep.addEventListener('click', async () => {
+    keep.disabled = true;
+    try {
+      const r = await extendDownloads(id, grant);
+      grantExpires = r.grantExpires;
+      extendable = r.extensionsLeft > 0;
+      warn.hidden = true;
+      keep.hidden = true;
+      toast(`Downloads stay open until ${atTime(grantExpires * 1000)}.`);
+    } catch (e) {
+      extendable = false;
+      keep.hidden = true;
+      warn.textContent = friendlyError(e);
+    } finally {
+      keep.disabled = false;
+      tick();
+    }
+  });
+  clear($('#files-window-switch')).append(windowSwitch.el, warn, keep);
   const tick = () => {
     const left = grantExpires * 1000 - Date.now();
-    windowEl.textContent = left > 0 ? `Downloads available for ${formatDuration(left)}` : 'The download window has closed — open the link again (if views remain).';
+    windowEl.textContent = left <= 0 ? 'The download window has closed — open the link again (if views remain).'
+      : windowSwitch.stopped() ? `Downloads available until ${atTime(grantExpires * 1000)}` : `Downloads available for ${formatDuration(left)}`;
+    windowSwitch.el.hidden = left <= 0;
+    if (left > 0 && left <= WINDOW_WARN_MS && warned !== grantExpires) {
+      warned = grantExpires;
+      warn.textContent = extendable
+        ? `Downloads close at ${atTime(grantExpires * 1000)}, in under ${Math.ceil(WINDOW_WARN_MS / 60000)} minutes. Need more time?`
+        : `Downloads close at ${atTime(grantExpires * 1000)} and cannot be kept open longer.`;
+      warn.hidden = false;
+      keep.hidden = !extendable;
+    }
+    if (left <= 0) { keep.hidden = true; warn.hidden = true; }
   };
   tick();
   clearInterval(timer);
@@ -545,6 +592,7 @@ function stopExpiryTimer() {
   if (timer !== null) { clearInterval(timer); timer = null; }
   const box = $('#status-timer');
   if (box) { box.hidden = true; box.classList.remove('ending'); }
+  if (expirySwitch) expirySwitch.el.hidden = true;
 }
 
 function startExpiryTimer(meta, onExpire) {
@@ -552,12 +600,22 @@ function startExpiryTimer(meta, onExpire) {
   const clock = $('#status-timer-clock');
   if (!box || !clock || !meta.expires) return;
   const at = meta.expires * 1000;
-  const render = () => {
+  const label = box.querySelector('.status-timer-label');
+  // The countdown can be stopped (WCAG 2.2.2): it then shows the fixed time.
+  if (!expirySwitch) {
+    expirySwitch = countdownSwitch(() => { if (expiryRender) expiryRender(); });
+    box.insertAdjacentElement('afterend', expirySwitch.el);
+  }
+  expirySwitch.el.hidden = false;
+  function render() {
     const left = Math.max(0, at - Date.now());
-    clock.textContent = formatDuration(left);
-    box.classList.toggle('ending', left > 0 && left <= 600000);
+    const still = expirySwitch.stopped();
+    if (label) label.textContent = still ? 'Deletes on' : 'Deletes in';
+    clock.textContent = still ? atTime(at) : formatDuration(left);
+    box.classList.toggle('ending', !still && left > 0 && left <= 600000);
     if (left <= 0) { stopExpiryTimer(); onExpire(); }
-  };
+  }
+  expiryRender = render;
   box.hidden = false;
   render();
   if (at > Date.now()) timer = setInterval(render, 1000);

@@ -140,7 +140,11 @@ export function openDialog({ title, sub = '', body = [], wide = false, fallback 
     else if (fallback) fallback();
     if (onClose) onClose();
   }
-  scrim.addEventListener('mousedown', (e) => { if (e.target === scrim) close(); });
+  // A click on the scrim closes it, on the up-event and only when the press
+  // also began there (WCAG 2.5.2): a drag out of a field never closes it.
+  let downOnScrim = false;
+  scrim.addEventListener('pointerdown', (e) => { downOnScrim = e.target === scrim; });
+  scrim.addEventListener('click', (e) => { if (e.target === scrim && downOnScrim) close(); downOnScrim = false; });
   document.body.appendChild(scrim);
   for (const el of inerted) el.inert = true;
   document.addEventListener('keydown', onKey, true);
@@ -251,7 +255,7 @@ function unlockView(mount, deps, lockedErr) {
   return new Promise((resolve) => {
     const msg = h('p.msg.error', { id: 'drive-unlock-msg', role: 'alert', hidden: true });
     const pw = h('input.input', { id: 'drive-unlock-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false' });
-    const code = h('input.input.mono', { id: 'drive-unlock-code', autocomplete: 'off', spellcheck: 'false', maxlength: '64', placeholder: 'xxxx-xxxx-xxxx' });
+    const code = h('input.input.mono', { id: 'drive-unlock-code', autocomplete: 'one-time-code', spellcheck: 'false', autocapitalize: 'characters', maxlength: '64', placeholder: 'xxxx-xxxx-xxxx' });
     const pwBtn = h('button.cta', { type: 'submit', id: 'drive-unlock-btn', text: setup ? 'Set up with password' : 'Unlock with password' });
     const codeBtn = h('button.cta', { type: 'submit', id: 'drive-unlock-code-btn', text: 'Unlock with recovery code' });
     const pkBtn = h('button.btn', { type: 'button', id: 'drive-unlock-passkey', text: 'Unlock with a passkey', hidden: !withPasskey || !passkeysSupported() });
@@ -397,12 +401,15 @@ function mountApp(mount, client, deps) {
   // the right pane
   const crumbs = h('nav.crumbs', { 'aria-label': 'Folder path' });
   const title = h('h2.drive-pane-title', { id: 'drive-pane-title', tabindex: '-1' });
-  const selAll = h('input', { type: 'checkbox', id: 'drive-select-all', 'aria-label': 'Select everything in this folder' });
+  // The <label> around each box is its pointer target (at least 24×24 CSS px,
+  // 44×44 on narrow screens: WCAG 2.5.8). "Select all" shows its text where the
+  // table turns into cards (below 640px); its name is that text (2.5.3).
+  const selAll = h('input', { type: 'checkbox', id: 'drive-select-all' });
   const caption = h('caption.sr-only', { id: 'drive-caption' });
   const tbody = h('tbody', { id: 'drive-rows' });
   const table = h('table.table.drive-table', { id: 'drive-table' }, caption,
     h('thead', {}, h('tr', {},
-      h('th.cell-check', { scope: 'col' }, selAll),
+      h('th.cell-check', { scope: 'col' }, h('label.check-hit.drive-selall', {}, selAll, h('span.drive-selall-text', { text: 'Select all in this folder' }))),
       h('th', { scope: 'col', text: 'Name' }), h('th', { scope: 'col', text: 'Size' }), h('th', { scope: 'col', text: 'Modified' }),
       h('th', { scope: 'col' }, h('span.sr-only', { text: 'Shares' })))),
     tbody);
@@ -496,7 +503,7 @@ function mountApp(mount, client, deps) {
       : h('span.drive-fname', { text: name });
     const sharesBtn = h('button.btn.tree-btn', { type: 'button', text: 'Shares', 'aria-label': `Shares of ${name}`, on: { click: () => sharesDialog(c) } });
     return h('tr', { dataset: { id: c.id, kind: c.kind } },
-      h('td.cell-check', {}, check),
+      h('td.cell-check', {}, h('label.check-hit', {}, check)),
       h('td', { dataset: { label: 'Name' } }, nameCell),
       h('td.mono', { dataset: { label: 'Size' }, text: c.kind === 'dir' ? '—' : formatBytes(Number(c.size) || 0) }),
       h('td.mono', { dataset: { label: 'Modified' }, text: formatDate(modifiedOf(c)) }),
@@ -711,7 +718,7 @@ function mountApp(mount, client, deps) {
     const inf = h('button.opt-toggle', { type: 'button', id: 'drive-share-unlimited', 'aria-pressed': 'false', 'aria-label': 'Unlimited views', title: 'Unlimited views', text: '∞', disabled: !L.allowUnlimitedViews });
     inf.addEventListener('click', () => { const on = inf.getAttribute('aria-pressed') !== 'true'; inf.setAttribute('aria-pressed', String(on)); views.disabled = on; });
     const expN = h('input.input.opt-num', { id: 'drive-share-expire', type: 'number', min: '1', step: '1', value: '24', inputmode: 'numeric' });
-    const expU = h('select.input.opt-sel', { id: 'drive-share-unit', 'aria-label': 'Expiry unit' },
+    const expU = h('select.input.opt-sel', { id: 'drive-share-unit', 'aria-label': 'Expires in: unit' },
       h('option', { value: 'm', text: 'minutes' }), h('option', { value: 'h', text: 'hours', selected: true }), h('option', { value: 'd', text: 'days' }));
     const pwOn = h('input', { type: 'checkbox', id: 'drive-share-pw-on' });
     const pw1 = h('input.input', { id: 'drive-share-pw', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });

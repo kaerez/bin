@@ -99,7 +99,7 @@ export async function handlePrivate(request, env, url, ctx) {
   if (p === '/api/private/me') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const me = await dir.me(a.user.id, { impersonating: !!a.actor });
-    return withAuth(a, json({ ...me, impersonatedBy: a.actor ? a.actor.username : null }));
+    return withAuth(a, json({ ...me, impersonatedBy: a.actor ? a.actor.username : null, session: a.session }));
   }
 
   if (p === '/api/private/me/password') {

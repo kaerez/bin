@@ -48,6 +48,13 @@ export function h(spec, props = {}, ...children) {
   return el;
 }
 
+/**
+ * `el` with its label shown above it (WCAG 3.3.2). The text defaults to the
+ * control's aria-label, so what is shown and what is announced are the same
+ * words (2.5.3).
+ */
+export const labelled = (el, text = el.getAttribute('aria-label')) => h('label.field-inline', {}, h('span.field-label', { text }), el);
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** Minimal SVG builder (createElementNS + setAttribute; no markup parsing). */
@@ -172,6 +179,16 @@ export function formatDuration(ms) {
   const pad = (n) => String(n).padStart(2, '0');
   if (d > 0) return `${d}d ${pad(hh)}:${pad(m)}:${pad(s)}`;
   return hh > 0 ? `${hh}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+/** Seconds → words: "12 hours", "5 minutes", "7 days", "1 hour 30 minutes". */
+export function spellDuration(sec) {
+  const parts = [];
+  const unit = (n, w) => { if (n) parts.push(`${n} ${w}${n === 1 ? '' : 's'}`); };
+  unit(Math.floor(sec / 86400), 'day');
+  unit(Math.floor((sec % 86400) / 3600), 'hour');
+  unit(Math.floor((sec % 3600) / 60), 'minute');
+  return parts.slice(0, 2).join(' ') || 'less than a minute';
 }
 
 /** Seconds → coarse "2d 3h" / "3h 12m" / "12m" / "<1m". */

@@ -1,0 +1,311 @@
+# WCAG 2.2 conformance report
+
+This is the record of secbin's WCAG 2.2 audit: every success criterion at levels A, AA and AAA,
+with a verdict, the evidence (a `file:line` in this repository, or the check that proves it) and
+the pages it concerns. The product rule (see `AGENTS.md`) is that WCAG 2.2 level AA is the
+minimum for every page and state, and level AAA is met wherever possible.
+
+**Scope.** secbin's own pages and every state they can show: the landing page and the public
+composer, the share viewer (password, note, link, credential, files, preview, gone), log in, owner
+setup, the dashboard composer, My shares, Account, every Admin tab and the role editor, the
+accessibility statement (with its site map and glossary), the accessibility settings widget
+(English and Hebrew), and the Drive (folder tree, table, dialogs, upload, unlock). Content that
+users share (notes, files, PDFs, images, audio and video) is theirs, not secbin's: this report
+covers how secbin presents it, not the content itself.
+
+**Date and build.** 2026-09-27, branch `claude/wcag-audit` (the Drive integration with `main`).
+
+**How it was checked** (all in Chromium, driven by Playwright, against `wrangler dev`):
+
+- *axe-core*, WCAG 2.0/2.1/2.2 A and AA rules, every page and state, both themes, desktop and
+  phone widths (`axe-audit` suite); and the AAA rules `color-contrast-enhanced` in both themes and
+  in the high-contrast mode (`wcag22.mjs --aaa`).
+- *The accessibility tree* that Chromium passes to screen readers: names, roles, states,
+  landmarks, headings, live regions, dialogs, form errors, the Drive's tree (`a11y-tree` suite).
+- *The criteria automation cannot judge*, measured by `wcag22.mjs` (a scratch suite kept with
+  the audit, see "Tests" below) on 42 states at 1280×900, at 320×640 (320 CSS px) and at 320×256
+  (400 % zoom of 1280×1024):
+  - reflow (no horizontal page scroll, nothing cut off);
+  - text spacing, with the WCAG 1.4.12 values injected as a user style sheet;
+  - target sizes, by measuring every pointer target's box;
+  - focus not obscured, by pressing Tab through every page with the fixed accessibility button,
+    the toast and the install banner present, and sampling what covers the focused element;
+  - a visible focus ring on every Tab stop;
+  - label in name, visible labels, autocomplete tokens and paste on every credential field;
+  - duplicate ids in the DOM built at runtime, and balanced tags and unique ids in the HTML
+    the server sends;
+  - the time-limit warnings, end to end (session warning and "Stay signed in"; download window
+    warning and "Keep downloads open"; "Stop the countdown").
+- *Unit and DOM tests* for what the fixes guarantee (`test-dom/wcag22.test.js`,
+  `test/files.test.js`, `test/turnstile.test.js`).
+- *Reading the code* for everything else (the "Evidence" column).
+
+**What this is not.** Automated and manual checks in Chromium are not a test with a screen reader,
+voice control, switch access or another browser. The verdicts below are what this audit could
+establish; "What remains for people with assistive technology" at the end lists what still has
+to be confirmed by people, and how.
+
+**Verdicts.** *Supports*: the criterion is met on every page and state in scope. *Partially
+supports*: met in some places, not all. *Does not support*: not met. *Not applicable*: nothing
+in scope that the criterion is about.
+
+**Pages** (last column): **All** every page; **Land** landing page and public composer; **View**
+share viewer; **Login**; **Setup**; **Comp** dashboard composer; **Shares** My shares; **Acct**
+Account; **Admin** every Admin tab and the role editor; **Stmt** accessibility statement;
+**Widget** accessibility settings; **Drive** tree, table, dialogs, upload, unlock.
+
+**WCAG 2.1** column: the level the criterion has in WCAG 2.1, or *2.2 only* for the criteria
+WCAG 2.2 added (six at A/AA: 2.4.11, 2.5.7, 2.5.8, 3.2.6, 3.3.7, 3.3.8; three at AAA).
+
+## Summary
+
+| Level | Criteria | Supports | Partially supports | Does not support | Not applicable |
+|---|---|---|---|---|---|
+| WCAG 2.1 A | 30 | 26 | 0 | 0 | 4 |
+| WCAG 2.1 AA | 20 | 18 | 0 | 0 | 2 |
+| WCAG 2.2 A | 31 | 27 | 0 | 0 | 4 |
+| WCAG 2.2 AA | 24 | 22 | 0 | 0 | 2 |
+| WCAG 2.2 AAA | 31 | 23 | 0 | 2 (2.2.3, 3.1.5) | 6 |
+
+WCAG 2.1 A counts 4.1.1 Parsing (which WCAG 2.2 removed) and not 3.2.6 or 3.3.7; WCAG 2.1 AA
+does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified all the same.
+
+## Level A
+
+| Criterion | 2.1 | Verdict | Evidence | Pages |
+|---|---|---|---|---|
+| 1.1.1 Non-text Content | A | Supports | Decorative SVGs are `aria-hidden` (`public/index.html:38`); icon buttons have names (`public/index.html:59`, `public/js/a11y.js:105`); the QR code has alt text (`public/index.html:675`); image previews use the file name (`public/js/viewer.js:150`). **Fixed:** a PDF page (a canvas) now has a name and its text as real text under "Text of this page" (`public/js/pdfview.js:106`); a page with no text says so and points to the download. axe `image-alt`, `svg-img-alt`, `button-name`: 0. | All, View |
+| 1.2.1 Audio-only and Video-only (Prerecorded) | A | Not applicable | secbin has no audio or video of its own. Audio and video that users share are their content; the viewer plays them with the browser's own controls (`public/js/viewer.js:164`) and always offers the download. | View |
+| 1.2.2 Captions (Prerecorded) | A | Not applicable | As 1.2.1. | View |
+| 1.2.3 Audio Description or Media Alternative (Prerecorded) | A | Not applicable | As 1.2.1. | View |
+| 1.3.1 Info and Relationships | A | Supports | Landmarks, one `h1` per view, `h2` sections; tables with `th` and a caption (`public/dashboard/js/drive-app.js:408`); fieldsets and legends for radio groups (`public/dashboard/account/index.html:252`); the Drive tree is an ARIA tree (`public/js/tree.js:44`). **Fixed:** fields labelled only by a placeholder now have a `<label>` (see 3.3.2); duration and quota fields in the role editor are named in context instead of "Amount"/"Unit" (`public/dashboard/js/admin.js:702`, `public/dashboard/js/admin.js:393`). axe and the `a11y-tree` suite: 0 violations. | All |
+| 1.3.2 Meaningful Sequence | A | Supports | The DOM order is the reading order; the only positioned content (dialogs, the widget panel, the toast) is announced or takes focus. Right-to-left text in the widget and statement carries `dir` (`public/js/a11y.js:108`). | All |
+| 1.3.3 Sensory Characteristics | A | Supports | Instructions name the control, not only its place or shape ("Drop files here" always comes with "Add files" / "Add folder" buttons: `public/index.html:343`). | Comp, Land, Drive |
+| 1.4.1 Use of Color | A | Supports | Links in text are underlined (`public/css/styles.css:1067`); errors are text (and `aria-invalid`); pressed and selected states have a check mark, weight or position as well as colour (`public/css/styles.css:1017`, `public/css/styles.css:1160`). | All |
+| 1.4.2 Audio Control | A | Supports | Nothing plays on its own: media previews start only from their controls (no `autoplay` anywhere). | View |
+| 2.1.1 Keyboard | A | Supports | Every function works from the keyboard (`a11y-tree`: keyboard-only walks of every page, the Drive tree's arrow keys, tabs, dialogs). Drag and drop is never the only way: upload buttons (`public/dashboard/js/drive-app.js:418`), "Move" with a folder picker. | All |
+| 2.1.2 No Keyboard Trap | A | Supports | Dialogs keep focus inside while open and release it on Escape, Cancel or close (`public/dashboard/js/drive-app.js:126`, `public/dashboard/js/session-timeout.js:139`). The Turnstile widget is a frame that Tab enters and leaves. | All |
+| 2.1.4 Character Key Shortcuts | A | Supports | The only single-key input is type-ahead in the Drive tree, active only while the tree has focus (`public/js/tree.js:245`). | Drive, Comp, View |
+| 2.2.1 Timing Adjustable | A | Supports | Every time limit on what a person is doing can be extended. **Fixed:** (1) *the signed-in session*: two minutes before it would time out for inactivity, an alert dialog warns and "Stay signed in" (or Escape) extends it, as often as needed (`public/dashboard/js/session-timeout.js:33`; deadlines from `src/lib/auth.js:47`); the absolute session limit (default 7 days, beyond the 20-hour exception) is announced 2 minutes ahead. (2) *the download window* of a file share (default 1 hour): 5 minutes before it closes, a warning with "Keep downloads open" extends it by the window again, at least ten times, never past the share's expiry, spending no view (`src/fileshare-do.js:261`, `src/routes/public.js:262`, `public/js/view.js:413`). (3) *the toast* no longer disappears on a timer: it stays until the next key press or click (`public/js/ui.js:97`). A share's own expiry is a property of the content the sender chose (like an event that ends), not a limit on the recipient's task. Checked: `wcag22.mjs` "2.2.1" checks; `test-dom/wcag22.test.js`; `test/files.test.js` "extending a download window". | All signed-in pages, View |
+| 2.2.2 Pause, Stop, Hide | A | Supports | **Fixed:** every countdown that updates each second (a share's "Deletes in", the download window, the one-time code's seconds) has a "Stop the countdown" switch that shows the fixed time instead (`public/js/ui.js:160`); it starts stopped when "Stop animations" is on. Animations run once and under 5 s; the last-minutes pulse of the expiry timer stops with the switch. The one-time code itself keeps changing (that is its purpose). | View |
+| 2.3.1 Three Flashes or Below Threshold | A | Supports | Nothing flashes. | All |
+| 2.4.1 Bypass Blocks | A | Supports | "Skip to main content" on every page (`public/index.html:36`), landmarks. | All |
+| 2.4.2 Page Titled | A | Supports | Every page has its own title; **fixed:** the viewer's and composer's views now name themselves in the title ("Enter the password · secbin", "Shared files · secbin"…: `public/js/ui.js:20`, `public/index.html:116`). | All |
+| 2.4.3 Focus Order | A | Supports | Focus follows the DOM; a new view moves focus to it, dialogs to their first control and back to the opener when they close. **Fixed:** a view change no longer takes focus from the header, footer or accessibility settings (`public/js/ui.js:16`). | All |
+| 2.4.4 Link Purpose (In Context) | A | Supports | Every link's text says where it goes (see 2.4.9). | All |
+| 2.5.1 Pointer Gestures | A | Supports | No path-based or multi-point gestures; the PDF preview pages with buttons. | All |
+| 2.5.2 Pointer Cancellation | A | Supports | Actions run on click (the up-event). **Fixed:** the accessibility panel and the Drive dialogs used to close on mouse-down outside them; now on click, and a dialog only when the press also began on its backdrop (`public/js/a11y.js:161`, `public/dashboard/js/drive-app.js:143`, `public/js/composer.js:575`). | All, Drive, Comp |
+| 2.5.3 Label in Name | A | Supports | **Fixed:** fields whose `aria-label` differed from their visible label (the setup page's "Owner password" was named "New password"; Turnstile keys; export passphrase; Drive "Select all") now use the visible words (`public/dashboard/setup/index.html:189`, `public/dashboard/js/admin.js:1076`, `public/dashboard/js/admin-portable.js:19`, `public/dashboard/js/drive-app.js:406`). `wcag22.mjs` "2.5.3 label in name": 0 on every state. | All |
+| 2.5.4 Motion Actuation | A | Not applicable | Nothing responds to device motion. | — |
+| 3.1.1 Language of Page | A | Supports | `<html lang="en">` on every page; the statement's second language article has its own `lang`. | All |
+| 3.2.1 On Focus | A | Supports | Focus alone changes no context (the accessibility panel closes when focus leaves it: a change of content, not of context). | All |
+| 3.2.2 On Input | A | Supports | Changing a field never navigates or submits; settings save on their button. Tabs switch panels in place. | All |
+| 3.2.6 Consistent Help | 2.2 only | Supports | Every page has the same footer in the same order: Source code, Threat model, Accessibility statement (the contact), Glossary (checked for every page by `test-dom/wcag22.test.js` "in every page footer"). The accessibility settings button is in the same place on every page. | All |
+| 3.3.1 Error Identification | A | Supports | Errors are text in an alert region, tied to the field (`aria-invalid`, `aria-describedby`) and focused (`public/dashboard/js/drive-app.js:162`, `public/js/setup.js:47`). | All |
+| 3.3.2 Labels or Instructions | A | Supports | **Fixed:** every field now has a visible label: the share password fields (`public/index.html:126`, `public/index.html:553`), the repeat-password fields on setup and account, passkey and API key names, API key lifetime, the My shares filters (`public/dashboard/shares/index.html:113`), and the admin panel's fields through one helper that shows the field's name above it (`public/js/common.js:56`). `wcag22.mjs` "3.3.2 no visible label": 0. | All |
+| 3.3.7 Redundant Entry | 2.2 only | Supports | Nothing already entered in a process is asked again, except where it is essential or for security: a new password is typed twice; your password confirms changes to your own account (step-up); the Drive unlocks at sign-in from what was used to sign in (`public/js/login.js:13`). | Login, Acct, Comp, Drive |
+| 4.1.1 Parsing (obsolete in 2.2) | A | Supports | WCAG 2.2 removed this criterion (always satisfied). Verified anyway: the HTML the server sends has balanced tags, no duplicate attributes and unique ids (`wcag22.mjs` "4.1.1 served HTML", 10 pages), and the DOM built at runtime has no duplicate ids in any of the 42 states. **Fixed:** two admin renders could run at once and duplicate a panel's content and ids (`user-detail`); renders of a panel are now queued (`public/dashboard/js/admin.js:163`). | All |
+| 4.1.2 Name, Role, Value | A | Supports | Native controls first; ARIA where needed (tabs, switches, tree, dialogs, `aria-pressed`, `aria-expanded`, `aria-current`). axe and `a11y-tree`: names, roles and states on every page. | All |
+
+## Level AA
+
+| Criterion | 2.1 | Verdict | Evidence | Pages |
+|---|---|---|---|---|
+| 1.2.4 Captions (Live) | AA | Not applicable | No live media. | — |
+| 1.2.5 Audio Description (Prerecorded) | AA | Not applicable | As 1.2.1. | View |
+| 1.3.4 Orientation | AA | Supports | No orientation lock (no `orientation` in the manifest or CSS); every page works in portrait and landscape. | All |
+| 1.3.5 Identify Input Purpose | AA | Supports | Fields about the user carry their token: `username`, `current-password`, `new-password`, `one-time-code` (`public/dashboard/login/index.html:103`, `public/dashboard/js/drive-app.js:257`; **fixed:** the Drive's recovery code field: `public/dashboard/js/drive-app.js:258`). Fields about someone else (a credential being shared) are rightly `off`. Checked for every static page by `test-dom/wcag22.test.js`. | Login, Setup, Acct, Drive, Admin |
+| 1.4.3 Contrast (Minimum) | AA | Supports | Every text colour is ≥7:1 (see 1.4.6), so ≥4.5:1. **Fixed:** the error toast's white text on the dark theme's red was 3.7:1; it now has its own fill (`public/css/styles.css:89`). axe `color-contrast`: 0 in both themes. | All |
+| 1.4.4 Resize Text | AA | Supports | Text scales with browser zoom to 400 % without loss (see 1.4.10), and with the widget's text sizes. | All |
+| 1.4.5 Images of Text | AA | Supports | No images of text (the wordmark is text). | All |
+| 1.4.10 Reflow | AA | Supports | `wcag22.mjs` "1.4.10 reflow" at 320×640 and 320×256: 0 on every state. **Fixed:** long links and generated keys wrap instead of scrolling (`public/css/styles.css:420`, `public/css/styles.css:602`); the role editor's selects no longer widen the page (`public/css/styles.css:585`); the footer links wrap (`public/css/styles.css:551`). Data tables become one card per row below 640 px; code blocks and the PDF canvas (2-D content) scroll in their own box. | All |
+| 1.4.11 Non-text Contrast | AA | Supports | **Fixed:** the borders of text fields, option groups and the editor were 1.5:1; they now use a field colour ≥3:1 on every surface in both themes (`public/css/styles.css:36`, `public/css/styles.css:75`). The focus ring is ≥7:1 (`public/css/styles.css:86`). Checked by `test-dom/wcag22.test.js` "field boundaries and the focus ring". | All |
+| 1.4.12 Text Spacing | AA | Supports | `wcag22.mjs` "1.4.12 text spacing" (line height 1.5, paragraph spacing 2 em, letter spacing 0.12 em, word spacing 0.16 em, as a user style sheet): no clipped or hidden text on any state at 1280 and 320 px. | All |
+| 1.4.13 Content on Hover or Focus | AA | Supports | No custom tooltips; the "not encrypted" hint shown on focus is in the flow, not over other content (`public/css/styles.css:797`). | Comp, Shares, Drive |
+| 2.4.5 Multiple Ways | AA | Supports | The navigation on every dashboard page, the links between related pages, and (**added**) a site map on the accessibility statement, linked from every footer (`public/accessibility/index.html:104`). Share links are the result of a process. | All |
+| 2.4.6 Headings and Labels | AA | Supports | Headings name their sections; labels name their fields (see 3.3.2); duration fields in the role editor now say what they are for (see 1.3.1). | All |
+| 2.4.7 Focus Visible | AA | Supports | Every Tab stop draws a ring (`wcag22.mjs` "2.4.7 no focus ring": 0; the Drive tree draws it on its row). **Fixed:** in forced colours (Windows High Contrast) the box-shadow rings were dropped; a system-coloured outline replaces them (`public/css/styles.css:1183`). | All |
+| 2.4.11 Focus Not Obscured (Minimum) | 2.2 only | Supports | **Fixed:** the fixed accessibility button no longer covers what has focus: the page scrolls it clear, the toast moves to the top, the panel closes when focus leaves it, and the button sits below dialogs (`public/js/a11y.js:196`, `public/css/styles.css:983`, `public/js/a11y.js:172`). `wcag22.mjs` "2.4.11 focus obscured" (Tab through every page at 1280×900 and 320×256): 0. | All |
+| 2.5.7 Dragging Movements | 2.2 only | Supports | Nothing needs dragging: files dropped onto the composer or the Drive can also be chosen with "Add files" / "Upload"; items move with "Move" and a folder picker (`public/dashboard/js/drive-app.js:587`). | Comp, Land, Drive |
+| 2.5.8 Target Size (Minimum) | 2.2 only | Supports | `wcag22.mjs` "2.5.8 target size": every target ≥24×24 or spaced; 0 on every state. **Fixed:** the widget's statement link, and the Drive's selection boxes, whose `<label>` is now the target (24 px, 44 px on phones: `public/css/styles.css:1168`). | All |
+| 3.1.2 Language of Parts | AA | Supports | Hebrew in the widget and a second-language statement carry `lang` and `dir` (`public/js/a11y.js:116`). Shared notes are the sender's content. | Widget, Stmt |
+| 3.2.3 Consistent Navigation | AA | Supports | The header, the dashboard navigation and the footer are the same, in the same order, on every page (footers checked by `test-dom/wcag22.test.js`). | All |
+| 3.2.4 Consistent Identification | AA | Supports | The same function has the same name and icon everywhere (Copy, Delete now, Show password, the lock). | All |
+| 3.3.3 Error Suggestion | AA | Supports | Messages say how to fix it ("Passwords do not match — repeat the same password in both fields."; the password policy is spelled out). | All |
+| 3.3.4 Error Prevention (Legal, Financial, Data) | AA | Supports | Deleting asks for a second press (`public/js/common.js:129`); an import is shown as a plan before it runs; a share can be deleted at once after creation. | Comp, Shares, Acct, Admin, Drive |
+| 3.3.8 Accessible Authentication (Minimum) | 2.2 only | Supports | No step asks for a cognitive test: passwords and recovery codes can be pasted and filled by password managers (the right `autocomplete` tokens; nothing blocks paste: `test-dom/wcag22.test.js:251`); a passkey signs in with no password at all. **Fixed:** the human check (Cloudflare Turnstile, a third-party widget that asks no questions) no longer stands between anyone and signing in: a passkey sign-in needs no human check (`src/routes/auth.js:133`, `public/js/login.js:31`), and wherever the check is used the note under the button offers the alternative and the contact (`public/js/turnstile.js:54`). Share passwords (a secret shared between two people, not a login) can be pasted; password managers are kept from saving them as the site's login. | Login, Acct, Land, View, Drive |
+| 4.1.3 Status Messages | AA | Supports | Saves, copies and errors are announced (`role="status"` toast, alert regions, progress live regions, the human-check note); the new warnings are an alert dialog (session) and an alert (download window). | All |
+
+## Level AAA
+
+| Criterion | 2.1 | Verdict | Evidence | Pages |
+|---|---|---|---|---|
+| 1.2.6 Sign Language (Prerecorded) | AAA | Not applicable | No media of secbin's own (see 1.2.1). | — |
+| 1.2.7 Extended Audio Description (Prerecorded) | AAA | Not applicable | As 1.2.6. | — |
+| 1.2.8 Media Alternative (Prerecorded) | AAA | Not applicable | As 1.2.6. | — |
+| 1.2.9 Audio-only (Live) | AAA | Not applicable | As 1.2.6. | — |
+| 1.3.6 Identify Purpose | AAA | Supports | Regions are landmarks, controls have names and roles, fields their `autocomplete` purpose, icons are named or hidden. | All |
+| 1.4.6 Contrast (Enhanced) | AAA | Supports | **Fixed:** the palette now gives every text colour ≥7:1 on paper, sheet and raised surfaces, in both themes (`public/css/styles.css:40`); the high-contrast mode is white or yellow on black. axe `color-contrast-enhanced`: 0 on 23 states × dark, light and high-contrast (`wcag22.mjs --aaa`); tokens checked by `test-dom/wcag22.test.js`. | All |
+| 1.4.7 Low or No Background Audio | AAA | Not applicable | No audio of secbin's own. | — |
+| 1.4.8 Visual Presentation | AAA | Supports | Colours can be chosen (light, dark, high contrast); text is never justified; lines are at most about 80 characters (`.wrap` 680 px, subtitles 52 ch); line height 1.65; text resizes to 400 % without horizontal scrolling. **Added:** the widget's "Text spacing" mode sets line spacing 1.8, paragraph spacing 1.5 times that and lines of at most 70 characters (`public/css/styles.css:1213`). | All |
+| 1.4.9 Images of Text (No Exception) | AAA | Supports | No images of text. | All |
+| 2.1.3 Keyboard (No Exception) | AAA | Supports | As 2.1.1, with no exception: dropping files has button equivalents. | All |
+| 2.2.3 No Timing | AAA | Does not support | Timing is part of what secbin is: shares expire and self-destruct after their views, a view opens a download window, and sessions end for security. All of them can be extended (2.2.1), but they exist by design. | View, signed-in pages |
+| 2.2.4 Interruptions | AAA | Supports | The only unsolicited message, the install suggestion, never takes focus and can be dismissed for a year (`public/js/install-banner.js:18`); toasts are results of the person's own actions. | All |
+| 2.2.5 Re-authenticating | AAA | Supports | **Added:** when a session ends, the page keeps what was typed and offers "Sign in again" in a new tab; back in the first tab the session is picked up again and the work can be saved (`public/dashboard/js/session-timeout.js:92`). | Signed-in pages |
+| 2.2.6 Timeouts | AAA | Supports | **Added:** the login page says that inactivity signs you out and that a warning comes first (`public/dashboard/login/index.html:156`); Account shows the exact inactivity time and the latest end (`public/dashboard/js/account.js:125`); the warning dialog repeats the time. Nothing typed is lost when a session ends (2.2.5). | Login, Acct, signed-in pages |
+| 2.3.2 Three Flashes | AAA | Supports | Nothing flashes. | All |
+| 2.3.3 Animation from Interactions | AAA | Supports | Every motion stops with the system's "reduce motion" and with the widget's "Stop animations" (`public/css/styles.css:510`, `public/css/styles.css:1026`). | All |
+| 2.4.8 Location | AAA | Supports | Page titles, `aria-current` in the navigation (`public/dashboard/js/nav.js:42`), the Drive's folder path (`public/dashboard/js/drive-app.js:402`). | All |
+| 2.4.9 Link Purpose (Link Only) | AAA | Supports | **Fixed:** link texts that needed context now stand alone: "Source code", "Threat model", "Accessibility statement", "new share", "Create another share", "API documentation (docs/API.md)", and links opening a new tab say so (`public/index.html:711`). Links inside shared notes are the sender's text (they too say they open a new tab: `public/js/markdown.js:187`). | All |
+| 2.4.10 Section Headings | AAA | Supports | Sections have headings (account cards, admin panels, statement, glossary, site map, Drive panes, dialogs); views without a visible heading have a hidden one (`public/index.html:202`). | All |
+| 2.4.12 Focus Not Obscured (Enhanced) | 2.2 only | Supports | As 2.4.11, for any part of the focused control: `wcag22.mjs` "2.4.12 partly covered": 0. **Fixed:** the note editor is shorter on short screens, so it fits between the edges (`public/css/styles.css:257`). | All |
+| 2.4.13 Focus Appearance | 2.2 only | Supports | The focus indicator is a 2 px ring with a 2 px gap (`public/css/styles.css:119`, `public/css/styles.css:308`): at least a 2 px perimeter, ≥3:1 against the unfocused state (the ring is ≥7:1 on every surface). | All |
+| 2.5.5 Target Size (Enhanced) | AAA | Supports | **Added:** the widget's "Large buttons and links" mode makes every target at least 44×44 (`public/css/styles.css:1191`; inline links in text are exempt). Measured: `wcag22.mjs --aaa` "2.5.5": 0 on 23 states. The accessibility button itself is 44×44 on every page. | All |
+| 2.5.6 Concurrent Input Mechanisms | AAA | Supports | Keyboard, mouse, touch and pen all work together; nothing is restricted to one input. | All |
+| 3.1.3 Unusual Words | AAA | Supports | **Added:** a glossary of the technical words (`public/accessibility/index.html:120`), linked from every page's footer. | All |
+| 3.1.4 Abbreviations | AAA | Supports | **Added:** the glossary expands every abbreviation the interface uses (AES-256-GCM, API, CIDR, CLI, HKDF, IP, KB/MB/GB, m/h/d, PDF, QR, TOTP, URL, WCAG). | All |
+| 3.1.5 Reading Level | AAA | Does not support | The interface text is short and plain, but its subject (encryption, access keys, administration) needs words beyond lower-secondary reading level, and there is no simplified version. The glossary explains the terms. Shared notes are the senders' own text. | All |
+| 3.1.6 Pronunciation | AAA | Not applicable | No words whose meaning depends on their pronunciation in context. | — |
+| 3.2.5 Change on Request | AAA | Supports | Nothing changes page on its own. **Fixed:** when a session ends the page no longer depends on a redirect: the dialog offers "Sign in again" (2.2.5); links that open a new tab say so (2.4.9). | All |
+| 3.3.5 Help | AAA | Supports | Instructions next to the fields that need them (password policy, link rules, file policy, expiry), help panels in the admin, the glossary and the statement's contact on every page. | All |
+| 3.3.6 Error Prevention (All) | AAA | Supports | Input is checked before it is sent; deleting asks twice; imports show a plan; a share can be deleted after creation; settings can be changed back. | All |
+| 3.3.9 Accessible Authentication (Enhanced) | 2.2 only | Supports | As 3.3.8, without relying on any exception: no object or image recognition anywhere; a passkey signs in with no human check. | Login, Acct, Drive |
+
+## What was fixed in this audit
+
+Level A and AA failures (all fixed):
+
+- **1.4.3** the error toast's text on the dark theme's red (3.7:1) → its own fill.
+- **1.4.10** long links, generated keys and the role editor's selects widened the page at
+  320 px; the footer links did not wrap → they wrap.
+- **1.4.11** text field, option group and editor borders were 1.5:1 → a field colour ≥3:1.
+- **2.2.1** the session timed out for inactivity without warning; a file share's download window
+  closed without warning and could not be extended; toasts vanished on a timer → the session
+  warning with "Stay signed in", the download-window warning with "Keep downloads open" (a new
+  server route, at most ten times, spending no view, never past the share's expiry), toasts stay
+  until the next key press or click.
+- **2.2.2** per-second countdowns (share expiry, download window, one-time code) could not be
+  stopped → "Stop the countdown" (on by default with "Stop animations").
+- **2.4.2** the share viewer and composer views all had the same title → each view names itself.
+- **2.4.3** a view change could take focus away from the header, the footer or the accessibility
+  settings → it now moves focus only when focus was on a hidden view or nowhere.
+- **2.4.7** focus rings drawn as box-shadows disappeared in forced colours → a system outline.
+- **2.4.11** the fixed accessibility button (above dialogs too), the toast and the open settings
+  panel could cover the focused control → focus is scrolled clear, the toast moves to the top,
+  the panel closes when focus leaves it, dialogs cover the button.
+- **2.5.2** the settings panel and the Drive's dialogs closed on mouse-down outside them → on
+  click, and only when the press began on the backdrop.
+- **2.5.3** several fields' names differed from their visible labels (setup "Owner password",
+  Turnstile keys, export passphrase, Drive "Select all", the public role's tracking fields) →
+  the visible words are the name.
+- **2.5.8** the widget's statement link and the Drive's checkboxes were under 24 px → 24 px
+  targets (44 px on phones).
+- **3.3.2** fields labelled only by a placeholder (share passwords, repeat-password fields,
+  passkey and API key names, API key lifetime, My shares filters, admin fields) → visible labels.
+- **3.3.8** the human check (a third-party widget) was the only way into an account → a passkey
+  signs in without it, and the check's note offers the alternative and the contact.
+- **4.1.1** (verified although obsolete) two admin renders could duplicate a panel and its ids
+  → renders of a panel are queued.
+- **1.1.1** (improvement) a PDF preview page is now named and its text given as text.
+
+AAA criteria implemented: 1.4.6 (7:1 palette, both themes), 1.4.8 (Text spacing mode), 2.2.5
+(sign in again in a new tab without losing work), 2.2.6 (session length stated on login and
+Account), 2.4.9 (self-describing links, new-tab notices), 2.4.12 (tall editor fits short
+screens), 2.5.5 (Large buttons and links mode), 3.1.3 and 3.1.4 (glossary), 3.2.5 (no automatic
+change of page; new tabs announced), plus the site map (2.4.5).
+
+## What is not fully met, and why
+
+- **2.2.3 No Timing (AAA): does not support.** Expiry is the product: shares self-destruct after
+  their views or time, a view opens a limited download window, and sessions end for security.
+  Each can be extended (2.2.1); none can be removed without removing the feature.
+- **3.1.5 Reading Level (AAA): does not support.** The subject needs specialist words; there is
+  no simplified version. The glossary explains them. Shared notes are the senders' text.
+- **1.2.1–1.2.9, 1.4.7, 2.5.4, 3.1.6: not applicable.** secbin has no audio or video of its own,
+  nothing responds to motion, and no word's meaning depends on pronunciation. Audio and video
+  that users share play with the browser's controls and can always be downloaded.
+- **Outside secbin's control**, with the app side made accessible:
+  - *content users share* (PDFs, documents, images, media): secbin cannot make it accessible;
+    it can always be downloaded, a PDF preview gives its text, an image preview its file name;
+  - *the Turnstile widget* (third party): a passkey signs in without it; its note offers the
+    alternative and the contact; the owner can turn it off or make account changes for a user.
+- **Configuration**: the owner can set the absolute session limit below 20 hours (the default is
+  7 days); the app then warns two minutes ahead but cannot extend it, as that limit is a security
+  control.
+
+## Conclusion
+
+On the evidence of this audit (Chromium, automated and manual checks, code review), secbin's own
+pages and states:
+
+- **WCAG 2.1 level A**: meet every criterion (all *Supports* or *Not applicable*).
+- **WCAG 2.1 level AA**: meet every criterion.
+- **WCAG 2.2 level A**: meet every criterion, including 3.2.6 and 3.3.7.
+- **WCAG 2.2 level AA**: meet every criterion, including 2.4.11, 2.5.7, 2.5.8 and 3.3.8.
+- **WCAG 2.2 level AAA**: 23 of the 31 criteria are met; 2.2.3 and 3.1.5 are not;
+  the rest are not applicable. 1.4.8 and 2.5.5 are met through the widget's "Text spacing" and
+  "Large buttons and links" modes (a style switcher on every page).
+
+This is not yet confirmed with assistive technology by people: see below. Until it is, treat the
+AA result as a strong expectation, not a guarantee.
+
+## What remains for people with assistive technology
+
+Everything above was measured in Chromium. It has not been confirmed by people using:
+
+- screen readers: **NVDA** (Windows, with Firefox and Chrome), **JAWS** (Windows, Chrome and
+  Edge), **VoiceOver** on macOS (Safari) and on iOS (Safari), **TalkBack** on Android (Chrome);
+- **voice control** (Voice Control on macOS/iOS, Dragon), which depends on label in name;
+- **switch access** and **screen magnifiers** (ZoomText, macOS Zoom);
+- **Safari** and **Firefox** as browsers: focus rings, `inert`, the `details` element, the PDF
+  text panel, forced colours in Firefox, and text-only zoom in Firefox (View → Zoom Text Only).
+
+### Test script
+
+Do each task with the keyboard and a screen reader, then with voice control, then at 400 % zoom.
+Note anything that is not announced, announced wrongly, hard to reach or hard to understand.
+
+1. **Landing and statement.** Open `/`. Find "Skip to main content"; follow the footer to the
+   accessibility statement, its site map and its glossary. Open the accessibility settings;
+   switch every option, change language to Hebrew and back, close with Escape.
+2. **Sign in.** Log in with a password (paste it from a password manager), then with a passkey,
+   then with a recovery code. Make a mistake first: is the error announced and tied to the field?
+   With the human check on, is its note (and the passkey alternative) read?
+3. **Create a note** in the dashboard with a password: the password dialog's two labelled fields,
+   the confirmation, the link, the QR code's text alternative, "copy link".
+4. **Open it as the recipient** in a private window: the password prompt, the note, "Stop the
+   countdown", "Delete now".
+5. **Files.** Share a folder with the viewer on; as the recipient, walk the folder tree and the
+   file table, preview an image and a PDF (read "Text of this page"), download all. Wait for the
+   download-window warning (the owner can set the window to 5 minutes): is it announced, and does
+   "Keep downloads open" work?
+6. **Drive.** Unlock it, create a folder, upload files, select items (by the whole row checkbox
+   target), move them with the folder picker, share, see the shares of an item, delete. Walk the
+   folder tree with the arrow keys and type-ahead.
+7. **My shares and Account.** Filter shares, extend one, revoke one. Change your password
+   (paste), add a passkey, make recovery codes, create an API key.
+8. **Admin.** Create a user and a role, edit the Default role's session timeouts, open every tab.
+   Set the idle timeout to 5 minutes, wait: is the warning dialog announced, can you stay signed
+   in, and after it expires, can you sign in again in a new tab and save what you typed?
+9. **Windows High Contrast** (forced colours): repeat 1, 3 and 6 and check every focus ring.
+
+## Tests
+
+- `test-dom/wcag22.test.js`: the session warning (idle and absolute, extend twelve times, focus
+  and `inert`, no navigation on its own), "Stop the countdown", focus not obscured, view titles,
+  new-tab links, labels and autocomplete on the static pages, no paste blocking, the human-check
+  help, and the palette (7:1 text, 3:1 field boundaries) in both themes.
+- `test/files.test.js` "extending a download window": ten extensions and no more, no view
+  spent, never past the share's expiry, the purge waits for an extended window.
+- `test/turnstile.test.js`: a passkey signs in with the human check on and no token; a recovery
+  code still needs one.
+- `wcag22.mjs` (scratch Playwright suite used for this report; it is not part of CI): the probes
+  described above, on every page and state, at three viewports, and `--aaa`.
+
+Results of the final run (2026-09-27, this branch): `npm test` 355 + 116 + 217 + 261 passed,
+`npm run lint` and `sync-shared --check` clean; end to end: `wcag22 --aaa` 17/17 with 0 findings
+(A/AA probes and AAA), `axe-audit` 0 violations, `a11y` 30/30, `run` 39/39, `drive-int`
+104/104, and the accessibility-tree suite 207/207 in a copy updated for the merged UI (the
+original, written before the Drive integration, fails the same 5 checks on the commit before this
+audit: it still expects the composer's flat file list and a widget with 6 switches).

@@ -548,7 +548,7 @@ function openPasswordModal(onSubmit) {
     input.value = '';
     confirmInput.value = '';
     invalid(null);
-    create.onclick = cancel.onclick = scrim.onclick = input.onkeydown = confirmInput.onkeydown = null;
+    create.onclick = cancel.onclick = scrim.onclick = scrim.onpointerdown = input.onkeydown = confirmInput.onkeydown = null;
     document.removeEventListener('keydown', onKey);
     if (opener && typeof opener.focus === 'function') opener.focus();
   };
@@ -572,7 +572,10 @@ function openPasswordModal(onSubmit) {
   };
   create.onclick = submitPw;
   cancel.onclick = close;
-  scrim.onclick = (e) => { if (e.target === scrim) close(); };
+  // Only a click that also began on the scrim closes it (2.5.2): a drag out of a field does not.
+  let downOnScrim = false;
+  scrim.onpointerdown = (e) => { downOnScrim = e.target === scrim; };
+  scrim.onclick = (e) => { if (e.target === scrim && downOnScrim) close(); downOnScrim = false; };
   input.onkeydown = confirmInput.onkeydown = (e) => { if (e.key === 'Enter') submitPw(); };
   document.addEventListener('keydown', onKey);
   mmsg.hidden = true;

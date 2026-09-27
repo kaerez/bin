@@ -3,7 +3,7 @@
 // manifest, proof-gated open with view counting, download grants, last-view
 // grace + purge, R2 cleanup on alarm / revoke / delete, and caps.
 import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { MAX_ACTIVE_GRANTS, MAX_GRANTS_PER_CLIENT } from '../src/fileshare-do.js';
+import { MAX_ACTIVE_GRANTS, MAX_GRANTS_PER_CLIENT, MAX_GRANT_EXTENSIONS } from '../src/fileshare-do.js';
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
 import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent } from './helpers.js';
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
@@ -204,6 +204,55 @@ describe('download grants', () => {
       await state.storage.put('grants', [{ h: '0'.repeat(64), exp: 1 }]);
     });
     expect((await openShare(s.id, s.fragment)).res.status).toBe(200);
+  });
+});
+
+describe('extending a download window (WCAG 2.2.1)', () => {
+  const extend = (id, grant, ip) => fetchJson(`/api/file/${id}/extend`, { method: 'POST', headers: { 'x-download-grant': grant }, ip });
+
+  it('moves the end by the window from now, spends no view, at most MAX_GRANT_EXTENSIONS times', async () => {
+    const s = await upload(oc, [{ path: 'long.txt', bytes: utf8('take your time') }], { views: 2, expire: '1d' });
+    const o = await openShare(s.id, s.fragment);
+    const { grant, grantExpires } = await o.res.json();
+    vi.useFakeTimers({ now: Date.now() + 50 * 60 * 1000, toFake: ['Date'] }); // 50 minutes later
+    const r = await extend(s.id, grant);
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body.grantExpires).toBeGreaterThanOrEqual(grantExpires + 49 * 60);
+    expect(body.extensionsLeft).toBe(MAX_GRANT_EXTENSIONS - 1);
+    vi.useRealTimers();
+    expect((await getChunk(s.id, 0, grant)).status).toBe(200);
+    // No view was spent.
+    expect((await (await fetchJson(`/api/file/${s.id}`)).json()).meta.left).toBe(1);
+    for (let i = 1; i < MAX_GRANT_EXTENSIONS; i++) expect((await extend(s.id, grant)).status).toBe(200);
+    const over = await extend(s.id, grant);
+    expect(over.status).toBe(409);
+    expect((await over.json()).error).toBe('extend_limit');
+  });
+
+  it('never past the share expiry; a bad or expired grant is refused', async () => {
+    const s = await upload(oc, [{ path: 'short.txt', bytes: utf8('x') }], { views: null, expire: '1h' });
+    const o = await openShare(s.id, s.fragment);
+    const { grant, paste } = await o.res.json();
+    const r = await (await extend(s.id, grant)).json();
+    expect(r.grantExpires).toBeLessThanOrEqual(paste.meta.expires);
+    expect((await extend(s.id, 'A'.repeat(43), freshIp())).status).toBe(403);
+    expect((await extend(s.id, 'short', freshIp())).status).toBe(403);
+    expect((await fetchJson(`/api/file/${s.id}/extend`, { headers: { 'x-download-grant': grant } })).status).toBe(405);
+  });
+
+  it('after the last view, the purge waits for the extended window', async () => {
+    const s = await upload(oc, [{ path: 'once.txt', bytes: utf8('last') }], { views: 1, expire: '1d' });
+    const o = await openShare(s.id, s.fragment);
+    const { grant } = await o.res.json();
+    vi.useFakeTimers({ now: Date.now() + 50 * 60 * 1000, toFake: ['Date'] });
+    expect((await extend(s.id, grant)).status).toBe(200);
+    vi.useFakeTimers({ now: Date.now() + 20 * 60 * 1000, toFake: ['Date'] }); // 70 min after opening: past the first window
+    const stub = env.FILESHARE.get(env.FILESHARE.idFromName(s.id));
+    await runDurableObjectAlarm(stub);
+    vi.useRealTimers();
+    expect((await getChunk(s.id, 0, grant)).status).toBe(200);
+    expect(await env.FILES.get(`f/${s.id}/0`)).not.toBeNull();
   });
 });
 

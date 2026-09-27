@@ -1,5 +1,6 @@
 // turnstile.test.js — the Cloudflare Turnstile human check: off unless both
-// TURNSTILE_SITEKEY and TURNSTILE_SECRET are set; when on, login, a signed-in
+// TURNSTILE_SITEKEY and TURNSTILE_SECRET are set; when on, login (password or
+// recovery code; a passkey sign-in needs none), a signed-in
 // password change, every other change to one's own account (username, API
 // keys, passkeys, recovery codes, the sign-in steps) and starting an anonymous
 // share need a token that siteverify accepts for this hostname and this form's
@@ -118,15 +119,31 @@ describe('login', () => {
 });
 
 describe('passkey and recovery-code logins', () => {
-  it('need a "login" token too (the second step rides on the password step\'s)', async () => {
+  it('a recovery code needs a "login" token; a passkey does not (the way in without the widget); the second step rides on the password step\'s', async () => {
     withFake();
     const o = await (await tsFetch('/api/auth/passkey/options', { method: 'POST', body: {}, ip: freshIp() })).json();
     const pk = await tsFetch('/api/auth/passkey/login', { method: 'POST', body: { challengeId: o.challengeId, credential: {} }, ip: freshIp() });
-    expect(await errorOf(pk)).toBe('turnstile_required');
+    // Past the human check: refused for the (empty) credential itself.
+    expect(pk.status).not.toBe(200);
+    expect(await errorOf(pk)).not.toMatch(/^turnstile_/);
     const rc = await tsFetch('/api/auth/recovery', { method: 'POST', body: { username: 'owner', code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ' }, ip: freshIp() });
     expect(await errorOf(rc)).toBe('turnstile_required');
     const sf = await tsFetch('/api/auth/second-factor', { method: 'POST', body: { challengeId: 'nope', code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ' }, ip: freshIp() });
     expect(await errorOf(sf)).toBe('challenge_expired');
+  });
+
+  it('a registered passkey signs in with Turnstile on and no token', async () => {
+    withFake();
+    const u = await makeUser('ts-passkey-in');
+    const auth = new SoftAuthenticator();
+    const reg = await (await fetchJson('/api/private/me/passkeys/options', { method: 'POST', body: {}, cookie: u.cookie, ip: freshIp() })).json();
+    const credential = await auth.create(reg.publicKey, ORIGIN);
+    expect((await fetchJson('/api/private/me/passkeys', { method: 'POST', cookie: u.cookie, ip: freshIp(), body: { challengeId: reg.challengeId, credential, name: 'Laptop', current: proofFor(USER_PW) } })).status).toBe(201);
+    const o = await (await tsFetch('/api/auth/passkey/options', { method: 'POST', body: {}, ip: freshIp() })).json();
+    const r = await tsFetch('/api/auth/passkey/login', { method: 'POST', body: { challengeId: o.challengeId, credential: await auth.get(o.publicKey, ORIGIN) }, ip: freshIp() });
+    expect(r.status).toBe(200);
+    expect(cookieOf(r)).toBeTruthy();
+    expect(calls).toHaveLength(0); // siteverify was never asked
   });
 });
 

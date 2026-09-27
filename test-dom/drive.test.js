@@ -282,6 +282,18 @@ describe('the Drive', () => {
     expect(document.getElementById('drive-selinfo').textContent).toBe('2 selected');
   });
 
+  it('each selection box sits in a <label> (the pointer target, WCAG 2.5.8); "Select all" is named by its text (2.5.3)', async () => {
+    await openApp();
+    for (const cb of document.querySelectorAll('#drive-table input[type="checkbox"]')) expect(cb.parentElement.matches('label.check-hit')).toBe(true);
+    const all = document.getElementById('drive-select-all');
+    expect(all.hasAttribute('aria-label')).toBe(false);
+    expect(all.closest('label').textContent).toBe('Select all in this folder');
+    // Clicking the label (not the box) toggles it.
+    const box = row('readme.txt').querySelector('input[type="checkbox"]');
+    box.closest('label').click();
+    expect(box.checked).toBe(true);
+  });
+
   it('new folder and rename (dialogs, validation, focus back); names are sealed on the wire', async () => {
     await openApp();
     const mk = document.getElementById('drive-mkdir');

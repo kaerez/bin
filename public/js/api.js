@@ -23,6 +23,19 @@ async function readJson(res) {
   try { return await res.json(); } catch { return null; }
 }
 
+// Signed-in activity: every successful /api/private request may slide the
+// session's idle window (src/lib/auth.js), so the session-timeout warning
+// (public/dashboard/js/session-timeout.js) restarts its clock on each one.
+const activity = new Set();
+/** Call `fn(path)` after each successful /api/private request; returns the unsubscribe. */
+export function onPrivateActivity(fn) {
+  activity.add(fn);
+  return () => activity.delete(fn);
+}
+const touched = (path, res) => {
+  if (res.ok && path.startsWith('/api/private/')) for (const fn of activity) { try { fn(path); } catch { /* a listener's bug is not the request's */ } }
+};
+
 async function request(path, { method = 'GET', body, headers = {}, raw = false, signal } = {}) {
   const init = { method, headers: { ...headers }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual', ...(signal ? { signal } : {}) };
   if (body !== undefined) {
@@ -31,6 +44,7 @@ async function request(path, { method = 'GET', body, headers = {}, raw = false, 
   }
   const res = await fetch(path, init);
   if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
+  touched(path, res);
   if (raw && res.ok) return res;
   const data = await readJson(res);
   if (!res.ok) {
@@ -57,6 +71,13 @@ export const openShare = (kind, id, { linkProof, keyProof }) =>
  */
 export const expireShare = (kind, id, { linkProof, keyProof }) =>
   request(`/api/${kind}/${enc(id)}/expire`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof } });
+
+/** Keep a file share's download window open longer (at most ten times; spends no view). */
+export async function extendDownloads(id, grant) {
+  const d = await request(`/api/file/${enc(id)}/extend`, { method: 'POST', headers: { 'x-download-grant': grant } });
+  if (!Number.isFinite(d.grantExpires) || !Number.isInteger(d.extensionsLeft)) throw malformed();
+  return d;
+}
 
 /** One encrypted chunk of a file share, under a download grant. */
 export async function fetchChunk(id, i, grant) {

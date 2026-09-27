@@ -7,7 +7,7 @@
 // activity (unlike impersonation, which acts as the user).
 
 import { admin } from '../../js/api.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, labelled } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { opensButton } from './receipts.js';
 
@@ -63,7 +63,7 @@ export async function renderShares(p) {
   const status = h('select.input', { 'aria-label': 'Status' }, h('option', { value: '', text: 'any status' }),
     ...['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'].map((s) => h('option', { value: s, text: s })));
   const locked = h('select.input', { 'aria-label': 'Lock' }, h('option', { value: '', text: 'locked or not' }), h('option', { value: 'true', text: 'locked only' }), h('option', { value: 'false', text: 'unlocked only' }));
-  const q = h('input.input', { type: 'search', placeholder: 'Search labels', 'aria-label': 'Search labels', maxlength: '100' });
+  const q = h('input.input', { type: 'search', 'aria-label': 'Search labels', maxlength: '100' });
   const dt = (label) => h('input.input', { type: 'datetime-local', 'aria-label': label });
   const day = (label) => h('input.input', { type: 'date', 'aria-label': label });
   const cDay = day('Created on day'); const cFrom = dt('Created from'); const cTo = dt('Created until');
@@ -81,8 +81,7 @@ export async function renderShares(p) {
     h('div.filters', {},
       h('label.field', {}, h('span.field-label', { text: 'Users' }), userSel),
       h('div.stack', {},
-        h('div.toolbar', {}, kind, status, locked),
-        q,
+        h('div.toolbar', {}, labelled(kind), labelled(status), labelled(locked), labelled(q)),
         h('fieldset.range', {}, h('legend', { text: 'Created' }), h('div.toolbar', {}, h('span.field-label', { text: 'on' }), cDay, h('span.field-label', { text: 'or from' }), cFrom, h('span.field-label', { text: 'to' }), cTo)),
         h('fieldset.range', {}, h('legend', { text: 'Expires' }), h('div.toolbar', {}, h('span.field-label', { text: 'on' }), eDay, h('span.field-label', { text: 'or from' }), eFrom, h('span.field-label', { text: 'to' }), eTo)),
         h('div.btn-row', {}, apply, reset))),

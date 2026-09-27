@@ -100,14 +100,85 @@
                 </article>
             </div>
 
+            <!-- A site map (WCAG 2.4.5: a second way to every page besides the navigation). -->
+            <nav class="statement stack sitemap reveal d2" id="sitemap" aria-labelledby="sitemap-title" lang="en" dir="ltr">
+                <h2 class="section-title" id="sitemap-title">All pages of this site</h2>
+                <ul class="statement-list">
+                    <li><a href="/">Home: open a share, or share without an account when that is enabled</a></li>
+                    <li><a href="/dashboard/login/">Log in</a></li>
+                    <li><a href="/dashboard/">New share (signed in)</a></li>
+                    <li><a href="/dashboard/shares/">My shares: your shares and who opened them</a></li>
+                    <li><a href="/dashboard/drive/">Drive: your encrypted files and folders</a></li>
+                    <li><a href="/dashboard/account/">Account: password, passkeys, API keys and activity</a></li>
+                    <li><a href="/dashboard/admin/">Admin (the owner only)</a></li>
+                    <li><a href="/accessibility/">Accessibility statement</a></li>
+                    <li><a href="/accessibility/#glossary">Glossary</a></li>
+                </ul>
+            </nav>
+
+            <!-- Unusual words and abbreviations (WCAG 3.1.3, 3.1.4), linked from every page's footer. -->
+            <section class="statement stack glossary reveal d2" id="glossary" aria-labelledby="glossary-title" lang="en" dir="ltr">
+                <h2 class="section-title" id="glossary-title">Glossary: words and abbreviations used in secbin</h2>
+                <dl class="kv glossary-list">
+                    <dt>AES-256-GCM</dt>
+                    <dd>The encryption your browser uses for everything you share (Advanced Encryption Standard, 256-bit keys, Galois/Counter Mode). Without the key, the stored data cannot be read.</dd>
+                    <dt>API, API key</dt>
+                    <dd>Application programming interface: a way for scripts and the secbin command-line tool to use secbin. An API key is the password such a script uses; it can create shares but never sign in.</dd>
+                    <dt>Argon2id</dt>
+                    <dd>A deliberately slow way to turn a password into a key, so that guessing passwords takes a very long time.</dd>
+                    <dt>CIDR</dt>
+                    <dd>Classless Inter-Domain Routing: a way to write a range of network addresses, such as 10.0.0.0/8.</dd>
+                    <dt>CLI</dt>
+                    <dd>Command-line interface: a program you run by typing commands in a terminal.</dd>
+                    <dt>Drive</dt>
+                    <dd>Your encrypted file storage in secbin, with folders. Only you can read it.</dd>
+                    <dt>End-to-end encrypted</dt>
+                    <dd>Encrypted on the sender’s device and decrypted only on the recipient’s. The server stores only data it cannot read.</dd>
+                    <dt>Fragment (#fragment)</dt>
+                    <dd>The part of a link after the # sign. Browsers never send it to the server, so the key kept there stays with you.</dd>
+                    <dt>HKDF-SHA256</dt>
+                    <dd>A standard way to derive several separate keys from one secret (HMAC-based key derivation with SHA-256).</dd>
+                    <dt>Human check (Turnstile)</dt>
+                    <dd>A check by Cloudflare Turnstile that a person, not a program, is using the page. It asks no questions or puzzles; signing in with a passkey needs no human check.</dd>
+                    <dt>IP address</dt>
+                    <dd>Internet Protocol address: the number that identifies a device or network on the internet.</dd>
+                    <dt>KB, MB, GB</dt>
+                    <dd>Kilobyte, megabyte, gigabyte: sizes of files (1 MB is about a million bytes).</dd>
+                    <dt>m, h, d</dt>
+                    <dd>Minutes, hours, days, in short durations such as “2d 3h”.</dd>
+                    <dt>Passkey</dt>
+                    <dd>A way to sign in with your device’s fingerprint, face or screen lock instead of a password. It cannot be phished or guessed.</dd>
+                    <dt>PDF</dt>
+                    <dd>Portable Document Format, a common type of document file.</dd>
+                    <dt>QR code</dt>
+                    <dd>A square pattern that a phone camera can scan to open a link.</dd>
+                    <dt>Recovery code</dt>
+                    <dd>A one-time code you save when you add a passkey. Each code signs you in once, instead of your password and passkey.</dd>
+                    <dt>Share</dt>
+                    <dd>A note, link, credential or set of files you send with secbin. It is deleted when its views or its time run out.</dd>
+                    <dt>TOTP, one-time code</dt>
+                    <dd>Time-based one-time password: a six-digit code that changes every 30 seconds, used as a second sign-in step on many sites.</dd>
+                    <dt>URL</dt>
+                    <dd>Uniform Resource Locator: the address of a web page, a link.</dd>
+                    <dt>View limit</dt>
+                    <dd>How many times a share can be opened before it is deleted.</dd>
+                    <dt>WCAG</dt>
+                    <dd>Web Content Accessibility Guidelines, the international guidelines secbin is built to.</dd>
+                    <dt>Zero-knowledge</dt>
+                    <dd>The server never has the keys, so it cannot read what you store or share.</dd>
+                </dl>
+            </section>
+
         </main>
         <footer class="foot reveal d4">
             <nav class="foot-links" id="foot-links" aria-label="Project">
-                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
+                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source code<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
                 <span class="foot-sep" aria-hidden="true">·</span>
-                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat model<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
                 <span class="foot-sep" aria-hidden="true">·</span>
-                <a href="/accessibility/" aria-current="page">Accessibility</a>
+                <a href="/accessibility/" aria-current="page">Accessibility statement</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="/accessibility/#glossary">Glossary</a>
             </nav>
             <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
                 <span class="feat" role="listitem">Private</span>

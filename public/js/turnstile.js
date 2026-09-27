@@ -6,7 +6,9 @@
 //
 // The widget is always shown ("always"), so the visitor sees the check pass
 // before the protected button enables; its script is the only third-party code secbin loads,
-// and only on those pages (see the CSP in src/lib/http.js).
+// and only on those pages (see the CSP in src/lib/http.js). While it waits, and
+// if it fails, the note under the button offers the page's alternative (login:
+// a passkey, which needs no human check) and the site's contact (WCAG 3.3.8).
 
 import { scriptURL, TURNSTILE_SCRIPT } from './tt.js';
 import { fetchConfig } from './api.js';
@@ -43,6 +45,18 @@ export async function turnstileSiteKey() {
 
 const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {} });
 const WAITING = 'Waiting for the human check…';
+// The way on for anyone who cannot complete the widget (a third-party
+// component): the page's own alternative, if any, and the site's contact.
+const HELP = 'If you cannot complete it, ';
+const CONTACT = { href: '/accessibility/#st-contact', text: 'contact the administrator' };
+
+/** " <alternative> If you cannot complete it, contact the administrator." as nodes. */
+function helpNodes(alternative) {
+  const a = document.createElement('a');
+  a.href = CONTACT.href;
+  a.textContent = CONTACT.text;
+  return [document.createTextNode(` ${alternative ? `${alternative} ` : ''}${HELP}`), a, document.createTextNode('.')];
+}
 let noteSeq = 0;
 
 /** The native `disabled` accessor of a button, input, select or fieldset. */
@@ -86,7 +100,7 @@ function gate(btn, waiting) {
  * widget can serve several buttons: each take() uses up the token and starts
  * a fresh check.
  */
-export function humanCheck(container, action, { gate: buttons = [] } = {}) {
+export function humanCheck(container, action, { gate: buttons = [], alternative = '' } = {}) {
   let token = null;
   let state = 'pending'; // pending (site key unknown) | on | off
   let broken = null;
@@ -102,7 +116,7 @@ export function humanCheck(container, action, { gate: buttons = [] } = {}) {
     note.className = 'mono muted human-wait';
     note.id = `human-wait-${++noteSeq}`;
     note.setAttribute('role', 'status');
-    note.textContent = WAITING;
+    note.append(WAITING, ...helpNodes(alternative));
     note.hidden = true;
     gated[0].insertAdjacentElement('afterend', note);
     for (const b of gated) b.setAttribute('aria-describedby', [b.getAttribute('aria-describedby'), note.id].filter(Boolean).join(' '));
@@ -150,7 +164,7 @@ export function humanCheck(container, action, { gate: buttons = [] } = {}) {
       const note = document.createElement('p');
       note.className = 'msg error';
       note.setAttribute('role', 'alert');
-      note.textContent = broken.message;
+      note.append(broken.message, ...helpNodes(alternative));
       container.replaceChildren(note);
     }
     return {

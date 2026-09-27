@@ -13,7 +13,7 @@ import { DRIVE_PRF_SALT } from '../../js/drivekeys.js';
 import { updatePasswordWrap, replaceRecoveryWraps, removeRecoveryWraps, addPasskeyWrap, removePasskeyWrap } from '../../js/driveclient.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
-import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
+import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError, spellDuration } from '../../js/common.js';
 import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
@@ -120,6 +120,11 @@ function renderLimits() {
   row('Max files per share', lim(L.maxFilesPerShare));
   row('In-browser viewer', profile.viewer.enabled ? 'available' : 'off');
   row('API keys', profile.apiKeys.enabled ? `up to ${profile.apiKeys.max}` : 'not allowed');
+  // How long a session lasts (WCAG 2.2.6): the warning comes WARN_SEC before either end.
+  if (profile.session) {
+    row('Signed out after', `${spellDuration(profile.session.idleSec)} without activity (a warning comes 2 minutes before, with the option to stay signed in)`);
+    row('Session ends', `${formatDate(profile.session.endsAt)} at the latest (then sign in again)`);
+  }
   const q = clear($('#acct-quotas'));
   if (profile.quotas.length) {
     q.appendChild(h('h3.field-label', { text: 'Quotas' }));

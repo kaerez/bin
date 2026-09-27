@@ -57,7 +57,7 @@
             </a>
             <div class="topbar-right">
                 <nav class="dash-nav" id="dash-nav" aria-label="Dashboard" hidden>
-                    <a class="back" href="/dashboard/" data-nav="new"><span>new</span></a>
+                    <a class="back" href="/dashboard/" data-nav="new"><span>new share</span></a>
                     <a class="back" href="/dashboard/shares/" data-nav="shares"><span>my shares</span></a>
                     <a class="back" href="/dashboard/drive/" data-nav="drive" id="nav-drive" hidden><span>drive</span></a>
                     <a class="back" href="/dashboard/account/" data-nav="account"><span>account</span></a>
@@ -110,8 +110,10 @@
                     <p class="subtitle">Extend views or expiry within your limits, revoke a share instantly, or rename your labels. Labels are for your own reference — unlike the shares themselves, they are not encrypted.</p>
                 </div>
                 <div class="toolbar reveal d2">
-                    <input class="input" id="shares-q" type="search" placeholder="Search labels" aria-label="Search labels" maxlength="100" />
-                    <select class="input" id="shares-status" aria-label="Status">
+                    <label class="field-inline" for="shares-q"><span class="field-label">Search labels</span>
+                    <input class="input" id="shares-q" type="search" maxlength="100" /></label>
+                    <label class="field-inline" for="shares-status"><span class="field-label">Status</span>
+                    <select class="input" id="shares-status">
                         <option value="">all</option>
                         <option value="active">active</option>
                         <option value="ended">ended</option>
@@ -119,7 +121,7 @@
                         <option value="revoked">revoked</option>
                         <option value="deleted">deleted</option>
                         <option value="consumed">consumed</option>
-                    </select>
+                    </select></label>
                 </div>
                 <div class="table-wrap reveal d2"><table class="table" id="shares-table">
                     <thead><tr><th>Label</th><th>Type</th><th>Created</th><th>Expires</th><th>Views</th><th>Opened</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
@@ -131,11 +133,13 @@
         </main>
         <footer class="foot reveal d4">
             <nav class="foot-links" id="foot-links" aria-label="Project">
-                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
+                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source code<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
                 <span class="foot-sep" aria-hidden="true">·</span>
-                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat model<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
                 <span class="foot-sep" aria-hidden="true">·</span>
-                <a href="/accessibility/">Accessibility</a>
+                <a href="/accessibility/">Accessibility statement</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="/accessibility/#glossary">Glossary</a>
             </nav>
             <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
                 <span class="feat" role="listitem">Private</span>

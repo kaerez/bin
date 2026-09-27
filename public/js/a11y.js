@@ -158,8 +158,16 @@ export function mount(root = document.body) {
   }
   btn.addEventListener('click', () => toggle(!open));
   document.addEventListener('keydown', (e) => { if (open && e.key === 'Escape') { e.preventDefault(); toggle(false); } });
-  document.addEventListener('mousedown', (e) => {
-    if (open && !panel.contains(e.target) && !btn.contains(e.target)) toggle(false, { focusButton: panel.contains(document.activeElement) });
+  // A click outside closes it: on the up-event (2.5.2), so pressing and
+  // sliding away does nothing. Focus that fell to <body> returns to the button.
+  // (The event path, not contains(): a language button re-renders the panel
+  // and is detached by the time its click reaches the document.)
+  document.addEventListener('click', (e) => {
+    const path = e.composedPath();
+    if (open && !path.includes(panel) && !path.includes(btn)) {
+      const a = document.activeElement;
+      toggle(false, { focusButton: !a || a === document.body || panel.contains(a) });
+    }
   });
   // Focus moved to the page (Tab past the panel, a skip link): close, so the
   // panel never covers the focused control. Focus stays where it went.
@@ -170,7 +178,46 @@ export function mount(root = document.body) {
   render();
   root.appendChild(btn);
   root.appendChild(panel);
+  document.addEventListener('focusin', (e) => { if (!panel.contains(e.target) && e.target !== btn) requestAnimationFrame(() => unobscure(e.target)); });
   return { btn, panel, toggle, get settings() { return settings; } };
+}
+
+// Fixed elements that stay on screen while the page scrolls under them.
+const FIXED = '#a11y-btn, #toast.show, .pwa-banner:not([hidden]), .kdf-progress:not([hidden])';
+const GAP = 8;
+
+/**
+ * Focus not obscured (WCAG 2.4.11 / 2.4.12): when `el` (just focused) lies
+ * under one of the fixed elements, even in part, scroll the page until it is
+ * clear. The toast moves to the top instead (it is only a message). An element
+ * inside a modal dialog, or too tall to fit between them, is left alone.
+ * Returns the distance scrolled (0 when nothing was in the way).
+ */
+export function unobscure(el) {
+  if (!(el instanceof Element) || el === document.body || el === document.documentElement) return 0;
+  if (el.closest('[aria-modal="true"], .a11y-panel, #toast, .pwa-banner, .kdf-progress')) return 0;
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  const r = el.getBoundingClientRect();
+  if (!r.width && !r.height) return 0;
+  // The band of the viewport that no fixed element covers, in the columns `el` occupies.
+  let top = 0;
+  let bottom = vh;
+  for (const c of document.querySelectorAll(FIXED)) {
+    if (c.contains(el)) continue;
+    const b = c.getBoundingClientRect();
+    if (!b.width || !b.height || !(r.left < b.right && r.right > b.left) || getComputedStyle(c).visibility === 'hidden') continue;
+    if (c.id === 'toast') {
+      if (r.top < b.bottom + GAP && r.bottom > b.top - GAP) c.classList.add('toast-top');
+      continue;
+    }
+    // Bottom-anchored (the accessibility button, the install banner on phones) or top-anchored.
+    if (b.top + b.height / 2 > vh / 2) bottom = Math.min(bottom, b.top - GAP);
+    else top = Math.max(top, b.bottom + GAP);
+  }
+  if ((r.top >= top && r.bottom <= bottom) || r.height > bottom - top) return 0;
+  const dy = r.bottom > bottom ? r.bottom - bottom : r.top - top;
+  window.scrollBy({ top: dy, left: 0, behavior: 'instant' });
+  return dy;
 }
 
 if (typeof document !== 'undefined' && document.body && !globalThis.__SECBIN_A11Y_NO_AUTOMOUNT) mount();

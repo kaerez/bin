@@ -39,6 +39,17 @@ export const logoutCookie = () => clearCookie(SESSION_COOKIE);
 export const accountDisabled = (headers) => new HttpError(403, 'account_disabled', 'This account is disabled. Contact the administrator.', undefined, headers);
 
 /**
+ * When a session ends (Unix seconds), for the browser's warning before it
+ * does (WCAG 2.2.1): `idleEndsAt` without further activity (each request
+ * slides it, at most once a minute), `endsAt` at the latest (the absolute
+ * timeout; it cannot be extended). `idleSec` is the inactivity allowance.
+ */
+export function sessionTimes(c, { idleSec, absSec }) {
+  const endsAt = Math.min(c.exp, c.iat + absSec);
+  return { idleSec, idleEndsAt: Math.min(c.lat + idleSec, endsAt), endsAt, slideSec: SLIDE_SEC };
+}
+
+/**
  * Resolve the session on a request. Returns
  *   { ok: true, user, actor, claims, setCookie? }  or
  *   { ok: false, reason: 'none' | 'unconfigured' | 'invalid' }.
@@ -61,11 +72,13 @@ export async function readSession(request, env) {
   const { idleSec, absSec } = res.settings;
   if (t - c.lat > idleSec || t - c.iat > absSec) return { ok: false, reason: 'invalid' };
   let setCookie;
+  let lat = c.lat;
   if (t - c.lat >= SLIDE_SEC) {
     const next = { ...c, lat: t, exp: Math.min(c.exp, c.iat + absSec) };
     setCookie = sessionCookie(SESSION_COOKIE, await sealToken(keys, next), Math.min(next.exp - t, idleSec));
+    lat = t;
   }
-  return { ok: true, user: res.user, actor: res.actor, claims: c, setCookie };
+  return { ok: true, user: res.user, actor: res.actor, claims: c, setCookie, session: sessionTimes({ ...c, lat }, { idleSec, absSec }) };
 }
 
 /**
@@ -95,7 +108,7 @@ export async function authenticate(request, env, { allowApiKey = false, scope = 
     if (s.reason === 'disabled') throw accountDisabled({ 'set-cookie': logoutCookie() });
     throw new HttpError(401, 'unauthenticated', 'Please log in.');
   }
-  return { user: s.user, actor: s.actor, claims: s.claims, setCookie: s.setCookie, channel: 'all' };
+  return { user: s.user, actor: s.actor, claims: s.claims, setCookie: s.setCookie, session: s.session, channel: 'all' };
 }
 
 /** The actor recorded for an action: the user, or { id: owner, imp: true } while impersonating. */

@@ -120,7 +120,7 @@ export async function handlePublic(request, env, url) {
   }
 
   // /chunk/<i> reads a file share's stream; /chunk/<ref>/<i> a Drive share's file.
-  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|chunk)(?:\/(\d{1,6})(?:\/(\d{1,6}))?)?)?$/);
+  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|extend|chunk)(?:\/(\d{1,6})(?:\/(\d{1,6}))?)?)?$/);
   if (!m) return null;
   const [, kind, rawId, action, idx, idx2] = m;
   const id = decodePathSegment(rawId);
@@ -157,6 +157,10 @@ export async function handlePublic(request, env, url) {
     assertNotCrossSite(request);
     const proofs = await proofHashes(request);
     return expireByOpener(env, g, id, info, proofs);
+  }
+  if (action === 'extend' && info.file && idx === undefined) {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    return extendGrant(request, env, g, id);
   }
   if (action === 'chunk' && info.file && idx !== undefined) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -249,6 +253,21 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
   if (status === 'bad_link' || status === 'bad_password') return failed(env, g, proofFailure(status));
   if (status === 'not_allowed') return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
   return goneFor(env, g, id, err(410, 'gone', GONE), lh);
+}
+
+/**
+ * Keep a download window open longer (WCAG 2.2.1): the grant itself is the
+ * credential (as for chunks); the window is the sender's role's, now.
+ */
+async function extendGrant(request, env, g, id) {
+  const grant = request.headers.get('x-download-grant') || '';
+  if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) return failed(env, g, err(403, 'bad_grant', 'A valid X-Download-Grant header is required.'));
+  const policy = await directory(env).shareOpenPolicy(id);
+  const r = await fileStub(env, id).extendGrant(await hashToken(grant), policy.grantSec);
+  if (r.status === 'ok') return json({ grantExpires: r.grantExpires, extensionsLeft: r.extensionsLeft });
+  if (r.status === 'limit') return err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires });
+  if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'The download window has expired — open the link again.'));
+  return err(410, 'gone', GONE);
 }
 
 /** Chunk i of a file share's stream, or (with `ref`) chunk i of a Drive share's file number `ref`. */
