@@ -15,6 +15,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Nothing the Worker serves is stored in Cloudflare's cache** (with Workers Caching on, see
+  Changed): the top-level fetch handler adds `Cloudflare-CDN-Cache-Control: no-store` to every
+  response it returns, errors and exceptions included, and `Cache-Control: no-store` to any
+  response without one of its own (the asset server's `307` for `/index.html` and the bare
+  `404` when the assets binding is missing had none, and would have been cached
+  heuristically). The home page and the anonymous tracker keep their browser caching. A
+  workerd test walks 87 routes, methods and outcomes and checks every response.
 - **Security audit fixes** (OWASP-style review of the whole code base; no Critical or High
   findings):
   - cross-site requests to the public share routes are refused before any Guard accounting
@@ -283,6 +290,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Smart Placement and Workers Caching** are on in `wrangler.toml` (and
+  `wrangler.toml.example`): `[placement] mode = "smart"` runs the fetch handler where it is
+  fastest overall (near the Directory Durable Object for most API calls), and
+  `[cache] enabled = true` sets the default caching for fetch-handler responses. No
+  per-entrypoint override is set (the default export is the only fetch entrypoint), and no
+  Worker response opts into the cache (see Security).
 - **The accessibility statement is admin-edited and English only by default** (#35): the text
   moved from `public/accessibility/index.html` into settings (Admin → Settings →
   Accessibility, which also holds the contact and coordinator); the built-in Hebrew version

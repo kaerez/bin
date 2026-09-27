@@ -9,6 +9,28 @@ name = "bin"
 main = "src/index.js"
 compatibility_date = "2025-10-11"
 
+# ── Smart Placement ──────────────────────────────────────────────────────────
+# Runs the fetch handler where it is fastest overall, which for secbin is near
+# its Durable Objects (almost every API call reaches the Directory singleton).
+# Static assets served without the Worker are still answered from the location
+# nearest the visitor. Durable Objects place themselves; RPC is unaffected.
+[placement]
+mode = "smart"
+
+# ── Workers Caching ──────────────────────────────────────────────────────────
+# The default caching behaviour for HTTP responses returned by fetch handlers
+# (the per-entrypoint [exports.<name>.cache] tables can override it; secbin's
+# only fetch entrypoint is the default export, so none is set). With it on,
+# Cloudflare consults its cache before invoking the Worker — and a response
+# with no Cache-Control would be cached heuristically (RFC 9111), cookie-
+# authenticated GETs included. secbin therefore opts every Worker response
+# OUT: the top-level fetch handler (src/index.js) adds
+# `Cloudflare-CDN-Cache-Control: no-store` to everything it returns and
+# `Cache-Control: no-store` to anything without its own. Nothing the Worker
+# serves is stored at the edge; see SECURITY.md ("Edge caching").
+[cache]
+enabled = true
+
 # ── Static assets ────────────────────────────────────────────────────────────
 # The frontend lives in public/. The Worker runs first for the API and for the
 # signed-in app (/dashboard*, which it gates on a valid session); every other path

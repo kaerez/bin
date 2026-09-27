@@ -13,7 +13,7 @@
 // expiry and brute-force protection. It never sees a decryption key, a password,
 // a file name or a file type. See SPEC.md §10 and SECURITY.md.
 
-import { err, HttpError, withSecurityHeaders, redirect } from './lib/http.js';
+import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, SECURITY_HEADERS } from './lib/http.js';
 import { readSession, logoutCookie, SESSION_COOKIE } from './lib/auth.js';
 import { ipContext, cachedSettings } from './lib/guard.js';
 import { turnstileKeys } from './lib/turnstile.js';
@@ -35,7 +35,7 @@ const DASH_LOGIN = /^\/dashboard\/login(\/|\/index\.html)?$/;
 // (password change) and the home page's public composer when it is enabled.
 const TURNSTILE_DASH = /^\/dashboard\/(login|account)(\/|\/index\.html)?$/;
 const HOME = /^\/(index\.html)?$/;
-// The home page is public and cached: look up a session only when a cookie is there.
+// The home page is public and browser-cached: look up a session only when a cookie is there.
 const hasSessionCookie = (request) => (request.headers.get('cookie') || '').includes(`${SESSION_COOKIE}=`);
 
 async function showsTurnstile(env, pathname) {
@@ -49,10 +49,13 @@ async function showsTurnstile(env, pathname) {
 }
 
 // The signed-in app is never stored; the public landing page keeps the asset
-// server's own caching headers, as when it was served straight from static
-// assets (the service worker keeps it as the offline shell).
+// server's own caching headers for the browser, as when it was served straight
+// from static assets (the service worker keeps it as the offline shell). Neither
+// is ever stored in Cloudflare's cache (withCachePolicy, in the fetch handler):
+// the home page varies with the session cookie (the signed-in redirect) and
+// with the admin's Turnstile / anonymous-sharing settings (its headers).
 async function serveAsset(env, request, url, { noStore = true } = {}) {
-  if (!env.ASSETS) return new Response('Not found', { status: 404 });
+  if (!env.ASSETS) return new Response('Not found', { status: 404, headers: { ...SECURITY_HEADERS, 'cache-control': 'no-store' } });
   const turnstile = url ? await showsTurnstile(env, url.pathname) : false;
   return withSecurityHeaders(await env.ASSETS.fetch(request), { turnstile, noStore });
 }
@@ -117,20 +120,29 @@ async function route(request, env, url, ctx) {
   return (await handlePublic(request, env, url)) ?? err(404, 'not_found', 'Not found.');
 }
 
+function errorResponse(e) {
+  if (e instanceof HttpError) return e.toResponse();
+  if (e instanceof BindingMissing) {
+    console.error(`deployment error: the ${e.binding} binding is missing or invalid`);
+    // The binding's name goes to the logs, not to the (possibly anonymous) caller.
+    return err(503, 'not_configured', 'The server is not fully configured. Please contact the administrator.');
+  }
+  console.error('unhandled error', e && e.stack ? e.stack : e);
+  return err(500, 'server_error', 'Something went wrong. Please try again.');
+}
+
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    let res;
     try {
-      return await route(request, env, url, ctx);
+      res = await route(request, env, new URL(request.url), ctx);
+      if (!(res instanceof Response)) throw new Error('route returned no response');
     } catch (e) {
-      if (e instanceof HttpError) return e.toResponse();
-      if (e instanceof BindingMissing) {
-        console.error(`deployment error: the ${e.binding} binding is missing or invalid`);
-        // The binding's name goes to the logs, not to the (possibly anonymous) caller.
-        return err(503, 'not_configured', 'The server is not fully configured. Please contact the administrator.');
-      }
-      console.error('unhandled error', e && e.stack ? e.stack : e);
-      return err(500, 'server_error', 'Something went wrong. Please try again.');
+      res = errorResponse(e);
     }
+    // Every response, error paths included, leaves with an explicit cache
+    // policy: nothing the Worker returns is stored by Cloudflare's cache
+    // (wrangler.toml [cache]); see withCachePolicy.
+    return withCachePolicy(res);
   },
 };
