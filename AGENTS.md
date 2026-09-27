@@ -102,6 +102,15 @@ never committed) and `node_modules`.
   region or national standard.
 - **Reverse shares:** an optional password gates the anonymous uploader only; uploads land in the
   user's chosen drive folder; the user never needs that password.
+- **Starting over without a kit (an accepted exception to "Security first", this case only):**
+  when the owner starts their Drive over without a recovery kit, users' browsers move their
+  Drives to the new escrow key automatically, once per owner reset (the reset's epoch one more
+  than the pinned one, the escrow key signed by the reset's signing key), without the user's
+  approval. The maintainer chose this knowing that, in that window, anyone able to change the
+  server's responses could substitute an escrow key. Every other unsigned escrow key change keeps
+  the signed-key pin (the notice and "Trust the new key").
+- **The Drive key never changes** on a password change or an admin reset: only the `pw` wrap is
+  replaced, proven to be of the same DK by the key check value.
 - **Impersonation:** the owner can do everything the user can, the Drive included; it is
   invisible to the user (the user's activity shows the actions as theirs), and the owner-only
   admin audit keeps the start, end and real actor.

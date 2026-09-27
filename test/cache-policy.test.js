@@ -20,7 +20,7 @@ import { encryptPaste } from '../public/js/crypto.js';
 import { utf8 } from '../public/js/bytes.js';
 import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16 } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
-import { enc, enableDrive, someBytes, escrowWrap } from './drive-helpers.js';
+import { enc, enableDrive, someBytes, escrowWrap, KCV } from './drive-helpers.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 
@@ -310,7 +310,7 @@ describe('cache policy (Workers Caching)', () => {
     record('GET /api/private/drive (key, 403)', await get('/api/private/drive', { headers: { authorization: `Bearer ${all}` } }));
     record('PUT /api/private/drive/keys (first set-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }, await escrowWrap()] } }));
     record('PUT /api/private/drive/keys (replace without step-up, 400)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }] } }));
-    record('PUT /api/private/drive/keys (step-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }], current: proofFor(USER_PW) } }));
+    record('PUT /api/private/drive/keys (step-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }], current: proofFor(USER_PW), kcv: KCV } }));
     record('GET /api/private/drive/keys (405)', await get('/api/private/drive/keys', { cookie: dc }));
     const folderId = nid();
     record('POST /api/private/drive/folders (201)', await get('/api/private/drive/folders', { method: 'POST', cookie: dc, body: { id: folderId, parent: 'root', name: enc() } }));
@@ -340,7 +340,7 @@ describe('cache policy (Workers Caching)', () => {
     record('GET /api/file/<drive share>/chunk/0/0', await raw(`/api/file/${driveShare}/chunk/0/0`, { headers: { 'x-download-grant': dgrant, 'cf-connecting-ip': ip } }));
     record('POST /api/private/drive/escrow (not impersonating, 403)', await get('/api/private/drive/escrow', { method: 'POST', cookie: dc, body: {} }));
     record('POST /api/private/admin/drive/escrow/<id> (owner, 200)', await get(`/api/private/admin/drive/escrow/${dv.id}`, { method: 'POST', cookie: oc, headers: intent, body: { reason: 'cache walk' } }));
-    record('PUT /api/private/admin/drive/keys/<id> (owner, 200)', await get(`/api/private/admin/drive/keys/${dv.id}`, { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }] } }));
+    record('PUT /api/private/admin/drive/keys/<id> (owner, 200)', await get(`/api/private/admin/drive/keys/${dv.id}`, { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }], kcv: KCV } }));
     const imp = await get(`/api/private/admin/users/${dv.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent });
     const ic = (imp.headers.get('set-cookie') || '').split(';')[0];
     record('GET /api/private/drive (impersonating, 200)', await get('/api/private/drive', { cookie: ic }));

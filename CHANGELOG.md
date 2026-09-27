@@ -58,6 +58,52 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - documentation: the status codes do tell a reverse-share id from an unknown one; the owner
     acting as the user can create a link whose key the owner keeps; with Turnstile on, its script
     can read the link key on the uploader page.
+- **Owner recovery kit, starting over, Drives the owner sets up** (docs/DRIVE.md §3, §3.1, §3.2;
+  SECURITY.md "Drive keys"):
+  - **owner recovery kit**: a file (`secbin-owner-kit/1`) with the owner's Drive key and a
+    snapshot of every escrow key (current, signing, earlier), made and read only in the browser
+    (Argon2id with the export's parameters over an optional passphrase, AES-256-GCM, the format,
+    owner id and origin in the AAD); the same kit, status, check and restore on the export screen
+    and the owner's Drive page (one module, `public/js/drivekit.js`, with a `user` kind for a
+    later user kit; a kit of the other kind is refused). Download is always available and needs
+    the step-up (`drive.kit_exported`, with the version); the pages show the escrow key's version,
+    fingerprint and date and the latest kit, and ask for a fresh kit after a rotation (announced
+    once, then a static notice) or when none was downloaded. **Verify kit** checks a file the
+    owner selects, read-only (format and owner, the tag, the Drive key, the current, signing and
+    earlier keys, the version, a live opening of one user's escrow wrap per key), with a verdict
+    (`drive.kit_verified`). **Restore from kit** (also from the Drive page's unlock screen) brings
+    back the owner's Drive with a fresh password key, the escrow access on current and past keys,
+    and sealed escrow keys the server lost (only for its own public keys and kids in use, with the
+    step-up; `drive.kit_used`, `drive.kit_keys_restored`). Failed openings are throttled. The kit
+    is never part of an export;
+  - **AUTHN owner recovery** still removes the owner's passkeys and recovery codes; it now also
+    drops their Drive wraps and marks the owner's Drive stale, and changes no key;
+  - **only an explicit rotation makes an escrow key or signing key** (besides the first creation
+    and starting over): "restore the escrow public key" no longer makes a signing key, and the
+    owner's first set-up happens only when no escrow or signing key exists anywhere. The escrow
+    key has a version (1, then one more per new pair);
+  - **starting over without a kit**, only when nothing the owner signs in with opens the Drive,
+    with the typed username and the step-up: new Drive key, escrow pair and signing key; the old
+    Drive is **archived** as it was (sealed under the old Drive key, counted in the storage),
+    restorable with a kit for it (items re-sealed under the current key, " (2)" for a clashing
+    top-level name, the old escrow keys back for users still on them) and deleted only by
+    "Delete the old Drive archive" (typed username, step-up). `drive.owner_reset`,
+    `drive.archive_restored`, `drive.archive_deleted`;
+  - **maintainer-accepted weakening:** after a start over, users' browsers move their Drives to
+    the new escrow key **automatically**, once per owner reset (an epoch one more than the pinned
+    one, the key signed by the reset's signing key), with a one-time notice and
+    `drive.escrow_rewrapped` in the user's activity and the admin audit. During that window,
+    anyone able to change the server's responses could substitute an escrow key; every other
+    unsigned change keeps the notice and "Trust the new key";
+  - **Drives the owner sets up**: creating an account (or resetting the password of a user with no
+    Drive yet) with the owner's Drive unlocked sets the user's Drive up in the owner's browser
+    (`pw` and `escrow` wraps, the pin; `drive.created_by_owner`); otherwise it waits for the
+    user's first sign-in, and the create form says which. Imports and impersonation never do;
+  - **the Drive key never changes**: a password change opens the Drive key first (the old
+    password or the passkey's PRF) and writes the new password wrap at once; an admin reset asks
+    the owner to unlock their own Drive inline and re-wraps through the escrow (or continues
+    without, with a warning). A new password wrap is accepted only with the Drive key's check
+    value (`kcv`, HMAC under the key's "files" sub-key), kept since the first set-up.
 - **Drive, security audit round 2** (docs/DRIVE.md §3, §6, §10; SECURITY.md "Drive keys"):
   - the owner's escrow key pair changes only with the owner's password or a passkey (the first
     one excepted), and a new escrow key must be signed by the owner's signing key (ECDSA P-256,
@@ -464,6 +510,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Fixed
 
+- **Admin → Users** no longer lists the users twice when the panel is rendered again while a
+  render is still loading (e.g. the tab clicked just after creating a user).
 - **Admin:** global settings (share-size cap, viewer switch and size, limits, quotas) never apply
   to the owner; the owner's own password can no longer be reset from the admin UI/API (use
   Account); every limit and setting shows its default, and "Max API keys" can be "no limit";

@@ -69,6 +69,19 @@ export function createDriveKey() {
   return randomBytes(DK_BYTES);
 }
 
+/**
+ * The Drive key's check value: HMAC-SHA-256 under DK's "files" sub-key (its
+ * raw HKDF output) of "secbin-drive/v1 kcv", base64url. The server keeps it
+ * from the first set-up and accepts a new password wrap only with the same
+ * value, so a wrap of another key is refused; it reveals nothing about DK.
+ */
+export async function keyCheckValue(dk) {
+  if (!isDk(dk)) throw new TypeError('invalid Drive key');
+  const raw = await hkdf32(dk, EMPTY, info('files'));
+  const key = await crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8('secbin-drive/v1 kcv'))));
+}
+
 /** { names, files }: the two AES-256-GCM sub-keys (HKDF, salt empty). */
 export async function deriveSubkeys(dk) {
   if (!isDk(dk)) throw new TypeError('invalid Drive key');
@@ -314,10 +327,12 @@ export function sameEscrowKey(a, b) {
 export async function sealEscrowPin(dk, pin) {
   const { names } = await deriveSubkeys(dk);
   const v = typeof pin === 'string' ? { escrow: pin, sign: null } : { escrow: String(pin.escrow), sign: pin.sign ? String(pin.sign) : null };
+  // The owner reset this pin has seen (docs/DRIVE.md §3), when there was one.
+  if (pin && Number.isSafeInteger(pin.epoch) && pin.epoch > 0) v.epoch = pin.epoch;
   return sealField(names, 'escrowPin', 'drive', JSON.stringify(v));
 }
 
-/** The pin `{ escrow, sign }`, or null (none; or it does not open with this DK — altered). */
+/** The pin `{ escrow, sign, epoch? }`, or null (none; or it does not open with this DK — altered). */
 export async function openEscrowPin(dk, sealed) {
   if (!sealed) return null;
   try {
@@ -325,7 +340,9 @@ export async function openEscrowPin(dk, sealed) {
     const text = new TextDecoder().decode(await openField(names, 'escrowPin', 'drive', sealed));
     const v = JSON.parse(text);
     if (!v || typeof v.escrow !== 'string') return null;
-    return { escrow: v.escrow, sign: typeof v.sign === 'string' ? v.sign : null };
+    const pin = { escrow: v.escrow, sign: typeof v.sign === 'string' ? v.sign : null };
+    if (Number.isSafeInteger(v.epoch) && v.epoch > 0) pin.epoch = v.epoch;
+    return pin;
   } catch {
     return null;
   }
@@ -377,6 +394,46 @@ export async function escrowKeyEndorsed(signJwk, escrowJwk, sig) {
     return await crypto.subtle.verify(SIGN, key, bytesFromB64url(sig), endorsement(cleanJwk(escrowJwk)));
   } catch {
     return false;
+  }
+}
+
+// ── raw private keys, for the owner recovery kit (docs/DRIVE.md §3) ──────
+// The kit carries the escrow and signing private keys as PKCS#8, so that it
+// can put back a sealed copy the owner's Drive has lost.
+
+const PKCS8_FIELD = { escrow: 'escrowPriv', sign: 'escrowSign' };
+
+/** A sealed escrow (`kind` 'escrow') or signing ('sign') private key → its PKCS#8 bytes; DecryptError on a wrong DK. */
+export async function openPrivateKeyBytes(dk, kind, data) {
+  const seg = segments(data, 2);
+  if (!seg || seg[0].length !== 12 || !PKCS8_FIELD[kind]) throw new DecryptError('invalid sealed key');
+  const { files } = await deriveSubkeys(dk);
+  return open(files, aad(PKCS8_FIELD[kind], 'drive'), seg[0], seg[1]);
+}
+
+/** PKCS#8 bytes sealed under DK as the Drive stores them (`escrowPriv` / `escrowSignPriv`). */
+export async function sealPrivateKeyBytes(dk, kind, pkcs8) {
+  if (!PKCS8_FIELD[kind] || !(pkcs8 instanceof Uint8Array)) throw new TypeError('invalid key');
+  const { files } = await deriveSubkeys(dk);
+  const { iv, ct } = await seal(files, aad(PKCS8_FIELD[kind], 'drive'), pkcs8);
+  return [VERSION, b64urlFromBytes(iv), b64urlFromBytes(ct)].join('.');
+}
+
+/**
+ * PKCS#8 bytes of an escrow ('escrow', ECDH) or signing ('sign', ECDSA) key →
+ * { privateKey (non-extractable), publicJwk (derived from it), kid };
+ * DecryptError when they are not such a key.
+ */
+export async function privateKeyFromBytes(kind, pkcs8) {
+  const alg = kind === 'escrow' ? ECDH : kind === 'sign' ? ECDSA : null;
+  const usages = kind === 'escrow' ? ['deriveBits'] : ['sign'];
+  try {
+    const full = await crypto.subtle.exportKey('jwk', await crypto.subtle.importKey('pkcs8', pkcs8, alg, true, usages));
+    const publicJwk = cleanJwk(full);
+    const privateKey = await crypto.subtle.importKey('pkcs8', pkcs8, alg, false, usages);
+    return { privateKey, publicJwk, kid: kind === 'escrow' ? await escrowKeyId(publicJwk) : await signingKeyId(publicJwk) };
+  } catch {
+    throw new DecryptError('invalid private key');
   }
 }
 

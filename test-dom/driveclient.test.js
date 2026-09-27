@@ -12,7 +12,7 @@ import {
 } from '../public/js/driveclient.js';
 import {
   loadSessionKey, clearSessionKey, saveSessionKey, createDriveKey, createEscrowKeyPair, sealEscrowPriv, wrapEscrow,
-  wrapPassword, unlockWithPassword, unlockWithRecovery, unlockWithPrf, recoveryRef,
+  wrapPassword, unlockWithPassword, unlockWithRecovery, unlockWithPrf, recoveryRef, keyCheckValue,
 } from '../public/js/drivekeys.js';
 import { deriveAccess, openPaste } from '../public/js/crypto.js';
 import { validateRefsManifest } from '../public/js/refsmanifest.js';
@@ -178,8 +178,15 @@ describe('sign-in upkeep', () => {
     expect(userId).toBe('u9');
     expect(body.set.map((w) => w.kind)).toEqual(['pw']);
     expect(await unlockWithPassword('reset pw', body.driveSalt, body.set)).toEqual(userDk);
-    S.userWraps = [];
+    // The same DK: the new wrap carries the Drive key's check value.
+    expect(body.kcv).toBe(await keyCheckValue(userDk));
+    // A Drive with wraps but no escrow wrap: nothing to open it with.
+    S.userWraps = [{ kind: 'pw', ref: 'pw', data: '1.a.b' }];
     expect(await escrowPasswordReset({ ownerId: 'owner1', userId: 'u9', newPassword: 'x' })).toBe('no_wrap');
+    // No Drive at all: the owner, who knows the new password, sets it up now.
+    S.userWraps = [];
+    expect(await escrowPasswordReset({ ownerId: 'owner1', userId: 'u8', newPassword: 'x' })).toBe('created');
+    expect(S.userDrives.u8.wraps.map((w) => w.kind).sort()).toEqual(['escrow', 'pw']);
   }, 30000);
 });
 

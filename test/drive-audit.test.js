@@ -14,7 +14,7 @@ import { env, SELF, runInDurableObject, createExecutionContext, waitOnExecutionC
 import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src/index.js';
 import { ORIGIN, owner, makeUser, fetchJson, intent, cookieOf, salt16, freshIp, proofFor, USER_PW, proofHeaders, login } from './helpers.js';
-import { enc, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, drive, DIR_BYTES, FILE_BYTES, escrowWrap } from './drive-helpers.js';
+import { enc, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, drive, DIR_BYTES, FILE_BYTES, escrowWrap, KCV } from './drive-helpers.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
@@ -252,9 +252,9 @@ describe('L-4: key material needs the step-up', () => {
     expect(ch.status).toBe(200);
     const c2 = cookieOf(ch);
     expect((await drive(c2)).pwStale).toBe(true);
-    expect((await keys(c2, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }] })).status).toBe(200);
+    expect((await keys(c2, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], kcv: KCV })).status).toBe(200);
     expect((await drive(c2)).pwStale).toBe(false);
-    expect((await keys(c2, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }] })).status).toBe(400); // not stale any more
+    expect((await keys(c2, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], kcv: KCV })).status).toBe(400); // not stale any more
   });
 });
 
@@ -401,7 +401,7 @@ describe('Impersonation: the owner uses the user’s whole Drive', () => {
     expect(ch.status).toBe(200);
     // The old password no longer opens the Drive; the recovery code and the escrow still do.
     expect((await drive(ic)).wraps.map((w) => w.kind)).toEqual(['escrow', 'recovery']);
-    const pw = { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }] };
+    const pw = { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], kcv: KCV };
     expect((await keys(ic, pw)).status).toBe(200); // added, not replaced
     expect((await keys(ic, { ...pw, driveSalt: salt16() })).status).toBe(403); // now it would replace it
     expect((await drive(ic)).pwStale).toBe(false);

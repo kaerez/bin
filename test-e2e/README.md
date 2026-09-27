@@ -49,9 +49,32 @@ is refused; a user who has not signed in since the Drive was enabled shows the n
 nothing created, and their first sign-in then sets the Drive up by itself (password and escrow
 wraps); the notice when the owner's Drive is locked; Hebrew and spoofing names in the Drive page;
 and the user's own activity listing the Drive actions done as them, as theirs and with no trace
-of the impersonation, while the admin audit names the owner. Same set-up as `drive-int.mjs` (a
+of the impersonation, while the admin audit names the owner. It also checks the create-user
+form: a user created with the owner's Drive unlocked gets a Drive at once; one created with it
+locked waits for their first sign-in. Same set-up as `drive-int.mjs` (a
 fresh server with no owner yet):
 
 ```sh
 WT=$PWD BASE=http://127.0.0.1:8787 node test-e2e/drive-impersonate.mjs
+```
+
+## `owner-kit.mjs` — the owner recovery kit, starting over, the archive
+
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3.1, §3.2), in two phases on one server state:
+phase 1 — the kit status and the fresh-kit notice on the Drive page; Download kit on the export
+screen (refused without the step-up; again and again), the file saved to disk; after a reload,
+Verify kit with that saved file (`setInputFiles`), a tampered file, an older kit after a rotation
+(the notice announced, then static after a reload); Restore from kit; the create-user form setting
+the new user's Drive up now, or deferring it; phase 2 — after the server restarts with a new
+`AUTHN` value: AUTHN owner recovery (the Drive marked stale), the unlock screen (restore, start
+over), starting over (the typed username; the archive and the notice), and the archive brought
+back with the phase-1 kit. axe (WCAG 2.2 A/AA) on every state, and no page errors.
+
+```sh
+rm -rf .wrangler/kit-state
+npx wrangler dev --port 8787 --persist-to .wrangler/kit-state
+WT=$PWD BASE=http://localhost:8787 OUT=/tmp/kit PHASE=1 node test-e2e/owner-kit.mjs
+# stop wrangler, then restart it on the same state with a new setup token:
+npx wrangler dev --port 8787 --persist-to .wrangler/kit-state --var AUTHN:<a new value of 32+ characters>
+WT=$PWD BASE=http://localhost:8787 OUT=/tmp/kit PHASE=2 AUTHN2=<that value> node test-e2e/owner-kit.mjs
 ```

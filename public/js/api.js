@@ -199,6 +199,19 @@ export const drive = {
   receivedRetry: (id) => request(`${D}/received/${enc(id)}/failed`, { method: 'DELETE', headers: INTENT }),
   // The owner acting as this user: their escrow wrap and the owner's sealed escrow key (admin audit).
   impersonationEscrow: () => request(`${D}/escrow`, { method: 'POST', headers: INTENT, body: {} }),
+  // The owner's recovery kit (made and read in the browser only): record a
+  // download / use / check (admin audit), a check's live escrow wraps, and
+  // sealed escrow keys put back from the kit.
+  kit: (body) => request(`${D}/kit`, { method: 'POST', headers: INTENT, body }),
+  kitProbe: () => request(`${D}/kit/probe`),
+  kitKeys: (body) => request(`${D}/kit/keys`, { method: 'PUT', headers: INTENT, body }),
+  // The owner, with no kit and no way to open their Drive: start it over (new keys).
+  startOver: (body) => request(`${D}/start-over`, { method: 'POST', headers: INTENT, body }),
+  // The Drive the owner had before starting over (an archive, sealed under the old DK).
+  archive: (gen, after) => request(`${D}/archive/${enc(gen)}${after ? `?after=${enc(after)}` : ''}`),
+  archiveNodes: (gen, body) => request(`${D}/archive/${enc(gen)}/nodes`, { method: 'PUT', headers: INTENT, body }),
+  archiveFinish: (gen, body) => request(`${D}/archive/${enc(gen)}/finish`, { method: 'POST', headers: INTENT, body }),
+  archiveDelete: (gen, body) => request(`${D}/archive/${enc(gen)}`, { method: 'DELETE', headers: INTENT, body }),
   // The owner, for a user: open their escrow wrap (admin audit) / write their `pw` wrap after a reset.
   escrow: (userId, reason) => request(`${A}/drive/escrow/${enc(userId)}`, { method: 'POST', headers: INTENT, body: { reason } }),
   setUserKeys: (userId, body) => request(`${A}/drive/keys/${enc(userId)}`, { method: 'PUT', headers: INTENT, body }),

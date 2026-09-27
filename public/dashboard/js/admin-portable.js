@@ -9,6 +9,8 @@
 // keys. An import never changes an existing account's password, recovery
 // codes, API keys or passkeys: it only sets its role and adds passkeys, so the
 // parts that cannot apply to an existing account are shown but disabled.
+// The owner recovery kit (drivekit-ui.js) is its own card here, never part of
+// an export file.
 
 import { admin, ApiError } from '../../js/api.js';
 import { loginProof } from '../../js/pwauth.js';
@@ -70,6 +72,16 @@ export async function renderPortable(panel, profile) {
   try { users = (await admin.users()).users.filter((u) => u.role === 'user'); } catch (e) { showMsg(p.appendChild(h('p.msg')), friendlyError(e)); }
   p.appendChild(exportCard(users, profile));
   p.appendChild(importCard(users, profile));
+  // The owner recovery kit (docs/DRIVE.md §3): the Drive key and the escrow
+  // keys, never in the export file above.
+  const slot = p.appendChild(h('div', { id: 'owner-kit-slot' }));
+  try {
+    const [{ kitCard, KIT_ANCHOR }, drive] = await Promise.all([import('./drivekit-ui.js'), import('../../js/driveclient.js')]);
+    slot.replaceWith(kitCard({ profile, drive, place: 'export' }));
+    if (location.hash === `#${KIT_ANCHOR}`) document.getElementById(KIT_ANCHOR)?.focus();
+  } catch (e) {
+    showMsg(slot.appendChild(h('p.msg')), `The owner recovery kit is unavailable: ${friendlyError(e)}`);
+  }
 }
 
 // ── export ───────────────────────────────────────────────────────────────────
