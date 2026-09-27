@@ -18,104 +18,20 @@ import { CSP, TURNSTILE_CSP } from '../src/lib/http.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import {
-  setReverseStretcher, createReverseKey, sealReversePriv, openReversePriv, linkProof, linkHash, passwordGate, passwordProof,
+  createReverseKey, openReversePriv, linkProof,
   sealNote, openNote, sealUpload, openUpload, newReverseId, newNodeId, fragmentOf,
 } from '../public/js/reversekeys.js';
-import { createDriveKey, deriveSubkeys, sealField, openField } from '../public/js/drivekeys.js';
-import { hkdf32 } from '../public/js/crypto.js';
+import { deriveSubkeys, sealField, openField } from '../public/js/drivekeys.js';
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from '../public/js/bytes.js';
-import { CHUNK, encryptChunk, decryptChunk, importFileKey } from '../public/js/files.js';
-
-// Argon2id stand-in (workerd cannot compile WebAssembly; the server never runs it).
-setReverseStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('test-stretch')));
+import { CHUNK, decryptChunk, importFileKey } from '../public/js/files.js';
+import {
+  DK, dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, putChunk, reserve, send, received, overhead, ownSealed,
+} from './reverse-helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
 afterEach(() => vi.useRealTimers());
 
-const DK = createDriveKey();
-const dirStub = () => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
-const driveOf = (uid) => env.DRIVE.get(env.DRIVE.idFromName(`drive:${uid}`));
-const errorOf = async (r) => (await r.json()).error;
-
-async function receiver(name, limits = {}) {
-  const u = await makeUser(name);
-  await enableDrive(u.id, { reverseEnabled: true, ...limits });
-  return u;
-}
-
-/**
- * Create a reverse share on `folder` as the user's browser would, confirmed
- * with the user's password (`confirm: false`: no confirmation, as the owner
- * acting as the user sends).
- */
-async function newReverse(cookie, { folder = 'root', password, note, id = newReverseId(), confirm = true, ...opts } = {}) {
-  const { pub, privateKey } = await createReverseKey();
-  const body = { id, folder, priv: await sealReversePriv(DK, id, privateKey), lh: await linkHash(pub), expire: '7d', ...opts };
-  if (confirm) body.current = proofFor(USER_PW);
-  if (typeof password === 'string') body.password = await passwordGate(password, pub);
-  else if (password !== undefined) body.password = password; // as sent (validation tests)
-  if (typeof note === 'string') body.note = await sealNote(pub, id, note);
-  else if (note !== undefined) body.note = note;
-  const res = await fetchJson('/api/private/drive/reverse', { method: 'POST', cookie, body, headers: intent });
-  return { res, id, pub, privateKey, body };
-}
-
-/** An uploader request (anonymous). */
-function rv(id, path, { method = 'POST', headers = {}, body, ip } = {}) {
-  return fetchJson(`/api/reverse/${id}${path}`, { method, body, headers: { ...intent, ...headers }, ip });
-}
-const openLink = async (r, ip, pub = r.pub) => rv(r.id, '/open', { headers: { 'x-link-proof': await linkProof(pub) }, ip });
-async function begin(r, { password, ip, token, pub = r.pub } = {}) {
-  const headers = { 'x-link-proof': await linkProof(pub) };
-  if (password) {
-    const head = await (await openLink(r, ip)).json();
-    headers['x-key-proof'] = await passwordProof(password, head.password.salt, head.password.t, r.pub);
-  }
-  if (token) headers['x-secbin-turnstile'] = token;
-  return rv(r.id, '/begin', { headers, ip });
-}
-async function grantOf(r, opts) {
-  const res = await begin(r, opts);
-  if (res.status !== 200) throw new Error(`begin: ${res.status} ${await res.text()}`);
-  return (await res.json()).grant;
-}
-const putChunk = (id, node, i, bytes, token, ip) => SELF.fetch(`${ORIGIN}/api/reverse/${id}/files/${node}/chunk/${i}`, {
-  method: 'PUT', headers: { 'content-type': 'application/octet-stream', 'x-upload-token': token, ...(ip ? { 'cf-connecting-ip': ip } : {}) }, body: bytes,
-});
-
-/** Encrypt + reserve one file (no chunks yet) → { res, node, fk, data }. */
-async function reserve(r, grant, { path = 'a.txt', bytes = utf8('hello world'), type = 'text/plain', types, size, ip } = {}) {
-  const nodeId = newNodeId();
-  const fk = randomBytes(32);
-  const sealed = await sealUpload(r.pub, r.id, nodeId, fk, { path, type, mtime: 1700000000000, size: bytes.length });
-  const body = { id: nodeId, ...sealed, size: size ?? bytes.length };
-  if (types) body.types = types;
-  const res = await rv(r.id, '/files', { headers: { 'x-reverse-grant': grant }, body, ip });
-  return { res, node: nodeId, fk, bytes, data: res.status === 201 ? await res.json() : null };
-}
-/** Reserve, upload every chunk and finalize one file. */
-async function send(r, grant, opts = {}) {
-  const f = await reserve(r, grant, opts);
-  if (f.res.status !== 201) throw new Error(`reserve: ${f.res.status} ${await f.res.text()}`);
-  const key = await importFileKey(b64urlFromBytes(f.fk));
-  const n = f.data.chunks;
-  for (let i = 0; i < n; i++) {
-    const ct = await encryptChunk(key, i, n, f.bytes.slice(i * CHUNK, (i + 1) * CHUNK));
-    const pr = await putChunk(r.id, f.node, i, ct, f.data.uploadToken, opts.ip);
-    if (pr.status !== 200) throw new Error(`chunk: ${pr.status} ${await pr.text()}`);
-  }
-  const fin = await rv(r.id, `/files/${f.node}/finalize`, { headers: { 'x-reverse-grant': grant, 'x-upload-token': f.data.uploadToken }, ip: opts.ip });
-  if (fin.status !== 200) throw new Error(`finalize: ${fin.status} ${await fin.text()}`);
-  return f;
-}
-const received = async (cookie) => (await fetchJson('/api/private/drive/received', { cookie })).json();
-/** What the received files not yet re-wrapped add to the Drive's use: their sealed path, metadata and wrap. */
-const overhead = (uid) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(
-  'SELECT COALESCE(SUM(LENGTH(name) + LENGTH(meta) + LENGTH(fk)), 0) AS s FROM nodes WHERE rs IS NOT NULL').one().s);
-// The sealed fields of the Drive's own items (every item counts, docs/DRIVE.md §10).
-const ownSealed = (uid) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(
-  "SELECT COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0) AS s FROM nodes WHERE rs IS NULL AND id != 'root'").one().s);
 const audit = async (subject) => (await (await fetchJson(`/api/private/admin/audit?user=${subject}`, { cookie: oc })).json()).rows;
 
 describe('role options and migration 14', () => {
@@ -383,7 +299,15 @@ describe('the uploader', () => {
   it('limits: files, bytes, file size, declared types, the Drive capacity and largest file; cancel gives a reservation back', async () => {
     const u = await receiver('rev-lim', { driveMaxBytes: 1000000, driveMaxFileBytes: 60 });
     const ip = freshIp();
-    const r = await newReverse(u.cookie, { maxFiles: 2, maxBytes: 90, maxFileBytes: 50, types: { mode: 'allow', rules: ['ext:txt'] } });
+    // A file's sealed path, metadata and wrap count towards the link's bytes too:
+    // measure them once (the same for every file below: same path, a 2-digit size).
+    const probe = await newReverse(u.cookie);
+    const pg = await grantOf(probe, { ip });
+    const pf = await reserve(probe, pg, { ip });
+    const P = await runInDurableObject(driveOf(u.id), (inst, state) => state.storage.sql.exec('SELECT sealed FROM reverse WHERE id = ?', probe.id).one().sealed);
+    expect(P).toBeGreaterThan(300);
+    expect((await rv(probe.id, `/files/${pf.node}`, { method: 'DELETE', headers: { 'x-reverse-grant': pg, 'x-upload-token': pf.data.uploadToken }, ip })).status).toBe(200);
+    const r = await newReverse(u.cookie, { maxFiles: 2, maxBytes: 90 + 2 * P, maxFileBytes: 50, types: { mode: 'allow', rules: ['ext:txt'] } });
     const grant = await grantOf(r, { ip });
     const txt = [{ ext: 'txt', mime: 'text/plain' }];
     let f = await reserve(r, grant, { size: 51, types: txt, ip });
@@ -403,7 +327,7 @@ describe('the uploader', () => {
     // Cancelling the first gives its 50 bytes and its file back.
     const cancel = await rv(r.id, `/files/${a.node}`, { method: 'DELETE', headers: { 'x-reverse-grant': grant, 'x-upload-token': a.data.uploadToken }, ip });
     expect(cancel.status).toBe(200);
-    expect((await (await openLink(r, ip)).json()).limits).toMatchObject({ filesLeft: 2, bytesLeft: 90 });
+    expect((await (await openLink(r, ip)).json()).limits).toMatchObject({ filesLeft: 2, bytesLeft: 90 + 2 * P });
     await send(r, grant, { bytes: new Uint8Array(40), types: txt, ip });
     await send(r, grant, { bytes: new Uint8Array(40), types: txt, ip });
     f = await reserve(r, grant, { size: 1, types: txt, ip });

@@ -129,7 +129,7 @@ export async function handleDrive(request, env, url) {
     const s = await drive().summary(uid);
     const out = {
       enabled: true, capacity: pol.capacity, maxFile: pol.maxFile, used: s.used, driveSalt: s.driveSalt, wraps: s.wraps,
-      escrowPub: escrowPub(), escrowPin: s.escrowPin ? JSON.parse(s.escrowPin) : null, pwStale: s.pwStale, received: s.received,
+      escrowPub: escrowPub(), escrowPin: s.escrowPin ? JSON.parse(s.escrowPin) : null, pwStale: s.pwStale, received: s.received, receivedFailed: s.receivedFailed,
     };
     if (a.actor) {
       // Impersonating: the escrow wrap only through the logged route below.

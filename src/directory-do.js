@@ -283,6 +283,8 @@ const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
 /** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
 const PENDING_REVERSE_SEC = 600;
+/** `reverse.received` log entries of one link are added up over this long (one entry per link per hour). */
+const RECEIVED_LOG_SEC = 3600;
 /** Bound parameters per `IN (…)` query: SQLite in a Durable Object allows about 100. */
 const SQL_BATCH = 90;
 /** What the owner's impersonated Drive use is logged as (admin audit only; docs/DRIVE.md §9). */
@@ -2123,15 +2125,25 @@ export class Directory extends DurableObject {
 
   /**
    * Log a reverse-share event for its user: `received` (files and bytes of a
-   * finished upload session — count and size only) or `bad_password` (at most
-   * one entry per share per minute; the Guard limits the attempts).
+   * finished upload session — count and size only; one entry per link per
+   * hour, which adds up the sessions of that hour, so anonymous uploads
+   * cannot flood the log) or `bad_password` (at most one entry per share per
+   * minute; the Guard and the link's lockout limit the attempts).
    */
   async reverseEvent(id, event, { files = 0, bytes = 0 } = {}) {
     const r = this.sql.exec("SELECT user_id FROM shares WHERE id = ? AND kind = 'reverse'", id).toArray()[0];
     if (!r) return { ok: false };
     if (event === 'received') {
       if (!Number.isSafeInteger(files) || files <= 0 || !Number.isSafeInteger(bytes) || bytes < 0) return { ok: false };
-      this.#log(null, r.user_id, 'reverse.received', `id=${id} files=${files} bytes=${bytes}`);
+      const head = `id=${id} `;
+      const open = this.sql.exec(`SELECT id, detail FROM activity WHERE subject_id = ? AND action = 'reverse.received' AND actor_id IS NULL
+        AND ts > ? AND substr(detail, 1, ?) = ? ORDER BY id DESC LIMIT 1`, r.user_id, now() - RECEIVED_LOG_SEC, head.length, head).toArray()[0];
+      const m = open && /^id=\S+ files=(\d+) bytes=(\d+)$/.exec(open.detail);
+      if (m) {
+        this.sql.exec('UPDATE activity SET detail = ? WHERE id = ?', `${head}files=${Number(m[1]) + files} bytes=${Number(m[2]) + bytes}`, open.id);
+      } else {
+        this.#log(null, r.user_id, 'reverse.received', `${head}files=${files} bytes=${bytes}`);
+      }
       return { ok: true };
     }
     if (event === 'bad_password') {

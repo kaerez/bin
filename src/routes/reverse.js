@@ -23,7 +23,7 @@ import { expireSeconds, isProof, ARGON2, MAX_TTL } from '../../public/js/format.
 import { MAX_CHUNK_CT } from '../../public/js/files.js';
 import { normalizeRules, checkDeclaredTypes, refusedTypes, describeType } from '../../public/js/filepolicy.js';
 import { b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
-import { NODE_ID_RE, ROOT, MAX_REVERSE_FILES } from '../drive-do.js';
+import { NODE_ID_RE, ROOT, MAX_REVERSE_FILES, RECEIVED_FAIL_REASONS } from '../drive-do.js';
 import { encField } from './drive.js';
 
 export const REVERSE_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
@@ -96,15 +96,44 @@ export async function handleReverseOwner(request, env, url, a) {
 
   if (p === '/api/private/drive/received') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
-    const r = await drive().received(uid);
-    return json({ items: r.items, keys: r.keys, more: r.more });
+    const rawAfter = url.searchParams.get('after');
+    let after = null;
+    if (rawAfter !== null) {
+      const c = /^(\d{1,12})\.([A-Za-z0-9_-]{22})$/.exec(rawAfter);
+      if (!c) return invalid('after must be the "next" value of the previous page.');
+      after = { created: Number(c[1]), id: c[2] };
+    }
+    const failed = url.searchParams.get('failed') === '1';
+    const r = await drive().received(uid, { after, failed });
+    if (failed) {
+      // With the link's label (the share index has it), for the user to recognise them.
+      const ids = [...new Set(r.items.map((i) => i.rs))];
+      const rows = [];
+      for (let i = 0; i < ids.length; i += ID_BATCH) rows.push(...await dir.sharesByIds(uid, ids.slice(i, i + ID_BATCH)));
+      const label = new Map(rows.map((x) => [x.id, x.label]));
+      return json({ items: r.items.map((i) => ({ ...i, label: label.get(i.rs) ?? '' })), more: r.more, next: r.next });
+    }
+    return json({ items: r.items, keys: r.keys, more: r.more, next: r.next });
   }
 
-  const m = p.match(/^\/api\/private\/drive\/received\/([^/]+)$/);
+  const m = p.match(/^\/api\/private\/drive\/received\/([^/]+)(\/failed)?$/);
   if (m) {
-    if (request.method !== 'POST') return methodNotAllowed('POST');
     const node = decodePathSegment(m[1]);
     if (!node || !NODE_ID_RE.test(node)) return err(404, 'not_found', 'No such item.');
+    if (m[2]) {
+      // The browser could not take it in (POST, with a reason), or will try again (DELETE).
+      if (request.method !== 'POST' && request.method !== 'DELETE') return methodNotAllowed('POST, DELETE');
+      let reason = null;
+      if (request.method === 'POST') {
+        const body = await readJsonBody(request);
+        if (body.reason !== undefined && !RECEIVED_FAIL_REASONS.includes(body.reason)) return invalid(`reason must be one of ${RECEIVED_FAIL_REASONS.join(', ')}.`);
+        reason = body.reason ?? null;
+      } else assertIntent(request);
+      const r = await drive().markReceived(uid, node, { failed: request.method === 'POST', reason });
+      if (!r.ok) return fromDo(r);
+      return json({ ok: true, received: r.received, failed: r.failed });
+    }
+    if (request.method !== 'POST') return methodNotAllowed('POST');
     const body = await readJsonBody(request);
     const parent = typeof body.parent === 'string' && (body.parent === ROOT || NODE_ID_RE.test(body.parent)) ? body.parent : null;
     const name = encField(body.name, MAX_NAME_CT);
@@ -255,17 +284,21 @@ export async function handleReversePublic(request, env, url) {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
     const r = await drive.reverseOpen(uid, id);
     if (r.status !== 'ok') return err(410, 'gone', GONE);
-    if (r.ph) {
-      const kp = request.headers.get('x-key-proof');
-      if (!kp) return err(401, 'password_required', 'This link needs a password.', { salt: r.head.password.salt, t: r.head.password.t });
-      if (!isProof(kp) || !eqB64(await proofHashOf(kp), r.ph)) {
-        await dir.reverseEvent(id, 'bad_password');
-        return failed(env, g, err(403, 'bad_password', 'Wrong password.'));
-      }
-    }
+    const kp = request.headers.get('x-key-proof');
+    if (r.ph && !kp) return err(401, 'password_required', 'This link needs a password.', { salt: r.head.password.salt, t: r.head.password.t });
+    const lockedRes = (until) => err(429, 'password_locked', 'Too many wrong passwords for this link. Try again later.', { until });
+    if (r.head.password && r.head.password.lockedUntil) return lockedRes(r.head.password.lockedUntil);
+    // The human check first: without a token no password guess is answered.
     await requireTurnstile(env, request, TURNSTILE_ACTIONS.reverse);
     const grant = genToken();
-    const s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec);
+    // The password is checked in the Drive, with the link's lockout (all networks).
+    const proofHash = r.ph && isProof(kp) ? await proofHashOf(kp) : null;
+    const s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec, { net: g.key, proofHash });
+    if (s.status === 'bad_password') {
+      await dir.reverseEvent(id, 'bad_password');
+      return failed(env, g, err(403, 'bad_password', 'Wrong password.', s.until ? { until: s.until } : undefined));
+    }
+    if (s.status === 'pw_locked') return lockedRes(s.until);
     if (s.status === 'busy') return err(429, 'busy', 'Too many uploads to this link are in progress. Try again later.');
     if (s.status !== 'ok') return err(410, 'gone', GONE);
     return json({ grant, expires: s.expires });

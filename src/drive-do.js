@@ -17,7 +17,7 @@
 // what to delete and deleting it.
 
 import { DurableObject } from 'cloudflare:workers';
-import { timingSafeEqualHex } from '../public/js/bytes.js';
+import { timingSafeEqualHex, randomBytes, utf8, b64urlFromBytes, bytesFromB64url } from '../public/js/bytes.js';
 import { CHUNK, TAG } from '../public/js/files.js';
 
 const SCHEMA = `
@@ -41,8 +41,19 @@ CREATE INDEX IF NOT EXISTS rsessions_rid ON rsessions(rid);
 `;
 // Columns added after the Drive first shipped (fresh objects get them from here too).
 // nodes.rs: the reverse share of a received file not yet re-wrapped; nodes.rsess:
-// the upload session that reserved it (its chunks keep that session open).
-const COLUMNS = [['nodes', 'rs', 'TEXT'], ['nodes', 'rsess', 'TEXT']];
+// the upload session that reserved it (its chunks keep that session open);
+// nodes.rfail / rwhy: when and why the user's browser could not take it in
+// (it then leaves the queue, docs/REVERSE.md §3). reverse.sealed: the sealed
+// paths, metadata and wraps received (they count towards the link's bytes);
+// reverse.pwfails / pwsince / pwlock: wrong passwords in the current window,
+// and a lock after too many. rsessions.net: a keyed hash of the uploader's
+// network (per-network session cap); rsessions.started: the session's start.
+const COLUMNS = [
+  ['nodes', 'rs', 'TEXT'], ['nodes', 'rsess', 'TEXT'], ['nodes', 'rfail', 'INTEGER'], ['nodes', 'rwhy', 'TEXT'],
+  ['reverse', 'sealed', 'INTEGER NOT NULL DEFAULT 0'], ['reverse', 'pwfails', 'INTEGER NOT NULL DEFAULT 0'],
+  ['reverse', 'pwsince', 'INTEGER'], ['reverse', 'pwlock', 'INTEGER'],
+  ['rsessions', 'net', 'TEXT'], ['rsessions', 'started', 'INTEGER'],
+];
 
 export const ROOT = 'root';
 /** Node ids: 16 random bytes, base64url (chosen by the browser so it can bind encrypted fields to them). */
@@ -54,10 +65,27 @@ export const MAX_DEPTH = 64;
 export const MAX_WRAPS = 64;
 /** Shares referencing one item at most (each share is a separate link). */
 export const MAX_SHARES_PER_NODE = 1000;
-/** Reverse shares per Drive (ended ones included until their files are taken in), open upload sessions per share, files per share. */
+/**
+ * Reverse shares per Drive (ended ones included until their files are taken
+ * in); open upload sessions per share, and per uploader network per share;
+ * files per share.
+ */
 export const MAX_REVERSE = 1000;
-export const MAX_SESSIONS = 100;
+export const MAX_SESSIONS = 1000;
+export const MAX_SESSIONS_PER_NET = 5;
 export const MAX_REVERSE_FILES = 10000;
+/** An upload session with no unfinished file lapses after this long without activity. */
+export const SESSION_IDLE_SEC = 600;
+/** A received file must be finished, and a session ends, at most this long after it started (keep-alives included). */
+export const RECEIVE_MAX_SEC = 86400;
+/** Wrong passwords for one link (from any network) within PW_WINDOW_SEC lock it for PW_LOCK_SEC. */
+export const PW_MAX_FAILS = 10;
+export const PW_WINDOW_SEC = 900;
+export const PW_LOCK_SEC = 900;
+/** Received files per page of GET /received. */
+export const RECEIVED_PAGE = 500;
+/** Why the user's browser could not take a received file in (nodes.rwhy). */
+export const RECEIVED_FAIL_REASONS = ['unreadable', 'name', 'place'];
 /** An ended reverse share is kept (for its lists) this long — as long as the share index keeps its row. */
 const REVERSE_KEEP_SEC = 30 * 86400;
 
@@ -202,7 +230,8 @@ export class Drive extends DurableObject {
     const sec = Number(this.#meta('pendingSec')) || 3600;
     const r = this.sql.exec("SELECT MIN(updated) AS t FROM nodes WHERE state = 'pending'").one();
     const s = this.sql.exec('SELECT MIN(expires) AS t FROM rsessions').one();
-    const times = [r.t === null ? null : r.t + sec, s.t].filter((x) => x !== null);
+    const q = this.sql.exec("SELECT MIN(created) AS t FROM nodes WHERE state = 'pending' AND rs IS NOT NULL").one();
+    const times = [r.t === null ? null : r.t + sec, s.t, q.t === null ? null : q.t + RECEIVE_MAX_SEC].filter((x) => x !== null);
     if (!times.length) return;
     const at = Math.min(...times) * 1000;
     const cur = await this.ctx.storage.getAlarm();
@@ -233,6 +262,7 @@ export class Drive extends DurableObject {
       pwStale: this.#meta('pwStale') === '1',
       content: this.#hasContent(),
       received: this.#receivedCount(),
+      receivedFailed: this.#receivedFailedCount(),
     };
   }
 
@@ -596,8 +626,12 @@ export class Drive extends DurableObject {
   }
 
   // ── reverse shares (docs/REVERSE.md) ─────────────────────────────────────
+  /** Received files waiting to be taken in (not those the browser could not take in: they left the queue). */
   #receivedCount() {
-    return this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready'").one().c;
+    return this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready' AND rfail IS NULL").one().c;
+  }
+  #receivedFailedCount() {
+    return this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs IS NOT NULL AND state = 'ready' AND rfail IS NOT NULL").one().c;
   }
   #reverse(id) {
     return this.sql.exec('SELECT * FROM reverse WHERE id = ?', id).toArray()[0] || null;
@@ -617,7 +651,8 @@ export class Drive extends DurableObject {
       id: r.id, folder: r.folder, created: r.created, expires: r.expires, status: this.#reverseState(r),
       password: !!r.ph, note: !!r.note, maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null,
       maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, files: r.files, bytes: r.bytes,
-      pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready'", r.id).one().c,
+      pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NULL", r.id).one().c,
+      failed: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NOT NULL", r.id).one().c,
     };
     if (priv) o.priv = JSON.parse(r.priv);
     return o;
@@ -625,8 +660,30 @@ export class Drive extends DurableObject {
   /** Give a pending (reserved) upload's allowance back and delete its rows (inside a transaction). */
   #dropPending(f) {
     this.sql.exec('DELETE FROM upchunks WHERE node_id = ?', f.id);
+    const row = this.sql.exec("SELECT LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0) AS o FROM nodes WHERE id = ? AND state = 'pending'", f.id).toArray()[0];
     const gone = this.sql.exec("DELETE FROM nodes WHERE id = ? AND state = 'pending'", f.id).rowsWritten;
-    if (gone && f.rs) this.sql.exec('UPDATE reverse SET files = MAX(0, files - 1), bytes = MAX(0, bytes - ?) WHERE id = ?', f.size, f.rs);
+    if (gone && f.rs) {
+      this.sql.exec('UPDATE reverse SET files = MAX(0, files - 1), bytes = MAX(0, bytes - ?), sealed = MAX(0, sealed - ?) WHERE id = ?', f.size, row ? row.o : 0, f.rs);
+    }
+  }
+  /** The sealed path, metadata and wrap of a reserved file: they count towards the link's byte limit. */
+  #bytesUsed(r) {
+    return r.bytes + (r.sealed || 0);
+  }
+  /**
+   * A keyed hash of the uploader's network (the Guard's key: an IPv4 address
+   * or an IPv6 prefix) for the per-network session cap. The key is random per
+   * Drive, so the stored value does not give the address back.
+   */
+  async #netTag(net) {
+    if (typeof net !== 'string' || !net) return null;
+    let k = this.#meta('netKey');
+    if (!k) {
+      k = b64urlFromBytes(randomBytes(32));
+      this.#setMeta('netKey', k);
+    }
+    const key = await crypto.subtle.importKey('raw', bytesFromB64url(k), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(net)))).slice(0, 32);
   }
   /**
    * Reverse shares that ended more than REVERSE_KEEP_SEC ago (as long as the
@@ -733,24 +790,49 @@ export class Drive extends DurableObject {
       status: 'ok', lh: r.lh, ph: r.ph,
       head: {
         note: r.note ? JSON.parse(r.note) : null,
-        password: r.ph ? { salt: r.salt, t: r.t } : null,
+        password: r.ph ? { salt: r.salt, t: r.t, lockedUntil: r.pwlock && r.pwlock > nowSec() ? r.pwlock : null } : null,
         expires: r.expires,
         limits: { maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types,
-          filesLeft: o.maxFiles === null ? null : Math.max(0, o.maxFiles - r.files), bytesLeft: o.maxBytes === null ? null : Math.max(0, o.maxBytes - r.bytes) },
+          filesLeft: o.maxFiles === null ? null : Math.max(0, o.maxFiles - r.files), bytesLeft: o.maxBytes === null ? null : Math.max(0, o.maxBytes - this.#bytesUsed(r)) },
       },
     };
   }
 
-  /** A new upload session (the Worker checked link, password and human check) → { status, expires }. */
-  async reverseBegin(uid, id, hash, ttl) {
+  /**
+   * A new upload session (the Worker checked the link proof and the human
+   * check) → { status, expires }. The password is checked here, atomically
+   * with the link's lockout: PW_MAX_FAILS wrong ones within PW_WINDOW_SEC,
+   * from any network, lock the link's password for PW_LOCK_SEC (the right one
+   * too: 'pw_locked'). A session with no unfinished file lapses after
+   * SESSION_IDLE_SEC; at most MAX_SESSIONS_PER_NET are open per uploader
+   * network (`net`, the Guard's key) and MAX_SESSIONS per link.
+   */
+  async reverseBegin(uid, id, hash, ttl, { net = null, proofHash = null } = {}) {
     this.#bind(uid);
+    const tag = await this.#netTag(net); // before any check: nothing below awaits
     const r = this.#reverse(id);
     if (this.#reverseState(r) !== 'active') return { status: 'gone' };
     const t = nowSec();
+    if (r.ph) {
+      if (r.pwlock && r.pwlock > t) return { status: 'pw_locked', until: r.pwlock };
+      if (typeof proofHash !== 'string' || !safeEq(proofHash, r.ph)) {
+        const fails = (r.pwsince && r.pwsince > t - PW_WINDOW_SEC ? r.pwfails : 0) + 1;
+        if (fails >= PW_MAX_FAILS) {
+          this.sql.exec('UPDATE reverse SET pwfails = 0, pwsince = NULL, pwlock = ? WHERE id = ?', t + PW_LOCK_SEC, id);
+          return { status: 'bad_password', until: t + PW_LOCK_SEC };
+        }
+        this.sql.exec('UPDATE reverse SET pwfails = ?, pwsince = ? WHERE id = ?', fails, fails === 1 ? t : r.pwsince, id);
+        return { status: 'bad_password', until: null };
+      }
+      if (r.pwfails || r.pwlock) this.sql.exec('UPDATE reverse SET pwfails = 0, pwsince = NULL, pwlock = NULL WHERE id = ?', id);
+    }
     this.sql.exec('DELETE FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0', id, t);
     if (this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND expires > ?', id, t).one().c >= MAX_SESSIONS) return { status: 'busy' };
-    const expires = Math.min(r.expires, t + ttl);
-    this.sql.exec('INSERT INTO rsessions (hash, rid, expires) VALUES (?, ?, ?)', hash, id, expires);
+    if (tag && this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND net = ? AND expires > ?', id, tag, t).one().c >= MAX_SESSIONS_PER_NET) {
+      return { status: 'busy' };
+    }
+    const expires = Math.min(r.expires, t + Math.min(ttl, SESSION_IDLE_SEC));
+    this.sql.exec('INSERT INTO rsessions (hash, rid, expires, net, started) VALUES (?, ?, ?, ?, ?)', hash, id, expires, tag, t);
     await this.#schedulePurge();
     return { status: 'ok', expires };
   }
@@ -759,9 +841,15 @@ export class Drive extends DurableObject {
     const x = this.sql.exec('SELECT * FROM rsessions WHERE hash = ?', hash).toArray()[0];
     return x && x.rid === id && x.expires > nowSec() ? x : null;
   }
+  /** Keep session `x` open for `ttl` more seconds: never past the link's expiry, or RECEIVE_MAX_SEC after it started. */
   #touch(x, ttl) {
     const r = this.#reverse(x.rid);
-    this.sql.exec('UPDATE rsessions SET expires = ? WHERE hash = ?', Math.min(r.expires, Math.max(x.expires, nowSec() + ttl)), x.hash);
+    const cap = Math.min(r.expires, (x.started ?? nowSec()) + RECEIVE_MAX_SEC);
+    this.sql.exec('UPDATE rsessions SET expires = ? WHERE hash = ?', Math.min(cap, Math.max(x.expires, nowSec() + ttl)), x.hash);
+  }
+  /** Does session `hash` still have a file reserved and not finished? */
+  #sessionBusy(hash) {
+    return this.sql.exec("SELECT 1 FROM nodes WHERE rsess = ? AND state = 'pending' LIMIT 1", hash).toArray().length > 0;
   }
 
   /**
@@ -781,18 +869,22 @@ export class Drive extends DurableObject {
     if (r.files + 1 > MAX_REVERSE_FILES) return fail(409, 'too_many_files', `A link accepts at most ${MAX_REVERSE_FILES} files.`, { max: MAX_REVERSE_FILES });
     if (opts.maxFileBytes !== null && opts.maxFileBytes !== undefined && size > opts.maxFileBytes) return fail(413, 'file_too_large', `Each file may be at most ${opts.maxFileBytes} bytes.`, { max: opts.maxFileBytes });
     if (size > maxFile) return fail(413, 'file_too_large', `Each file may be at most ${maxFile} bytes.`, { max: maxFile });
-    if (opts.maxBytes !== null && opts.maxBytes !== undefined && r.bytes + size > opts.maxBytes) return fail(413, 'share_full', 'This link has no room left for that file.', { max: opts.maxBytes, used: r.bytes });
+    const fk = JSON.stringify({ kind: 'rs', data: wrap });
+    // The sealed path, metadata and wrap count towards the link's bytes too (an empty file is not free).
+    const sealed = name.length + meta.length + fk.length;
+    if (opts.maxBytes !== null && opts.maxBytes !== undefined && this.#bytesUsed(r) + size + sealed > opts.maxBytes) {
+      return fail(413, 'share_full', 'This link has no room left for that file.', { max: opts.maxBytes, used: this.#bytesUsed(r) });
+    }
     const bad = this.#checkNew(node) || this.#checkParent(r.folder);
     if (bad) return bad.error === 'exists' ? bad : fail(bad.status === 404 ? 410 : bad.status, bad.status === 404 ? 'gone' : bad.error, bad.message);
-    const fk = JSON.stringify({ kind: 'rs', data: wrap });
     // The sealed fields take room too: they count against the capacity (#used).
-    if (this.#used() + size + name.length + meta.length + fk.length > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
+    if (this.#used() + size + sealed > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
     const chunks = driveChunks(size);
     const t = nowSec();
     this.ctx.storage.transactionSync(() => {
       this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated, rs, rsess) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
         node, r.folder, name, meta, size, chunks, fk, uploadHash, t, t, id, hash);
-      this.sql.exec('UPDATE reverse SET files = files + 1, bytes = bytes + ? WHERE id = ?', size, id);
+      this.sql.exec('UPDATE reverse SET files = files + 1, bytes = bytes + ?, sealed = sealed + ? WHERE id = ?', size, sealed, id);
       this.#touch(x, pendingSec);
     });
     this.#setMeta('pendingSec', String(pendingSec));
@@ -812,6 +904,8 @@ export class Drive extends DurableObject {
     if (!n || n.rs !== id || this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
     const c = this.#pending(node, uploadHash);
     if (c.status !== 'ok') return c;
+    // Re-sent chunks keep a reservation alive, but not past RECEIVE_MAX_SEC.
+    if (c.n.created + RECEIVE_MAX_SEC <= nowSec()) return { status: 'gone' };
     if (!Number.isInteger(i) || i < 0 || i >= c.n.chunks) return { status: 'bad_index' };
     const expected = driveChunkSize(c.n.size, i);
     if (!bytes || bytes.byteLength !== expected) return { status: 'bad_size', expected };
@@ -846,13 +940,16 @@ export class Drive extends DurableObject {
     if (!x) return { status: 'bad_grant' };
     const n = this.#node(node);
     if (!n || n.rs !== id) return { status: 'gone' };
+    // Only the session that reserved the file finishes it.
+    if (n.state === 'pending' && !safeEq(n.rsess, hash)) return { status: 'bad_grant' };
     if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
     if (this.inflight?.get(node)) return { status: 'busy' };
     const r = await this.finalize(uid, node, uploadHash);
     if (r.status !== 'ok') return r;
     this.sql.exec('UPDATE nodes SET rsess = NULL WHERE id = ?', node);
     this.sql.exec('UPDATE rsessions SET files = files + 1, bytes = bytes + ? WHERE hash = ?', n.size, hash);
-    this.#touch(x, pendingSec);
+    // With nothing left unfinished, the session is idle again.
+    this.#touch(x, this.#sessionBusy(hash) ? pendingSec : Math.min(pendingSec, SESSION_IDLE_SEC));
     return { status: 'ok' };
   }
 
@@ -863,6 +960,7 @@ export class Drive extends DurableObject {
     return this.ctx.blockConcurrencyWhile(async () => {
       const n = this.#node(node);
       if (!n || n.rs !== id || n.state !== 'pending') return { status: 'gone' };
+      if (!safeEq(n.rsess, hash)) return { status: 'bad_grant' }; // only the session that reserved it
       if (!safeEq(uploadHash, n.upload_hash)) return { status: 'forbidden' };
       await this.#deleteObjects(uid, [n]);
       this.ctx.storage.transactionSync(() => this.#dropPending(n));
@@ -880,17 +978,49 @@ export class Drive extends DurableObject {
     return { status: 'ok', files: x.files, bytes: x.bytes };
   }
 
-  /** Received files the user's browser has not re-wrapped yet (finished uploads only), with their shares' sealed keys. */
-  async received(uid, limit = 500) {
+  /**
+   * Received files the user's browser has not re-wrapped yet (finished
+   * uploads only), oldest first, with their shares' sealed keys → { items,
+   * keys, more, next }. `after` ({ created, id }, from `next`) pages on, so
+   * items that cannot be taken in never hide the ones behind them. `failed`:
+   * the items the browser could not take in instead (no sealed fields: they
+   * are shown with their link, size and time, to be deleted or tried again).
+   */
+  async received(uid, { after = null, limit = RECEIVED_PAGE, failed = false } = {}) {
     this.#bind(uid);
-    const rows = this.sql.exec("SELECT * FROM nodes WHERE rs IS NOT NULL AND state = 'ready' ORDER BY created, id LIMIT ?", limit + 1).toArray();
-    const more = rows.length > limit;
-    const items = rows.slice(0, limit).map((r) => ({
+    const lim = Math.max(1, Math.min(RECEIVED_PAGE, limit | 0));
+    const cond = `rs IS NOT NULL AND state = 'ready' AND rfail IS ${failed ? 'NOT ' : ''}NULL`;
+    const rows = after
+      ? this.sql.exec(`SELECT * FROM nodes WHERE ${cond} AND (created > ? OR (created = ? AND id > ?)) ORDER BY created, id LIMIT ?`,
+        after.created, after.created, after.id, lim + 1).toArray()
+      : this.sql.exec(`SELECT * FROM nodes WHERE ${cond} ORDER BY created, id LIMIT ?`, lim + 1).toArray();
+    const more = rows.length > lim;
+    const page = rows.slice(0, lim);
+    const last = page[page.length - 1];
+    const next = more && last ? `${last.created}.${last.id}` : null;
+    if (failed) {
+      return { ok: true, items: page.map((r) => ({ id: r.id, rs: r.rs, size: r.size, created: r.created, failed: r.rfail, reason: r.rwhy })), more, next };
+    }
+    const items = page.map((r) => ({
       id: r.id, parent: r.parent, rs: r.rs, name: JSON.parse(r.name), meta: r.meta ? JSON.parse(r.meta) : null,
       fk: JSON.parse(r.fk), size: r.size, chunks: r.chunks, created: r.created,
     }));
     const keys = [...new Set(items.map((i) => i.rs))].map((rid) => this.#reverse(rid)).filter(Boolean).map((r) => ({ id: r.id, priv: JSON.parse(r.priv) }));
-    return { ok: true, items, keys, more };
+    return { ok: true, items, keys, more, next };
+  }
+
+  /**
+   * The user's browser could not take received file `node` in (`failed`,
+   * with a reason of RECEIVED_FAIL_REASONS): it leaves the queue and is listed
+   * as failed; `failed: false` puts it back (try again).
+   */
+  async markReceived(uid, node, { failed, reason = null }) {
+    this.#bind(uid);
+    const n = this.#node(node);
+    if (!n || !n.rs || n.state !== 'ready') return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    if (failed) this.sql.exec('UPDATE nodes SET rfail = ?, rwhy = ? WHERE id = ?', nowSec(), RECEIVED_FAIL_REASONS.includes(reason) ? reason : 'unreadable', node);
+    else this.sql.exec('UPDATE nodes SET rfail = NULL, rwhy = NULL WHERE id = ?', node);
+    return { ok: true, received: this.#receivedCount(), failed: this.#receivedFailedCount() };
   }
 
   /** A received file re-wrapped by the user's browser: from now on an ordinary Drive file (in `parent`). */
@@ -902,7 +1032,7 @@ export class Drive extends DurableObject {
       const bad = this.#checkParent(parent);
       if (bad) return bad;
     }
-    this.sql.exec('UPDATE nodes SET parent = ?, name = ?, meta = ?, fk = ?, rs = NULL, updated = ? WHERE id = ?', parent, name, meta, fk, nowSec(), node);
+    this.sql.exec('UPDATE nodes SET parent = ?, name = ?, meta = ?, fk = ?, rs = NULL, rfail = NULL, rwhy = NULL, updated = ? WHERE id = ?', parent, name, meta, fk, nowSec(), node);
     this.#dropEndedReverse();
     return { ok: true, used: this.#used() };
   }
@@ -916,7 +1046,8 @@ export class Drive extends DurableObject {
     const sec = Number(this.#meta('pendingSec')) || 3600;
     let purged = 0;
     await this.ctx.blockConcurrencyWhile(async () => {
-      const stale = this.sql.exec("SELECT id, chunks, size, rs FROM nodes WHERE kind = 'file' AND state = 'pending' AND updated <= ?", nowSec() - sec).toArray();
+      const stale = this.sql.exec(`SELECT id, chunks, size, rs FROM nodes WHERE kind = 'file' AND state = 'pending'
+        AND (updated <= ? OR (rs IS NOT NULL AND created <= ?))`, nowSec() - sec, nowSec() - RECEIVE_MAX_SEC).toArray();
       if (!stale.length) return;
       await this.#deleteObjects(uid, stale);
       this.ctx.storage.transactionSync(() => {
