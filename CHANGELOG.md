@@ -15,6 +15,14 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Nothing the Worker serves is stored in Cloudflare's cache** (with Workers Caching on, see
+  Changed): the top-level fetch handler adds `Cloudflare-CDN-Cache-Control: no-store` to every
+  response it returns, errors and exceptions included, and `Cache-Control: no-store` to any
+  response without one of its own (the asset server's `307` for `/index.html` and the bare
+  `404` when the assets binding is missing had none, and would have been cached
+  heuristically). The home page and the anonymous tracker keep their browser caching. A
+  workerd test walks 148 routes, methods and outcomes (API-key calls to My shares and the
+  Account page's human checks included) and checks every response.
 - **Human check on every Account change:** with Turnstile on, changing the username, adding or
   removing a passkey, the "password and passkey" choice, new recovery codes, and creating,
   changing or revoking an API key now need a fresh Turnstile token (action `account`), like the
@@ -376,6 +384,14 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Smart Placement and Workers Caching** are on in `wrangler.toml` (and
+  `wrangler.toml.example`): `[placement] mode = "smart"` runs the fetch handler where it is
+  fastest overall (near the Directory Durable Object for most API calls), and
+  `[cache] enabled = true` sets the default caching for fetch-handler responses. No
+  per-entrypoint override is set (the default export is the only fetch entrypoint), and no
+  Worker response opts into the cache (see Security).
+- **Accessibility statement:** the default text and the admin help no longer name a country or a
+  national standard; the default states WCAG 2.2 AA as the minimum and AAA wherever possible.
 - **Imports never remove or overwrite an existing account's credentials** (the owner's
   included). An account that already exists only gets its role set (if that part is chosen;
   never the owner's) and the imported passkeys added (if that part is chosen); its password,

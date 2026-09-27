@@ -102,6 +102,34 @@ export function withSecurityHeaders(res, { noStore = true, turnstile = false } =
   return out;
 }
 
+/**
+ * The last line of defence for Workers Caching (wrangler.toml [cache]), applied
+ * by the top-level fetch handler to every response the Worker returns, errors
+ * included. Cloudflare's cache sits in front of the Worker and would otherwise
+ * store a response without Cache-Control heuristically (a 200 for two hours, a
+ * 404 for three minutes) — cookie-authenticated GETs too, since only an
+ * Authorization request header or a Set-Cookie response header bypasses it.
+ *   • `Cloudflare-CDN-Cache-Control: no-store` (read by Cloudflare's cache
+ *     before Cache-Control, and stripped before the browser) keeps every
+ *     Worker response out of the edge cache, including the home page and the
+ *     tracker, which keep their own browser caching.
+ *   • A response with no Cache-Control of its own gets `no-store`, so the
+ *     browser and any other cache keep nothing either.
+ */
+export const EDGE_CACHE_CONTROL = 'cloudflare-cdn-cache-control';
+export function withCachePolicy(res) {
+  let out = res;
+  try {
+    out.headers.set(EDGE_CACHE_CONTROL, 'no-store');
+  } catch {
+    // Immutable headers (a response passed through from a fetch): copy it.
+    out = new Response(res.body, res);
+    out.headers.set(EDGE_CACHE_CONTROL, 'no-store');
+  }
+  if (!out.headers.has('cache-control')) out.headers.set('cache-control', 'no-store');
+  return out;
+}
+
 export function redirect(location, status = 302) {
   return new Response(null, { status, headers: { location, 'cache-control': 'no-store', ...SECURITY_HEADERS } });
 }
