@@ -97,10 +97,13 @@ export function settingsWithDefaults(rows) {
   return out;
 }
 
-// ── per-user capability limits ───────────────────────────────────────────────
-// Each key resolves: user override → global default row → code default.
+// ── capability limits (per role) ─────────────────────────────────────────────
+// Each key resolves: the account's role → the Default role (the global rows)
+// → code default. The public account has its own rows instead of a role.
 // `null` on a numeric key means "no limit" (still bounded by hard ceilings).
 export const PASSKEY_MODES = ['any', 'second', 'off'];
+/** Passkeys per account, at most (the passkeysMax limit can lower it). */
+export const MAX_PASSKEYS = 10;
 
 export const LIMITS = {
   text:                { type: 'bool', def: true },
@@ -153,6 +156,13 @@ export const LIMITS = {
   // second factor (every password login then needs one); "off" — none.
   // Recovery codes stand in for a passkey wherever one is accepted.
   passkeys:            { type: 'enum', values: PASSKEY_MODES, def: 'any', owner: 'any' },
+  // How many passkeys an account may register.
+  passkeysMax:         { type: 'int', min: 1, max: MAX_PASSKEYS, nullable: false, def: MAX_PASSKEYS, owner: MAX_PASSKEYS },
+  // Per-role values of server-wide settings (null: the Settings / Viewer
+  // value applies). The owner always has the server-wide values.
+  sessionIdleSec:      { type: 'int', min: SETTINGS['session.idleSec'].min, max: SETTINGS['session.idleSec'].max, nullable: true, def: null, owner: null },
+  sessionAbsSec:       { type: 'int', min: SETTINGS['session.absSec'].min, max: SETTINGS['session.absSec'].max, nullable: true, def: null, owner: null },
+  viewerMaxBytes:      { type: 'int', min: SETTINGS['viewer.maxBytes'].min, max: SETTINGS['viewer.maxBytes'].max, nullable: true, def: null },
 };
 
 /** The password-policy keys of the limits (see public/js/pwauth.js). */

@@ -6,10 +6,13 @@
 // with the same checkers the admin API uses.
 //
 // What it can hold:
-//   system  — settings, global limits (all + API channel), global quotas,
-//             global viewer rules, IP rules;
+//   system  — settings, the Default role (global limits for the all and API
+//             channels, quotas, viewer rules), IP rules, and the custom roles
+//             (each with its own limits, quotas and viewer rules);
 //   users[] — per user: `credentials` (username is always present; salt, t,
-//             verifier, disabled) and/or `config` (limits, quotas, viewer rules).
+//             verifier, disabled) and/or `config` ({ role }: the role's name,
+//             "Default" for the Default role). Files from before roles carry
+//             per-user limits in `config`; they are accepted and ignored.
 // Never: the owner account, sessions, API keys, shares, usage counters or the
 // activity log.
 
@@ -78,8 +81,27 @@ function ipRule(r, where) {
   return { cidr, action: r.action, expires, note };
 }
 
+export const MAX_ROLES = 200;
+const ROLE_NAME_MAX = 64;
+
+function role(v, i) {
+  const where = `system.roles[${i}]`;
+  keys(v, where, ['name', 'ownQuotas', 'limits', 'quotas', 'viewerRules']);
+  // eslint-disable-next-line no-control-regex
+  if (typeof v.name !== 'string' || !v.name.trim() || v.name.length > ROLE_NAME_MAX || /[\u0000-\u001f\u007f]/.test(v.name)) throw new PortableError(`${where}: invalid name`);
+  if (['owner', 'default'].includes(v.name.trim().toLowerCase())) throw new PortableError(`${where}: "${v.name}" is a built-in role`);
+  if (typeof v.ownQuotas !== 'boolean') throw new PortableError(`${where}: ownQuotas must be true or false`);
+  return {
+    name: v.name.trim(),
+    ownQuotas: v.ownQuotas,
+    limits: limitsBlock(v.limits, `${where}.limits`),
+    quotas: quotas(v.quotas, `${where}.quotas`),
+    viewerRules: viewerRules(v.viewerRules, `${where}.viewerRules`),
+  };
+}
+
 function system(v) {
-  keys(v, 'system', ['settings', 'limits', 'quotas', 'viewerRules', 'ipRules']);
+  keys(v, 'system', ['settings', 'limits', 'quotas', 'viewerRules', 'ipRules'], ['roles']);
   keys(v.settings, 'system.settings', [], Object.keys(v.settings ?? {}));
   const settings = {};
   for (const [k, val] of Object.entries(v.settings)) settings[k] = wrap(`system.settings.${short(k)}`, () => checkSetting(k, val));
@@ -92,7 +114,18 @@ function system(v) {
     quotas: quotas(v.quotas, 'system.quotas'),
     viewerRules: viewerRules(v.viewerRules, 'system.viewerRules'),
     ipRules: list(v.ipRules, 'system.ipRules', 1000).map((r, i) => ipRule(r, `system.ipRules[${i}]`)),
+    roles: v.roles === undefined ? [] : uniqueRoles(list(v.roles, 'system.roles', MAX_ROLES).map(role)),
   };
+}
+
+function uniqueRoles(roles) {
+  const seen = new Set();
+  for (const r of roles) {
+    const k = r.name.toLowerCase();
+    if (seen.has(k)) throw new PortableError(`system.roles: "${r.name}" appears twice`);
+    seen.add(k);
+  }
+  return roles;
 }
 
 function user(v, i) {
@@ -110,12 +143,18 @@ function user(v, i) {
     out.credentials = { salt: c.salt, t: c.t, verifier: c.verifier, disabled: c.disabled };
   }
   if (v.config !== undefined) {
-    keys(v.config, `${where}.config`, ['limits', 'quotas', 'viewerRules']);
-    out.config = {
-      limits: limitsBlock(v.config.limits, `${where}.config.limits`),
-      quotas: quotas(v.config.quotas, `${where}.config.quotas`),
-      viewerRules: viewerRules(v.config.viewerRules, `${where}.config.viewerRules`),
-    };
+    if (isObj(v.config) && Object.prototype.hasOwnProperty.call(v.config, 'role')) {
+      keys(v.config, `${where}.config`, ['role']);
+      if (typeof v.config.role !== 'string' || !v.config.role.trim() || v.config.role.length > ROLE_NAME_MAX) throw new PortableError(`${where}.config: invalid role`);
+      out.config = { role: v.config.role.trim() };
+    } else {
+      // Before roles: per-user limits, quotas and viewer rules. Checked, then ignored.
+      keys(v.config, `${where}.config`, ['limits', 'quotas', 'viewerRules']);
+      limitsBlock(v.config.limits, `${where}.config.limits`);
+      quotas(v.config.quotas, `${where}.config.quotas`);
+      viewerRules(v.config.viewerRules, `${where}.config.viewerRules`);
+      out.config = { legacy: true };
+    }
   }
   if (!out.credentials && !out.config) throw new PortableError(`${where}: nothing to import (no credentials or config)`);
   return out;

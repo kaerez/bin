@@ -333,7 +333,11 @@ spaces are ignored, O/I/L read as 0/1/1).
 | `GET/POST /api/private/me/keys` `{name, expiresInSec?, scopes?, step…}`, `PATCH …/keys/:id` `{name?, scopes?, step…}`, `DELETE …/keys/:id` `{step…}` (`X-Secbin-Intent`) | session, not impersonating (except `GET`) | API keys; `scopes` is a subset of `notes`, `files`, `policy` (default all three; empty or unknown → 400 `invalid_scopes`). Listing returns each key's `scopes` |
 | `GET /api/private/admin/turnstile` | owner | `{sitekey, secretSet, active: 'env'\|'admin'\|null, deployment}`; never the secret |
 | `PUT /api/private/admin/turnstile` `{sitekey, secret?, step…}` or `{clear: true, step…}` | owner | set (an empty `secret` keeps the saved one) or remove the panel's keys; 400 `invalid_sitekey` / `invalid_secret`. The deployment's keys still win |
-| `PATCH /api/private/admin/limits` for `public-user-0000` | owner | 400 `invalid_limit` for limits that do not apply to the public account (`apiEnabled`, `apiMaxKeys`, `receipt*`, `logMax*`, `pw*`, `passkeys`); `inherit` is accepted |
+| `GET/POST /api/private/admin/roles` `{name}` or `{from, name}` | owner | list (Owner, Default, custom: `{id, name, builtin, locked?, ownQuotas?, users}`); create, or duplicate `from` a role id or `"default"` (Default's values copied as explicit settings); 409 `name_taken` (unique, case-insensitive; "Owner" and "Default" are reserved) |
+| `GET/PATCH/DELETE /api/private/admin/roles/:id` `{name?, ownQuotas?}` | owner | one role (its rows, what it inherits, its users); rename / quota choice; delete (`X-Secbin-Intent`; its users move to Default → `{moved}`) |
+| `PUT /api/private/admin/users/:id/role` `{roleId}` | owner | `"default"` or a custom role id; 403 `owner_role` for the owner or for `"owner"` |
+| `PATCH /api/private/admin/limits`, `PUT …/quotas`, `PUT …/viewer-rules` `{scope, …}` | owner | `scope`: `"global"` (the Default role), `"role:<id>"` or `public-user-0000`; a user id → 400 `use_a_role` |
+| `PATCH /api/private/admin/limits` for `public-user-0000` | owner | 400 `invalid_limit` for limits that do not apply to the public account (`apiEnabled`, `apiMaxKeys`, `receipt*`, `logMax*`, `pw*`, `passkeys`, `passkeysMax`, `session*`); `inherit` is accepted |
 | `POST /api/private/admin/users/:id/keys` `{name, expiresInSec?, scopes?}`, `PATCH`/`DELETE …/keys/:kid` | owner | the same for another user's keys, without a confirmation (with `{step…}` on the owner's own account). The new key is returned once |
 
 `step…` is the confirmation for a change to one's own account: `current` (the password proof, as
@@ -442,7 +446,24 @@ exact ciphertext size of every chunk: `min(CHUNK, padded − i·CHUNK) + 16`.
   claims `{sid, uid, act?, ver, iat, lat, exp}`. Checked against current state on every request
   (revoked `sid`, disabled user, `ver` = the user's session version — bumped by password changes,
   resets and disables); idle and absolute timeouts are admin settings.
-- **Limits** resolve per request: user override → global default → built-in default. API-channel
+- **Roles.** Every user has exactly one role; a user with no other role has the Default role.
+  - **Owner:** built in and locked (everything allowed, no limits). Only the owner has it, and
+    the owner's role never changes.
+  - **Default:** built in and cannot be deleted. It holds an explicit value for every option (the
+    global rows; `inherit` is refused for the all channel). Migration 10 fills in any missing
+    value, taking the user session timeouts and the largest previewable file from the current
+    settings.
+  - **Custom roles** (`roles`: id, unique name, `own_quotas`) keep their rows under the scope
+    `r:<id>`. Anything they leave unset is "same as Default", which follows later changes to
+    Default.
+  - A role's quota list replaces Default's only when `own_quotas` is on; saving a list turns it
+    on. Viewer rules are the role's own when `viewerCustomRules` is on.
+  - Role-only options: `passkeysMax` (1–10), `sessionIdleSec` / `sessionAbsSec` (user sessions;
+    the owner keeps the server-wide `session.*`) and `viewerMaxBytes`.
+  - Accounts have no settings of their own: migration 10 drops per-user overrides and logs how
+    many (`roles.migrated`). Admin calls that target a user id get `400 use_a_role`. The public
+    account keeps its own rows.
+- **Limits** resolve per request: the account's role → the Default role → built-in default. API-channel
   limits and quotas can only restrict further. Quota windows are fixed buckets (UTC calendar
   for months/years); every creation counts toward all-channel quotas, API creations also toward
   API quotas.

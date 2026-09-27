@@ -22,6 +22,8 @@ describe('password policy', () => {
     for (const bad of [{ pwMinLength: 11 }, { pwMinLength: 129 }, { pwMinLength: null }, { pwUpper: 'yes' }]) {
       expect((await limits('global', bad)).status).toBe(400);
     }
-    expect((await limits('global', { pwMinLength: 'inherit', pwDigit: 'inherit' })).status).toBe(200);
+    // The Default role always holds a value: "inherit" is refused there; set the defaults back.
+    expect((await limits('global', { pwMinLength: 'inherit' })).status).toBe(400);
+    expect((await limits('global', { pwMinLength: 12, pwDigit: false })).status).toBe(200);
   });
 });

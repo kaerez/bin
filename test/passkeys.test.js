@@ -266,12 +266,12 @@ describe('administration', () => {
   });
 
   it('a global "off" never applies to the owner', async () => {
-    expect((await limits('', { passkeys: 'off' })).status).toBe(200);
+    expect((await limits('global', { passkeys: 'off' })).status).toBe(200);
     const u = await makeUser('pk-global-off');
     expect(await errorOf(await post('/api/private/me/passkeys/options', {}, u.cookie))).toBe('passkeys_disabled');
     const o = await register(oc, { password: 'owner-password' });
     expect(o.res.status).toBe(201);
-    await limits('', { passkeys: 'any' });
+    await limits('global', { passkeys: 'any' });
   });
 });
 

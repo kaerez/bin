@@ -34,7 +34,8 @@ const LIMIT_UI = [
   ['maxShareBytes', 'Max share size', 'bytes'],
   ['maxFileBytes', 'Max single file size', 'bytes'],
   ['viewer', 'In-browser viewer', 'bool'],
-  ['viewerCustomRules', 'Use per-user viewer rules', 'bool'],
+  ['viewerCustomRules', 'Use this role\'s own viewer rules (not Default\'s)', 'bool'],
+  ['viewerMaxBytes', 'In-browser viewer: largest file', 'bytes', { nullable: false }],
   ['apiEnabled', 'API keys allowed', 'bool'],
   ['apiMaxKeys', 'Max API keys', 'int'],
   ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
@@ -53,6 +54,9 @@ const LIMIT_UI = [
   ['pwDigit', 'Password: needs a digit', 'bool'],
   ['pwSymbol', 'Password: needs a symbol', 'bool'],
   ['passkeys', 'Passkeys', 'enum', { values: [['any', 'sign in alone or as a second factor'], ['second', 'only as a second factor after the password'], ['off', 'not allowed']] }],
+  ['passkeysMax', 'Passkeys: at most', 'int', { nullable: false }],
+  ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
+  ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
 ];
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
@@ -108,7 +112,7 @@ async function refreshOverview() {
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
-  ({ users: renderUsers, shares: () => renderShares(panel('shares')), defaults: renderDefaults, settings: renderSettings, viewer: renderViewer, security: renderSecurity, public: renderPublic, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
+  ({ users: renderUsers, roles: renderRoles, shares: () => renderShares(panel('shares')), settings: renderSettings, viewer: renderViewer, security: renderSecurity, public: renderPublic, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────
@@ -207,13 +211,15 @@ function limitText(type, v) {
  * built-in defaults for the global level, the global values for a user),
  * shown next to the choice so every default is visible.
  */
-function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omit = [] }) {
+function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omit = [], explicit = false }) {
   const box = h('div.limits-grid');
   const keys = (channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI).filter(([k]) => !omit.includes(k));
   const ctls = [];
   for (const [key, label, type, opt = {}] of keys) {
-    const has = Object.prototype.hasOwnProperty.call(rows, key);
-    const v = has ? rows[key] : undefined;
+    // The Default role (explicit) holds a value for every option: no "inherit".
+    let has = Object.prototype.hasOwnProperty.call(rows, key);
+    let v = has ? rows[key] : undefined;
+    if (explicit && !has) { has = true; v = inherited?.[key]; }
     const choices = {
       bool: () => [h('option', { value: 'true', text: 'yes', selected: has && v === true }), h('option', { value: 'false', text: 'no', selected: has && v === false })],
       enum: () => opt.values.map(([k, t]) => h('option', { value: `enum:${k}`, text: t, selected: has && v === k })),
@@ -222,9 +228,9 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
     }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: 'no limit', selected: has && v === null })]),
       h('option', { value: 'value', text: 'limit to', selected: has && v !== null })]);
     const inh = channel !== 'api' && inherited && Object.prototype.hasOwnProperty.call(inherited, key) ? ` (${limitText(type, inherited[key])})` : '';
-    const inheritText = channel === 'api' ? 'no extra restriction' : scope === 'global' ? `built-in default${inh}` : `inherit${inh}`;
+    const inheritText = channel === 'api' ? 'no extra restriction' : `same as Default${inh}`;
     const mode = h('select.input', { 'aria-label': `${label} mode` },
-      h('option', { value: 'inherit', text: inheritText, selected: !has }),
+      ...(explicit && channel !== 'api' ? [] : [h('option', { value: 'inherit', text: inheritText, selected: !has })]),
       ...choices());
     let val = null;
     if (type === 'rules') {
@@ -328,8 +334,9 @@ function rulesEditor(scope, list, { withPresets = true } = {}) {
 async function renderUsers() {
   const p = clear(panel('users'));
   await refreshOverview(); // the global password policy may have just changed
-  const data = await guard(() => admin.users());
+  const [data, roleList] = await Promise.all([guard(() => admin.users()), guard(() => admin.roles())]);
   if (!data) return;
+  const assignable = (roleList?.roles || []).filter((r) => !r.locked);
   const user = h('input.input', { placeholder: 'username', maxlength: '64', 'aria-label': 'New username', autocomplete: 'off' });
   // The owner may set any password; the policy applies when users change their own.
   const newPolicy = overview?.defaults?.inherited;
@@ -360,7 +367,10 @@ async function renderUsers() {
     const del = h('button.btn.danger', { type: 'button', text: 'Delete' });
     armConfirm(del, 'Delete user + revoke shares?', async () => { await guard(() => admin.deleteUser(u.id, true), 'User deleted.'); renderUsers(); });
     actions.appendChild(del);
-    body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td.mono', { dataset: { label: 'Role' }, text: u.role }),
+    // One role per user; changing it applies at once.
+    const pick = h('select.input', { 'aria-label': `Role of ${u.username}` }, ...assignable.map((r) => h('option', { value: r.id, text: r.name, selected: r.id === u.roleId })));
+    pick.onchange = async () => { if (!(await guard(() => admin.setUserRole(u.id, pick.value), `${u.username} now has the role ${pick.selectedOptions[0].textContent}.`))) renderUsers(); };
+    body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td', { dataset: { label: 'Role' } }, pick),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(u.created) }), h('td.cell-actions', {}, actions)));
   }
@@ -391,10 +401,10 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
     h('p.mono.muted', { text: `You may set any password. This user's own changes follow: ${describePolicy(userPolicy)}` })));
   if (passwordOnly) return;
 
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities & limits (GUI + API)' }), limitsEditor({ scope: id, channel: 'all', rows: d.limits.all, effective: d.effective.all, inherited: overview?.defaults.inherited, onSaved: () => openUser(id, false, { scroll: false }) })));
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Extra API restrictions (can only narrow, never widen)' }), limitsEditor({ scope: id, channel: 'api', rows: d.limits.api, effective: d.effective.api, onSaved: () => openUser(id, false, { scroll: false }) })));
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas for this user (in addition to global quotas)' }), quotasEditor(id, d.quotas)));
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Per-user viewer rules (used when "Use per-user viewer rules" is on)' }), rulesEditor(id, d.viewerRules)));
+  // Capabilities, limits and quotas come from the user's role.
+  const goRole = h('button.btn', { type: 'button', text: `Edit the role ${d.role?.name || 'Default'}`, on: { click: () => { selectTab('roles'); renderRoles(d.role?.id || 'default'); } } });
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: `Role: ${d.role?.name || 'Default'}` }),
+    h('p.mono.muted', { text: 'What this user may do comes from their role. Change the role in the list above, or edit the role itself.' }), h('div.btn-row', {}, goRole)));
   box.appendChild(userKeysCard(id, d.keys));
   const pk = d.passkeys || { count: 0, recoveryLeft: 0, mfa: false };
   const pkReset = h('button.btn.danger', { type: 'button', text: 'Remove all passkeys', disabled: !pk.count && !pk.recoveryLeft });
@@ -472,16 +482,108 @@ function userKeysCard(id, list) {
 }
 
 // ── defaults ─────────────────────────────────────────────────────────────────
-async function renderDefaults() {
-  const p = clear(panel('defaults'));
+// ── roles ─────────────────────────────────────────────────────────────────────
+// Every user has one role (Default unless given another). Owner: built in,
+// locked (everything allowed, no limits), the owner's only. Default: built in,
+// cannot be deleted, holds a value for every option. Custom roles leave
+// options on "same as Default" until set.
+async function renderRoles(openId = null) {
+  const p = clear(panel('roles'));
   await refreshOverview();
-  if (!overview) return;
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Default limits for every user' }),
-    h('p.mono.muted', { text: 'Per-user settings override these; the built-in default is shown in brackets. Global settings never apply to the owner.' }),
-    limitsEditor({ scope: 'global', channel: 'all', rows: overview.limits.all, inherited: overview.defaults.limits })));
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Default extra API restrictions' }),
-    limitsEditor({ scope: 'global', channel: 'api', rows: overview.limits.api })));
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Global quotas (apply to every user separately)' }), quotasEditor('global', overview.quotas)));
+  const data = await guard(() => admin.roles());
+  if (!data || !overview) return;
+  const name = h('input.input', { placeholder: 'Role name, e.g. Contractors', maxlength: '64', 'aria-label': 'New role name' });
+  const create = h('button.btn', { type: 'button', text: 'Create role' });
+  create.onclick = async () => {
+    const r = await guard(() => admin.createRole({ name: name.value.trim() }), 'Role created. Its options start as "same as Default".');
+    if (r) renderRoles(r.id);
+  };
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a role' }), h('div.toolbar', {}, name, create),
+    h('p.mono.muted', { text: 'Every user has exactly one role: Default unless you choose another (Users). A new role starts with every option on "same as Default", so it follows Default until you change an option.' })));
+
+  const body = h('tbody');
+  for (const r of data.roles) {
+    const actions = h('div.btn-row.row-actions');
+    if (r.locked) {
+      actions.appendChild(h('span.mono.muted', { text: 'locked: everything allowed, no limits; the owner only' }));
+    } else {
+      actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', on: { click: () => openRole(r.id) } }));
+      const dup = h('button.btn', { type: 'button', text: 'Duplicate' });
+      dup.onclick = async () => {
+        const c = await guard(() => admin.createRole({ from: r.id, name: uniqueName(`${r.name} copy`, data.roles) }), 'Role duplicated.');
+        if (c) renderRoles(c.id);
+      };
+      actions.appendChild(dup);
+      if (!r.builtin) {
+        const del = h('button.btn.danger', { type: 'button', text: 'Delete' });
+        armConfirm(del, r.users ? `Delete; ${r.users} user${r.users === 1 ? '' : 's'} move${r.users === 1 ? 's' : ''} to Default?` : 'Delete?', async () => {
+          if (await guard(() => admin.deleteRole(r.id), 'Role deleted.')) renderRoles();
+        });
+        actions.appendChild(del);
+      }
+    }
+    body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Role' }, text: r.name }),
+      h('td.mono', { dataset: { label: 'Users' }, text: String(r.users) }),
+      h('td.mono', { dataset: { label: 'Kind' }, text: r.locked ? 'built in, locked' : r.builtin ? 'built in' : 'custom' }),
+      h('td.cell-actions', {}, actions)));
+  }
+  p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Role', 'Users', 'Kind', ''].map((t) => h('th', { text: t })))), body)));
+  p.appendChild(h('div', { id: 'role-detail' }));
+  if (openId) openRole(openId);
+}
+
+const uniqueName = (base, roles) => {
+  const taken = new Set(roles.map((r) => r.name.toLowerCase()));
+  let n = base.slice(0, 60);
+  for (let i = 2; taken.has(n.toLowerCase()); i++) n = `${base.slice(0, 56)} ${i}`;
+  return n;
+};
+
+/** The editor for one role: Default (explicit values) or a custom role. */
+async function openRole(id, { scroll = true } = {}) {
+  const box = clear($('#role-detail'));
+  const reopen = () => openRole(id, { scroll: false });
+  if (id === 'default') {
+    await refreshOverview();
+    box.appendChild(h('h2.section-title', { text: 'Default role' }));
+    box.appendChild(h('p.mono.muted', { text: 'Applies to every user without another role, and is what other roles follow for the options they leave on "same as Default". Every option has a value here. The owner is never affected.' }));
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities, limits, passkeys, password policy, sessions' }),
+      limitsEditor({ scope: 'global', channel: 'all', rows: overview.limits.all, inherited: overview.defaults.limits, explicit: true, onSaved: () => renderRoles('default') })));
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Extra API restrictions (can only narrow, never widen)' }),
+      limitsEditor({ scope: 'global', channel: 'api', rows: overview.limits.api, onSaved: () => renderRoles('default') })));
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas (each user counted separately)' }), quotasEditor('global', overview.quotas)));
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Viewer rules' }), rulesEditor('global', overview.viewerRules)));
+  } else {
+    const d = await guard(() => admin.role(id));
+    if (!d) return;
+    const scope = `role:${id}`;
+    const rename = h('input.input', { value: d.role.name, maxlength: '64', 'aria-label': 'Role name' });
+    const save = h('button.btn', { type: 'button', text: 'Rename' });
+    save.onclick = async () => { if (await guard(() => admin.updateRole(id, { name: rename.value.trim() }), 'Role renamed.')) renderRoles(id); };
+    box.appendChild(h('h2.section-title', { text: `Role: ${d.role.name}` }));
+    box.appendChild(h('div.card.stack', {}, h('div.toolbar', {}, rename, save),
+      h('p.mono.muted', { text: d.users.length ? `Users: ${d.users.map((u) => u.username).join(', ')}` : 'No users have this role yet (assign it under Users).' })));
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities, limits, passkeys, password policy, sessions' }),
+      limitsEditor({ scope, channel: 'all', rows: d.limits.all, effective: d.effective.all, inherited: d.inherited, onSaved: reopen })));
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Extra API restrictions (can only narrow, never widen)' }),
+      limitsEditor({ scope, channel: 'api', rows: d.limits.api, effective: d.effective.api, onSaved: reopen })));
+    const own = [h('input', { type: 'radio', name: `own-quotas-${id}`, value: 'default', checked: !d.role.ownQuotas }), h('input', { type: 'radio', name: `own-quotas-${id}`, value: 'own', checked: d.role.ownQuotas })];
+    const quotaBox = h('div', { hidden: !d.role.ownQuotas }, quotasEditor(scope, d.quotas));
+    for (const r of own) {
+      r.onchange = async () => {
+        if (!r.checked) return;
+        const ownQuotas = r.value === 'own';
+        quotaBox.hidden = !ownQuotas;
+        await guard(() => admin.updateRole(id, { ownQuotas }), ownQuotas ? 'This role now uses its own quota list (save it below).' : 'This role now uses Default\'s quotas.');
+      };
+    }
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas' }),
+      h('fieldset.range', {}, h('legend', { text: 'Which quotas apply' }),
+        h('label.radio-opt', {}, own[0], h('span', { text: 'Same as Default' })), h('label.radio-opt', {}, own[1], h('span', { text: 'This role\'s own list (instead of Default\'s)' }))),
+      quotaBox));
+    box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Viewer rules (used when "Use this role\'s own viewer rules" is yes)' }), rulesEditor(scope, d.viewerRules)));
+  }
+  if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // ── settings ─────────────────────────────────────────────────────────────────
@@ -498,7 +600,9 @@ async function renderSettings() {
   const mib = (key, label, max) => { const c = numberInput(s[key], { step: 1, scale: MiB, label: `${label} (MiB)` }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono', { text: `MiB (max ${max})` }), dflt(formatBytes(defs[key]))); };
   const scopeRule = (scope, label) => h('div.card.stack', {}, h('h3.field-label', { text: label }),
     int(`guard.${scope}.max`, 'Failures allowed'), dur(`guard.${scope}.windowSec`, 'Within'), dur(`guard.${scope}.blockSec`, 'Then block the IP for'));
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Sessions' }), dur('session.idleSec', 'Idle timeout'), dur('session.absSec', 'Absolute timeout')));
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Your sessions (owner)' }),
+    h('p.mono.muted', { text: 'Session timeouts for everyone else are set per role (Admin → Roles).' }),
+    dur('session.idleSec', 'Idle timeout'), dur('session.absSec', 'Absolute timeout')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'File shares' }),
     mib('files.maxShareBytes', 'Max share size (all files)', '2048'), dur('files.grantSec', 'Download window after opening'), dur('files.pendingSec', 'Unfinished upload deadline')));
   p.appendChild(h('div.stack', {}, h('h2.section-title', { text: 'Brute-force protection (per IP)' }),
@@ -540,7 +644,7 @@ const PUBLIC_ID = 'public-user-0000';
 // Not for the public account (no API keys, receipts page, password, passkeys
 // or log of its own); the server refuses them too (PUBLIC_NA_LIMITS).
 const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs', 'receiptLanguages',
-  'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys'];
+  'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],
   ['ip', 'Network address only', 'Counts per IP address (IPv6 per the tracking prefix), stored only as a keyed hash. Nothing is stored in the browser; people behind one address share the limits.'],
@@ -622,15 +726,13 @@ async function renderViewer() {
   if (!overview) return;
   const s = overview.settings;
   const on = h('input', { type: 'checkbox', checked: s['viewer.enabled'], id: 'viewer-enabled' });
-  const max = numberInput(s['viewer.maxBytes'], { step: 1, scale: MiB, label: 'Largest file the viewer opens (MiB)' });
   const save = h('button.btn', { type: 'button', text: 'Save' });
-  save.onclick = () => guard(() => admin.settings({ 'viewer.enabled': on.checked, 'viewer.maxBytes': max.read() }), 'Viewer settings saved.');
+  save.onclick = () => guard(() => admin.settings({ 'viewer.enabled': on.checked }), 'Viewer settings saved.');
+  const toRoles = h('button.btn', { type: 'button', text: 'Roles', on: { click: () => { selectTab('roles'); renderRoles('default'); } } });
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'In-browser viewer' }),
-    h('label.inline', {}, on, ' Enabled globally (turning it off takes effect for existing links immediately)'),
-    h('div.limit-row', {}, h('span.field-label', { text: 'Max previewable file size' }), max, h('span.mono', { text: 'MiB' })),
-    h('p.mono.muted', { text: 'Users also need the per-user "In-browser viewer" capability (Defaults or per user), and the sender opts in per share.' }),
-    h('div.btn-row', {}, save)));
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Global viewer rules' }), rulesEditor('global', overview.viewerRules)));
+    h('label.inline', {}, on, ' Enabled for the whole server (turning it off takes effect for existing links immediately)'),
+    h('p.mono.muted', { text: 'Who may use it, the largest file it opens and its rules are set per role (Admin → Roles; Default for everyone without another role). The sender also opts in per share.' }),
+    h('div.btn-row', {}, save, toRoles)));
 }
 
 // ── security ─────────────────────────────────────────────────────────────────

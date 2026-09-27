@@ -361,6 +361,11 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`
     only.
   - The built-in public account never holds keys.
+- **Roles replace per-user settings.** Every account has exactly one role (the Default role
+  unless given another), and the owner's is the locked Owner role. The migration that introduced
+  roles deleted any per-user overrides and wrote one audit entry with how many (`roles.migrated`),
+  so an account that was restricted individually falls back to the Default role until it is
+  given a role. Review Users → Role after upgrading (recommendation).
 - **Impersonation** ("log in as"): owner only, never nested, no admin access or key minting
   while impersonating; each action is logged with the real actor (the user's own activity view
   shows it as theirs).
