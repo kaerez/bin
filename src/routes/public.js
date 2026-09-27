@@ -124,6 +124,11 @@ export async function handlePublic(request, env, url) {
   const [, kind, rawId, action, idx] = m;
   const id = decodePathSegment(rawId);
 
+  // Before any Guard accounting: another site can make a visitor's browser
+  // send simple GETs here (<img src>, no preflight). Counted as "invalid",
+  // they would get the visitor's network blocked from opening shares. The
+  // app only ever calls these from its own pages; the CLI sends no header.
+  assertNotCrossSite(request);
   const g = await ipContext(env, request);
   const blocked = await blockedResponse(env, g);
   if (blocked) return blocked;

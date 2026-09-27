@@ -146,6 +146,7 @@ export async function handlePrivate(request, env, url, ctx) {
   // A challenge for confirming a change with a passkey instead of the password.
   if (p === '/api/private/me/reauth') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertNotCrossSite(request);
     if (a.actor) return err(403, 'impersonating', 'Not available while impersonating.');
     const r = await dir.reauthOptions(a.user.id);
     return r.ok ? json({ challengeId: r.challengeId, publicKey: requestOptions(r, url.hostname) }) : fromDir(r);
@@ -168,6 +169,7 @@ export async function handlePrivate(request, env, url, ctx) {
       return withAuth(a, st.ok ? json(st) : fromDir(st));
     }
     if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertNotCrossSite(request);
     if (a.actor) return err(403, 'impersonating', 'Passkeys cannot be changed while impersonating.');
     if (p === '/api/private/me/passkeys/options') {
       const r = await dir.passkeyRegisterOptions(a.user.id);
