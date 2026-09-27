@@ -91,8 +91,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   the unlock prompt becomes "Set up your Drive" (password only) the first time, offers the
   passkey only when one has a Drive wrap (the sign-in's PRF helper), and returns when the tab's
   key does not open the Drive; transfers report bytes and can be cancelled (downloads too);
-  dropped empty folders are kept; Share… applies the file-type and folder-depth policy and can
-  allow in-browser viewing, like the composer. My shares and Admin → Shares name drive shares
+  dropped empty folders are kept; an upload whose name the folder already has becomes
+  "name (2).ext"…; while the owner impersonates a user whose Drive has no key yet, the page says
+  "The Drive can only be set up by its user" instead of the prompt; the manual end-to-end
+  script is `test-e2e/drive-int.mjs` (see `test-e2e/README.md`, not run in CI); Share… applies
+  the file-type and folder-depth policy and can allow in-browser viewing, like the composer. My shares and Admin → Shares name drive shares
   "drive".
 - **Folder tree component** (`public/js/tree.js`): a WAI-ARIA tree (roving tabindex, arrow
   keys, Home/End, Enter/Space, `*`, type-ahead; `aria-expanded`/`aria-selected`/levels) with a

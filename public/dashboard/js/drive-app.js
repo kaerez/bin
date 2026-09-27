@@ -204,7 +204,8 @@ function nameDialog({ title, sub, value = '', action, submit, fallback }) {
  * unlockDrive, unlockDriveWithPasskey, DriveLocked, DriveDisabled), profile
  * (/api/private/me), user ({ id, role, impersonating }, from the profile),
  * revoke(shareId) }. Resolves to { state: 'open' | 'locked' | 'disabled' |
- * 'error', app?, unlocked? } (unlocked: a promise of the app once unlocked).
+ * 'impersonating' | 'error', app?, unlocked? } (unlocked: a promise of the
+ * app once unlocked).
  */
 export async function startDrive(mount, deps) {
   mount.replaceChildren(h('p.msg', { role: 'status', text: 'Opening your Drive…' }));
@@ -213,11 +214,21 @@ export async function startDrive(mount, deps) {
     client = await deps.drive.openDrive({ user: deps.user });
   } catch (e) {
     if (deps.drive.DriveDisabled && e instanceof deps.drive.DriveDisabled) { mount.replaceChildren(disabledNotice()); return { state: 'disabled' }; }
-    if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) return { state: 'locked', unlocked: unlockView(mount, deps, e) };
+    if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
+      // The owner acting as a user cannot create that user's Drive key.
+      if (e.reason === 'impersonating' || (e.reason === 'setup' && deps.user && deps.user.impersonating)) { mount.replaceChildren(impersonatingNotice()); return { state: 'impersonating' }; }
+      return { state: 'locked', unlocked: unlockView(mount, deps, e) };
+    }
     mount.replaceChildren(h('div.card.drive-notice', {}, h('p.msg.error', { role: 'alert', text: `The Drive could not be opened: ${friendlyError(e)}` })));
     return { state: 'error' };
   }
   return { state: 'open', app: mountApp(mount, client, deps) };
+}
+
+function impersonatingNotice() {
+  return h('div.card.drive-notice', { id: 'drive-impersonating' },
+    h('h2.section-title', { text: 'The Drive can only be set up by its user' }),
+    h('p.modal-sub', { text: 'This user has not set up their Drive yet, and its key can only be created by the user, when they sign in. While you act as them, their Drive stays closed.' }));
 }
 
 function disabledNotice() {
@@ -664,8 +675,10 @@ function mountApp(mount, client, deps) {
     let done = 0;
     const label = files.length === 1 ? `Uploading ${files[0].name}` : `Uploading ${files.length} files`;
     const ok = await transfer(label, async (progress, signal) => {
+      // A name already in the folder gets " (2)", " (3)"… (one read of the folder for the batch).
+      const { names: taken } = await client.names(target);
       for (const f of files) {
-        await client.upload(target, f, { signal, onProgress: (d) => progress(done + d, total) });
+        await client.upload(target, f, { signal, taken, onProgress: (d) => progress(done + d, total) });
         done += f.size;
       }
     });

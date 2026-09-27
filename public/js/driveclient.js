@@ -453,10 +453,13 @@ export class DriveClient {
 
   /**
    * Upload a File (or a Blob with `name`) into `parentId` → its id. Options:
-   * onProgress(bytesDone, total), signal (AbortSignal), name, type, mtime.
+   * onProgress(bytesDone, total), signal (AbortSignal), name, type, mtime,
+   * taken (a Set of the names already in the folder, from names(); updated
+   * here — else the folder is read). A name already taken gets " (2)"….
    */
-  async upload(parentId, file, { onProgress, signal, name, type, mtime } = {}) {
-    const fileName = checkName(name ?? file.name);
+  async upload(parentId, file, { onProgress, signal, name, type, mtime, taken } = {}) {
+    // A name already used in the folder gets " (2)", " (3)"… (the server cannot see names).
+    const fileName = uniqueName(taken ?? (await this.names(parentId)).names, checkName(name ?? file.name));
     const size = file.size;
     const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
     const mime = normalizeMime(type) || detectMime({ name: fileName, platformType: file.type, head });
@@ -508,19 +511,24 @@ export class DriveClient {
   async uploadTree(parentId, entries, { onProgress, onFile, signal } = {}) {
     const total = entries.reduce((s, e) => s + (e.dir ? 0 : e.file.size), 0);
     const folders = new Map([['', parentId]]);
-    const listed = new Map(); // folder id → Map(name → dir id)
+    const inside = new Map(); // folder id → { dirs: Map(name → id), names: Set }
+    const contentOf = async (id) => {
+      if (!inside.has(id)) inside.set(id, await this.names(id).catch(() => ({ dirs: new Map(), names: new Set() })));
+      return inside.get(id);
+    };
     const ensure = async (dirPath) => {
       if (folders.has(dirPath)) return folders.get(dirPath);
       const cut = dirPath.lastIndexOf('/');
       const parent = await ensure(cut < 0 ? '' : dirPath.slice(0, cut));
       const leaf = dirPath.slice(cut + 1);
-      if (!listed.has(parent)) {
-        const { children } = await this.list(parent).catch(() => ({ children: [] }));
-        listed.set(parent, new Map(children.filter((c) => c.kind === 'dir' && c.name !== null).map((c) => [c.name, c.id])));
+      const here = await contentOf(parent);
+      // An existing folder of that name is reused (merged into); a file of that name is not.
+      let id = here.dirs.get(leaf);
+      if (!id) {
+        id = await this.mkdir(parent, uniqueName(here.names, leaf));
+        here.dirs.set(leaf, id);
+        inside.set(id, { dirs: new Map(), names: new Set() });
       }
-      const known = listed.get(parent);
-      const id = known.get(leaf) ?? await this.mkdir(parent, leaf);
-      known.set(leaf, id);
       folders.set(dirPath, id);
       return id;
     };
@@ -535,11 +543,31 @@ export class DriveClient {
       const dir = await ensure(cut < 0 ? '' : path.slice(0, cut));
       if (onFile) onFile(path);
       const base = before;
-      ids.push(await this.upload(dir, e.file, { name: path.slice(cut + 1), signal, onProgress: onProgress && ((d) => onProgress(base + d, total)) }));
+      const { names: taken } = await contentOf(dir);
+      ids.push(await this.upload(dir, e.file, { name: path.slice(cut + 1), taken, signal, onProgress: onProgress && ((d) => onProgress(base + d, total)) }));
       before += e.file.size;
     }
     if (onProgress) onProgress(total, total);
     return ids;
+  }
+
+  /**
+   * The names in folder `id` → { names: Set (every readable name), dirs:
+   * Map(folder name → id) }, for picking names that do not clash. Unlike
+   * list(), an unreadable name is skipped, never a reason to lock.
+   */
+  async names(id) {
+    const r = await api.node(id);
+    if (!r || !Array.isArray(r.children)) throw malformed();
+    const names = new Set();
+    const dirs = new Map();
+    for (const c of r.children.filter((x) => x && x.state !== 'pending')) {
+      const d = await this.decode(c).catch(() => null);
+      if (!d || d.name === null) continue;
+      names.add(d.name);
+      if (d.kind === 'dir' && !dirs.has(d.name)) dirs.set(d.name, d.id);
+    }
+    return { names, dirs };
   }
 
   async rename(id, name) {
