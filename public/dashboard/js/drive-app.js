@@ -654,7 +654,9 @@ function mountApp(mount, client, deps) {
     check.addEventListener('change', () => { if (check.checked) selected.add(c.id); else selected.delete(c.id); updateButtons(); });
     const nameCell = c.kind === 'dir'
       ? h('button.tree-open.drive-open', { type: 'button', title: `Open ${name}`, on: { click: () => open(c.id, { focus: true }) } }, h('span.tree-icon', { 'aria-hidden': 'true' }), c.name ? nameEl(name) : h('span', { text: name }))
-      : h('span.drive-fname', {}, c.name ? nameEl(name) : h('span', { text: name }));
+      : h('span.drive-fname', {}, c.name ? nameEl(name) : h('span', { text: name }),
+        // A received file whose name was cleaned when it was taken in (or an older name with such characters).
+        c.renamed ? h('span.tree-sub.mono.renamed-note', { text: ' renamed: hidden characters removed' }) : null);
     const sharesBtn = h('button.btn.tree-btn', { type: 'button', text: 'Shares', 'aria-label': `Shares of ${name}`, on: { click: () => sharesDialog(c) } });
     return h('tr', { dataset: { id: c.id, kind: c.kind } },
       h('td.cell-check', {}, check),
@@ -1127,27 +1129,112 @@ function mountApp(mount, client, deps) {
     draw();
   }
 
-  /** Take in what reverse shares have received (re-wrapped into this Drive's own format). */
+  /**
+   * Take in what reverse shares have received (re-wrapped into this Drive's
+   * own format), then say what happened: added, renamed (hidden characters
+   * removed), placed higher up (folders nested too deeply), and the files
+   * that could not be added, with a way to review, delete or retry them.
+   */
   async function takeInReceived() {
-    let added = 0;
-    let failed = 0;
+    let r;
     try {
-      for (let round = 0; round < 20; round++) {
-        const r = await client.receivePending();
-        added += r.added;
-        failed = r.failed;
-        if (!r.more || !r.added) break;
-      }
+      r = await client.receivePending();
     } catch (e) {
       showMsg(receivedMsg, `Received files could not be added now: ${friendlyError(e)}`);
       return;
     }
-    if (added) {
-      toast(`Added ${added} received file${added === 1 ? '' : 's'}.`);
+    if (r.added) {
+      toast(`Added ${r.added} received file${r.added === 1 ? '' : 's'}.`);
       await refresh();
     }
-    if (failed) showMsg(receivedMsg, `${failed} received file${failed === 1 ? '' : 's'} could not be opened with your Drive's key and ${failed === 1 ? 'was' : 'were'} not added.`, false);
-    else if (added) showMsg(receivedMsg, `${added} new received file${added === 1 ? ' was' : 's were'} added to your folders.`, false);
+    const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+    const parts = [];
+    if (r.added) parts.push(`${n(r.added, 'new received file was', 'new received files were')} added to your folders.`);
+    if (r.renamed) parts.push(`${n(r.renamed, 'name had', 'names had')} hidden direction or spacing characters, removed.`);
+    if (r.flattened) parts.push(`${n(r.flattened, 'file was', 'files were')} in folders nested too deeply (or in too many new folders at once) and ${r.flattened === 1 ? 'was' : 'were'} put in the deepest folder allowed.`);
+    if (r.deferred) parts.push(`${n(r.deferred, 'file', 'files')} could not be added now; ${r.deferred === 1 ? 'it is' : 'they are'} tried again the next time your Drive opens.`);
+    await showReceived(parts);
+  }
+
+  /** The status line under the toolbar: `parts`, and the files that could not be added (with a Review button). */
+  async function showReceived(parts) {
+    let failed = { items: [], total: 0 };
+    try { failed = await client.failedReceived(); } catch { /* the line says what it can */ }
+    const count = Math.max(failed.items.length, failed.total || 0);
+    const nodes = parts.length ? [h('span', { text: parts.join(' ') })] : [];
+    if (count) {
+      nodes.push(h('span', { text: `${nodes.length ? ' ' : ''}${count} received file${count === 1 ? '' : 's'} could not be added. ` }),
+        h('button.linkbtn', { type: 'button', id: 'drive-received-review', text: 'Review them', on: { click: () => failedDialog() } }));
+    }
+    if (!nodes.length) { receivedMsg.hidden = true; receivedMsg.replaceChildren(); return; }
+    receivedMsg.classList.remove('error');
+    receivedMsg.replaceChildren(...nodes);
+    receivedMsg.hidden = false;
+  }
+
+  const FAIL_TEXT = {
+    unreadable: 'does not open with this Drive’s key (damaged, or not sent for this link)',
+    name: 'its name or folder path cannot be used',
+    place: 'your Drive refused it (full, or its folder is full)',
+  };
+
+  /** The received files that could not be added: link, size, time, why; delete or try again. */
+  async function failedDialog() {
+    const status = h('p.msg', { role: 'status', text: 'Loading…' });
+    const d = openDialog({
+      title: 'Received files that could not be added',
+      sub: 'These uploads reached your Drive but could not be opened or placed. Their names are encrypted, so only the link, size and time are shown. Delete them to free the space, or try again (for example after making room).',
+      body: [status], wide: true, fallback: focusPane,
+    });
+    d.setActions(btn('Close', () => d.close(), 'modal-btn'));
+    let items = [];
+    let more = false;
+    let next = null;
+    const load = async () => {
+      const r = await client.failedReceived(next);
+      items = items.concat(r.items);
+      more = r.more;
+      next = r.next;
+    };
+    try { await load(); } catch (e) { status.textContent = ''; d.error(friendlyError(e)); return; }
+    const done = async (msgText) => { toast(msgText); await showReceived([]); };
+    const draw = () => {
+      if (!items.length) { d.setBody(h('p.msg', { id: 'drive-failed-none', text: 'Nothing left to review.' })); return; }
+      const tb = h('tbody');
+      for (const it of items) {
+        const del = h('button.btn.danger.tree-btn', { type: 'button', text: 'Delete', 'aria-label': `Delete the ${formatBytes(it.size)} file received ${formatDate(it.created)}` });
+        armConfirm(del, 'Delete now', async () => {
+          del.disabled = true;
+          try { await client.remove(it.id); items = items.filter((x) => x !== it); draw(); d.box.focus(); await done('Received file deleted.'); refreshUsage(); } catch (e) { del.disabled = false; d.error(friendlyError(e)); }
+        });
+        const again = h('button.btn.tree-btn', { type: 'button', text: 'Try again', 'aria-label': `Try again the ${formatBytes(it.size)} file received ${formatDate(it.created)}` });
+        again.addEventListener('click', async () => {
+          again.disabled = true;
+          try {
+            await client.retryReceived(it.id);
+            items = items.filter((x) => x !== it);
+            draw();
+            d.box.focus();
+            await takeInReceived();
+          } catch (e) { again.disabled = false; d.error(friendlyError(e)); }
+        });
+        tb.appendChild(h('tr', { dataset: { id: it.id } },
+          h('td', { dataset: { label: 'Link' }, text: it.label || '(no label)' }),
+          h('td.mono', { dataset: { label: 'Size' }, text: formatBytes(Number(it.size) || 0) }),
+          h('td.mono', { dataset: { label: 'Received' }, text: formatDate(it.created) }),
+          h('td', { dataset: { label: 'Why' }, text: FAIL_TEXT[it.reason] || FAIL_TEXT.unreadable }),
+          h('td.cell-actions', {}, h('div.btn-row', {}, again, del))));
+      }
+      const rows = [h('div.table-wrap', {}, h('table.table', { id: 'drive-failed-table' },
+        h('caption.sr-only', { text: 'Received files that could not be added' }),
+        h('thead', {}, h('tr', {}, ...['Link', 'Size', 'Received', 'Why'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
+        tb))];
+      if (more) {
+        rows.push(h('button.btn', { type: 'button', id: 'drive-failed-more', text: 'Show more', on: { click: async (e) => { e.currentTarget.disabled = true; try { await load(); draw(); } catch (err) { d.error(friendlyError(err)); } } } }));
+      }
+      d.setBody(...rows);
+    };
+    draw();
   }
 
   // ── an item's shares ───────────────────────────────────────────────────

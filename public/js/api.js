@@ -191,8 +191,12 @@ export const drive = {
   // Reverse shares (docs/REVERSE.md §6.1) and the files they received.
   createReverse: (body) => request(`${D}/reverse`, { method: 'POST', headers: INTENT, body }),
   reverse: (folder) => request(`${D}/reverse${folder ? `?folder=${enc(folder)}` : ''}`),
-  received: () => request(`${D}/received`),
+  received: (after = null) => request(`${D}/received${after ? `?after=${enc(after)}` : ''}`),
   acceptReceived: (id, body) => request(`${D}/received/${enc(id)}`, { method: 'POST', headers: INTENT, body }),
+  // Received files the browser could not take in: recorded (they leave the queue), listed, put back.
+  receivedFailed: (id, reason) => request(`${D}/received/${enc(id)}/failed`, { method: 'POST', headers: INTENT, body: { reason } }),
+  receivedFailedList: (after = null) => request(`${D}/received?failed=1${after ? `&after=${enc(after)}` : ''}`),
+  receivedRetry: (id) => request(`${D}/received/${enc(id)}/failed`, { method: 'DELETE', headers: INTENT }),
   // The owner acting as this user: their escrow wrap and the owner's sealed escrow key (admin audit).
   impersonationEscrow: () => request(`${D}/escrow`, { method: 'POST', headers: INTENT, body: {} }),
   // The owner, for a user: open their escrow wrap (admin audit) / write their `pw` wrap after a reset.

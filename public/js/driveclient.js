@@ -61,6 +61,16 @@ export const ROOT = 'root';
 const ROOT_NAME = 'Drive';
 const MAX_NAME_BYTES = 255;
 const MAX_DEPTH = 64;
+/**
+ * Folder levels a received file's path may create below its link's folder
+ * (never past MAX_DEPTH in all): deeper folders are flattened — the file goes
+ * into the deepest folder allowed. And new folders one take-in may create:
+ * past that, files go into the deepest of their folders that exists.
+ */
+export const RECEIVED_MAX_DEPTH = 8;
+export const RECEIVED_MAX_NEW_FOLDERS = 200;
+/** Pages of received files one take-in reads at most (500 each). */
+const RECEIVED_MAX_PAGES = 40;
 const newId = () => b64urlFromBytes(randomBytes(16));
 const malformed = () => new ApiError('Malformed response from the server.', 502, 'malformed');
 
@@ -563,6 +573,7 @@ export class DriveClient {
         type = normalizeMime(m.type) || OCTET;
         mtime = Number.isSafeInteger(m.mtime) && m.mtime >= 0 ? m.mtime : 0;
         ok = Number.isSafeInteger(m.size) && m.size === base.size && base.chunks === refChunks(base.size);
+        if (m.renamed === true) renamed = true; // a received file whose name was cleaned when it was taken in
       } catch { /* missing or unreadable metadata */ }
       if (!ok) name = null;
     }
@@ -940,23 +951,33 @@ export class DriveClient {
    * Take in the files reverse shares have received: open each with its
    * share's private key, create (or reuse, by name) the upload's folders in
    * the target folder, and re-wrap its name, metadata and key into the normal
-   * Drive format (the content is not touched) → { added, failed, more }.
-   * Items that do not open are left as they are (counted in `failed`).
+   * Drive format (the content is not touched) → { added, failed, renamed,
+   * flattened, deferred, more }.
+   * - Names are cleaned (files.js cleanName: direction overrides and
+   *   invisible separators removed, NFC); a file whose name changed is marked
+   *   `renamed` in its metadata, which the Drive shows.
+   * - At most RECEIVED_MAX_DEPTH folder levels (and MAX_DEPTH in all) are
+   *   created for a path, and RECEIVED_MAX_NEW_FOLDERS folders per take-in:
+   *   past either, the file lands in the deepest folder allowed (`flattened`).
+   * - An item that cannot be taken in (it does not open, its name is not
+   *   usable, the Drive refuses its place) is recorded as failed on the
+   *   server: it leaves the queue (the Drive lists it to delete or try again),
+   *   so it never holds up the items behind it. A network or server error
+   *   leaves it for the next time (`deferred`). The queue is read page by
+   *   page (`next`), so failures never hide later items.
    */
   async receivePending({ onItem } = {}) {
-    const r = await api.received();
-    const items = Array.isArray(r.items) ? r.items : [];
-    const keys = new Map();
-    for (const k of Array.isArray(r.keys) ? r.keys : []) {
-      try { keys.set(k.id, (await openReversePriv(this.dk, k.id, k.priv)).privateKey); } catch { /* sealed under another key */ }
-    }
+    const keys = new Map(); // share id → private key, or null (does not open with this Drive's key)
     // As uploadTree: an existing folder of a name is reused, a clashing file name gets " (2)"….
     const folders = new Map(); // `${parent}\n${path}` → id
     const inside = new Map(); // folder id → { dirs: Map(name → id), names: Set }
+    const depthOf = new Map(); // a link's folder → its depth in the tree
+    let newFolders = 0;
     const contentOf = async (id) => {
       if (!inside.has(id)) inside.set(id, await this.names(id).catch(() => ({ dirs: new Map(), names: new Set() })));
       return inside.get(id);
     };
+    // The folder for `dirPath` under `parent`, made where needed while the budget lasts; else the deepest one there is.
     const ensure = async (parent, dirPath) => {
       if (!dirPath) return parent;
       const key = `${parent}\n${dirPath}`;
@@ -967,6 +988,8 @@ export class DriveClient {
       const here = await contentOf(up);
       let id = here.dirs.get(leaf);
       if (!id) {
+        if (newFolders >= RECEIVED_MAX_NEW_FOLDERS) return up;
+        newFolders++;
         id = await this.mkdir(up, uniqueName(here.names, leaf));
         here.dirs.set(leaf, id);
         inside.set(id, { dirs: new Map(), names: new Set() });
@@ -974,36 +997,98 @@ export class DriveClient {
       folders.set(key, id);
       return id;
     };
-    let added = 0;
-    let failed = 0;
-    for (const it of items) {
-      const priv = keys.get(it.rs);
-      try {
-        if (!priv) throw new Error('no key');
-        const got = await openUpload(priv, it.rs, it);
-        // The uploader's sealed size must be the server's (the chunks follow from it): else it fails closed.
-        if (got.size !== it.size) throw new Error('size mismatch');
-        const path = checkPath(got.path);
-        path.split('/').forEach(checkName);
-        const cut = path.lastIndexOf('/');
-        const parent = await ensure(it.parent, cut < 0 ? '' : path.slice(0, cut));
-        const type = normalizeMime(got.type) || OCTET;
-        const { names: taken } = await contentOf(parent);
-        const leaf = uniqueName(taken, path.slice(cut + 1));
-        await api.acceptReceived(it.id, {
-          parent,
-          name: await sealField(this.keys.names, 'name', it.id, leaf),
-          // The server's size is the one the chunks have: the metadata says the same.
-          meta: await sealField(this.keys.names, 'meta', it.id, JSON.stringify({ type, mtime: got.mtime, size: it.size })),
-          fk: await sealField(this.keys.files, 'fk', it.id, got.fk),
-        });
-        added++;
-        if (onItem) onItem({ id: it.id, path, name: leaf, parent });
-      } catch {
-        failed++;
+    const levelsUnder = async (parent) => {
+      if (!depthOf.has(parent)) {
+        let d;
+        try { const r = await api.node(parent); d = Array.isArray(r.path) ? r.path.filter((x) => x && x.id !== parent).length : 0; } catch { d = MAX_DEPTH; }
+        depthOf.set(parent, d);
       }
+      return Math.max(0, Math.min(RECEIVED_MAX_DEPTH, MAX_DEPTH - depthOf.get(parent)));
+    };
+    const failure = (reason) => Object.assign(new Error(reason), { receivedReason: reason });
+    const out = { added: 0, failed: 0, renamed: 0, flattened: 0, deferred: 0, more: false };
+    let after = null;
+    for (let page = 0; page < RECEIVED_MAX_PAGES; page++) {
+      const r = await api.received(after);
+      const items = Array.isArray(r.items) ? r.items : [];
+      for (const k of Array.isArray(r.keys) ? r.keys : []) {
+        if (keys.has(k.id)) continue;
+        try { keys.set(k.id, (await openReversePriv(this.dk, k.id, k.priv)).privateKey); } catch { keys.set(k.id, null); /* sealed under another key */ }
+      }
+      for (const it of items) {
+        try {
+          const priv = keys.get(it.rs);
+          if (!priv) throw failure('unreadable');
+          let got;
+          try { got = await openUpload(priv, it.rs, it); } catch { throw failure('unreadable'); }
+          // The uploader's sealed size must be the server's (the chunks follow from it): else it fails closed.
+          if (got.size !== it.size) throw failure('unreadable');
+          let path;
+          try {
+            path = checkPath(cleanName(got.path));
+            path.split('/').forEach(checkName);
+          } catch { throw failure('name'); }
+          const renamed = path !== got.path;
+          const segs = path.split('/');
+          const leafName = segs.pop();
+          const allowed = await levelsUnder(it.parent);
+          const want = segs.slice(0, allowed).join('/');
+          let parent;
+          try { parent = await ensure(it.parent, want); } catch (e) { throw e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 ? failure('place') : e; }
+          // Deeper than allowed, or out of new folders: in the deepest folder there is.
+          const flattened = segs.length > allowed || (want !== '' && folders.get(`${it.parent}\n${want}`) !== parent);
+          const type = normalizeMime(got.type) || OCTET;
+          const { names: taken } = await contentOf(parent);
+          const leaf = uniqueName(taken, leafName);
+          const meta = { type, mtime: got.mtime, size: it.size, ...(renamed ? { renamed: true } : {}) };
+          try {
+            await api.acceptReceived(it.id, {
+              parent,
+              name: await sealField(this.keys.names, 'name', it.id, leaf),
+              // The server's size is the one the chunks have: the metadata says the same.
+              meta: await sealField(this.keys.names, 'meta', it.id, JSON.stringify(meta)),
+              fk: await sealField(this.keys.files, 'fk', it.id, got.fk),
+            });
+          } catch (e) {
+            taken.delete(leaf);
+            throw e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 ? failure('place') : e;
+          }
+          out.added++;
+          if (renamed) out.renamed++;
+          if (flattened) out.flattened++;
+          if (onItem) onItem({ id: it.id, path, name: leaf, parent, renamed, flattened });
+        } catch (e) {
+          if (!e || !e.receivedReason) {
+            if (e instanceof ApiError && (e.status === 401 || e.status === 403)) throw e; // signed out, or no Drive: stop
+            out.deferred++; // a network or server error: next time
+            continue;
+          }
+          out.failed++;
+          await api.receivedFailed(it.id, e.receivedReason).catch(() => {});
+        }
+      }
+      out.more = !!r.more;
+      after = typeof r.next === 'string' ? r.next : null;
+      if (!out.more || !after) break;
     }
-    return { added, failed, more: !!r.more };
+    return out;
+  }
+
+  /**
+   * Received files that could not be taken in → { items: [{ id, rs, label,
+   * size, created, failed, reason }], more, next, total } (`total`, the count
+   * of all of them, on the first page only).
+   */
+  async failedReceived(after = null) {
+    const [r, st] = await Promise.all([api.receivedFailedList(after), after ? null : api.state()]);
+    const items = Array.isArray(r.items) ? r.items : [];
+    const total = st && Number.isSafeInteger(st.receivedFailed) ? st.receivedFailed : items.length;
+    return { items, more: !!r.more, next: typeof r.next === 'string' ? r.next : null, ...(after ? {} : { total }) };
+  }
+
+  /** Put a failed received file back in the queue (the next take-in tries it again). */
+  async retryReceived(id) {
+    await api.receivedRetry(id);
   }
 }
 

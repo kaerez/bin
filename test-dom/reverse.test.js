@@ -18,6 +18,7 @@ import {
 import { createDriveKey, saveSessionKey, clearSessionKey, saveImpersonationKey, clearImpersonationKey, wrapRecovery, recoveryRef, deriveSubkeys, openField } from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
 import { utf8, fromUtf8, bytesFromB64url } from '../public/js/bytes.js';
+import { formatDate } from '../public/js/common.js';
 import { CHUNK, TAG } from '../public/js/files.js';
 import { fakeServer, seedTree, seedReceived } from './drive-fake-server.js';
 
@@ -73,6 +74,7 @@ async function reverseServer({ password = null, note = null, limits = {}, turnst
       if (m[2] === 'begin') {
         S.begins.push(h);
         if (gate && !h['x-key-proof']) return fail(401, 'password_required');
+        if (S.lockedUntil) return fail(429, 'password_locked', { until: S.lockedUntil });
         if (gate && await sha(h['x-key-proof']) !== gate.ph) return fail(403, 'bad_password');
         return ok({ grant: 'G'.repeat(43), expires: 2000000000 });
       }
@@ -215,6 +217,19 @@ describe('the uploader page', () => {
     await until(() => !$('#reverse-done').hidden);
     expect(S.files.size).toBe(1);
     expect(pw.value).toBe('');
+  });
+
+  it('a link whose password is locked (too many wrong ones) says when to try again', async () => {
+    const S = await reverseServer({ password: 'letmein' });
+    S.lockedUntil = 2000000000;
+    await mountUploader(page(), { location: S.location });
+    pick($('#reverse-file-input'), [fileOf('a.txt', 'alpha')]);
+    await until(() => !$('#reverse-send').disabled);
+    $('#reverse-password').value = 'letmein';
+    $('#reverse-send').click();
+    await until(() => /Too many wrong passwords/.test($('#reverse-msg').textContent));
+    expect($('#reverse-msg').textContent).toContain(formatDate(2000000000));
+    expect(S.files.size).toBe(0);
   });
 
   it('refuses files over the link\'s limits before sending anything', async () => {
@@ -412,12 +427,13 @@ describe('Drive: received files', () => {
     await r.app.ready;
     await r.app.received;
     expect(S.accepted).toHaveLength(3);
-    expect($('#drive-received').textContent).toMatch(/1 received file could not be opened/);
+    expect($('#drive-received').textContent).toMatch(/1 received file could not be added/);
     // The re-wrapped fields are the Drive's own: sealed with DK's keys, bound to the node.
     const keys = await deriveSubkeys(dk);
-    const b = S.accepted.find((x) => x.body.parent === ids.get('Documents')).body;
-    const id = S.accepted.find((x) => x.body.parent === ids.get('Documents')).id;
-    expect(fromUtf8(await openField(keys.names, 'name', id, b.name))).toBe('b.txt');
+    const inDocs = S.accepted.filter((x) => x.body.parent === ids.get('Documents'));
+    const leaves = await Promise.all(inDocs.map(async (x) => fromUtf8(await openField(keys.names, 'name', x.id, x.body.name))));
+    expect([...leaves].sort()).toEqual(['b.txt', 'notes (2).md']);
+    const { id, body: b } = inDocs[leaves.indexOf('b.txt')];
     expect(JSON.parse(fromUtf8(await openField(keys.names, 'meta', id, b.meta)))).toMatchObject({ type: 'text/plain', size: 5 });
     expect((await openField(keys.files, 'fk', id, b.fk)).length).toBe(32);
     // The folder shows them like any file; the path's folders exist.
@@ -443,4 +459,137 @@ describe('Drive: received files', () => {
     expect(r.state).toBe('locked');
     expect($('#drive-received-waiting').textContent).toBe('2 new received files: unlock your Drive to add them to your folders.');
   });
+});
+
+// ── security audit round 3 (M-1, L-5): the take-in ─────────────────────────
+describe('audit round 3: taking received files in', () => {
+  const dirs = () => [...S.nodes.values()].filter((n) => n.kind === 'dir' && !n.rs).length;
+  const keysOf = async () => deriveSubkeys(dk);
+  const openName = async (id) => fromUtf8(await openField((await keysOf()).names, 'name', id, S.nodes.get(id).name));
+  const openMeta = async (id) => JSON.parse(fromUtf8(await openField((await keysOf()).names, 'meta', id, S.nodes.get(id).meta)));
+
+  it(`L-5: a received path creates at most ${drive.RECEIVED_MAX_DEPTH} folder levels; deeper files land in the deepest one`, async () => {
+    await server();
+    const rs = await existingReverse(ids.get('Documents'));
+    const before = dirs();
+    const deep = Array.from({ length: 60 }, (_, i) => `d${i}`).join('/');
+    const id = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: `${deep}/x.txt`, bytes: utf8('x') });
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    await r.app.received;
+    expect(dirs() - before).toBe(drive.RECEIVED_MAX_DEPTH);
+    expect(await openName(id)).toBe('x.txt');
+    expect(await openName(S.nodes.get(id).parent)).toBe(`d${drive.RECEIVED_MAX_DEPTH - 1}`);
+    expect($('#drive-received').textContent).toMatch(/1 file was in folders nested too deeply/);
+  });
+
+  it('L-5: never past the Drive\'s 64 levels in all; and at most a set number of new folders per take-in', async () => {
+    await server();
+    // A link on a folder 62 levels down: only 2 more levels fit.
+    let chain = {};
+    const top = chain;
+    for (let i = 0; i < 61; i++) { chain[`c${i}`] = {}; chain = chain[`c${i}`]; }
+    const deepIds = await seedTree(S, dk, { deep: top });
+    const leafPath = ['deep', ...Array.from({ length: 61 }, (_, i) => `c${i}`)].join('/');
+    const target = deepIds.get(leafPath);
+    const rs = await existingReverse(target);
+    const a = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: target, path: 'p/q/r/s/a.txt', bytes: utf8('a') });
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    await r.app.received;
+    expect(await openName(S.nodes.get(a).parent)).toBe('q');
+    expect(await openName(S.nodes.get(S.nodes.get(a).parent).parent)).toBe('p');
+    // Many new folders at once: the budget, then the link's folder itself.
+    await server();
+    const rs2 = await existingReverse(ids.get('Documents'));
+    const n = drive.RECEIVED_MAX_NEW_FOLDERS + 5;
+    const got = [];
+    for (let i = 0; i < n; i++) got.push(await seedReceived(S, { rid: rs2.id, pub: rs2.pub, folder: ids.get('Documents'), path: `f${i}/x.txt`, bytes: utf8('x') }));
+    const before = dirs();
+    const r2 = await startDrive(mountPoint(), deps());
+    await r2.app.ready;
+    await r2.app.received;
+    expect(dirs() - before).toBe(drive.RECEIVED_MAX_NEW_FOLDERS);
+    expect(got.filter((x) => S.nodes.get(x).parent === ids.get('Documents'))).toHaveLength(5);
+    expect(got.every((x) => !S.nodes.get(x).rs)).toBe(true);
+  }, 60000);
+
+  it('L-5: names in every script stay as they are; direction overrides are removed (and the file marked renamed); names are shown isolated', async () => {
+    await server();
+    const rs = await existingReverse(ids.get('Documents'));
+    const keep = ['דוח שנתי 2026.pdf', 'שָׁלוֹם.txt', 'report-דוח.docx', 'تقرير.pdf', 'می‌خواهم.txt', '👨‍👩‍👧 family.jpg'];
+    const kept = [];
+    for (const name of keep) kept.push([name, await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: name, bytes: utf8(name) })]);
+    const hebrewPath = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'מסמכים/דוחות 2026/סיכום.pdf', bytes: utf8('pdf') });
+    const spoof = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'invoice\u202efdp.exe', bytes: utf8('MZ'), type: 'application/pdf' });
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    await r.app.received;
+    for (const [name, id] of kept) {
+      expect(await openName(id)).toBe(name);
+      expect((await openMeta(id)).renamed).toBeUndefined();
+    }
+    expect(await openName(hebrewPath)).toBe('סיכום.pdf');
+    const sub = S.nodes.get(hebrewPath).parent;
+    expect(await openName(sub)).toBe('דוחות 2026');
+    expect(await openName(S.nodes.get(sub).parent)).toBe('מסמכים');
+    expect(await openName(spoof)).toBe('invoicefdp.exe');
+    expect(await openMeta(spoof)).toMatchObject({ renamed: true, type: 'application/pdf' });
+    expect($('#drive-received').textContent).toMatch(/1 name had hidden direction or spacing characters, removed/);
+    // The folder shows each name in an isolate, the extension as its own left-to-right one; the renamed file says so.
+    await r.app.open(ids.get('Documents'));
+    const rowOf = (text) => [...document.querySelectorAll('#drive-rows tr')].find((tr) => tr.querySelector('.fname')?.textContent === text);
+    const inv = rowOf('invoicefdp.exe');
+    expect(inv.querySelector('.fname').getAttribute('dir')).toBe('auto');
+    expect(inv.querySelector('.fext')).toMatchObject({ textContent: '.exe' });
+    expect(inv.querySelector('.fext').getAttribute('dir')).toBe('ltr');
+    expect(inv.querySelector('.renamed-note').textContent).toMatch(/renamed/);
+    const heb = rowOf('דוח שנתי 2026.pdf');
+    expect(heb.querySelector('.fstem').textContent).toBe('דוח שנתי 2026');
+    expect(heb.querySelector('.fext').textContent).toBe('.pdf');
+    expect(heb.querySelector('.renamed-note')).toBeNull();
+  }, 60000);
+
+  it('M-1: items that cannot be taken in leave the queue (recorded on the server), never hide later ones, and can be reviewed, retried or deleted', async () => {
+    await server();
+    S.receivedPage = 2;
+    const rs = await existingReverse(ids.get('Documents'));
+    rs.label = 'Contracts';
+    S.reverse.find((x) => x.id === rs.id).label = 'Contracts';
+    const bad = [];
+    for (let i = 0; i < 3; i++) {
+      const id = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: `bad${i}.txt`, bytes: utf8('x'), bad: true });
+      S.nodes.get(id).created = 1690000000 + i; // the oldest: first in the queue
+      bad.push(id);
+    }
+    const good = [];
+    for (let i = 0; i < 3; i++) good.push(await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: `good${i}.txt`, bytes: utf8('ok') }));
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    await r.app.received;
+    expect(good.every((id) => !S.nodes.get(id).rs)).toBe(true);
+    for (const id of bad) expect(S.nodes.get(id)).toMatchObject({ rs: rs.id, rfail: expect.any(Number), rwhy: 'unreadable' });
+    const marks = S.requests.filter((q) => q.method === 'POST' && /\/received\/[^/]+\/failed$/.test(q.path));
+    expect(marks).toHaveLength(3);
+    expect($('#drive-received').textContent).toMatch(/3 new received files were added.*3 received files could not be added/);
+    // Review: link, size, time, why; try one again, delete another.
+    $('#drive-received-review').click();
+    await until(() => $('#drive-failed-table'));
+    const rows = () => [...document.querySelectorAll('#drive-failed-table tbody tr')];
+    expect(rows()).toHaveLength(2); // one page of 2…
+    expect(rows()[0].children[0].textContent).toBe('Contracts');
+    expect(rows()[0].children[3].textContent).toMatch(/does not open/);
+    $('#drive-failed-more').click(); // …and the next
+    await until(() => rows().length === 3);
+    const first = rows()[0];
+    button(first, 'Try again').click();
+    await until(() => S.requests.some((q) => q.method === 'DELETE' && q.path.endsWith(`/received/${bad[0]}/failed`)));
+    // Tried again at once: it still does not open, so it is recorded again.
+    await until(() => S.requests.filter((q) => q.method === 'POST' && q.path.endsWith(`/received/${bad[0]}/failed`)).length === 2);
+    const second = rows().find((tr) => tr.dataset.id === bad[1]);
+    button(second, 'Delete').click();
+    button(second, 'Delete now').click();
+    await until(() => !S.nodes.has(bad[1]));
+    await until(() => !rows().some((tr) => tr.dataset.id === bad[1]));
+  }, 60000);
 });

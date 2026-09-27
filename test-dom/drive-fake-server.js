@@ -33,6 +33,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     userWraps: null, // the "other user" for the escrow route
     adminKeys: [],
     reverse: [], // reverse shares: the create bodies plus { status, files, bytes, created, expires }
+    receivedPage: 500, // received files per page (as the server)
     pwStale: false,
     escrowPin: null,
     handoffKey: null,
@@ -62,10 +63,10 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: S.impersonatedBy });
     if (p === '/api/private/drive' && method === 'GET') {
       if (!S.enabled) return ok({ enabled: false });
-      const received = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready').length;
+      const received = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !n.rfail).length;
       const wraps = [...S.wraps.values()].map((w) => (S.impersonatedBy && w.kind === 'escrow' ? { ...w, data: null } : w));
       return ok({
-        enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps, escrowPub: S.escrowPub, escrowPin: S.escrowPin, pwStale: S.pwStale, received,
+        enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps, escrowPub: S.escrowPub, escrowPin: S.escrowPin, pwStale: S.pwStale, received, receivedFailed: [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && n.rfail).length,
         ...(S.handoffKey && !S.impersonatedBy ? { handoffKey: S.handoffKey } : {}),
         ...(role === 'owner' ? { escrowPriv: S.escrowPriv } : {}),
       });
@@ -139,15 +140,34 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       return ok({ reverse: rows });
     }
     if (p === '/api/private/drive/received' && method === 'GET') {
-      const items = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready').map((n) => ({ id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created }));
+      // As the server: oldest first, pages of S.receivedPage with a cursor; `failed=1` lists the failed ones.
+      const failed = u.searchParams.get('failed') === '1';
+      const after = u.searchParams.get('after');
+      const all = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !!n.rfail === failed)
+        .sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : 1));
+      const from = after ? all.findIndex((n) => `${n.created}.${n.id}` === after) + 1 : 0;
+      const page = all.slice(from, from + S.receivedPage);
+      const more = from + page.length < all.length;
+      const next = more ? `${page[page.length - 1].created}.${page[page.length - 1].id}` : null;
+      if (failed) {
+        return ok({ items: page.map((n) => ({ id: n.id, rs: n.rs, label: S.reverse.find((r) => r.id === n.rs)?.label || '', size: n.size, created: n.created, failed: n.rfail, reason: n.rwhy })), more, next });
+      }
+      const items = page.map((n) => ({ id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created }));
       const keys = [...new Set(items.map((i) => i.rs))].map((id) => S.reverse.find((r) => r.id === id)).filter(Boolean).map((r) => ({ id: r.id, priv: r.priv }));
-      return ok({ items, keys, more: false });
+      return ok({ items, keys, more, next });
+    }
+    if ((m = p.match(/^\/api\/private\/drive\/received\/([^/]+)\/failed$/))) {
+      const n = S.nodes.get(m[1]);
+      if (!n || !n.rs) return fail(409, 'not_received');
+      if (method === 'POST') Object.assign(n, { rfail: 1700000500, rwhy: body.reason });
+      else Object.assign(n, { rfail: null, rwhy: null });
+      return ok({ ok: true });
     }
     if ((m = p.match(/^\/api\/private\/drive\/received\/([^/]+)$/)) && method === 'POST') {
       const n = S.nodes.get(m[1]);
       if (!n || !n.rs) return fail(409, 'not_received');
       if (!S.nodes.has(body.parent) || S.nodes.get(body.parent).kind !== 'dir') return fail(404, 'not_found');
-      Object.assign(n, { parent: body.parent, name: body.name, meta: body.meta, fk: body.fk, rs: null });
+      Object.assign(n, { parent: body.parent, name: body.name, meta: body.meta, fk: body.fk, rs: null, rfail: null });
       S.accepted = (S.accepted || []).concat([{ id: n.id, body }]);
       return ok({ ok: true });
     }

@@ -8,7 +8,7 @@
 // encrypted in this browser (public/js/reverseclient.js); the server stores
 // only ciphertext. DOM through h() only (strict CSP + Trusted Types).
 
-import { h, clear, showMsg, formatBytes, formatDate, friendlyError } from './common.js';
+import { h, clear, showMsg, formatBytes, formatDate, friendlyError, nameEl } from './common.js';
 import { ApiError } from './api.js';
 import { progressBar } from './progress.js';
 import { walkEntry } from './walk.js';
@@ -106,7 +106,7 @@ function buildApp(root, up, humanCheck) {
   const check = humanCheck(human, 'reverse-upload', { gate: [send] });
 
   const render = () => {
-    clear(list).append(...entries.slice(0, 200).map((e) => h('li.mono', { text: `${e.path} — ${formatBytes(e.file.size)}` })),
+    clear(list).append(...entries.slice(0, 200).map((e) => h('li.mono', {}, nameEl(e.path), ` — ${formatBytes(e.file.size)}`)),
       ...(entries.length > 200 ? [h('li.mono', { text: `… and ${entries.length - 200} more` })] : []));
     const bytes = entries.reduce((n, e) => n + e.file.size, 0);
     total.textContent = entries.length ? `${entries.length} file${entries.length === 1 ? '' : 's'}, ${formatBytes(bytes)}` : '';
@@ -178,6 +178,9 @@ function buildApp(root, up, humanCheck) {
       else if (e instanceof ApiError && e.code === 'bad_password') {
         showMsg(msg, 'That password is not right. Check it and try again.');
         if (pw) { pw.setAttribute('aria-invalid', 'true'); pw.setAttribute('aria-describedby', 'reverse-password-hint reverse-msg'); pw.focus(); pw.select?.(); }
+      } else if (e instanceof ApiError && e.code === 'password_locked') {
+        const until = Number.isSafeInteger(e.extra.until) ? ` after ${formatDate(e.extra.until)}` : ' later';
+        showMsg(msg, `Too many wrong passwords were tried for this link. Try again${until}.`);
       } else if (e instanceof ApiError && e.status === 410) showMsg(msg, 'This link no longer accepts files: it has expired or was revoked.');
       else showMsg(msg, friendlyError(e));
     } finally {
