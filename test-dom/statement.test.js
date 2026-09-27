@@ -32,6 +32,10 @@ describe('model', () => {
     expect(JSON.stringify(p)).not.toMatch(/[֐-׿]/); // no Hebrew by default
     expect(p.statements[0].done).toHaveLength(8);
     expect(p.statements[0].limits).toHaveLength(4);
+    // Says what was tested, and claims no screen-reader testing that was not done.
+    expect(JSON.stringify(p)).not.toMatch(/every combination of screen reader/i);
+    expect(p.statements[0].reviewNote.join(' ')).toMatch(/accessibility tree/);
+    expect(p.statements[0].reviewNote.join(' ')).toMatch(/No screen reader was used/);
     expect(A11Y_DEFAULTS['a11y.alt.lang']).toBe('');
     expect({ contact: p.contact, coordinator: p.coordinator }).toEqual({ contact: '', coordinator: '' });
   });

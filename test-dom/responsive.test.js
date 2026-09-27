@@ -75,7 +75,13 @@ const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) 
 
 /** Every body cell under a titled column carries that title as data-label; untitled (action) columns carry none. */
 function expectLabelled(table) {
-  const heads = [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim());
+  // An actions column has no visible title, only a name for screen readers
+  // (.sr-only): it counts as untitled here, but it must have that name.
+  const heads = [...table.querySelectorAll('thead th')].map((th) => {
+    expect(th.textContent.trim(), 'every column header has a name').not.toBe('');
+    const sr = th.querySelector('.sr-only');
+    return sr && th.textContent.trim() === sr.textContent.trim() ? '' : th.textContent.trim();
+  });
   const rows = [...table.querySelectorAll('tbody tr')].filter((tr) => !tr.classList.contains('extend-row'));
   expect(rows.length, 'table has rows').toBeGreaterThan(0);
   for (const tr of rows) {

@@ -8,7 +8,7 @@ import { changePassword, listKeys, createKey, updateKey, revokeKey, myActivity, 
 import { passkeysSupported, createPasskey } from '../../js/passkeys.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
-import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
+import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
 import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { humanCheck } from '../../js/turnstile.js';
@@ -61,7 +61,8 @@ function wireUsername() {
     const msg = $('#name-msg');
     const btn = $('#name-btn');
     const name = $('#name-new').value.trim();
-    if (!name) return showMsg(msg, 'Enter the new username.');
+    markInvalid($('#name-new'), msg, false);
+    if (!name) { showMsg(msg, 'Enter the new username.'); markInvalid($('#name-new'), msg); $('#name-new').focus(); return; }
     btn.disabled = true;
     try {
       const r = await changeUsername(name, await confirmStep($('#name-current')));
@@ -70,8 +71,10 @@ function wireUsername() {
       showMsg(msg, `Your username is now ${r.username}. Use it the next time you sign in.`, false);
       toast('Username changed.');
     } catch (err) {
-      const text = err instanceof ApiError && err.code === 'username_taken' ? 'That username is taken.' : refusal(err);
+      const taken = err instanceof ApiError && err.code === 'username_taken';
+      const text = taken ? 'That username is taken.' : refusal(err);
       showMsg(msg, text);
+      if (taken) markInvalid($('#name-new'), msg);
       toast(text, { error: true });
     } finally {
       btn.disabled = false;
@@ -124,7 +127,14 @@ function wirePassword() {
     const msg = $('#pw-msg');
     const btn = $('#pw-btn');
     const bad = policy ? checkNewPassword($('#pw-new').value, $('#pw-new2').value, policy) : checkOwnerPassword($('#pw-new').value, $('#pw-new2').value);
-    if (bad) return showMsg(msg, bad);
+    markInvalid($('#pw-new'), msg, false);
+    markInvalid($('#pw-new2'), msg, false);
+    if (bad) {
+      // Tie the message to the field it is about (the repeat field for a mismatch).
+      const field = /match/i.test(bad) ? $('#pw-new2') : $('#pw-new');
+      showMsg(msg, bad); markInvalid(field, msg); field.focus();
+      return;
+    }
     btn.disabled = true;
     btn.textContent = 'Changing…';
     try {
