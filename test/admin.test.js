@@ -5,7 +5,7 @@
 // DISABLE_BFP kill switches).
 import { env } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
-import { ORIGIN, owner, login, makeUser, fetchJson, cookieOf, salt16, proofFor, intent, freshIp, createNote, openNote } from './helpers.js';
+import { ORIGIN, owner, login, makeUser, fetchJson, cookieOf, salt16, proofFor, USER_PW, intent, freshIp, createNote, openNote } from './helpers.js';
 import worker from '../src/index.js';
 import { parseIp, parseCidr, cidrContains, trackingKey, normalizeRule } from '../src/lib/ip.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
@@ -57,7 +57,7 @@ describe('impersonation', () => {
     expect(me.user.username).toBe('carol');
     expect(me.impersonatedBy).toBe('owner');
     expect((await fetchJson('/api/private/admin/users', { cookie: ic })).status).toBe(403);
-    expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: ic, body: { name: 'x' } })).status).toBe(403);
+    expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: ic, body: { current: proofFor(USER_PW), name: 'x' } })).status).toBe(403);
     const n = await createNote(ic, { text: 'made while impersonated' }, { label: 'imp' });
     expect(n.res.status).toBe(201);
     // The user's own log shows the action as theirs (no actor field at all)…
@@ -105,7 +105,7 @@ describe('capability limits and quotas', () => {
   it('quotas: fixed windows, GUI + API counted together, API can only restrict further', async () => {
     const u = await makeUser('frank');
     await limits(u.id, 'all', { apiEnabled: true });
-    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'k' } })).json()).key;
+    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'k' } })).json()).key;
     const bearer = { authorization: `Bearer ${key}` };
     // GUI allows 3/day, API allows 5/day → API gets min: still bounded by the 3 total.
     expect((await quotas(u.id, [{ channel: 'all', kind: 'all', n: 1, unit: 'd', max: 3 }, { channel: 'api', kind: 'all', n: 1, unit: 'd', max: 5 }])).status).toBe(200);

@@ -6,9 +6,9 @@
 
 import '../../js/kdf-progress.js';
 import { admin } from '../../js/api.js';
-import { newCredential, checkNewPassword, describePolicy, loginProof } from '../../js/pwauth.js';
+import { newCredential, checkOwnerPassword, describePolicy, loginProof } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
-import { toast } from '../../js/ui.js';
+import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl } from '../../js/sharetypes.js';
 import { ready } from './nav.js';
@@ -304,13 +304,13 @@ async function renderUsers() {
   const data = await guard(() => admin.users());
   if (!data) return;
   const user = h('input.input', { placeholder: 'username', maxlength: '64', 'aria-label': 'New username', autocomplete: 'off' });
-  // New users get the global password policy (their own overrides come later).
+  // The owner may set any password; the policy applies when users change their own.
   const newPolicy = overview?.defaults?.inherited;
-  const pw = h('input.input', { type: 'password', placeholder: 'password', 'aria-label': 'New user password', autocomplete: 'new-password', title: describePolicy(newPolicy) });
+  const pw = h('input.input', { type: 'password', placeholder: 'password', 'aria-label': 'New user password', autocomplete: 'new-password' });
   const pw2 = h('input.input', { type: 'password', placeholder: 'repeat password', 'aria-label': 'Repeat password', autocomplete: 'new-password' });
   const add = h('button.btn', { type: 'button', text: 'Create user' });
   add.onclick = async () => {
-    const bad = checkNewPassword(pw.value, pw2.value, newPolicy);
+    const bad = checkOwnerPassword(pw.value, pw2.value);
     if (bad) return msg(bad, true);
     add.disabled = true;
     const cred = await newCredential(pw.value);
@@ -319,7 +319,7 @@ async function renderUsers() {
     if (r) renderUsers();
   };
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, user, pw, pw2, add),
-    h('p.mono.muted', { text: `Password policy: ${describePolicy(newPolicy)} Checked in the browser only; the server never sees passwords.` })));
+    h('p.mono.muted', { text: `You may set any password. When users change their own, it must follow their policy (${describePolicy(newPolicy)}), checked in the browser only: the server never sees passwords.` })));
 
   const body = h('tbody');
   // The built-in public account is managed under Public access, not here.
@@ -351,45 +351,101 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   if (!d) return;
   box.appendChild(h('h2.section-title', { text: `Manage ${d.user.username}` }));
   const userPolicy = d.effective.all;
-  const npw = h('input.input', { type: 'password', placeholder: 'new password', autocomplete: 'new-password', 'aria-label': 'New password', title: describePolicy(userPolicy) });
+  const npw = h('input.input', { type: 'password', placeholder: 'new password', autocomplete: 'new-password', 'aria-label': 'New password' });
   const npw2 = h('input.input', { type: 'password', placeholder: 'repeat', autocomplete: 'new-password', 'aria-label': 'Repeat new password' });
   const setBtn = h('button.btn', { type: 'button', text: 'Set password' });
   setBtn.onclick = async () => {
-    const bad = checkNewPassword(npw.value, npw2.value, userPolicy);
+    const bad = checkOwnerPassword(npw.value, npw2.value);
     if (bad) return msg(bad, true);
     setBtn.disabled = true;
     const cred = await newCredential(npw.value);
-    await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out and their passkeys and recovery codes removed.');
+    await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out; their passkeys and recovery codes still work.');
     setBtn.disabled = false;
     npw.value = npw2.value = '';
   };
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }),
-    h('p.mono.muted', { text: 'This is account recovery: it also signs the user out everywhere and removes their passkeys and recovery codes.' }), h('div.toolbar', {}, npw, npw2, setBtn),
-    h('p.mono.muted', { text: `This user's password policy: ${describePolicy(userPolicy)}` })));
+    h('p.mono.muted', { text: 'This is account recovery: it also signs the user out everywhere. Their passkeys and recovery codes keep working; remove them below if the account may have been taken over.' }), h('div.toolbar', {}, npw, npw2, setBtn),
+    h('p.mono.muted', { text: `You may set any password. This user's own changes follow: ${describePolicy(userPolicy)}` })));
   if (passwordOnly) return;
 
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities & limits (GUI + API)' }), limitsEditor({ scope: id, channel: 'all', rows: d.limits.all, effective: d.effective.all, inherited: overview?.defaults.inherited, onSaved: () => openUser(id, false, { scroll: false }) })));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Extra API restrictions (can only narrow, never widen)' }), limitsEditor({ scope: id, channel: 'api', rows: d.limits.api, effective: d.effective.api, onSaved: () => openUser(id, false, { scroll: false }) })));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas for this user (in addition to global quotas)' }), quotasEditor(id, d.quotas)));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Per-user viewer rules (used when "Use per-user viewer rules" is on)' }), rulesEditor(id, d.viewerRules)));
-  const keys = h('tbody');
-  for (const k of d.keys) {
-    const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
-    armConfirm(rv, 'Revoke?', async () => { await guard(() => admin.revokeUserKey(id, k.id), 'Key revoked.'); openUser(id); });
-    keys.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
-      h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
-      h('td.mono', { dataset: { label: 'Scopes' }, text: (k.scopes || []).join(', ') }), h('td.cell-actions', {}, rv)));
-  }
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'API keys' }),
-    h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', 'Scopes', ''].map((t) => h('th', { text: t })))), keys))));
+  box.appendChild(userKeysCard(id, d.keys));
   const pk = d.passkeys || { count: 0, recoveryLeft: 0, mfa: false };
-  const pkReset = h('button.btn.danger', { type: 'button', text: 'Remove all passkeys', disabled: !pk.count });
-  armConfirm(pkReset, 'Remove passkeys and codes?', async () => { await guard(() => admin.resetPasskeys(id), 'Passkeys and recovery codes removed.'); openUser(id, false, { scroll: false }); });
+  const pkReset = h('button.btn.danger', { type: 'button', text: 'Remove all passkeys', disabled: !pk.count && !pk.recoveryLeft });
+  armConfirm(pkReset, 'Remove passkeys and codes?', async () => {
+    if (await guard(() => admin.resetPasskeys(id), 'Passkeys and recovery codes removed.')) openUser(id, false, { scroll: false });
+  });
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Passkeys' }),
     h('p.mono', { text: pk.count ? `${pk.count} passkey${pk.count === 1 ? '' : 's'}, ${pk.recoveryLeft} recovery code${pk.recoveryLeft === 1 ? '' : 's'} left${pk.mfa ? '; password logins also need a passkey' : ''}.` : 'No passkeys.' }),
-    h('p.mono.muted', { text: 'For a user who lost every passkey and recovery code: removing them lets the password alone sign in again (set a new password too if needed).' }),
+    h('p.mono.muted', { text: 'Removes every passkey and recovery code of this account (after a lost device or a takeover); the password alone then signs in. Passkeys can only be added by the user, on their own device.' }),
     h('div.btn-row', {}, pkReset)));
   if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+const KEY_SCOPES = [['notes', 'create notes'], ['files', 'upload files'], ['policy', 'read the policy']];
+const KEY_LIFE = [['', 'never expires'], ['604800', '7 days'], ['2592000', '30 days'], ['31536000', '365 days']];
+const scopeBoxes = (checked) => KEY_SCOPES.map(([v, t]) => {
+  const c = h('input', { type: 'checkbox', value: v, checked: checked.includes(v) });
+  return { c, label: h('label.inline', {}, c, ` ${t}`) };
+});
+
+/** A user's API keys: the owner creates, changes and revokes them (no confirmation for other users). */
+function userKeysCard(id, list) {
+  const name = h('input.input', { placeholder: 'Key name', maxlength: '100', 'aria-label': 'Key name' });
+  const life = h('select.input', { 'aria-label': 'Key lifetime' }, ...KEY_LIFE.map(([v, t]) => h('option', { value: v, text: t })));
+  const boxes = scopeBoxes(KEY_SCOPES.map(([v]) => v));
+  const shown = h('div.linkrow', { hidden: true });
+  const create = h('button.btn', { type: 'button', text: 'Create key' });
+  create.onclick = async () => {
+    const scopes = boxes.filter((b) => b.c.checked).map((b) => b.c.value);
+    if (!scopes.length) return msg('Choose at least one thing the key may do.', true);
+    const r = await guard(() => admin.createUserKey(id, { name: name.value.trim(), expiresInSec: life.value ? Number(life.value) : null, scopes }), 'API key created. Copy it now: it is shown only once.');
+    if (!r) return;
+    // Shown once: hand it to the user over a safe channel.
+    shown.replaceChildren(h('div.url.mono', { text: r.key }), h('button.copy-btn', { type: 'button', text: 'copy', on: { click: async (e) => flashCopied(e.target, (await copyText(r.key)) ? 'copied' : 'failed') } }));
+    shown.hidden = false;
+    name.value = '';
+    rows();
+  };
+  const body = h('tbody');
+  const rows = async () => {
+    const d = await guard(() => admin.user(id));
+    if (d) fill(d.keys);
+  };
+  const fill = (keys) => {
+    body.replaceChildren();
+    for (const k of keys) {
+      const tr = h('tr');
+      const edit = h('button.btn', { type: 'button', text: 'Edit' });
+      edit.onclick = () => {
+        const next = tr.nextElementSibling;
+        if (next && next.classList.contains('key-edit-row')) { next.remove(); return; }
+        const n = h('input.input', { value: k.name, maxlength: '100', 'aria-label': 'Key name' });
+        const bs = scopeBoxes(k.scopes || []);
+        const save = h('button.btn', { type: 'button', text: 'Save' });
+        save.onclick = async () => {
+          const scopes = bs.filter((b) => b.c.checked).map((b) => b.c.value);
+          if (!scopes.length) return msg('Choose at least one thing the key may do.', true);
+          if (await guard(() => admin.updateUserKey(id, k.id, { name: n.value.trim(), scopes }), 'API key updated.')) rows();
+        };
+        tr.after(h('tr.key-edit-row', {}, h('td.cell-full', { colspan: '5' }, h('div.toolbar', {}, n, h('fieldset.key-scopes', { 'aria-label': 'What the key may do' }, ...bs.map((b) => b.label)), save))));
+      };
+      const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
+      armConfirm(rv, 'Revoke?', async () => { if (await guard(() => admin.revokeUserKey(id, k.id), 'Key revoked.')) rows(); });
+      tr.append(h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
+        h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
+        h('td.mono', { dataset: { label: 'Scopes' }, text: (k.scopes || []).join(', ') }), h('td.cell-actions', {}, h('div.btn-row.row-actions', {}, edit, rv)));
+      body.appendChild(tr);
+    }
+  };
+  fill(list);
+  return h('div.card.stack', {}, h('h3.field-label', { text: 'API keys' }),
+    h('div.toolbar', {}, name, life, h('fieldset.key-scopes', { 'aria-label': 'What the key may do' }, ...boxes.map((b) => b.label)), create), shown,
+    h('p.mono.muted', { text: 'Needs "API keys allowed" for this user. A new key is shown once: give it to the user over a safe channel.' }),
+    h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', 'Scopes', ''].map((t) => h('th', { text: t })))), body)));
 }
 
 // ── defaults ─────────────────────────────────────────────────────────────────

@@ -161,6 +161,8 @@ function migrator(sql) {
 }
 
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{2,63}$/;
+/** A key's scopes in canonical order, or null unless a non-empty list of known scopes. */
+const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x) => API_SCOPES.includes(x)) ? API_SCOPES.filter((x) => list.includes(x)) : null);
 /**
  * The built-in public (anonymous) account: owns shares created without an
  * account. It has no password, cannot sign in, cannot be deleted, renamed,
@@ -591,10 +593,10 @@ export class Directory extends DurableObject {
    * within `lockout.windowSec`, every session of the account is ended —
    * owner included — and the holder must log in again.
    */
-  async changePassword(uid, { current, salt, t, verifier, lockoutOff = false }) {
+  async changePassword(uid, { current, reauth, origin, rpId, salt, t, verifier, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
-    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
@@ -605,38 +607,90 @@ export class Directory extends DurableObject {
     return { ok: true, ver: u.sess_ver + 1, passkeys: this.#passkeyCount(uid), recoveryLeft: this.#recoveryLeft(uid) };
   }
 
+  /** Change one's own username (needs the password or a passkey). */
+  async changeUsername(uid, { username, current, reauth, origin, rpId, lockoutOff = false }) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (typeof username !== 'string' || !USERNAME_RE.test(username)) return fail(400, 'invalid_username', 'Username must be 3–64 characters: letters, digits, . _ @ -');
+    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    if (wrong) return wrong;
+    const clash = this.#userByName(username);
+    if (clash && clash.id !== uid) return fail(409, 'username_taken', 'That username is taken.');
+    if (u.username === username) return { ok: true, username };
+    this.sql.exec('UPDATE users SET username = ?, updated = ? WHERE id = ?', username, now(), uid);
+    this.#log(uid, uid, 'username.changed', `from=${u.username} to=${username}`);
+    return { ok: true, username };
+  }
+
   /**
    * Step-up check of a signed-in account's current password (password change,
    * admin export/import). Wrong answers count toward the same threshold as a
    * login lockout; reaching it ends every session of the account.
    */
-  async verifyCurrent(uid, current, { lockoutOff = false } = {}) {
+  async verifyCurrent(uid, current, { lockoutOff = false, reauth, origin, rpId } = {}) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
-    return this.#checkCurrent(u, current, lockoutOff) ?? { ok: true };
+    return (await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff)) ?? { ok: true };
+  }
+
+  /**
+   * "Confirm it's you" for a change to one's own account: the current
+   * password (`current`, a verifier) or a fresh passkey assertion (`reauth`:
+   * {challengeId, credential} for a "reauth" challenge of this account).
+   * Returns null when confirmed, else the failure to return.
+   */
+  async #stepUp(u, { current, reauth, origin, rpId } = {}, lockoutOff = false) {
+    if (current === undefined && reauth && typeof reauth === 'object') {
+      const c = this.#takeChallenge(reauth.challengeId, 'reauth');
+      let ok = false;
+      if (c && c.user_id === u.id && this.#passkeyMode(u) !== 'off') {
+        const id = assertionId(reauth.credential);
+        const p = id && this.sql.exec('SELECT * FROM passkeys WHERE id = ? AND user_id = ?', id, u.id).toArray()[0];
+        ok = !!p && (await this.#checkAssertion(p, reauth.credential, c.challenge, origin, rpId)).ok;
+      }
+      if (ok) {
+        this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
+        return null;
+      }
+      return this.#stepUpFailure(u, lockoutOff, 'reauth_failed', 'The passkey could not be verified.');
+    }
+    return this.#checkCurrent(u, current, lockoutOff);
   }
 
   #checkCurrent(u, current, lockoutOff) {
-    const ts = now();
     if (typeof current !== 'string' || !timingSafeEqualHex(current, u.pw_verifier)) {
-      if (!lockoutOff) {
-        const st = this.#settings();
-        const f = this.sql.exec('SELECT * FROM pwchange_failures WHERE user_id = ?', u.id).toArray()[0];
-        const fresh = !f || ts - f.start > st['lockout.windowSec'];
-        const count = fresh ? 1 : f.count + 1;
-        if (count >= st['lockout.max']) {
-          this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
-          this.sql.exec('UPDATE users SET sess_ver = sess_ver + 1, updated = ? WHERE id = ?', ts, u.id);
-          this.#log(null, u.id, 'sessions.revoked', 'too many wrong current passwords');
-          return fail(401, 'session_revoked', 'Too many wrong passwords: you have been signed out everywhere. Log in again.');
-        }
-        this.sql.exec('INSERT INTO pwchange_failures (user_id, count, start) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start',
-          u.id, count, fresh ? ts : f.start);
-      }
-      return fail(403, 'wrong_password', 'The current password is incorrect.');
+      return this.#stepUpFailure(u, lockoutOff, 'wrong_password', 'The current password is incorrect.');
     }
     this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
     return null;
+  }
+
+  /** A failed step-up: after lockout.max within the window, every session of the account ends. */
+  #stepUpFailure(u, lockoutOff, code, message) {
+    const ts = now();
+    if (!lockoutOff) {
+      const st = this.#settings();
+      const f = this.sql.exec('SELECT * FROM pwchange_failures WHERE user_id = ?', u.id).toArray()[0];
+      const fresh = !f || ts - f.start > st['lockout.windowSec'];
+      const count = fresh ? 1 : f.count + 1;
+      if (count >= st['lockout.max']) {
+        this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
+        this.sql.exec('UPDATE users SET sess_ver = sess_ver + 1, updated = ? WHERE id = ?', ts, u.id);
+        this.#log(null, u.id, 'sessions.revoked', 'too many failed confirmations');
+        return fail(401, 'session_revoked', 'Too many failed confirmations: you have been signed out everywhere. Log in again.');
+      }
+      this.sql.exec('INSERT INTO pwchange_failures (user_id, count, start) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start',
+        u.id, count, fresh ? ts : f.start);
+    }
+    return fail(403, code, message);
+  }
+
+  /** A challenge to confirm a change to one's own account with a passkey. */
+  async reauthOptions(uid) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (this.#passkeyMode(u) === 'off' || !this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'This account has no passkey to confirm with: use the password.');
+    return { ok: true, ...this.#newChallenge('reauth', uid), allow: this.#allowList(uid) };
   }
 
   async activity(uid, { before = null, limit = 50 } = {}) {
@@ -656,10 +710,18 @@ export class Directory extends DurableObject {
       .map((k) => ({ ...k, scopes: String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) }));
   }
 
-  async createKey(uid, { name, hash, expires, scopes }) {
+  /**
+   * Create an API key. On one's own account (`actorId` = `uid`) it needs the
+   * password or a passkey; the owner creates keys for other users freely.
+   */
+  async createKey(uid, { name, hash, expires, scopes, actorId = uid, current, reauth, origin, rpId, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'public') return fail(403, 'api_disabled', 'The public account never has API keys.');
+    if (actorId === uid) {
+      const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+      if (wrong) return wrong;
+    }
     const eff = this.#effective(u).all;
     if (!eff.apiEnabled) return fail(403, 'api_disabled', 'API keys are not enabled for this account.');
     const count = this.sql.exec('SELECT COUNT(*) AS c FROM api_keys WHERE user_id = ?', uid).one().c;
@@ -671,20 +733,42 @@ export class Directory extends DurableObject {
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
     let sc = API_SCOPES;
     if (scopes !== undefined) {
-      if (!Array.isArray(scopes) || !scopes.length || scopes.some((x) => !API_SCOPES.includes(x))) {
-        return fail(400, 'invalid_scopes', `Choose one or more scopes: ${API_SCOPES.join(', ')}.`);
-      }
-      sc = API_SCOPES.filter((x) => scopes.includes(x));
+      sc = keyScopes(scopes);
+      if (!sc) return fail(400, 'invalid_scopes', `Choose one or more scopes: ${API_SCOPES.join(', ')}.`);
     }
     const id = newId();
     this.sql.exec('INSERT INTO api_keys (key_hash, id, user_id, name, created, expires, scopes) VALUES (?, ?, ?, ?, ?, ?, ?)', hash, id, uid, label, now(), expires ?? null, sc.join(','));
-    this.#log(uid, uid, 'apikey.created', `name=${label} scopes=${sc.join(',')}`);
+    this.#log(actorId, uid, 'apikey.created', `name=${label} scopes=${sc.join(',')}`);
     return { ok: true, id };
   }
 
-  async revokeKey(uid, id, actorId = uid) {
+  /** Rename a key or change its scopes (same confirmation rule as createKey). */
+  async updateKey(uid, id, { name, scopes, actorId = uid, current, reauth, origin, rpId, lockoutOff = false }) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    const k = this.sql.exec('SELECT name, scopes FROM api_keys WHERE user_id = ? AND id = ?', uid, String(id)).toArray()[0];
+    if (!k) return fail(404, 'not_found', 'Key not found.');
+    const label = name === undefined ? k.name : cleanLabel(name);
+    if (label === null || label === '') return fail(400, 'invalid_name', 'Give the key a name (up to 100 characters).');
+    const sc = scopes === undefined ? String(k.scopes || '').split(',').filter((x) => API_SCOPES.includes(x)) : keyScopes(scopes);
+    if (!sc) return fail(400, 'invalid_scopes', `Choose one or more scopes: ${API_SCOPES.join(', ')}.`);
+    if (actorId === uid) {
+      const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+      if (wrong) return wrong;
+    }
+    this.sql.exec('UPDATE api_keys SET name = ?, scopes = ? WHERE user_id = ? AND id = ?', label, sc.join(','), uid, String(id));
+    this.#log(actorId, uid, 'apikey.updated', `name=${label} scopes=${sc.join(',')}`);
+    return { ok: true };
+  }
+
+  async revokeKey(uid, id, actorId = uid, { current, reauth, origin, rpId, lockoutOff = false } = {}) {
     const r = this.sql.exec('SELECT name FROM api_keys WHERE user_id = ? AND id = ?', uid, id).toArray()[0];
     if (!r) return fail(404, 'not_found', 'Key not found.');
+    if (actorId === uid) {
+      const u = this.#user(uid);
+      const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+      if (wrong) return wrong;
+    }
     this.sql.exec('DELETE FROM api_keys WHERE user_id = ? AND id = ?', uid, id);
     this.#log(actorId, uid, 'apikey.revoked', `name=${r.name}`);
     return { ok: true };
@@ -851,7 +935,7 @@ export class Directory extends DurableObject {
     return { ok: true, ...this.#newChallenge('register', uid), user: { handle: this.#webauthnHandle(u), name: u.username }, exclude: this.#allowList(uid) };
   }
 
-  async addPasskey(uid, { challengeId, credential, name, current, origin, rpId, lockoutOff = false }) {
+  async addPasskey(uid, { challengeId, credential, name, current, reauth, origin, rpId, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     const c = this.#takeChallenge(challengeId, 'register');
@@ -859,7 +943,7 @@ export class Directory extends DurableObject {
     if (this.#passkeyMode(u) === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
     const label = cleanLabel(name);
     if (label === null || label === '') return fail(400, 'invalid_name', 'Give the passkey a name (up to 100 characters).');
-    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const r = await verifyRegistration(credential, { challenge: c.challenge, origin, rpId });
     if (!r.ok) return fail(400, 'invalid_passkey', `The passkey could not be verified (${r.reason}).`);
@@ -884,10 +968,10 @@ export class Directory extends DurableObject {
     return { ok: true, id: r.credentialId, codes };
   }
 
-  async removePasskey(uid, id, { current, lockoutOff = false }) {
+  async removePasskey(uid, id, { current, reauth, origin, rpId, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
-    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const p = this.sql.exec('SELECT name FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid).toArray()[0];
     if (!p) return fail(404, 'not_found', 'Passkey not found.');
@@ -901,11 +985,12 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
-  async regenerateRecoveryCodes(uid, { current, lockoutOff = false }) {
-    const prepared = await this.#prepareCodes(); // before any check: nothing can change in between
+  async regenerateRecoveryCodes(uid, { current, reauth, origin, rpId, lockoutOff = false }) {
+    const prepared = await this.#prepareCodes();
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
-    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+    // No await after the step-up: the checks and the store run in one step.
     if (wrong) return wrong;
     if (!this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'Add a passkey first: recovery codes stand in for a passkey.');
     this.#storeCodes(uid, prepared);
@@ -914,14 +999,14 @@ export class Directory extends DurableObject {
   }
 
   /** The user's choice (mode "any"): should a password login also need a passkey? */
-  async setSecondFactor(uid, { on, current, lockoutOff = false }) {
+  async setSecondFactor(uid, { on, current, reauth, origin, rpId, lockoutOff = false }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (typeof on !== 'boolean') return fail(400, 'invalid', 'on must be true or false');
     const mode = this.#passkeyMode(u);
     if (mode === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
     if (mode === 'second' && !on) return fail(403, 'second_factor_required', 'The administrator requires a passkey after the password.');
-    const wrong = this.#checkCurrent(u, current, lockoutOff);
+    const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     if (on && !this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'Add a passkey first.');
     this.sql.exec('UPDATE users SET mfa = ? WHERE id = ?', on ? 1 : 0, uid);
@@ -938,10 +1023,11 @@ export class Directory extends DurableObject {
     const r = await verifyAssertion(credential, { challenge, origin, rpId, publicKey: p.public_key, signCount: p.sign_count });
     if (!r.ok) return r;
     // Written only if no concurrent assertion moved the counter past this one;
-    // when counters are in use, losing that race means a cloned authenticator.
+    // when counters are in use, a counter that did not move forward may mean
+    // two devices hold the same key (the server cannot know for sure).
     const moved = this.sql.exec('UPDATE passkeys SET sign_count = ?, backed_up = ?, last_used = ? WHERE id = ? AND (sign_count < ? OR ? = 0) RETURNING id',
       r.signCount, r.backedUp ? 1 : 0, now(), p.id, r.signCount, r.signCount).toArray().length;
-    if (!moved) return { ok: false, reason: 'signature counter went backwards (cloned authenticator?)' };
+    if (!moved) return { ok: false, reason: 'signature counter did not move forward' };
     return r;
   }
 
@@ -969,7 +1055,7 @@ export class Directory extends DurableObject {
     return this.#sessionFor(u);
   }
 
-  /** Sign in with a recovery code instead of a passkey (mode "any" only). */
+  /** Sign in with a recovery code alone (in every passkey mode). */
   async recoveryLogin({ username, code, lockoutOff = false }) {
     const u = this.#loginUser(username);
     const ts = now();
@@ -978,18 +1064,16 @@ export class Directory extends DurableObject {
     if (!u) return fail(401, 'invalid_login', 'Wrong username or recovery code.');
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
-    const mode = this.#passkeyMode(u);
-    // Codes stand in for a passkey: without one they mean nothing.
-    const valid = hash && mode !== 'off' && this.#passkeyCount(u.id) > 0
-      && this.sql.exec('SELECT 1 FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash).toArray().length;
+    // A recovery code is the way back in when everything else is lost: it
+    // signs in on its own whatever the passkey mode or the user's "passkey
+    // after password" choice. Only the guards against guessing still apply
+    // (Turnstile, per-IP blocking, the account lockout), and a disabled
+    // account stays disabled.
+    const valid = hash && this.sql.exec('SELECT 1 FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash).toArray().length;
     if (!valid) {
       this.#passwordFailure(u, ts, s, lockoutOff);
       return fail(401, 'invalid_login', 'Wrong username or recovery code.');
     }
-    // A valid code is not spent when it cannot sign in on its own here: the
-    // administrator's "second" mode, or the user's own "passkey after
-    // password" (a code alone would then be weaker than what they chose).
-    if (mode === 'second' || u.mfa) return fail(403, 'password_first', 'This account signs in with its password first, then a passkey or recovery code.');
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
     this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash);
     this.#log(u.id, u.id, 'login', `recovery code (${this.#recoveryLeft(u.id)} left)`);
@@ -1041,13 +1125,18 @@ export class Directory extends DurableObject {
     return typeof code === 'string' && code ? { ...this.#sessionFor(u, s), recoveryLeft: this.#recoveryLeft(u.id) } : this.#sessionFor(u, s);
   }
 
-  /** Admin: remove every passkey (and recovery code) of a user who lost them. */
-  async adminResetPasskeys(id, actorId) {
+  /**
+   * Admin: remove every passkey (and recovery code) of an account. The owner
+   * does this for another user as freely as setting their password; on the
+   * owner's own account it needs the same confirmation as on Account.
+   */
+  async adminResetPasskeys(id, actorId, { current, reauth, origin, rpId, lockoutOff = false } = {}) {
     const u = this.#user(id);
     if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
-    // The owner removes their own passkeys from Account, with the current
-    // password; from here a stolen session alone could strip the second factor.
-    if (u.role === 'owner') return fail(403, 'use_account_page', 'Manage the owner\'s passkeys from Account, with the current password.');
+    if (id === actorId) {
+      const wrong = await this.#stepUp(u, { current, reauth, origin, rpId }, lockoutOff);
+      if (wrong) return wrong;
+    }
     const n = this.#passkeyCount(id);
     this.#dropPasskeys(id);
     this.#log(actorId, id, 'passkeys.reset_by_admin', `removed=${n}`);
@@ -1638,13 +1727,11 @@ export class Directory extends DurableObject {
     if (u.role === 'owner') return fail(403, 'use_account_page', 'Change the owner password from Account, with the current password.');
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
-    const n = this.#passkeyCount(id);
     this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), id);
     this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
-    // An admin reset is account recovery: whoever took the account over may
-    // have added a passkey or replaced the recovery codes, so they go too.
-    this.#dropPasskeys(id);
-    this.#log(actorId, id, 'password.reset_by_admin', n ? `passkeys removed=${n}` : '');
+    // Passkeys and recovery codes are not tied to the password and stay
+    // (remove them separately if the account may have been taken over).
+    this.#log(actorId, id, 'password.reset_by_admin');
     return { ok: true, ver: u.sess_ver + 1 };
   }
 
@@ -1972,7 +2059,6 @@ export class Directory extends DurableObject {
             this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
             this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', id);
             this.sql.exec('DELETE FROM api_keys WHERE user_id = ?', id);
-            this.#dropPasskeys(id);
           }
         }
         if (u.config) {

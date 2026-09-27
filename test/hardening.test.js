@@ -6,7 +6,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src/index.js';
-import { ORIGIN, owner, makeUser, fetchJson, createNote, freshIp, intent, salt16, proofFor, login } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, createNote, freshIp, intent, salt16, proofFor, USER_PW, login } from './helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -17,7 +17,7 @@ describe('disabled accounts', () => {
   it('are refused on every route, with a session or an API key, until re-enabled', async () => {
     const u = await makeUser('disabled-matrix');
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { apiEnabled: true } } });
-    const k = await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'cli' } })).json();
+    const k = await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'cli' } })).json();
     const note = await createNote(u.cookie, {}, { label: 'mine' });
     expect(note.res.status).toBe(201);
 

@@ -1,6 +1,6 @@
 // pwpolicy.test.js — the password policy the browser enforces (public/js/pwauth.js).
 import { describe, it, expect } from 'vitest';
-import { checkNewPassword, describePolicy, policyOf, DEFAULT_POLICY } from '../public/js/pwauth.js';
+import { checkNewPassword, checkOwnerPassword, passwordLength, describePolicy, policyOf, DEFAULT_POLICY } from '../public/js/pwauth.js';
 
 const strict = { pwMinLength: 14, pwUpper: true, pwLower: true, pwDigit: true, pwSymbol: true };
 
@@ -24,6 +24,21 @@ describe('password policy', () => {
     expect(checkNewPassword('Ωmega-😀😀😀😀😀5', undefined, p)).toBeNull();
     expect(checkNewPassword('😀'.repeat(6), undefined, { pwMinLength: 12 })).toMatch(/at least 12/); // 12 UTF-16 units, 6 characters
     expect(checkNewPassword('שלוםשלוםשלום1', undefined, { pwMinLength: 12, pwDigit: true })).toBeNull();
+  });
+
+  it('counts every character as typed: spaces, punctuation and combining marks too', () => {
+    expect(passwordLength('a b c d e f ')).toBe(12);
+    expect(passwordLength('   ')).toBe(3);
+    expect(passwordLength('cafe\u0301')).toBe(5); // e + combining acute: two characters typed
+    expect(checkNewPassword('cafe\u0301-cafe\u0301-', undefined, { pwMinLength: 12 })).toBeNull(); // 12 as typed (10 after NFC)
+    expect(checkNewPassword(' '.repeat(12))).toBeNull();
+  });
+
+  it('passwords the owner sets follow no policy', () => {
+    expect(checkOwnerPassword('x', 'x')).toBeNull();
+    expect(checkOwnerPassword('', '')).toMatch(/Enter a password/);
+    expect(checkOwnerPassword('abc', 'abd')).toMatch(/do not match/);
+    expect(checkOwnerPassword('a'.repeat(1025))).toMatch(/at most/);
   });
 
   it('never goes below the built-in minimum, and checks the confirmation last', () => {

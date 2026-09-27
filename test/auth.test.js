@@ -3,7 +3,7 @@
 // /dashboard gate, API keys and graceful behaviour with missing env vars.
 import { env, SELF } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
-import { ORIGIN, AUTHN, owner, setOwnerCookie, login, makeUser, fetchJson, cookieOf, salt16, proofFor, intent, freshIp, createNote } from './helpers.js';
+import { ORIGIN, AUTHN, owner, setOwnerCookie, login, makeUser, fetchJson, cookieOf, salt16, proofFor, USER_PW, intent, freshIp, createNote } from './helpers.js';
 import worker from '../src/index.js';
 import { sealToken, openToken } from '../src/lib/jwt.js';
 import { sessionKeys, authnToken, bfpDisabled } from '../src/lib/config.js';
@@ -146,13 +146,13 @@ describe('/dashboard gate', () => {
 describe('API keys', () => {
   it('need admin permission, authenticate creation only, and die when API access is revoked', async () => {
     const u = await makeUser('api-user');
-    expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'cli' } })).status).toBe(403);
+    expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'cli' } })).status).toBe(403);
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { apiEnabled: true, apiMaxKeys: 1 } } });
-    const k = await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'cli' } });
+    const k = await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'cli' } });
     expect(k.status).toBe(201);
     const { key } = await k.json();
     expect(key).toMatch(/^sbk_/);
-    expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'second' } })).status).toBe(409);
+    expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'second' } })).status).toBe(409);
     const bearer = { authorization: `Bearer ${key}` };
     const n = await createNote(null, { text: 'via api' }, { headers: bearer });
     expect(n.res.status).toBe(201);

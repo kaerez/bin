@@ -1,7 +1,7 @@
 // api-scopes.test.js — per-key API scopes: chosen at creation (every scope by
 // default), enforced on each API-key route, listed with the key.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson } from './helpers.js';
+import { owner, makeUser, fetchJson, proofFor, USER_PW } from './helpers.js';
 import { encryptPaste } from '../public/js/crypto.js';
 
 let oc;
@@ -11,7 +11,7 @@ describe('API key scopes', () => {
   it('defaults to every scope, validates, and enforces per route', async () => {
     const u = await makeUser('scopes-user');
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { apiEnabled: true } } });
-    const mk = async (body) => fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body });
+    const mk = async (body) => fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), ...body } });
     const all = await (await mk({ name: 'all' })).json();
     const files = await (await mk({ name: 'files-only', scopes: ['files'] })).json();
     for (const bad of [[], ['admin'], 'notes', ['notes', 'nope']]) expect((await mk({ name: 'bad', scopes: bad })).status).toBe(400);

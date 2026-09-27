@@ -38,11 +38,30 @@ export function describePolicy(policy = DEFAULT_POLICY) {
   return `At least ${p.pwMinLength} characters${list ? `, including ${list}` : ''}.`;
 }
 
+/**
+ * The length of a password as typed: every character counts (spaces,
+ * punctuation, emoji and combining marks included), one per Unicode code
+ * point, so a policy's minimum never counts fewer characters than the user
+ * entered.
+ */
+export const passwordLength = (pw) => [...String(pw)].length;
+
+/**
+ * For passwords the owner sets (their own, a new user's, or another user's):
+ * no policy, only a password that is there, fits and matches.
+ */
+export function checkOwnerPassword(pw, confirm) {
+  if (typeof pw !== 'string' || pw.length === 0) return 'Enter a password.';
+  if (passwordLength(pw) > MAX_PASSWORD) return `Use at most ${MAX_PASSWORD} characters.`;
+  if (confirm !== undefined && pw !== confirm) return 'The passwords do not match.';
+  return null;
+}
+
 /** null when `pw` satisfies the policy (and matches `confirm`), else a message. */
 export function checkNewPassword(pw, confirm, policy = DEFAULT_POLICY) {
   const p = policyOf(policy);
   if (typeof pw !== 'string') return describePolicy(p);
-  const len = [...pw.normalize('NFC')].length; // characters, not UTF-16 units
+  const len = passwordLength(pw);
   if (len < p.pwMinLength) return `Use at least ${p.pwMinLength} characters.`;
   if (len > MAX_PASSWORD) return `Use at most ${MAX_PASSWORD} characters.`;
   const missing = CLASSES.filter(([k, re]) => p[k] && !re.test(pw)).map(([, , t]) => t);

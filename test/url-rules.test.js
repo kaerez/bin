@@ -3,7 +3,7 @@
 // API key at GET /api/private/policy (the CLI checks links itself: the server
 // cannot see them).
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson } from './helpers.js';
+import { owner, makeUser, fetchJson, proofFor, USER_PW } from './helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -13,7 +13,7 @@ describe('URL rules', () => {
   it('validates, inherits, overrides and is readable by the CLI', async () => {
     const u = await makeUser('url-rules');
     expect((await limits(u.id, { apiEnabled: true })).status).toBe(200);
-    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'cli' } })).json()).key;
+    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'cli' } })).json()).key;
     const policy = async () => (await fetchJson('/api/private/policy', { headers: { authorization: `Bearer ${key}` } })).json();
     expect((await policy()).urlRules).toEqual(['scheme:http', 'scheme:https']);
     for (const bad of [['scheme:javascript'], ['scheme:data'], ['re:(['], [], ['https'], 'scheme:https']) {

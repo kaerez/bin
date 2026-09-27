@@ -4,7 +4,7 @@
 // the admin; IP rules as ranges; fetches of shares that ended are not counted
 // as invalid.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson, freshIp, createNote, openNote, proofHeaders, salt16, proofFor, intent } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, createNote, openNote, proofHeaders, salt16, proofFor, USER_PW, intent } from './helpers.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
 import { genId } from '../src/lib/ids.js';
@@ -52,7 +52,7 @@ describe('API keys: "no limit"', () => {
     const limits = (patch) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch } });
     expect((await limits({ apiEnabled: true, apiMaxKeys: null })).status).toBe(200);
     for (let i = 0; i < 6; i++) {
-      expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: `k${i}` } })).status).toBe(201);
+      expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: `k${i}` } })).status).toBe(201);
     }
     expect((await me(u.cookie)).apiKeys.max).toBe(1000);
   });

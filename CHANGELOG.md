@@ -31,16 +31,30 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - usernameless sign-in challenges are no longer stored, so a flood of requests cannot push out
     other people's pending sign-ins;
   - stored challenges are capped per account;
-  - the owner's passkeys can no longer be removed from the admin panel without the password;
-  - an admin password reset (or an import that overwrites credentials) now also removes the
-    account's passkeys and recovery codes;
-  - a recovery code alone no longer signs in once the user turned on "passkey after password";
+  - removing an account's passkeys from the admin panel (the owner's included) needs the
+    admin's own password;
+  - an admin password reset, or an import that overwrites credentials, keeps the account's
+    passkeys and recovery codes (passwords and passkeys are separate);
+  - a recovery code alone always signs in, whatever the passkey mode or the user's "passkey
+    after password" choice (Turnstile, per-IP blocking and the lockout still apply);
   - the second step respects the account lockout;
-  - concurrent sign-ins with a cloned passkey fail;
+  - of two simultaneous sign-ins presenting the same signature counter, only one succeeds;
   - Account lists the passkeys and codes that still work after a password change;
+  - every change to one's own account (password, username, passkeys, recovery codes, the second
+    step, API keys) is confirmed with the password or a passkey, asked again each time; the
+    owner changes other users' keys and passkeys without it;
   - a warning is logged when only one Turnstile key is set.
 
 ### Added
+
+- **Account:** change your username; edit an API key's name and scopes; confirm changes with a
+  passkey instead of the password; the second step is a choice under Passkeys ("password
+  alone" by default).
+- **Admin → Users:** the owner creates, edits and revokes a user's API keys (a new key is shown
+  once).
+- **Passwords the owner sets** (setup, the owner's own, a new user's, a reset) no longer follow the
+  password policy, which applies to users changing their own. The length counts every
+  character as typed. The impersonation banner is shorter.
 
 - **Progress bars for previews and downloads:** viewing a file opens the preview at once, with a
   bar and percentage while it is fetched and decrypted, then a busy "Preparing the preview…"
