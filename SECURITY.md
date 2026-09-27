@@ -149,9 +149,12 @@ compromise. Defenses:
     policy).
 - **Link shares** (`fmt: "url"`) are never followed automatically. Only absolute URLs without
   embedded credentials are accepted (on create and again after decryption).
-  - **Which links** a sender may share is the admin's *URL rules* (global and per user):
-    `scheme:https`, `scheme:tel`, … and `re:<regular expression>` against the whole link;
-    default `http` and `https`; the owner may share any safe link. The link is encrypted, so the
+  - **Which links** a sender may share is the role's *URL rules*: `scheme:<name>://` (links
+    written with `//`; http and https always are), `scheme:<name>:` (links without `//`, such as
+    `tel:` and `mailto:`), `scheme:*` and `re:<regular expression>` against the whole link. The
+    default is `scheme:http://` and `scheme:https://`, and the owner may share any safe link.
+    Rules saved in the older form (`scheme:tel`) were rewritten by migration 11 to allow exactly
+    what they allowed; older export files are upgraded on import. The link is encrypted, so the
     rules are checked by the sender's browser or CLI (the CLI reads them from
     `GET /api/private/policy`) — they keep honest senders within policy, not a modified client.
     Admin-written regular expressions run in senders' browsers (the admin is trusted; a costly

@@ -30,13 +30,15 @@ export class ShareTypeError extends Error {
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
 // ── URL rules ────────────────────────────────────────────────────────────────
-// A rule is "scheme:<name>" (e.g. scheme:https, scheme:tel), "scheme:*" (any
-// scheme that is not forbidden) or "re:<regular expression>", matched
+// A rule is "scheme:<name>://" (links like https://…; http and https are
+// always written this way), "scheme:<name>:" (links like tel:… with no "//"),
+// "scheme:*" (any scheme that is not forbidden, either form) or
+// "re:<regular expression>", matched
 // case-insensitively against the whole normalized URL (e.g.
 // re:^https://([a-z0-9-]+\.)*example\.com/). A URL is allowed when any rule
 // matches it. The owner's rules are ["scheme:*"].
 
-export const DEFAULT_URL_RULES = Object.freeze(['scheme:http', 'scheme:https']);
+export const DEFAULT_URL_RULES = Object.freeze(['scheme:http://', 'scheme:https://']);
 export const MAX_URL_RULES = 50;
 export const MAX_URL_RULE_LENGTH = 300;
 
@@ -56,6 +58,30 @@ export const FORBIDDEN_SCHEMES = Object.freeze(new Set([
 export const RECIPIENT_OPEN_SCHEMES = Object.freeze(new Set(['http', 'https', 'mailto', 'tel', 'sms']));
 
 const SCHEME_RE = /^[a-z][a-z0-9+.-]{0,31}$/;
+// Browsers always write these with "//" (http:example.com becomes http://example.com/).
+const HIERARCHICAL = new Set(['http', 'https', 'ws', 'wss', 'ftp']);
+// Schemes that never use "//": an old bare "scheme:tel" rule becomes "scheme:tel:".
+const OPAQUE = new Set(['mailto', 'tel', 'sms', 'geo', 'magnet', 'urn', 'news', 'callto', 'facetime', 'facetime-audio', 'maps', 'bitcoin']);
+
+/**
+ * Rules from before the scheme:name:// / scheme:name: syntax ("scheme:tel"),
+ * rewritten to allow exactly what they allowed: http, https and the like with
+ * "//", mailto, tel and the like without, any other scheme in both forms.
+ * Anything else is returned unchanged (and checked by normalizeUrlRules).
+ */
+export function upgradeUrlRules(list) {
+  if (!Array.isArray(list)) return list;
+  const out = [];
+  for (const item of list) {
+    const m = /^scheme:([a-z][a-z0-9+.-]{0,31})$/i.exec(String(item ?? '').trim());
+    if (!m) { out.push(item); continue; }
+    const name = m[1].toLowerCase();
+    if (HIERARCHICAL.has(name)) out.push(`scheme:${name}://`);
+    else if (OPAQUE.has(name)) out.push(`scheme:${name}:`);
+    else out.push(`scheme:${name}://`, `scheme:${name}:`);
+  }
+  return out;
+}
 
 /** Validate and canonicalize a rule list (throws Error with a readable message). */
 export function normalizeUrlRules(list) {
@@ -69,10 +95,16 @@ export function normalizeUrlRules(list) {
     const m = /^(scheme|re):(.*)$/s.exec(r);
     if (!m) throw new Error(`"${r.slice(0, 40)}": start a rule with scheme: or re:`);
     if (m[1] === 'scheme') {
-      const name = m[2].trim().toLowerCase().replace(/:$/, '');
-      if (name !== '*' && !SCHEME_RE.test(name)) throw new Error(`"${r.slice(0, 40)}": not a URL scheme`);
+      const body = m[2].trim().toLowerCase();
+      if (body === '*') { out.push('scheme:*'); continue; }
+      const sm = /^([^:/]*)(:\/\/|:)?$/.exec(body);
+      const name = sm ? sm[1] : '';
+      if (!SCHEME_RE.test(name)) throw new Error(`"${r.slice(0, 40)}": not a URL scheme`);
       if (FORBIDDEN_SCHEMES.has(name)) throw new Error(`the ${name}: scheme can never be allowed`);
-      out.push(`scheme:${name}`);
+      // Say which form: with "//" (scheme:name://) or without (scheme:name:).
+      if (!sm[2]) throw new Error(`"${r.slice(0, 40)}": write scheme:${name}:// (links like ${name}://…) or scheme:${name}: (links like ${name}:… without //)`);
+      if (HIERARCHICAL.has(name) && sm[2] === ':') throw new Error(`${name} links always have //: write scheme:${name}://`);
+      out.push(`scheme:${name}${sm[2]}`);
     } else {
       const pattern = m[2];
       if (!pattern) throw new Error('empty regular expression');
@@ -85,7 +117,8 @@ export function normalizeUrlRules(list) {
 
 /** Rules from untrusted input (a server response): invalid lists fall back to the default. */
 export function urlRulesOf(value) {
-  try { return value === undefined ? [...DEFAULT_URL_RULES] : normalizeUrlRules(value); } catch { return [...DEFAULT_URL_RULES]; }
+  // An older server may still send "scheme:tel": read it as it was meant.
+  try { return value === undefined ? [...DEFAULT_URL_RULES] : normalizeUrlRules(upgradeUrlRules(value)); } catch { return [...DEFAULT_URL_RULES]; }
 }
 
 const schemeOf = (u) => u.protocol.slice(0, -1).toLowerCase();
@@ -99,8 +132,9 @@ const schemeOf = (u) => u.protocol.slice(0, -1).toLowerCase();
 export function matchingUrlRule(u, rules = DEFAULT_URL_RULES) {
   const scheme = schemeOf(u);
   if (FORBIDDEN_SCHEMES.has(scheme)) return null;
+  const slashes = u.href.slice(scheme.length + 1).startsWith('//');
   for (const r of rules) {
-    if (r === 'scheme:*' || r === `scheme:${scheme}`) return r;
+    if (r === 'scheme:*' || r === `scheme:${scheme}${slashes ? '://' : ':'}`) return r;
     if (r.startsWith('re:')) {
       try { if (new RegExp(r.slice(3), 'iu').test(u.href)) return r; } catch { /* invalid rule: ignore */ }
     }

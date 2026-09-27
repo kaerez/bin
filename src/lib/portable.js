@@ -17,6 +17,7 @@
 // activity log.
 
 import { checkSetting, checkLimit, checkQuota, checkViewerRule } from './settings.js';
+import { upgradeUrlRules } from '../../public/js/sharetypes.js';
 import { normalizeRule } from './ip.js';
 import { ARGON2 } from '../../public/js/format.js';
 
@@ -57,7 +58,8 @@ function limitsBlock(v, where) {
   const out = { all: {}, api: {} };
   for (const ch of ['all', 'api']) {
     keys(v[ch], `${where}.${ch}`, [], Object.keys(v[ch] ?? {}));
-    for (const [k, val] of Object.entries(v[ch])) out[ch][k] = wrap(`${where}.${ch}.${short(k)}`, () => checkLimit(k, val, ch));
+    // Link rules from files made before scheme:name:// / scheme:name: are upgraded first.
+    for (const [k, val] of Object.entries(v[ch])) out[ch][k] = wrap(`${where}.${ch}.${short(k)}`, () => checkLimit(k, k === 'urlRules' ? upgradeUrlRules(val) : val, ch));
   }
   return out;
 }

@@ -139,8 +139,9 @@ function urlRulesHelp() {
     h('summary', { text: 'How link rules work' }),
     h('p', {}, 'A link\'s ', h('strong', { text: 'scheme' }), ' is the part before the first colon: ', code('https'), ' in ', code('https://example.com/page'), ', ', code('mailto'), ' in ', code('mailto:a@example.com'), ', ', code('tel'), ' in ', code('tel:+15551234'), '. One rule per line; a link is allowed when any rule matches:'),
     h('ul', {},
-      li(code('scheme:https'), ' allows every link with that scheme (', code('scheme:http'), ' and ', code('scheme:https'), ' are the built-in default).'),
-      li(code('scheme:*'), ' allows every scheme except the dangerous ones below.'),
+      li(code('scheme:https://'), ' allows links of that scheme written with ', code('//'), ' (', code('https://example.com'), '). ', code('scheme:http://'), ' and ', code('scheme:https://'), ' are the built-in default; http and https links always have ', code('//'), '.'),
+      li(code('scheme:tel:'), ' allows links of that scheme without ', code('//'), ' (', code('tel:+15551234'), ', ', code('mailto:a@example.com'), '). A scheme used both ways needs both rules: ', code('scheme:myapp://'), ' and ', code('scheme:myapp:'), '.'),
+      li(code('scheme:*'), ' allows every scheme, either way, except the dangerous ones below.'),
       li(code('re:<pattern>'), ' allows links a regular expression matches. The engine is the browser\'s (JavaScript ', code('RegExp'), ', flags ', code('i'), ' and ', code('u'), ': case-insensitive, Unicode), tested against the whole link as the browser normalizes it (e.g. ', code('https://example.com/a?b=1'), '). It matches ', h('em', { text: 'anywhere' }), ' in the link unless you anchor it: ', code('re:^https://([a-z0-9-]+\\.)*example\\.com(/|$)'), ' allows example.com and its subdomains only.')),
     h('p', {}, code('javascript:'), ', ', code('data:'), ', ', code('file:'), ', ', code('blob:'), ' and similar can never be allowed. The sender\'s browser or CLI checks the rules (the server never sees the link), and recipients can open only web, mail, phone and SMS links; others are shown for copying.'));
 }
@@ -151,7 +152,7 @@ function urlRulesHelp() {
  * type a link and see which rule allows it, or why it is refused.
  */
 function urlRulesInput(initial, label, inheritedRules) {
-  const area = h('textarea.input.rules-in', { rows: '3', spellcheck: 'false', 'aria-label': label, placeholder: 'scheme:https\nscheme:tel\nre:^https://([a-z0-9-]+\\.)*example\\.com(/|$)' });
+  const area = h('textarea.input.rules-in', { rows: '3', spellcheck: 'false', 'aria-label': label, placeholder: 'scheme:https://\nscheme:tel:\nre:^https://([a-z0-9-]+\\.)*example\\.com(/|$)' });
   area.value = initial.join('\n');
   const inheritedNote = h('p.mono.muted', { text: `In effect: ${(inheritedRules || DEFAULT_URL_RULES).join(', ')}` });
   const probe = h('input.input', { type: 'text', spellcheck: 'false', placeholder: 'test a link, e.g. https://example.com/page', 'aria-label': `${label}: test a link` });

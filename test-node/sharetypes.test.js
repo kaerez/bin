@@ -99,7 +99,7 @@ describe('URL rules (the admin\'s "links that may be shared")', () => {
   });
 
   it('allows extra schemes and anchored regular expressions', () => {
-    expect(parseShareUrl('tel:+15551234', { rules: ['scheme:tel'] }).href).toBe('tel:+15551234');
+    expect(parseShareUrl('tel:+15551234', { rules: ['scheme:tel:'] }).href).toBe('tel:+15551234');
     const rules = ['re:^https://([a-z0-9-]+\\.)*example\\.com/'];
     expect(parseShareUrl('https://docs.EXAMPLE.com/x', { rules }).href).toBe('https://docs.example.com/x');
     expect(() => parseShareUrl('https://evil.test/?example.com/', { rules })).toThrow(/not allowed/);
@@ -107,13 +107,34 @@ describe('URL rules (the admin\'s "links that may be shared")', () => {
   });
 
   it('validates rule lists (scheme names, forbidden schemes, regex syntax, size)', () => {
-    expect(normalizeUrlRules([' scheme:HTTPS: ', 'scheme:tel', 'scheme:tel', ''])).toEqual(['scheme:https', 'scheme:tel']);
-    expect(() => normalizeUrlRules(['scheme:data'])).toThrow(/never be allowed/);
+    expect(normalizeUrlRules([' scheme:HTTPS:// ', 'scheme:tel:', 'scheme:tel:', ''])).toEqual(['scheme:https://', 'scheme:tel:']);
+    expect(() => normalizeUrlRules(['scheme:data:'])).toThrow(/never be allowed/);
     expect(() => normalizeUrlRules(['https'])).toThrow(/start a rule with/);
     expect(() => normalizeUrlRules(['re:(['])).toThrow();
-    expect(() => normalizeUrlRules(Array.from({ length: 51 }, (_, i) => `scheme:s${i}`))).toThrow(/at most 50/);
-    expect(urlRulesOf(['scheme:data'])).toEqual(['scheme:http', 'scheme:https']); // untrusted input falls back
-    expect(describeUrlRules(['scheme:http', 'scheme:https', 'scheme:tel'])).toBe('http, https and tel links');
+    expect(() => normalizeUrlRules(Array.from({ length: 51 }, (_, i) => `scheme:s${i}:`))).toThrow(/at most 50/);
+    expect(urlRulesOf(['scheme:data:'])).toEqual(['scheme:http://', 'scheme:https://']); // untrusted input falls back
+    expect(describeUrlRules(['scheme:http://', 'scheme:https://', 'scheme:tel:'])).toBe('http://, https:// and tel: links');
+  });
+
+  it('a scheme rule says which form: scheme:name:// or scheme:name:', () => {
+    expect(() => normalizeUrlRules(['scheme:tel'])).toThrow(/write scheme:tel:\/\/ .* or scheme:tel:/);
+    expect(() => normalizeUrlRules(['scheme:https:'])).toThrow(/https links always have \/\/: write scheme:https:\/\//);
+    expect(() => normalizeUrlRules(['scheme:http:/'])).toThrow(/not a URL scheme/);
+    const both = ['scheme:myapp://'];
+    expect(urlAllowed(new URL('myapp://open/x'), both)).toBe(true);
+    expect(urlAllowed(new URL('myapp:open/x'), both)).toBe(false);
+    expect(urlAllowed(new URL('myapp:open/x'), ['scheme:myapp:'])).toBe(true);
+    expect(urlAllowed(new URL('myapp://open/x'), ['scheme:myapp:'])).toBe(false);
+    expect(urlAllowed(new URL('http:example.com'), ['scheme:http://'])).toBe(true); // browsers add the //
+    expect(urlAllowed(new URL('myapp://x'), ['scheme:*'])).toBe(true);
+    expect(urlAllowed(new URL('myapp:x'), ['scheme:*'])).toBe(true);
+  });
+
+  it('upgrades rules from before the new syntax to what they allowed', async () => {
+    const { upgradeUrlRules } = await import('../public/js/sharetypes.js');
+    expect(upgradeUrlRules(['scheme:https', 'scheme:tel', 'scheme:MAILTO', 'scheme:vscode', 'scheme:*', 're:^x', 'scheme:ssh://']))
+      .toEqual(['scheme:https://', 'scheme:tel:', 'scheme:mailto:', 'scheme:vscode://', 'scheme:vscode:', 'scheme:*', 're:^x', 'scheme:ssh://']);
+    expect(urlRulesOf(['scheme:https', 'scheme:tel'])).toEqual(['scheme:https://', 'scheme:tel:']); // an older server's policy
   });
 
   it('recipients accept any safe scheme and see host-less links for what they are', () => {
@@ -137,9 +158,9 @@ describe('what a recipient may open', () => {
 describe('link rule tester helpers', () => {
   it('names the rule that allows a link, and none for a refused one', async () => {
     const { matchingUrlRule, unanchoredRules } = await import('../public/js/sharetypes.js');
-    const rules = ['scheme:mailto', 're:^https://([a-z0-9-]+\\.)*example\\.com(/|$)', 're:intranet'];
+    const rules = ['scheme:mailto:', 're:^https://([a-z0-9-]+\\.)*example\\.com(/|$)', 're:intranet'];
     expect(matchingUrlRule(new URL('https://docs.example.com/a'), rules)).toBe('re:^https://([a-z0-9-]+\\.)*example\\.com(/|$)');
-    expect(matchingUrlRule(new URL('mailto:a@b.c'), rules)).toBe('scheme:mailto');
+    expect(matchingUrlRule(new URL('mailto:a@b.c'), rules)).toBe('scheme:mailto:');
     expect(matchingUrlRule(new URL('https://evil.test/?intranet'), rules)).toBe('re:intranet'); // unanchored: matches anywhere
     expect(matchingUrlRule(new URL('https://evil.test/'), rules)).toBeNull();
     expect(matchingUrlRule(new URL('javascript:alert(1)'), ['scheme:*'])).toBeNull();

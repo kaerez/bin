@@ -47,6 +47,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Link rules say the form of a scheme:** `scheme:name://` allows links written with `//`
+  (http and https are always written this way) and `scheme:name:` allows links without it
+  (`tel:`, `mailto:`). A bare `scheme:name` is no longer accepted. Saved rules and older
+  export files are rewritten to allow exactly what they allowed (`scheme:tel` → `scheme:tel:`,
+  `scheme:https` → `scheme:https://`, other schemes → both forms).
+
 - **Roles** (Admin → Roles, next to Users). Every user has exactly one role, Default unless
   given another.
   - **Owner** is built in and locked (everything allowed, no limits; the owner's only).
