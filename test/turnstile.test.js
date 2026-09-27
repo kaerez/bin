@@ -1,15 +1,17 @@
 // turnstile.test.js — the Cloudflare Turnstile human check: off unless both
 // TURNSTILE_SITEKEY and TURNSTILE_SECRET are set; when on, login, a signed-in
-// password change and starting an anonymous share need a token that
-// siteverify accepts for this hostname and this form's action. Admin password
-// resets, file chunks/finalize and API keys never need one. Only the pages
-// that show the widget get the relaxed CSP (and no COEP).
+// password change, every other change to one's own account (username, API
+// keys, passkeys, recovery codes, the sign-in steps) and starting an anonymous
+// share need a token that siteverify accepts for this hostname and this form's
+// action. Admin password resets, file chunks/finalize and API keys never need
+// one. Only the pages that show the widget get the relaxed CSP (and no COEP).
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker from '../src/index.js';
 import { setSiteverify, turnstileConfig } from '../src/lib/turnstile.js';
 import { CSP } from '../src/lib/http.js';
-import { owner, makeUser, fetchJson, freshIp, cookieOf, salt16, proofFor, ORIGIN } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, cookieOf, salt16, proofFor, ORIGIN, USER_PW, intent } from './helpers.js';
+import { SoftAuthenticator } from './soft-authenticator.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
 
@@ -144,6 +146,108 @@ describe('password changes', () => {
     const oc = cookieOf(await tsFetch('/api/auth/login', { method: 'POST', body: loginBody('owner', 'owner-password'), ip: freshIp(), token: 'ok:login#2' }));
     const reset = await tsFetch(`/api/private/admin/users/${u.id}/password`, { method: 'POST', cookie: oc, body: { salt: salt16(), t: 3, proof: proofFor('reset-by-admin-1') } });
     expect(reset.status).toBe(200);
+  });
+});
+
+describe('account changes', () => {
+  const allowApi = async (uid) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: await owner(), body: { scope: uid, channel: 'all', patch: { apiEnabled: true, apiMaxKeys: null } } });
+  const pw = (password = USER_PW) => ({ current: proofFor(password) });
+  let n = 0;
+  const once = (action) => `ok:${action}#${++n}`;
+
+  /** A client for `cookie`: with Turnstile on (tsFetch) or off (SELF). */
+  const client = (cookie, on = true) => (method, path, body, token) => {
+    const headers = method === 'DELETE' ? { ...intent } : {};
+    if (on) return tsFetch(path, { method, body, cookie, token, headers, ip: freshIp() });
+    return fetchJson(path, { method, body, cookie, headers, ip: freshIp() });
+  };
+
+  /** With Turnstile on: no token and another form's token are refused; a fresh "account" token passes. */
+  async function guarded(send, method, path, body, status) {
+    expect(await errorOf(await send(method, path, body)), path).toBe('turnstile_required');
+    expect(await errorOf(await send(method, path, body, once('password'))), path).toBe('turnstile_failed');
+    expect(await errorOf(await send(method, path, body, once('login'))), path).toBe('turnstile_failed');
+    const r = await send(method, path, body, once('account'));
+    expect(r.status, path).toBe(status);
+    return r;
+  }
+
+  it('each needs a fresh "account" token when Turnstile is on', async () => {
+    withFake();
+    const u = await makeUser('ts-acct');
+    await allowApi(u.id);
+    const send = client(u.cookie);
+    // Username.
+    await guarded(send, 'POST', '/api/private/me/username', { username: 'ts-acct-2', ...pw() }, 200);
+    // API keys: create, change, revoke.
+    const { id } = await (await guarded(send, 'POST', '/api/private/me/keys', { name: 'k', ...pw() }, 201)).json();
+    await guarded(send, 'PATCH', `/api/private/me/keys/${id}`, { name: 'k2', scopes: ['notes'], ...pw() }, 200);
+    await guarded(send, 'DELETE', `/api/private/me/keys/${id}`, pw(), 200);
+    // Adding a passkey: its challenge needs no token, the step that adds it
+    // does (a refused attempt leaves the challenge unused).
+    const auth = new SoftAuthenticator();
+    const o = await send('POST', '/api/private/me/passkeys/options', {});
+    expect(o.status).toBe(200);
+    const { challengeId, publicKey } = await o.json();
+    const credential = await auth.create(publicKey, ORIGIN);
+    await guarded(send, 'POST', '/api/private/me/passkeys', { challengeId, credential, name: 'Laptop', ...pw() }, 201);
+    // The sign-in steps, new recovery codes, removing the passkey.
+    await guarded(send, 'POST', '/api/private/me/second-factor', { on: true, ...pw() }, 200);
+    await guarded(send, 'POST', '/api/private/me/second-factor', { on: false, ...pw() }, 200);
+    await guarded(send, 'POST', '/api/private/me/recovery-codes', pw(), 200);
+    // A passkey confirmation's challenge needs no token either (the change it confirms does).
+    expect((await send('POST', '/api/private/me/reauth', {})).status).toBe(200);
+    await guarded(send, 'POST', `/api/private/me/passkeys/${auth.id}/remove`, pw(), 200);
+    // Reading needs none.
+    expect((await send('GET', '/api/private/me/keys')).status).toBe(200);
+    expect((await send('GET', '/api/private/me/passkeys')).status).toBe(200);
+  });
+
+  it('a token works once, and is checked before the password (a bot learns nothing)', async () => {
+    withFake();
+    const u = await makeUser('ts-acct-once');
+    const send = client(u.cookie);
+    const t = once('account');
+    expect((await send('POST', '/api/private/me/username', { username: 'ts-acct-once-2', ...pw() }, t)).status).toBe(200);
+    expect(await errorOf(await send('POST', '/api/private/me/username', { username: 'ts-acct-once-3', ...pw() }, t))).toBe('turnstile_failed');
+    // A wrong password without a token: refused for the token, not the password.
+    expect(await errorOf(await send('POST', '/api/private/me/username', { username: 'ts-acct-once-3', ...pw('wrong-password-000') }))).toBe('turnstile_required');
+    expect(await errorOf(await send('POST', '/api/private/me/username', { username: 'ts-acct-once-3', ...pw('wrong-password-000') }, once('account')))).toBe('wrong_password');
+  });
+
+  it('need no token when Turnstile is off', async () => {
+    const u = await makeUser('ts-acct-off');
+    await allowApi(u.id);
+    const send = client(u.cookie, false);
+    expect((await send('POST', '/api/private/me/username', { username: 'ts-acct-off-2', ...pw() })).status).toBe(200);
+    const made = await send('POST', '/api/private/me/keys', { name: 'k', ...pw() });
+    expect(made.status).toBe(201);
+    const { id } = await made.json();
+    expect((await send('PATCH', `/api/private/me/keys/${id}`, { name: 'k2', ...pw() })).status).toBe(200);
+    expect((await send('DELETE', `/api/private/me/keys/${id}`, pw())).status).toBe(200);
+    const auth = new SoftAuthenticator();
+    const o = await (await send('POST', '/api/private/me/passkeys/options', {})).json();
+    const credential = await auth.create(o.publicKey, ORIGIN);
+    expect((await send('POST', '/api/private/me/passkeys', { challengeId: o.challengeId, credential, name: 'Laptop', ...pw() })).status).toBe(201);
+    expect((await send('POST', '/api/private/me/second-factor', { on: true, ...pw() })).status).toBe(200);
+    expect((await send('POST', '/api/private/me/recovery-codes', pw())).status).toBe(200);
+    expect((await send('POST', `/api/private/me/passkeys/${auth.id}/remove`, pw())).status).toBe(200);
+  });
+
+  it('API keys need no token (and cannot reach the account routes at all)', async () => {
+    withFake();
+    const u = await makeUser('ts-acct-api');
+    await allowApi(u.id);
+    const { key } = await (await client(u.cookie)('POST', '/api/private/me/keys', { name: 'cli', ...pw() }, once('account'))).json();
+    const bearer = { authorization: `Bearer ${key}` };
+    const note = await tsFetch('/api/private/paste', { method: 'POST', headers: bearer, body: { paste: (await encryptPaste({ text: 'hi', bar: true, views: 1, expire: '1h' })).body } });
+    expect(note.status).toBe(201);
+    const policy = await tsFetch('/api/private/policy', { headers: bearer });
+    expect(policy.status).toBe(200);
+    // A key is not a session: the account routes refuse it before any human check.
+    const r = await tsFetch('/api/private/me/username', { method: 'POST', headers: bearer, body: { username: 'x', ...pw() } });
+    expect(r.status).toBe(403);
+    expect(await errorOf(r)).toBe('api_key_not_allowed');
   });
 });
 
