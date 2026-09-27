@@ -13,8 +13,8 @@ import { DRIVE_PRF_SALT } from '../../js/drivekeys.js';
 import { updatePasswordWrap, replaceRecoveryWraps, removeRecoveryWraps, addPasskeyWrap, removePasskeyWrap } from '../../js/driveclient.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
-import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
-import { copyText, flashCopied, toast } from '../../js/ui.js';
+import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
+import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
 import { humanCheck } from '../../js/turnstile.js';
@@ -83,7 +83,8 @@ function wireUsername() {
     const msg = $('#name-msg');
     const btn = $('#name-btn');
     const name = $('#name-new').value.trim();
-    if (!name) return showMsg(msg, 'Enter the new username.');
+    markInvalid($('#name-new'), msg, false);
+    if (!name) { showMsg(msg, 'Enter the new username.'); markInvalid($('#name-new'), msg); $('#name-new').focus(); return; }
     btn.disabled = true;
     try {
       const step = await confirmStep($('#name-current'));
@@ -93,8 +94,10 @@ function wireUsername() {
       showMsg(msg, `Your username is now ${r.username}. Use it the next time you sign in.`, false);
       toast('Username changed.');
     } catch (err) {
-      const text = err instanceof ApiError && err.code === 'username_taken' ? 'That username is taken.' : refusal(err);
+      const taken = err instanceof ApiError && err.code === 'username_taken';
+      const text = taken ? 'That username is taken.' : refusal(err);
       showMsg(msg, text);
+      if (taken) markInvalid($('#name-new'), msg);
       toast(text, { error: true });
     } finally {
       btn.disabled = false;
@@ -147,7 +150,14 @@ function wirePassword() {
     const msg = $('#pw-msg');
     const btn = $('#pw-btn');
     const bad = policy ? checkNewPassword($('#pw-new').value, $('#pw-new2').value, policy) : checkOwnerPassword($('#pw-new').value, $('#pw-new2').value);
-    if (bad) return showMsg(msg, bad);
+    markInvalid($('#pw-new'), msg, false);
+    markInvalid($('#pw-new2'), msg, false);
+    if (bad) {
+      // Tie the message to the field it is about (the repeat field for a mismatch).
+      const field = /match/i.test(bad) ? $('#pw-new2') : $('#pw-new');
+      showMsg(msg, bad); markInvalid(field, msg); field.focus();
+      return;
+    }
     btn.disabled = true;
     btn.textContent = 'Changing…';
     try {
@@ -267,23 +277,26 @@ function editKeyRow(k, tr) {
     return keyChange((step, token) => updateKey(k.id, { name: name.value.trim(), scopes }, step, token), 'API key updated.');
   };
   keyCheck?.gate(save);
-  tr.after(h('tr.key-edit-row', {}, h('td.cell-full', { colspan: '6' }, h('div.toolbar', {}, name,
+  tr.after(h('tr.key-edit-row', { dataset: { focusKey: `key:${k.id}:edit` } }, h('td.cell-full', { colspan: '6' }, h('div.toolbar', {}, name,
     h('fieldset.key-scopes', { 'aria-label': 'What the key may do' }, ...boxes.map((b, i) => h('label.inline', {}, b, ` ${KEY_SCOPES[i][1]}`))), save))));
 }
 
 async function renderKeys() {
+  // A revoke or an edit re-renders the table: focus goes back to the key's
+  // row, or to the card's heading when the row is gone.
+  const refocus = keepFocus($('#keys-body'), { fallback: $('#keys-card .section-title') });
   const body = clear($('#keys-body'));
   try {
     const { keys } = await listKeys();
     for (const k of keys) {
       const actions = h('div.btn-row.row-actions');
-      const tr = h('tr', {}, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
+      const tr = h('tr', { dataset: { focusKey: `key:${k.id}` } }, h('td', { dataset: { label: 'Name' }, text: k.name }), h('td.mono', { dataset: { label: 'Created' }, text: formatDate(k.created) }),
         h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
         h('td.mono', { dataset: { label: 'Expires' }, text: k.expires ? formatDate(k.expires) : 'never' }),
         h('td.mono', { dataset: { label: 'Scopes' }, text: (k.scopes || []).join(', ') || '—' }), h('td.cell-actions', {}, actions));
       if (!profile.impersonatedBy) {
-        actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', on: { click: () => editKeyRow(k, tr) } }));
-        const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
+        actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', dataset: { focusKey: `key:${k.id}:edit` }, on: { click: () => editKeyRow(k, tr) } }));
+        const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `key:${k.id}:revoke` } });
         armConfirm(rv, 'Revoke?', () => keyChange((step, token) => revokeKey(k.id, step, token), 'API key revoked.'));
         keyCheck?.gate(rv); // waits for the card's human check, like the Create button
         actions.appendChild(rv);
@@ -293,6 +306,7 @@ async function renderKeys() {
   } catch (e) {
     showMsg($('#keys-msg'), friendlyError(e));
   }
+  refocus();
 }
 
 // ── passkeys and recovery codes ────────────────────────────────────────────
@@ -342,9 +356,10 @@ async function passkeyAction(fn, done) {
 }
 
 async function renderPasskeys() {
+  const refocus = keepFocus($('#passkeys-body'), { fallback: $('#passkeys-card .section-title') });
   const body = clear($('#passkeys-body'));
   let st;
-  try { st = await myPasskeys(); } catch (e) { showMsg($('#passkeys-msg'), friendlyError(e)); return; }
+  try { st = await myPasskeys(); } catch (e) { showMsg($('#passkeys-msg'), friendlyError(e)); refocus(); return; }
   for (const p of st.passkeys) {
     const rm = h('button.btn.danger', { type: 'button', text: 'Remove' });
     armConfirm(rm, st.passkeys.length === 1 ? 'Remove (and its recovery codes)?' : 'Remove?', () => passkeyAction(
@@ -374,6 +389,7 @@ async function renderPasskeys() {
     : 'Adding your first passkey gives you 20 one-time recovery codes.';
   $('#recovery-regen').hidden = !has;
   $('#passkey-add').disabled = st.passkeys.length >= st.max;
+  refocus();
 }
 
 function wirePasskeys() {

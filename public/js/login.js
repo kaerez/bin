@@ -6,7 +6,7 @@
 import './kdf-progress.js';
 import { login, session, ApiError, passkeyLoginOptions, passkeyLogin, recoveryLogin, secondFactor } from './api.js';
 import { loginProof } from './pwauth.js';
-import { showMsg, wirePeek, friendlyError } from './common.js';
+import { showMsg, markInvalid, wirePeek, friendlyError } from './common.js';
 import { humanCheck } from './turnstile.js';
 import { passkeysSupported, usePasskeyPrf } from './passkeys.js';
 import { DRIVE_PRF_SALT } from './drivekeys.js';
@@ -43,7 +43,15 @@ async function done(r, creds = {}) {
   else location.replace('/dashboard/');
 }
 
-function failure(msg, err) {
+/** Mark the fields a message is about (and only those) invalid, described by it. */
+function flag(msg, ...fields) {
+  for (const f of document.querySelectorAll('#login-user, #login-pass, #login-code, #second-code')) markInvalid(f, msg, false);
+  for (const f of fields) markInvalid(f, msg);
+}
+
+function failure(msg, err, fields = []) {
+  // "Wrong username or password / recovery code" is about both fields.
+  flag(msg, ...(err instanceof ApiError && ['invalid_login', 'invalid_second_factor'].includes(err.code) ? fields : []));
   if (err instanceof ApiError && err.code === 'account_locked') {
     showMsg(msg, `This account is temporarily locked${err.extra.until ? ` until ${new Date(err.extra.until * 1000).toLocaleTimeString()}` : ''}.`);
   } else {
@@ -57,7 +65,6 @@ $('#recovery-toggle').addEventListener('click', () => {
   recoveryMode = !recoveryMode;
   $('#login-pass-block').hidden = recoveryMode;
   $('#login-code-block').hidden = !recoveryMode;
-  $('#recovery-toggle').setAttribute('aria-pressed', String(recoveryMode));
   $('#recovery-toggle').textContent = recoveryMode ? 'Use my password instead' : 'Use a recovery code instead';
   $('#login-btn').textContent = recoveryMode ? 'Log in with the code' : 'Log in';
   (recoveryMode ? $('#login-code') : $('#login-pass')).focus();
@@ -71,13 +78,18 @@ $('#login-form').addEventListener('submit', async (e) => {
   const username = $('#login-user').value.trim();
   const password = $('#login-pass').value;
   const code = $('#login-code').value.trim();
+  const secret = recoveryMode ? $('#login-code') : $('#login-pass');
   if (!username || (recoveryMode ? !code : !password)) {
     showMsg(msg, recoveryMode ? 'Enter your username and a recovery code.' : 'Enter your username and password.');
+    const missing = [!username && $('#login-user'), !secret.value.trim() && secret].filter(Boolean);
+    flag(msg, ...missing);
+    missing[0].focus();
     return;
   }
   btn.disabled = true;
   btn.textContent = 'Signing in…';
   msg.hidden = true;
+  flag(msg);
   try {
     const token = await (await check).take();
     if (recoveryMode) { await done(await recoveryLogin(username, code, token), { code }); return; }
@@ -85,7 +97,7 @@ $('#login-form').addEventListener('submit', async (e) => {
     if (r.secondFactor) { startSecond(r.secondFactor, password); return; }
     await done(r, { password });
   } catch (err) {
-    failure(msg, err);
+    failure(msg, err, [$('#login-user'), secret]);
   } finally {
     btn.disabled = false;
     btn.textContent = label;
@@ -145,7 +157,7 @@ async function second(body, btn, creds = {}) {
     await done(r, { password, ...(body.code ? { code: body.code } : {}), ...creds });
   } catch (err) {
     if (err instanceof ApiError && err.code === 'challenge_expired') startOver(err.message);
-    else failure(msg, err);
+    else failure(msg, err, body.code ? [$('#second-code')] : []);
   } finally {
     btn.disabled = false;
   }
@@ -162,7 +174,7 @@ $('#second-passkey').addEventListener('click', async () => {
 $('#second-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const code = $('#second-code').value.trim();
-  if (!code) { showMsg($('#second-msg'), 'Enter a recovery code, or use your passkey.'); return; }
+  if (!code) { showMsg($('#second-msg'), 'Enter a recovery code, or use your passkey.'); flag($('#second-msg'), $('#second-code')); $('#second-code').focus(); return; }
   second({ code }, $('#second-code-btn'));
 });
 $('#second-back').addEventListener('click', () => startOver());

@@ -68,7 +68,7 @@
                     type="button"
                     id="themeToggle"
                     class="theme-toggle"
-                    aria-label="Toggle light/dark theme"
+                    aria-label="Dark theme"
                     aria-pressed="true"
                 >
                     <svg
@@ -255,7 +255,7 @@
                     </fieldset>
                     <p class="subtitle" id="passkeys-sub">Sign in with this device's fingerprint, face or screen lock instead of your password, or add it as a second step after the password. You can have several (one per device).</p>
                     <p class="msg" id="recovery-used" role="status" hidden></p>
-                    <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Added</th><th>Last used</th><th>Synced</th><th></th></tr></thead><tbody id="passkeys-body"></tbody></table></div>
+                    <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Added</th><th>Last used</th><th>Synced</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="passkeys-body"></tbody></table></div>
                     <div class="stack" id="passkeys-actions">
                         <label class="field-label" for="passkey-current" id="passkey-current-label">Your password (asked again for every change)</label>
                         <input type="password" class="input" id="passkey-current" autocomplete="current-password" />
@@ -302,7 +302,7 @@
                     </form>
                     <div class="linkrow" id="key-new" hidden><div class="url mono" id="key-new-val"></div><button type="button" class="copy-btn" id="key-copy">copy</button></div>
                     <p class="mono key-warn" id="key-new-note" hidden>Copy this key now — it will not be shown again.</p>
-                    <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th>Scopes</th><th></th></tr></thead><tbody id="keys-body"></tbody></table></div>
+                    <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th>Scopes</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="keys-body"></tbody></table></div>
                     <p class="msg" id="keys-msg" role="alert" hidden></p>
                     <details class="api-help" id="api-help">
                         <summary>Using the API (REST)</summary>
@@ -319,25 +319,25 @@
                     <div class="btn-row"><button type="button" class="btn" id="activity-more" hidden>Load more</button></div>
                 </div>
             </section>
-            <footer class="foot reveal d4">
-                <nav class="foot-links" id="foot-links" aria-label="Project">
-                    <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
-                    <span class="foot-sep" aria-hidden="true">·</span>
-                    <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
-                    <span class="foot-sep" aria-hidden="true">·</span>
-                    <a href="/accessibility/">Accessibility</a>
-                </nav>
-                <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
-                    <span class="feat" role="listitem">Private</span>
-                    <span class="feat" role="listitem">End-to-end encrypted</span>
-                    <span class="feat" role="listitem">Notes &amp; files</span>
-                </div>
-                <p class="foot-crypto mono" aria-label="Cryptography">
-                    AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
-                    <span class="foot-frag">#fragment</span>
-                </p>
-            </footer>
         </main>
+        <footer class="foot reveal d4">
+            <nav class="foot-links" id="foot-links" aria-label="Project">
+                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="/accessibility/">Accessibility</a>
+            </nav>
+            <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
+                <span class="feat" role="listitem">Private</span>
+                <span class="feat" role="listitem">End-to-end encrypted</span>
+                <span class="feat" role="listitem">Notes &amp; files</span>
+            </div>
+            <p class="foot-crypto mono">
+                AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                <span class="foot-frag">#fragment</span>
+            </p>
+        </footer>
 
         <div id="toast" role="status" aria-live="polite"></div>
     </body>

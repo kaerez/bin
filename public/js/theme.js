@@ -52,9 +52,10 @@
   btn.addEventListener('click', function () {
     const next = root.classList.contains('dark') ? 'light' : 'dark';
 
-    // Reduced motion: flip outright. The stylesheet has the wave and the
+    // Reduced motion (the system setting, or "Stop animations" in the
+    // accessibility widget): flip outright. The stylesheet has the wave and the
     // fallback transition switched off, so waiting on either would just delay it.
-    if (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (root.classList.contains('a11y-no-anim') || (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches)) {
       apply(next, true);
       return;
     }

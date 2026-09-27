@@ -11,8 +11,8 @@ import { ApiError } from './api.js';
 import { expireSeconds, MAX_VIEWS } from './format.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk, checkPath, checkMime, buildTree, basename } from './files.js';
 import { detectMime, normalizeMime, COMMON_TYPES } from './mime.js';
-import { $, showView, toast, copyText, flashCopied } from './ui.js';
-import { h, clear, showMsg, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from './common.js';
+import { $, showView, toast, copyText, flashCopied, tablistKeys } from './ui.js';
+import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from './common.js';
 import { walkEntry } from './walk.js';
 import { folderBrowser } from './tree.js';
 import { buildSecret, describeHost, describeUrlRules, parseShareUrl, urlRulesOf, ShareTypeError } from './sharetypes.js';
@@ -31,6 +31,7 @@ let mode = 'note';
 const MODES = ['note', 'url', 'secret', 'files'];
 const SECRET_INPUTS = { title: '#sec-title', username: '#sec-username', password: '#sec-password', url: '#sec-url', totp: '#sec-totp', notes: '#sec-notes' };
 const items = new Map(); // path → { path, file, size, type, mtime } | { path, dir: true }
+let syncTabs = () => {};
 
 /**
  * Start the composer on this page. `profile` has the shape of /api/private/me
@@ -60,6 +61,8 @@ function init() {
     tab.hidden = !allowed[m];
     tab.onclick = () => setMode(m);
   }
+  // Arrow keys between the kinds; the focused tab is selected at once.
+  syncTabs = tablistKeys($('#tab-note').parentElement, { automatic: true });
   const first = MODES.find((m) => allowed[m]);
   if (!first) {
     showMsg($('#create-msg'), 'Your account is not allowed to create shares. Ask the administrator.');
@@ -120,6 +123,7 @@ function setMode(m) {
     $(`#tab-${k}`).setAttribute('aria-selected', String(k === m));
     $(`#panel-${k}`).hidden = k !== m;
   }
+  syncTabs();
   $('#create').setAttribute('aria-label', m === 'files' ? 'Encrypt, upload and create link' : 'Encrypt and create link');
 }
 
@@ -246,7 +250,6 @@ function wireFiles() {
     dz.classList.remove('over');
     await addDataTransfer(e.dataTransfer);
   });
-  dz.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
   renderList();
 }
 
@@ -440,7 +443,7 @@ async function submit(password, opts) {
       const r = await api.createNote(body, opts.label || undefined);
       result = { kind: 'paste', id: r.id, deletetoken: r.deletetoken, fragment };
     } else {
-      result = await uploadFiles(password, opts, (txt) => { progress.hidden = false; progress.textContent = txt; sendTxt.textContent = 'Uploading…'; });
+      result = await uploadFiles(password, opts, (txt) => { progress.textContent = txt; sendTxt.textContent = 'Uploading…'; });
     }
     if (animate) await wait(ARROW_LEAD_MS);
     await leaveCreate();
@@ -448,12 +451,12 @@ async function submit(password, opts) {
     clearTyped();
     $('#deletable').checked = false;
     items.clear();
-    progress.hidden = true;
+    progress.textContent = '';
     showSuccess({ ...result, url: `${location.origin}/p/${result.id}#${result.fragment}`, views: opts.views, expiryText: opts.expiryText });
   } catch (e) {
     createBtn.classList.remove('sending');
     showMsg($('#create-msg'), friendlyError(e));
-    progress.hidden = true;
+    progress.textContent = '';
     createBtn.disabled = false;
     sendTxt.textContent = label;
   }
@@ -518,12 +521,33 @@ function openPasswordModal(onSubmit) {
   const create = $('#pw-create');
   const cancel = $('#pw-cancel');
   const mmsg = $('#pw-modal-msg');
+  const dialog = $('#pw-modal-dialog');
   const opener = document.activeElement;
   wirePeek(['#modal-password', '#modal-peek'], ['#modal-password-confirm', '#modal-peek-confirm']);
+  // Modal: everything outside the dialog is inert while it is open (no
+  // focus, no pointer, out of the accessibility tree — screen readers'
+  // virtual cursor cannot wander out of it either).
+  const outside = [];
+  for (let n = scrim; n && n !== document.body; n = n.parentElement) {
+    for (const sib of n.parentElement.children) {
+      if (sib !== n && !sib.inert && !['SCRIPT', 'STYLE'].includes(sib.tagName)) { sib.inert = true; outside.push(sib); }
+    }
+  }
+  const invalid = (field, text) => {
+    markInvalid(input, mmsg, false);
+    markInvalid(confirmInput, mmsg, false);
+    if (!field) return;
+    showMsg(mmsg, text);
+    markInvalid(field, mmsg);
+    field.focus();
+  };
+  invalid(null);
   const close = () => {
+    for (const el of outside) el.inert = false;
     scrim.hidden = true;
     input.value = '';
     confirmInput.value = '';
+    invalid(null);
     create.onclick = cancel.onclick = scrim.onclick = input.onkeydown = confirmInput.onkeydown = null;
     document.removeEventListener('keydown', onKey);
     if (opener && typeof opener.focus === 'function') opener.focus();
@@ -533,13 +557,15 @@ function openPasswordModal(onSubmit) {
     if (e.key !== 'Tab') return;
     const f = [...scrim.querySelectorAll('input, button')].filter((el) => !el.disabled && el.offsetParent !== null);
     if (!f.length) return;
-    if (e.shiftKey && (document.activeElement === f[0] || !scrim.contains(document.activeElement))) { e.preventDefault(); f[f.length - 1].focus(); }
+    // Focus on the dialog itself (where it opens) counts as its start.
+    const atStart = document.activeElement === f[0] || document.activeElement === dialog;
+    if (e.shiftKey && (atStart || !scrim.contains(document.activeElement))) { e.preventDefault(); f[f.length - 1].focus(); }
     else if (!e.shiftKey && (document.activeElement === f[f.length - 1] || !scrim.contains(document.activeElement))) { e.preventDefault(); f[0].focus(); }
   };
   const submitPw = () => {
-    if (!input.value) { showMsg(mmsg, 'Enter a password, or cancel.'); input.focus(); return; }
-    if (input.value.length > 128) { showMsg(mmsg, 'Password is too long — 128 characters max.'); input.focus(); return; }
-    if (input.value !== confirmInput.value) { showMsg(mmsg, 'Passwords do not match — repeat the same password in both fields.'); confirmInput.focus(); return; }
+    if (!input.value) { invalid(input, 'Enter a password, or cancel.'); return; }
+    if (input.value.length > 128) { invalid(input, 'Password is too long — 128 characters max.'); return; }
+    if (input.value !== confirmInput.value) { invalid(confirmInput, 'Passwords do not match — repeat the same password in both fields.'); return; }
     const pw = input.value;
     close();
     onSubmit(pw);
@@ -551,7 +577,7 @@ function openPasswordModal(onSubmit) {
   document.addEventListener('keydown', onKey);
   mmsg.hidden = true;
   scrim.hidden = false;
-  $('#pw-modal-dialog').focus();
+  dialog.focus();
 }
 
 // ── success ──────────────────────────────────────────────────────────────────
