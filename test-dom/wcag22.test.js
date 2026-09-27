@@ -6,7 +6,7 @@
 //   3.2.5          links that open a new tab say so;
 //   3.3.2 / 2.5.3  every credential field on the static pages has a visible
 //                  label that is its accessible name, and an autocomplete token (1.3.5);
-//   3.3.8          the human check offers a way on (a passkey, the contact);
+//   3.3.8          the human check's note offers the contact (and a page's alternative);
 //   1.4.3 / 1.4.6 / 1.4.11  every text colour ≥7:1 and field boundaries ≥3:1, both themes.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -259,16 +259,20 @@ describe('credential fields on the static pages', () => {
 
 // ── 3.3.8: the human check offers a way on ───────────────────────────────────
 describe('humanCheck help', () => {
-  it('the waiting note offers the alternative and the contact', async () => {
+  it('the waiting note offers the contact, and a page\'s own alternative when it has one', async () => {
     api.config = { turnstile: '0x4AAAAAAAsitekey' };
     globalThis.turnstile = { render: () => 'w1', reset() {} };
     const box = Object.assign(document.createElement('div'), { hidden: true });
     const btn = document.createElement('button');
     document.body.append(box, btn);
-    const c = humanCheck(box, 'login', { gate: [btn], alternative: 'You can also sign in with a passkey, which needs no human check.' });
+    const c = humanCheck(box, 'login', { gate: [btn] });
     await c;
     const note = document.querySelector('.human-wait');
-    expect(note.textContent).toMatch(/Waiting for the human check.*passkey.*If you cannot complete it, contact the administrator\./);
+    expect(note.textContent).toBe('Waiting for the human check… If you cannot complete it, contact the administrator.');
+    const btn2 = document.createElement('button');
+    document.body.append(btn2);
+    await humanCheck(Object.assign(document.createElement('div'), { hidden: true }), 'account', { gate: [btn2], alternative: 'Ask the owner to make the change for you.' });
+    expect(btn2.nextElementSibling.textContent).toMatch(/Waiting for the human check… Ask the owner to make the change for you\. If you cannot complete it/);
     expect(note.querySelector('a').getAttribute('href')).toBe('/accessibility/#st-contact');
     delete globalThis.turnstile;
     api.config = { turnstile: null };

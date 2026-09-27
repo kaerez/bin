@@ -241,6 +241,28 @@ describe('extending a download window (WCAG 2.2.1)', () => {
     expect((await fetchJson(`/api/file/${s.id}/extend`, { headers: { 'x-download-grant': grant } })).status).toBe(405);
   });
 
+  it('has the chunk route\'s guards: cross-site refused, the grant is the credential, a bad grant counts as invalid', async () => {
+    const s = await upload(oc, [{ path: 'g.txt', bytes: utf8('guards') }], { views: null, expire: '1h' });
+    const { grant } = await (await openShare(s.id, s.fragment)).res.json();
+    for (const site of ['cross-site', 'same-site']) {
+      const r = await fetchJson(`/api/file/${s.id}/extend`, { method: 'POST', headers: { 'x-download-grant': grant, 'sec-fetch-site': site } });
+      expect(r.status).toBe(403);
+      expect((await r.json()).error).toBe('cross_site');
+    }
+    // No grant, no extension (a session cookie is not a grant).
+    expect((await fetchJson(`/api/file/${s.id}/extend`, { method: 'POST', cookie: oc })).status).toBe(403);
+    // A note id is not a file share.
+    expect((await fetchJson(`/api/paste/${s.id.slice(1)}x/extend`, { method: 'POST', headers: { 'x-download-grant': grant } })).status).toBeGreaterThanOrEqual(400);
+    // Bad grants feed the Guard's "invalid" scope: the network ends up blocked, as for chunks.
+    const ip = freshIp();
+    let last;
+    for (let i = 0; i < 80; i++) { // guard.invalid.max defaults to 60
+      last = await fetchJson(`/api/file/${s.id}/extend`, { method: 'POST', headers: { 'x-download-grant': 'B'.repeat(43) }, ip });
+      if (last.status === 429) break;
+    }
+    expect(last.status).toBe(429);
+  });
+
   it('after the last view, the purge waits for the extended window', async () => {
     const s = await upload(oc, [{ path: 'once.txt', bytes: utf8('last') }], { views: 1, expire: '1d' });
     const o = await openShare(s.id, s.fragment);

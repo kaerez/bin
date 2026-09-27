@@ -129,12 +129,8 @@ export async function handleAuth(request, env, url) {
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
-    // The second step rides on the password step's human check. A passkey
-    // sign-in needs none: the assertion is signed by a registered authenticator
-    // for a one-time server challenge, which no bot can guess or replay, and it
-    // is the way in for anyone who cannot complete the widget (WCAG 3.3.8).
-    // Lockouts and rate limits (isBlocked above) still apply.
-    if (p === '/api/auth/recovery') await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
+    // The second step rides on the password step's human check.
+    if (p !== '/api/auth/second-factor') await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
     const body = await readJsonBody(request);
     const dir = directory(env);
     const origin = url.origin;

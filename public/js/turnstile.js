@@ -7,8 +7,8 @@
 // The widget is always shown ("always"), so the visitor sees the check pass
 // before the protected button enables; its script is the only third-party code secbin loads,
 // and only on those pages (see the CSP in src/lib/http.js). While it waits, and
-// if it fails, the note under the button offers the page's alternative (login:
-// a passkey, which needs no human check) and the site's contact (WCAG 3.3.8).
+// if it fails, the note under the button offers the site's contact (and the
+// page's own alternative, if it has one), for anyone who cannot complete it.
 
 import { scriptURL, TURNSTILE_SCRIPT } from './tt.js';
 import { fetchConfig } from './api.js';

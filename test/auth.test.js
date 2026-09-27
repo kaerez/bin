@@ -99,6 +99,35 @@ describe('login and sessions', () => {
     await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'session.idleSec': 43200, 'session.absSec': 604800 } });
   });
 
+  it('/me reports the session deadlines; "Stay signed in" (a request) never moves the end past the absolute limit and needs a live session', async () => {
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'session.idleSec': 600, 'session.absSec': 3600 } });
+    let c = await login('owner', 'recovered-pass');
+    const t0 = Math.floor(Date.now() / 1000);
+    const s0 = (await (await fetchJson('/api/private/me', { cookie: c })).json()).session;
+    expect(s0.idleSec).toBe(600);
+    expect(s0.endsAt).toBeLessThanOrEqual(t0 + 3600 + 1);
+    expect(s0.idleEndsAt).toBeLessThanOrEqual(s0.endsAt);
+    // Keep "staying signed in" every 8 minutes: the end never passes endsAt, and at endsAt the session is over.
+    let at = Date.now();
+    for (let i = 0; i < 6; i++) {
+      at += 480 * 1000;
+      vi.useFakeTimers({ now: at, toFake: ['Date'] });
+      const r = await fetchJson('/api/private/me', { cookie: c });
+      if (at / 1000 >= s0.endsAt) { expect(r.status).toBe(401); break; }
+      expect(r.status).toBe(200);
+      const s = (await r.json()).session;
+      expect(s.endsAt).toBe(s0.endsAt);
+      expect(s.idleEndsAt).toBeLessThanOrEqual(s0.endsAt);
+      c = cookieOf(r) || c;
+    }
+    vi.useFakeTimers({ now: (s0.endsAt + 1) * 1000, toFake: ['Date'] });
+    expect((await fetchJson('/api/private/me', { cookie: c })).status).toBe(401);
+    vi.useRealTimers();
+    // Without a session, nothing to extend.
+    expect((await fetchJson('/api/private/me')).status).toBe(401);
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'session.idleSec': 43200, 'session.absSec': 604800 } });
+  });
+
   it('logout revokes the session server-side', async () => {
     const c = await login('owner', 'recovered-pass');
     expect((await fetchJson('/api/auth/logout', { method: 'POST', cookie: c })).status).toBe(400); // missing intent header

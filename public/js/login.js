@@ -27,10 +27,9 @@ if (new URLSearchParams(location.search).get('disabled') === '1') {
 })();
 
 wirePeek(['#login-pass', '#login-pass-peek']);
-// The password / recovery-code button stays disabled until the human check
-// (when on) has passed. A passkey needs no human check: it is the way in for
-// anyone who cannot complete the widget (WCAG 3.3.8; src/routes/auth.js).
-const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn')], alternative: passkeysSupported() ? 'You can also sign in with a passkey, which needs no human check.' : '' });
+// Sign-in buttons stay disabled until the human check (when on) has passed.
+// Its note offers the contact for anyone who cannot complete it (turnstile.js).
+const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'), $('#passkey-btn')] });
 
 /**
  * Signed in: unlock the Drive for this tab with what was used (the password,
@@ -115,9 +114,10 @@ if (passkeysSupported()) {
     pk.disabled = true;
     msg.hidden = true;
     try {
+      const token = await (await check).take();
       const o = await passkeyLoginOptions();
       const { credential, prf } = await usePasskeyPrf(o.publicKey, DRIVE_PRF_SALT);
-      await done(await passkeyLogin(o.challengeId, credential), prf ? { prfOutput: prf, credentialId: credential.rawId } : {});
+      await done(await passkeyLogin(o.challengeId, credential, token), prf ? { prfOutput: prf, credentialId: credential.rawId } : {});
     } catch (err) {
       failure(msg, err);
     } finally {

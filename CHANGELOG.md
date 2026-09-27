@@ -79,8 +79,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 - **WCAG 2.2 conformance audit** ([docs/WCAG22.md](docs/WCAG22.md)): every success criterion at
   A, AA and AAA with a verdict, evidence and the pages it concerns. On that evidence (Chromium,
   automated and manual checks; screen-reader testing by people still to come) the pages meet
-  WCAG 2.1 and 2.2 A and AA, and 23 of the 31 AAA criteria (not 2.2.3, no timing: expiry is
-  the product; not 3.1.5, reading level; six do not apply). The default accessibility statement
+  WCAG 2.1 and 2.2 A and AA (with the optional Turnstile human check, a third-party component,
+  covered by a statement of partial conformance), and 23 of the 31 AAA criteria (not 2.2.3, no
+  timing: expiry is the product; not 3.1.5, reading level; six do not apply). The default
+  accessibility statement
   now says so, with its limits. Fixes and additions:
   - a warning two minutes before a session times out, with "Stay signed in" (any number of
     times); after it ends, "Sign in again" in a new tab keeps what was typed; the login page and
@@ -91,10 +93,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     no view; after the last view the purge waits for an extended window (2.2.1);
   - "Stop the countdown" on every per-second countdown; toasts stay until the next key press or
     click (2.2.2);
-  - a passkey sign-in no longer needs the Turnstile human check (a passkey assertion is bound
-    to a one-time challenge and a registered authenticator); the password and recovery-code
-    sign-ins still do. Wherever the check is used, its note offers the alternative and the
-    contact (3.3.8, 3.3.9);
+  - wherever the Turnstile human check is used, the note under its button links to the
+    site's contact for anyone who cannot complete it (3.3.8);
   - text colours at least 7:1 and field borders at least 3:1 in both themes; the dark theme's
     error toast (3.7:1) fixed (1.4.3, 1.4.6, 1.4.11);
   - visible labels on every field, with the same words as the field's name (2.5.3, 3.3.2);

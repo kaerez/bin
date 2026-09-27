@@ -79,7 +79,7 @@ async function initPublicComposer() {
   const n = $('#public-notice');
   if (prof.notice) { n.textContent = prof.notice; n.hidden = false; }
   // Loads alongside the composer; a share waits for the token only when created.
-  const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')], alternative: 'With an account, you can sign in with a passkey (no human check) and share from your dashboard.' });
+  const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')] });
   setPublicHumanCheck(async () => (await check).take());
   const { startComposer } = await import('./composer.js');
   startComposer(prof, publicApi, { publicMode: true });

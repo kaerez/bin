@@ -212,8 +212,7 @@ deployment's `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or by the owner in Admi
   because it needs the Directory.
 
 When on, it protects the
-forms automated attacks target: login with a password or a recovery code, starting an
-anonymous share and every change a
+forms automated attacks target: login, starting an anonymous share and every change a
 signed-in browser session makes to its own account on the Account page:
 
 | Account page action | Route | Action name |
@@ -232,16 +231,13 @@ Asking for a challenge changes nothing and needs no token: the passkey registrat
 (`POST /api/private/me/passkeys/options`) and the passkey "confirm it's you" challenge
 (`POST /api/private/me/reauth`). The step each of them leads to is protected, and a challenge is
 not used up by a request that the human check refuses, so the check cannot be skipped by
-calling the steps in another order. A passkey sign-in (`POST /api/auth/passkey/login`) needs
-no token: its assertion is signed by a registered authenticator over a one-time server
-challenge, which a bot can neither guess nor replay, and it is the way in for anyone who cannot
-complete the widget (WCAG 3.3.8); the per-IP lockouts still apply. Setup, admin password resets, the owner's changes in the
+calling the steps in another order. Setup, admin password resets, the owner's changes in the
 admin panel (to other accounts or their own), recipients opening links, file chunks and API
 keys are never challenged; API keys cannot reach the account routes at all (`403
 api_key_not_allowed`).
 
-- **Client side** (`public/js/turnstile.js`). The protected buttons (log in with a password or
-  recovery code, create an anonymous share, and every button in the table above) stay disabled until
+- **Client side** (`public/js/turnstile.js`). The protected buttons (log in, sign in with a
+  passkey, create an anonymous share, and every button in the table above) stay disabled until
   the widget has issued a token, and again after each token is used (one token per call) until
   the next one arrives; if the widget cannot load they stay disabled and the page says why. On
   the Account page each card that changes something (username, password, passkeys and recovery

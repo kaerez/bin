@@ -237,8 +237,8 @@ The pages are built to **WCAG 2.2 level AA as a minimum, and AAA wherever possib
 AA and 2.0 AA. They have skip links, landmarks, full keyboard operation with visible focus,
 labelled fields, 7:1 (AAA) text contrast in both themes, reduced-motion support, reflow down to
 320 px and 400 % zoom, 24 px touch targets (44 px in the "large buttons" mode), warnings with an
-option to extend before a session times out or a download window closes, a passkey sign-in
-that needs no human check, and a glossary. Every page and state is checked with axe-core; the
+option to extend before a session times out or a download window closes, passwords that
+paste and fill from password managers, and a glossary. Every page and state is checked with axe-core; the
 full WCAG 2.2 conformance report, criterion by criterion, is [docs/WCAG22.md](docs/WCAG22.md).
 
 - **Preferences button** (bottom corner of every page, in English and Hebrew): high contrast,
