@@ -42,7 +42,7 @@ describe('humanCheck', () => {
     el.hidden = true;
     const c = await humanCheck(el, 'password');
     expect(el.hidden).toBe(false);
-    expect(w.renders[0].opts).toMatchObject({ sitekey: '0x4AAAAAAAsitekey', action: 'password', appearance: 'interaction-only' });
+    expect(w.renders[0].opts).toMatchObject({ sitekey: '0x4AAAAAAAsitekey', action: 'password', appearance: 'always' });
     w.solve('tok-1');
     expect(await c.take()).toBe('tok-1');
     // The next attempt starts a fresh challenge and waits for its token.
