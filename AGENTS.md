@@ -77,6 +77,13 @@ never committed) and `node_modules`.
 
 ## Product rules confirmed by the maintainer
 
+- **Security first:** the security requirements must not be changed or impacted by any other
+  requirement (accessibility, impersonation, convenience, access). No change may weaken an
+  existing control: human check, step-up, CSRF / cross-site guards, rate limits and lockouts,
+  session limits, token and grant scoping, CSP / Trusted Types, audit logging, and the
+  zero-knowledge design (the server never holds a key that opens user content; owner escrow is
+  the one documented exception). When two requirements conflict, keep the security control and
+  ask the maintainer.
 - **Recovery codes** always work instead of the password and/or passkey (a full override).
 - **Admin password resets never remove** an account's passkeys or recovery codes.
 - **Step-up:** anyone changing their own password, passkeys or API keys re-confirms with their
