@@ -190,7 +190,11 @@ export function startInstallBanner({ window: win = globalThis.window, document: 
 
   const hide = () => {
     if (!banner) return;
+    // Dismissed from the keyboard: focus must not fall back to <body> with
+    // the banner gone. The page's main landmark (tabindex="-1") takes it.
+    const hadFocus = banner.contains(doc.activeElement);
     banner.remove();
+    if (hadFocus) doc.getElementById('main')?.focus({ preventScroll: true });
     banner = null;
     doc.documentElement?.classList.remove('pwa-banner-open', 'pwa-banner-top');
   };

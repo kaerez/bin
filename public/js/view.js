@@ -14,7 +14,7 @@ import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill } from './ui.js';
-import { h, clear, showMsg, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
+import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
 import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
 import { ShareReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
 import { allowedRenderer, renderPreview } from './viewer.js';
@@ -199,6 +199,7 @@ function passwordScreen(head, limited, open) {
     if (inFlight) return;
     inFlight = true;
     msg.hidden = true;
+    markInvalid(input, msg, false);
     btn.disabled = true;
     const label = btn.textContent;
     btn.textContent = 'Unlocking…';
@@ -209,8 +210,8 @@ function passwordScreen(head, limited, open) {
       inFlight = false;
       btn.disabled = false;
       btn.textContent = label;
-      if (e instanceof PasswordRequired) { showMsg(msg, 'Please enter the password.'); input.focus(); return; }
-      if (e instanceof ApiError && e.code === 'bad_password') { showMsg(msg, 'Wrong password — try again.'); input.select(); return; }
+      if (e instanceof PasswordRequired) { showMsg(msg, 'Please enter the password.'); markInvalid(input, msg); input.focus(); return; }
+      if (e instanceof ApiError && e.code === 'bad_password') { showMsg(msg, 'Wrong password — try again.'); markInvalid(input, msg); input.select(); return; }
       openError(e);
     }
   };
@@ -237,6 +238,7 @@ function lifetimePills(pills, meta, bar) {
 
 function renderNote(paste, result) {
   showView('paste');
+  $('#paste-title').textContent = ({ url: 'Shared link', secret: 'Shared credential' })[result.fmt] || 'Shared note';
   stopTotp();
   $('#paste-msg').hidden = true;
   if (result.fmt === 'url' || result.fmt === 'secret') {
@@ -393,9 +395,11 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   timer = setInterval(tick, 1000);
 
   const filesBar = progressBar();
-  clear($('#files-progress')).appendChild(filesBar.el);
   const previewBar = progressBar();
   clear($('#preview-progress')).appendChild(previewBar.el);
+  // The preview card is hidden until a View press: keep its live status line
+  // outside it, so the region exists before its first announcement.
+  clear($('#files-progress')).append(filesBar.el, previewBar.live);
   const errMsg = $('#files-msg');
   let busy = false;
   /** Run a download or preview with a progress bar (bytes fetched and decrypted, in %). */
@@ -421,14 +425,23 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   const preview = $('#files-preview');
   const previewBody = $('#preview-body');
   let previewCleanup = null;
-  const closePreview = () => { if (previewCleanup) previewCleanup(); previewCleanup = null; previewBar.hide(); preview.hidden = true; };
+  let previewOpener = null;
+  const closePreview = () => {
+    const hadFocus = preview.contains(document.activeElement);
+    if (previewCleanup) previewCleanup();
+    previewCleanup = null;
+    previewBar.hide();
+    preview.hidden = true;
+    // Closing from inside the card: back to the View button that opened it.
+    if (hadFocus && previewOpener && previewOpener.isConnected) previewOpener.focus();
+  };
   $('#preview-close').onclick = closePreview;
 
   const fileButtons = (entry) => {
     const out = [h('button.btn', { type: 'button', text: 'Download', on: { click: () => run(`Downloading ${basename(entry.path)}`, entry.size, (p) => saveFile(reader, entry, p)) } })];
     const renderer = allowedRenderer(entry, manifest.view, viewerCfg);
     if (renderer) {
-      out.unshift(h('button.btn', {
+      const viewBtn = h('button.btn', {
         type: 'button', text: 'View',
         on: {
           click: () => {
@@ -437,6 +450,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
             // The preview opens at once with its own bar: bytes (fetch +
             // decrypt) as a percentage, then a busy bar while it renders.
             closePreview();
+            previewOpener = viewBtn;
             $('#preview-title').textContent = entry.path;
             clear(previewBody);
             preview.hidden = false;
@@ -454,7 +468,8 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
             }, previewBar);
           },
         },
-      }));
+      });
+      out.unshift(viewBtn);
     }
     return out;
   };
@@ -474,25 +489,27 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
 
   const size = (node) => node.files.reduce((n, f) => n + f.size, 0) + [...node.dirs.values()].reduce((n, d) => n + size(d), 0);
   const count = (node) => node.files.length + [...node.dirs.values()].reduce((n, d) => n + count(d), 0);
+  let treeSeq = 0;
   const renderNode = (node, depth) => {
-    const ul = h('ul.tree-list', { role: depth === 0 ? 'tree' : 'group' });
+    // Plain nested lists: an ARIA tree would need the full tree keyboard
+    // model (one Tab stop, arrow keys) and cannot hold these buttons.
+    const ul = h('ul.tree-list', { id: depth === 0 ? 'files-tree-list' : `files-tree-${++treeSeq}`, 'aria-label': depth === 0 ? 'Files' : null });
     for (const d of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       const children = renderNode(d, depth + 1);
-      const toggle = h('button.tree-toggle', { type: 'button', 'aria-expanded': 'true', 'aria-label': `Collapse ${d.name}`, text: '▾' });
+      const toggle = h('button.tree-toggle', { type: 'button', 'aria-expanded': 'true', 'aria-controls': children.id, 'aria-label': `Folder ${d.name}`, text: '▾' });
       toggle.onclick = () => {
         const open = toggle.getAttribute('aria-expanded') !== 'true';
         toggle.setAttribute('aria-expanded', String(open));
         toggle.textContent = open ? '▾' : '▸';
-        toggle.setAttribute('aria-label', `${open ? 'Collapse' : 'Expand'} ${d.name}`);
         children.hidden = !open;
       };
-      ul.appendChild(h('li.tree-dir', { role: 'treeitem' },
+      ul.appendChild(h('li.tree-dir', {},
         h('div.tree-row', {}, toggle, h('span.tree-name', { text: `${d.name}/` }), h('span.tree-sub.mono', { text: `${count(d)} · ${formatBytes(size(d))}` }),
           h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p)) } })),
         children));
     }
     for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) {
-      ul.appendChild(h('li.tree-file', { role: 'treeitem' },
+      ul.appendChild(h('li.tree-file', {},
         h('div.tree-row', {}, h('span.tree-spacer'), h('span.tree-name', { text: basename(f.path) }), h('span.tree-sub.mono', { text: formatBytes(f.size) }),
           h('span.tree-actions', {}, ...fileButtons(f).map((b) => { b.classList.add('tree-btn'); return b; })))));
     }
