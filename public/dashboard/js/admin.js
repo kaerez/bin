@@ -20,46 +20,71 @@ const $ = (s) => document.querySelector(s);
 const panel = (name) => document.querySelector(`.admin-panel[data-panel="${name}"]`);
 const MiB = 1024 * 1024;
 
-const LIMIT_UI = [
-  ['text', 'Notes allowed', 'bool'],
-  ['files', 'File sharing allowed', 'bool'],
-  ['url', 'Link shares allowed (needs notes)', 'bool'],
-  ['urlRules', 'Links that may be shared', 'urlrules'],
-  ['secret', 'Credential shares allowed (needs notes)', 'bool'],
-  ['openerDelete', 'Recipients may “delete now” (sender opts in)', 'bool'],
-  ['maxViews', 'Max views per share', 'int'],
-  ['allowUnlimitedViews', 'Unlimited views allowed', 'bool'],
-  ['maxExpireSec', 'Max expiry', 'dur'],
-  ['maxFilesPerShare', 'Max files per share', 'int'],
-  ['maxShareBytes', 'Max share size', 'bytes'],
-  ['maxFileBytes', 'Max single file size', 'bytes'],
-  ['viewer', 'In-browser viewer', 'bool'],
-  ['viewerCustomRules', 'Use this role\'s own viewer rules (not Default\'s)', 'bool'],
-  ['viewerMaxBytes', 'In-browser viewer: largest file', 'bytes', { nullable: false }],
-  ['apiEnabled', 'API keys allowed', 'bool'],
-  ['apiMaxKeys', 'Max API keys', 'int'],
-  ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
-  ['fileTypeRules', 'File type list', 'rules'],
-  ['maxFolderDepth', 'Max folder depth', 'int'],
-  ['receiptIp', 'Read receipts: sender sees the opener\'s address', 'bool'],
-  ['receiptLocation', 'Read receipts: sender sees the approximate location', 'bool'],
-  ['receiptBrowser', 'Read receipts: sender sees the browser and version', 'bool'],
-  ['receiptOs', 'Read receipts: sender sees the operating system', 'bool'],
-  ['receiptLanguages', 'Read receipts: sender sees the browser languages', 'bool'],
-  ['logMaxAgeSec', 'Keep this account\'s log entries for at most', 'dur'],
-  ['logMaxEntries', 'Keep at most this many log entries about the account', 'int'],
-  ['pwMinLength', 'Password: minimum length', 'int', { nullable: false }],
-  ['pwUpper', 'Password: needs an upper-case letter', 'bool'],
-  ['pwLower', 'Password: needs a lower-case letter', 'bool'],
-  ['pwDigit', 'Password: needs a digit', 'bool'],
-  ['pwSymbol', 'Password: needs a symbol', 'bool'],
-  ['passkeys', 'Passkeys', 'enum', { values: [['any', 'sign in alone or as a second factor'], ['second', 'only as a second factor after the password'], ['off', 'not allowed']] }],
-  ['passkeysMax', 'Passkeys: at most', 'int', { nullable: false }],
-  ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
-  ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
-  ['fileGrantSec', 'File shares: recipients may download for this long after opening', 'dur', { nullable: false }],
-  ['filePendingSec', 'File shares: an unfinished upload is discarded after', 'dur', { nullable: false }],
+// Role options in sections (the editor shows a heading per section). Each row:
+// [key, label, type, options]; the section is added as a fifth element.
+const LIMIT_SECTIONS = [
+  ['Sharing', [
+    ['text', 'Notes allowed', 'bool'],
+    ['files', 'File sharing allowed', 'bool'],
+    ['secret', 'Credential shares allowed (needs notes)', 'bool'],
+    ['openerDelete', 'Recipients may “delete now” (sender opts in)', 'bool'],
+    ['maxViews', 'Max views per share', 'int'],
+    ['allowUnlimitedViews', 'Unlimited views allowed', 'bool'],
+    ['maxExpireSec', 'Max expiry', 'dur'],
+  ]],
+  ['Links', [
+    ['url', 'Link shares allowed (needs notes)', 'bool'],
+    ['urlRules', 'Links that may be shared', 'urlrules'],
+  ]],
+  ['Files', [
+    ['maxFilesPerShare', 'Max files per share', 'int'],
+    ['maxShareBytes', 'Max share size', 'bytes'],
+    ['maxFileBytes', 'Max single file size', 'bytes'],
+    ['fileTypeMode', 'File types', 'enum', { values: [['any', 'any type'], ['allow', 'only the listed types'], ['block', 'all but the listed types']] }],
+    ['fileTypeRules', 'File type list', 'rules'],
+    ['maxFolderDepth', 'Max folder depth', 'int'],
+  ]],
+  ['File shares', [
+    ['fileGrantSec', 'File shares: recipients may download for this long after opening', 'dur', { nullable: false }],
+    ['filePendingSec', 'File shares: an unfinished upload is discarded after', 'dur', { nullable: false }],
+  ]],
+  ['In-browser viewer', [
+    ['viewer', 'In-browser viewer', 'bool'],
+    ['viewerCustomRules', 'Use this role\'s own viewer rules (not Default\'s)', 'bool'],
+    ['viewerMaxBytes', 'In-browser viewer: largest file', 'bytes', { nullable: false }],
+  ]],
+  ['API keys', [
+    ['apiEnabled', 'API keys allowed', 'bool'],
+    ['apiMaxKeys', 'Max API keys', 'int'],
+  ]],
+  ['Read receipts', [
+    ['receiptIp', 'Read receipts: sender sees the opener\'s address', 'bool'],
+    ['receiptLocation', 'Read receipts: sender sees the approximate location', 'bool'],
+    ['receiptBrowser', 'Read receipts: sender sees the browser and version', 'bool'],
+    ['receiptOs', 'Read receipts: sender sees the operating system', 'bool'],
+    ['receiptLanguages', 'Read receipts: sender sees the browser languages', 'bool'],
+  ]],
+  ['Activity log', [
+    ['logMaxAgeSec', 'Keep this account\'s log entries for at most', 'dur'],
+    ['logMaxEntries', 'Keep at most this many log entries about the account', 'int'],
+  ]],
+  ['Password', [
+    ['pwMinLength', 'Password: minimum length', 'int', { nullable: false }],
+    ['pwUpper', 'Password: needs an upper-case letter', 'bool'],
+    ['pwLower', 'Password: needs a lower-case letter', 'bool'],
+    ['pwDigit', 'Password: needs a digit', 'bool'],
+    ['pwSymbol', 'Password: needs a symbol', 'bool'],
+  ]],
+  ['Passkeys', [
+    ['passkeys', 'Passkeys', 'enum', { values: [['any', 'sign in alone or as a second factor'], ['second', 'only as a second factor after the password'], ['off', 'not allowed']] }],
+    ['passkeysMax', 'Passkeys: at most', 'int', { nullable: false }],
+  ]],
+  ['Sessions', [
+    ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
+    ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
+  ]],
 ];
+const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
@@ -214,11 +239,25 @@ function limitText(type, v) {
  * built-in defaults for the global level, the global values for a user),
  * shown next to the choice so every default is visible.
  */
+// Role options whose built-in default is a server setting (the owner's value).
+const SETTING_DEFAULT = { sessionIdleSec: 'session.idleSec', sessionAbsSec: 'session.absSec', fileGrantSec: 'files.grantSec', filePendingSec: 'files.pendingSec' };
+/** "default: …" for a role option: its built-in value on a new install. */
+function defaultText(key, type, opt) {
+  const d = overview?.defaults;
+  if (!d) return '';
+  const v = SETTING_DEFAULT[key] ? d.settings?.[SETTING_DEFAULT[key]] : d.limits?.[key];
+  if (v === undefined) return '';
+  if (type === 'enum') return `default: ${opt.values.find(([k]) => k === v)?.[1] ?? v}`;
+  return `default: ${limitText(type, v)}`;
+}
+
 function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omit = [], explicit = false }) {
   const box = h('div.limits-grid');
   const keys = (channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI).filter(([k]) => !omit.includes(k));
   const ctls = [];
-  for (const [key, label, type, opt = {}] of keys) {
+  let section = null;
+  for (const [key, label, type, opt, sec] of keys) {
+    if (sec !== section) { section = sec; box.appendChild(h('h4.limit-section', { text: sec })); }
     // The Default role (explicit) holds a value for every option: no "inherit".
     let has = Object.prototype.hasOwnProperty.call(rows, key);
     let v = has ? rows[key] : undefined;
@@ -254,7 +293,8 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
     sync();
     const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
     const effText = eff === undefined ? '' : `effective: ${limitText(type, eff)}`;
-    box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: effText })));
+    const note = [channel === 'api' ? '' : defaultText(key, type, opt), effText].filter(Boolean).join(' · ');
+    box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: note })));
     ctls.push({ key, type, mode, val });
   }
   const save = h('button.btn', { type: 'button', text: `Save ${channel === 'api' ? 'API' : ''} limits` });

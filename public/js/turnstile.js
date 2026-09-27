@@ -4,8 +4,8 @@
 // token works once: take() hands out the current one, and the next take()
 // starts a fresh challenge. The server side is src/lib/turnstile.js.
 //
-// The widget stays invisible unless Cloudflare needs the visitor to interact
-// ("interaction-only"); its script is the only third-party code secbin loads,
+// The widget is always shown ("always"), so the visitor sees the check pass
+// before the protected button enables; its script is the only third-party code secbin loads,
 // and only on those pages (see the CSP in src/lib/http.js).
 
 import { scriptURL, TURNSTILE_SCRIPT } from './tt.js';
@@ -102,7 +102,7 @@ export async function humanCheck(container, action, { gate: buttons = [] } = {})
       action,
       theme: 'auto',
       size: 'flexible',
-      appearance: 'interaction-only',
+      appearance: 'always',
       'refresh-expired': 'auto',
       language: 'auto',
       callback: (t) => { token = t; update(); settle((x) => x.resolve(t)); },

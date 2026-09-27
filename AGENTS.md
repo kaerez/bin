@@ -6,12 +6,22 @@ described in [README.md](./README.md); the threat model and security design in
 
 ## How to work
 
-- **Fan out.** Split independent work and run it in parallel: one agent (or session) per task,
-  each in its own git worktree and branch from `main`, with its own `wrangler dev` port and its
-  own local state. Read-only work (audits, reviews, write-ups, requirement checks) can always run
-  in parallel. Keep work serial only where it has to be: changes that touch the same core files
-  in conflicting ways, and features that depend on each other (e.g. reverse share needs the
-  Drive). The coordinator reviews, merges one branch at a time and resolves conflicts.
+- **Plan → shard → fan out.** Always work this way, to finish the plan and tasks faster:
+  1. **Plan:** break the request into atomic tasks (and subtasks) in the task list, with their
+     dependencies.
+  2. **Shard:** group the tasks into independent units of work that do not touch the same core
+     files in conflicting ways.
+  3. **Fan out:** run the shards at the same time, as parallel agents / sessions (one per task,
+     each in its own git worktree and branch from `main`, with its own `wrangler dev` port range
+     and its own local state), parallel subtasks, and parallel background commands and
+     subcommands. Shard long checks too: split the end-to-end suites across several dev-server
+     ports instead of running them one after another, and run the four test projects in
+     parallel.
+  Read-only work (audits, reviews, write-ups, requirement checks) can always run in parallel.
+  Keep work serial only where it has to be: changes that conflict in the same core files, and
+  features that depend on each other (e.g. reverse share needs the Drive). The coordinator
+  reviews each branch, merges one at a time and resolves conflicts; while agents run, the
+  coordinator keeps working on the next shard instead of waiting.
 - **Durable Object migrations** (`MIGRATIONS` in `src/directory-do.js`) are numbered by position:
   parallel branches must not both append one; the second to merge renumbers after rebasing on
   `main`.
@@ -22,6 +32,14 @@ described in [README.md](./README.md); the threat model and security design in
   the task list, and before calling work finished check each one against the code (not against
   commit messages). Answer questions explicitly; say plainly when something is not done.
 - **Never** skip, disable or weaken a test to get green, and never claim a check you did not run.
+- **Security audit (standing requirement).** After every major feature, and before calling a
+  wave of work finished, run a full OWASP-style audit (OWASP Top 10 / ASVS) of `main` with an
+  explicit verdict and code evidence for each of: **CSRF**, **XSS**, **command injection**,
+  **SQL injection**, **NoSQL / KV / R2 key injection**, plus authentication and sessions, access
+  control (IDOR, privilege escalation), cryptography, SSRF and open redirects, security headers,
+  file upload / download, denial of service and rate limiting, secrets and logging, and
+  dependencies. Confirm findings with tests or proof-of-concept requests against `wrangler dev`
+  (synthetic data only), fix confirmed findings in a PR, and report what was not verified.
 
 ## Checks before every push
 
