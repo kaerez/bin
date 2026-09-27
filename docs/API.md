@@ -452,10 +452,11 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
-| `POST /api/private/drive/reverse` | `{ id, folder, priv, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
-| `GET /api/private/drive/received` | → `{ items, keys, more }` — received files not yet taken into the Drive |
+| `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
 | `POST /api/private/drive/received/:id` | `{ parent, name, meta, fk }` → `{ ok }` — a received file re-wrapped into the Drive |
+| `POST /api/private/drive/received/:id/failed` | `{ reason }` → `{ ok, received, failed }` — the browser could not take it in (it leaves the queue); `DELETE` puts it back |
 | `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (in the admin audit) |
 | `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (in the admin audit) |
 

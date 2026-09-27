@@ -15,6 +15,29 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Reverse shares, security audit round 3** (docs/REVERSE.md §3, §4, §6, §7; SECURITY.md
+  "Reverse shares"):
+  - a link's id is claimed in the share index before anything else, in one step with the role's
+    checks and the active-links count: another account can no longer take over an id (`409
+    exists`), and `reverseMaxActive` holds under concurrent creates; no share index row ever
+    moves to another account or gets another link hash;
+  - received files that cannot be taken in are recorded as failed on the server and leave the
+    queue (`GET /received` pages with `after` / `next`), so they never hold up later files; the
+    Drive lists them ("Review them") to delete or try again;
+  - the human check comes before the password on `begin`, and each link has its own lockout
+    (10 wrong passwords in 15 minutes, from any networks: 15 minutes);
+  - an upload session with nothing unfinished lapses after 10 minutes idle; at most 5 open
+    sessions per network per link (1 000 per link);
+  - `reverse.received` is one log entry per link per hour, adding up that hour's sessions;
+  - received names are cleaned as everywhere (`cleanName`; Hebrew, Arabic, ZWNJ / ZWJ and LRM /
+    RLM stay) and a renamed file is marked; a received path creates at most 8 folder levels and a
+    take-in at most 200 new folders (deeper files go into the deepest folder allowed);
+  - finalize and cancel accept only the session that reserved the file; a file's sealed fields
+    count towards the link's byte limit (empty files included); a reservation must finish within
+    24 hours however often its chunks are re-sent;
+  - documentation: the status codes do tell a reverse-share id from an unknown one; the owner
+    acting as the user can create a link whose key the owner keeps; with Turnstile on, its script
+    can read the link key on the uploader page.
 - **Drive, security audit round 2** (docs/DRIVE.md §3, §6, §10; SECURITY.md "Drive keys"):
   - the owner's escrow key pair changes only with the owner's password or a passkey (the first
     one excepted); the owner's browser checks the server's escrow public key against its own
