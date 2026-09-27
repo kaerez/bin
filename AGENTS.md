@@ -6,12 +6,13 @@ described in [README.md](./README.md); the threat model and security design in
 
 ## How to work
 
-- **Plan → shard → fan out.** Always work this way, to finish the plan and tasks faster:
+- **Plan → plan sharding → fan out.** Always work this way, for every plan and every task (and
+  subtask), to finish them faster:
   1. **Plan:** break the request into atomic tasks (and subtasks) in the task list, with their
      dependencies.
-  2. **Shard:** group the tasks into independent units of work that do not touch the same core
+  2. **Plan sharding:** group the tasks into independent units of work that do not touch the same core
      files in conflicting ways.
-  3. **Fan out:** run the shards at the same time, as parallel agents / sessions (one per task,
+  3. **Fan out:** run the shards at the same time, as parallel agents / sessions / tasks (one per task,
      each in its own git worktree and branch from `main`, with its own `wrangler dev` port range
      and its own local state), parallel subtasks, and parallel background commands and
      subcommands. Shard long checks too: split the end-to-end suites across several dev-server

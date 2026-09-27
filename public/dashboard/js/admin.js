@@ -65,8 +65,8 @@ const LIMIT_SECTIONS = [
     ['receiptLanguages', 'Read receipts: sender sees the browser languages', 'bool'],
   ]],
   ['Activity log', [
-    ['logMaxAgeSec', 'Keep this account\'s log entries for at most', 'dur'],
-    ['logMaxEntries', 'Keep at most this many log entries about the account', 'int'],
+    ['logMaxAgeSec', 'Keep each user\'s entries for', 'dur', { nullText: 'keep forever' }],
+    ['logMaxEntries', 'Keep at most this many entries per user', 'int', { nullText: 'keep forever' }],
   ]],
   ['Password', [
     ['pwMinLength', 'Password: minimum length', 'int', { nullable: false }],
@@ -239,8 +239,21 @@ function limitText(type, v) {
  * built-in defaults for the global level, the global values for a user),
  * shown next to the choice so every default is visible.
  */
+// Explanations shown under a section heading in the role editors (as the
+// Owner role editor has for the owner's own values).
+const SECTION_NOTES = {
+  Sessions: [() => h('p.mono.muted', { text: 'How long this role\'s users stay signed in: signed out after being idle, and in any case after the absolute time.' })],
+  'File shares': [() => h('p.mono.muted', { text: 'For file shares this role\'s users send: how long recipients may keep downloading after opening one, and how long an unfinished upload is kept before it is discarded.' })],
+  'Activity log': [
+    () => h('p.mono.muted', { text: 'Entries about each user with this role (their own actions and events on their account). Keep them forever, or delete the older ones, and the oldest beyond a number, automatically; Settings → Activity log caps every account as well. The owner\'s actions on the account follow the Owner role, and server-wide configuration changes are never deleted automatically. The owner can always clear entries by hand under Activity log.' }),
+  ],
+};
+
 // Role options whose built-in default is a server setting (the owner's value).
 const SETTING_DEFAULT = { sessionIdleSec: 'session.idleSec', sessionAbsSec: 'session.absSec', fileGrantSec: 'files.grantSec', filePendingSec: 'files.pendingSec' };
+/** A role option's value as text ("keep forever" rather than "no limit" where the option says so). */
+const optText = (type, v, opt = {}) => (v === null && opt.nullText ? opt.nullText : limitText(type, v));
+
 /** "default: …" for a role option: its built-in value on a new install. */
 function defaultText(key, type, opt) {
   const d = overview?.defaults;
@@ -248,7 +261,7 @@ function defaultText(key, type, opt) {
   const v = SETTING_DEFAULT[key] ? d.settings?.[SETTING_DEFAULT[key]] : d.limits?.[key];
   if (v === undefined) return '';
   if (type === 'enum') return `default: ${opt.values.find(([k]) => k === v)?.[1] ?? v}`;
-  return `default: ${limitText(type, v)}`;
+  return `default: ${optText(type, v, opt)}`;
 }
 
 function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omit = [], explicit = false }) {
@@ -257,7 +270,11 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
   const ctls = [];
   let section = null;
   for (const [key, label, type, opt, sec] of keys) {
-    if (sec !== section) { section = sec; box.appendChild(h('h4.limit-section', { text: sec })); }
+    if (sec !== section) {
+      section = sec;
+      box.appendChild(h('h4.limit-section', { text: sec }));
+      if (channel !== 'api') for (const n of SECTION_NOTES[sec] || []) box.appendChild(n());
+    }
     // The Default role (explicit) holds a value for every option: no "inherit".
     let has = Object.prototype.hasOwnProperty.call(rows, key);
     let v = has ? rows[key] : undefined;
@@ -267,9 +284,9 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
       enum: () => opt.values.map(([k, t]) => h('option', { value: `enum:${k}`, text: t, selected: has && v === k })),
       rules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
       urlrules: () => [h('option', { value: 'value', text: 'set to', selected: has })],
-    }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: 'no limit', selected: has && v === null })]),
+    }[type] ?? (() => [...(opt.nullable === false ? [] : [h('option', { value: 'null', text: opt.nullText || 'no limit', selected: has && v === null })]),
       h('option', { value: 'value', text: 'limit to', selected: has && v !== null })]);
-    const inh = channel !== 'api' && inherited && Object.prototype.hasOwnProperty.call(inherited, key) ? ` (${limitText(type, inherited[key])})` : '';
+    const inh = channel !== 'api' && inherited && Object.prototype.hasOwnProperty.call(inherited, key) ? ` (${optText(type, inherited[key], opt)})` : '';
     const inheritText = channel === 'api' ? 'no extra restriction' : `same as Default${inh}`;
     const mode = h('select.input', { 'aria-label': `${label} mode` },
       ...(explicit && channel !== 'api' ? [] : [h('option', { value: 'inherit', text: inheritText, selected: !has })]),
@@ -292,7 +309,7 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
     mode.onchange = sync;
     sync();
     const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
-    const effText = eff === undefined ? '' : `effective: ${limitText(type, eff)}`;
+    const effText = eff === undefined ? '' : `effective: ${optText(type, eff, opt)}`;
     const note = [channel === 'api' ? '' : defaultText(key, type, opt), effText].filter(Boolean).join(' · ');
     box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: note })));
     ctls.push({ key, type, mode, val });
@@ -616,7 +633,6 @@ async function ownerRole(box) {
       h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
       h('h3.field-label', { text: 'Your activity log' }),
       h('p.mono.muted', { text: 'Entries about you and entries you made (admin actions, including while logged in as a user) are never removed by the Settings or role limits. Keep them forever (the default), or delete the older ones, and the oldest beyond a number, automatically. Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically. You can always clear entries by hand under Activity log.' }),
-      h('p.type-hint.warn', { role: 'note', text: 'Audit trails can be subject to retention obligations (for example SOX record-keeping). Check with your Legal / Compliance team before shortening them; this is not legal advice.' }),
       keep('log.ownerMaxAgeSec', 'Keep your entries for', 'dur'), keep('log.ownerMaxEntries', 'Keep at most this many of your entries', 'int'),
       h('div.btn-row', {}, save)));
   save.onclick = async () => {
@@ -667,7 +683,6 @@ async function publicRole(box, reopen) {
     if (await guard(() => admin.settings(patch), 'Public role saved.')) reopen();
   };
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Counting anonymous senders' }),
-    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the mode and the notice.' }),
     h('fieldset.range', {}, h('legend', { text: 'How anonymous creators are counted' }), ...radios),
     h('label.inline', {}, notice, ' Show a notice on the public composer'),
     h('label.field', {}, h('span.field-label', { text: 'Notice text' }), noticeText),
@@ -777,7 +792,7 @@ async function renderSettings() {
     scopeRule('invalid', 'Invalid fetches: links that never existed, a wrong #key or password, bad tokens. Not counted: opening a share that expired, was used up, revoked or deleted with its correct link (#key); a wrong #key for such a share still counts'),
     h('div.card.stack', {}, int('guard.v6Prefix', 'IPv6 tracking prefix (/n)'))));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Activity log' }),
-    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. A role\'s log limits (Roles) can keep less about its users. Entries about the owner and entries the owner made (admin actions, impersonation) follow the owner\'s own limits instead (Roles → Owner; kept forever by default). Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
+    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. A role\'s log limits (Roles) can keep less about its users. Entries about the owner and entries the owner made (admin actions, impersonation) follow the owner\'s own limits instead (Roles → Owner; kept forever by default). Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically.' }),
     dur('log.maxAgeSec', 'Keep entries for at most'), int('log.maxEntries', 'Keep at most this many entries')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
@@ -789,7 +804,7 @@ async function renderSettings() {
   const saveStatement = h('button.btn', { type: 'button', text: 'Save statement details' });
   saveStatement.onclick = () => guard(() => admin.settings({ 'a11y.contact': contact.value.trim(), 'a11y.coordinator': coord.value.trim() }), 'Accessibility statement saved.');
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Accessibility statement' }),
-    h('p.mono.muted', {}, 'Shown on the public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), ' page (English and Hebrew). A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees). Have the statement reviewed by an accessibility professional or Legal before relying on it.'),
+    h('p.mono.muted', {}, 'Shown on the public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), ' page (English and Hebrew). A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees).'),
     h('label.field-label', { text: 'How to report a problem' }), contact,
     h('label.field-label', { text: 'Accessibility coordinator (optional)' }), coord, h('div.btn-row', {}, saveStatement)));
   const save = h('button.cta', { type: 'button', text: 'Save settings' });
@@ -829,7 +844,6 @@ async function renderPublic() {
   p.appendChild(h('div.card.stack', {},
     h('h2.section-title', { text: 'Public (anonymous) sharing' }),
     h('p.subtitle', { text: 'When on, the home page offers the composer to anyone, as the built-in public account: no password, no dashboard, no API keys. What anonymous senders may do, how they are counted, the notice they see and their browser ids are set on the Public role (Roles).' }),
-    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the Public role\'s tracking mode and notice before turning this on.' }),
     h('label.inline', {}, on, ' Allow anonymous sharing'),
     h('div.btn-row', {}, save, toRole)));
 }
@@ -960,7 +974,7 @@ function clearLogsCard(onDone) {
     }
   });
   return h('div.card.stack', {}, h('h2.section-title', { text: 'Clear logs' }),
-    h('p.mono.muted', { text: 'Deletes entries for good, without leaving a record that they existed. Audit trails may be subject to retention duties (e.g. SOX): check with Legal / Compliance before clearing.' }),
+    h('p.mono.muted', { text: 'Deletes entries for good, without leaving a record that they existed.' }),
     h('div.toolbar', {}, scope, who, h('label.inline', {}, olderOn, ' older than'), date, mine, go));
 }
 
