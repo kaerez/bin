@@ -163,9 +163,13 @@ working.
   cannot check one. The owner always has the built-in policy (12 characters).
 - **Users** (owner only): create, disable, delete (optionally revoking their shares), reset a
   user's password without knowing the old one (never the owner's own — that changes on Account,
-  with the current password), unlock, and **log in as** a user — every action taken
-  while impersonating is recorded with the real actor in the audit log, while the user's own
-  activity shows it as theirs.
+  with the current password), unlock, and **log in as** a user. Acting as the user, the owner
+  can do everything the user can, the Drive included: every Account setting (any password, the
+  username, passkeys, recovery codes, the sign-in choice, API keys) with no confirmation, notes
+  and files, My shares and read receipts. A banner and the Account page say whose account it is;
+  the admin panel is out of reach until "Return to admin". Impersonation is invisible to the user
+  (the user's activity shows the actions as theirs), and the owner-only admin audit keeps the
+  start, end and real actor.
 - **Roles** (Admin → Roles) — every user has one: Default unless given another. A role sets
   notes/files on or off, max views, unlimited views allowed, max expiry, max share size, max
   single-file size, max files per share, the in-browser viewer and its largest file, API keys
@@ -234,8 +238,8 @@ Cloudflare Access is no longer needed. You may still layer it in front of `/dash
 
 ## Accessibility
 
-The pages are built to **WCAG 2.2 level AA**, which covers the WCAG 2.0 AA base of the Israeli
-standard IS 5568. They have skip links, landmarks, full keyboard operation with visible focus,
+The pages are built to **WCAG 2.2 level AA as a minimum, and AAA wherever possible**; AA also covers WCAG 2.1
+AA and 2.0 AA. They have skip links, landmarks, full keyboard operation with visible focus,
 labelled fields, AA contrast in both themes, reduced-motion support, reflow down to 320 px and
 24 px touch targets. Every page and state is checked with axe-core.
 

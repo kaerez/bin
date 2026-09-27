@@ -13,8 +13,9 @@
 import { drive as api, session, ApiError } from './api.js';
 import {
   createDriveKey, deriveSubkeys, sealField, openField, wrapPassword, unlockWithPassword, wrapRecovery, unlockWithRecovery,
-  recoveryRef, DRIVE_PRF_SALT, wrapPrf, unlockWithPrf, createEscrowKeyPair, sealEscrowPriv, openEscrowPriv, wrapEscrow,
-  unlockWithEscrow, escrowKeyId, escrowWrapKeyId, saveSessionKey, loadSessionKey, clearSessionKey,
+  recoveryRef, DRIVE_PRF_SALT, wrapPrf, unlockWithPrf, createEscrowKeyPair, sealEscrowPriv, openEscrowKeyPair, sameEscrowKey,
+  wrapEscrow, unlockWithEscrow, escrowKeyId, escrowWrapKeyId, sealEscrowPin, openEscrowPin, wrapHandoff, unlockWithHandoff,
+  saveSessionKey, loadSessionKey, clearSessionKey, sessionKeyUser, saveImpersonationKey, loadImpersonationKey, clearImpersonationKey,
 } from './drivekeys.js';
 import { encryptPaste } from './crypto.js';
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from './bytes.js';
@@ -28,9 +29,14 @@ import { createReverseKey, sealReversePriv, openReversePriv, linkHash, passwordG
 
 /**
  * No usable DK in this tab (`reason`: 'locked' | 'wrong' | 'setup' |
- * 'impersonating' | 'no_passkey'). `credentialIds` (from openDrive) lists the
- * passkeys (base64url credential ids) that have a Drive wrap, so a page can
- * offer the passkey unlock only when one exists.
+ * 'handoff' | 'no_passkey', and while the owner acts as a user:
+ * 'owner_locked' (the owner's own Drive is not unlocked in this tab) |
+ * 'no_escrow' (the owner has no escrow key yet, or it does not open) |
+ * 'no_wrap' (the user's Drive has no escrow wrap yet) | 'escrow_failed' (the
+ * wrap is for another escrow key) | 'escrow_mismatch' (the server's escrow
+ * public key is not the owner's: see DriveClient#notice)). `credentialIds`
+ * (from openDrive) lists the passkeys (base64url credential ids) that have a
+ * Drive wrap, so a page can offer the passkey unlock only when one exists.
  */
 export class DriveLocked extends Error {
   constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = [], received = 0) {
@@ -95,6 +101,12 @@ export function checkName(name) {
   return name;
 }
 
+const NOTICE_TEXT = {
+  escrow_mismatch: 'The escrow public key the server gives every Drive is not the one your escrow private key belongs to: it may have been replaced. No Drive is wrapped to it from this browser until you restore it.',
+  escrow_unreadable: 'Your escrow private key does not open with your Drive key, so it cannot be checked or used.',
+  escrow_missing: 'The server has an escrow public key, but your Drive holds no escrow private key for it.',
+};
+
 /** A sealed field as the server returns it (object, or its JSON text). */
 const sealed = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
 
@@ -123,20 +135,27 @@ async function loadState() {
 
 /**
  * The Drive with this tab's DK → DriveClient. Throws DriveLocked when the tab
- * has none (reason 'setup' when the Drive has no key yet), DriveDisabled when
- * the role has no Drive. `user` ({ id, role }) saves a session lookup.
+ * has none (reason 'setup' when the Drive has no key yet, 'handoff' when the
+ * owner created it and the user's password finishes the set-up),
+ * DriveDisabled when the role has no Drive. `user` ({ id, role,
+ * impersonating }) saves a session lookup. While the owner acts as the user,
+ * the Drive opens through the owner escrow (openAsOwner).
  */
 export async function openDrive({ user } = {}) {
   const u = await whoAmI(user);
   const st = await loadState();
+  if (u.impersonating) return openAsOwner(u, st);
   if (!st.wraps.length) {
     clearSessionKey();
     throw new DriveLocked('Set up your Drive with your password.', 'setup');
   }
   const dk = loadSessionKey(u.id);
-  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st), Number(st.received) || 0);
+  if (!dk) {
+    if (st.handoffKey) throw new DriveLocked('Your administrator created your Drive: enter your account password to finish setting it up.', 'handoff');
+    throw new DriveLocked(undefined, 'locked', passkeyRefs(st), Number(st.received) || 0);
+  }
   const client = await DriveClient.create(dk, u);
-  if (!u.impersonating) await client.maintain(st).catch(() => {});
+  await client.maintain(st).catch(() => {});
   return client;
 }
 
@@ -148,29 +167,30 @@ export async function openDrive({ user } = {}) {
  * 'setup') or DriveDisabled.
  *
  * `passwordVerified` (sign-in only: the server has just accepted the password)
- * lets a stale `pw` wrap be replaced once another wrap opened; `spentCode`
- * removes the wrap of a recovery code the sign-in has just used up.
+ * lets a stale `pw` wrap be replaced; `spentWraps` are the wraps of a recovery
+ * code this sign-in used up (the server removed them and returned them once).
  */
-export async function unlockDrive(creds = {}, { user, passwordVerified = false, spentCode = false } = {}) {
+export async function unlockDrive(creds = {}, { user, passwordVerified = false, spentWraps = [] } = {}) {
   const u = await whoAmI(user);
   const st = await loadState();
+  if (u.impersonating) return openAsOwner(u, st);
   let dk = null;
   let via = null;
   if (!st.wraps.length) {
-    if (u.impersonating) throw new DriveLocked('Only the user can set up their Drive.', 'impersonating');
     if (!creds.password) throw new DriveLocked('Set up your Drive with your password.', 'setup');
     dk = await setUp(u, st, creds);
     via = 'pw';
   } else {
     if (creds.password) { dk = await unlockWithPassword(creds.password, st.driveSalt, st.wraps); via = 'pw'; }
     if (!dk && creds.prfOutput && creds.credentialId) { dk = await unlockWithPrf(creds.prfOutput, creds.credentialId, st.wraps); via = 'passkey'; }
-    if (!dk && creds.code) { dk = await unlockWithRecovery(creds.code, st.wraps); via = 'recovery'; }
+    if (!dk && creds.code) { dk = await unlockWithRecovery(creds.code, [...st.wraps, ...(Array.isArray(spentWraps) ? spentWraps : [])]); via = 'recovery'; }
+    // A Drive the owner created while acting as this user: its one-time hand-over.
+    if (!dk && st.handoffKey) { dk = await unlockWithHandoff(st.handoffKey, st.wraps); via = 'handoff'; }
     if (!dk) throw new DriveLocked('That does not unlock your Drive.', 'wrong');
   }
-  // While impersonating, the tab's slot keeps the owner's own DK.
-  if (!u.impersonating) saveSessionKey(dk, u.id);
+  saveSessionKey(dk, u.id);
   const client = await DriveClient.create(dk, u);
-  if (!u.impersonating) await client.maintain(st, { ...creds, via, passwordVerified, spentCode }).catch(() => {});
+  await client.maintain(st, { ...creds, via, passwordVerified: passwordVerified || via === 'handoff' }).catch(() => {});
   return client;
 }
 
@@ -190,7 +210,11 @@ export async function unlockDriveWithPasskey({ user } = {}) {
   return unlockDrive({ prfOutput: prf, credentialId }, { user });
 }
 
-/** The first DK: wraps for the password (and passkey, escrow); the owner's escrow key pair. */
+/**
+ * The first DK: wraps for the password (and passkey, escrow, with the escrow
+ * key pinned); the owner's escrow key pair when there is none yet (a later
+ * one needs the owner's confirmation: DriveClient#notice).
+ */
 async function setUp(u, st, creds) {
   // A Drive with content but no wraps is broken, not new: never replace its key.
   const top = await api.node(ROOT).catch(() => null);
@@ -201,11 +225,14 @@ async function setUp(u, st, creds) {
   if (creds.prfOutput && creds.credentialId) set.push(await wrapPrf(dk, creds.prfOutput, creds.credentialId));
   const body = { driveSalt, set, remove: [] };
   if (u.role === 'owner') {
-    const kp = await createEscrowKeyPair();
-    body.escrowPriv = await sealEscrowPriv(dk, kp.privateKey);
-    body.escrowPub = kp.publicJwk;
+    if (!st.escrowPub) {
+      const kp = await createEscrowKeyPair();
+      body.escrowPriv = await sealEscrowPriv(dk, kp.privateKey);
+      body.escrowPub = kp.publicJwk;
+    }
   } else if (st.escrowPub) {
     set.push(await wrapEscrow(dk, st.escrowPub));
+    body.escrowPin = await sealEscrowPin(dk, await escrowKeyId(st.escrowPub));
   }
   await api.setKeys(body);
   // Two tabs may set up at the same moment: the stored `pw` wrap decides.
@@ -217,13 +244,55 @@ async function setUp(u, st, creds) {
   throw new DriveLocked('That does not unlock your Drive.', 'wrong');
 }
 
+/**
+ * The owner, acting as user `u`, opens that user's Drive with the owner
+ * escrow (docs/DRIVE.md §3): the owner's own DK (already in this tab) opens
+ * the owner's escrow private key, which opens the user's escrow wrap. The
+ * user's DK is kept in its own slot (never the owner's) until the
+ * impersonation ends. A Drive with no key yet is created here (an escrow wrap
+ * and a one-time hand-over wrap; the user's password wrap follows at their
+ * next sign-in). Every call of the escrow route is in the admin audit.
+ */
+async function openAsOwner(u, st) {
+  const kept = loadImpersonationKey(u.id);
+  if (kept) return DriveClient.create(kept, u);
+  const ownerUid = sessionKeyUser();
+  if (!ownerUid || ownerUid === u.id) throw new DriveLocked('Your own Drive is not unlocked in this tab.', 'owner_locked');
+  const r = await api.impersonationEscrow();
+  const ownerDk = loadSessionKey(r.ownerId);
+  if (!ownerDk) throw new DriveLocked('Your own Drive is not unlocked in this tab.', 'owner_locked');
+  if (typeof r.escrowPriv !== 'string' || !r.escrowPub) throw new DriveLocked('You have no escrow key yet.', 'no_escrow');
+  let pair;
+  try { pair = await openEscrowKeyPair(ownerDk, r.escrowPriv); } catch { throw new DriveLocked('Your escrow key does not open with your Drive key.', 'no_escrow'); }
+  if (!sameEscrowKey(pair.publicJwk, r.escrowPub)) throw new DriveLocked(NOTICE_TEXT.escrow_mismatch, 'escrow_mismatch');
+  let dk;
+  if (!st.wraps.length) {
+    // The user's Drive, created for them: never over content (that would hide it).
+    const top = await api.node(ROOT).catch(() => null);
+    if (top && Array.isArray(top.children) && top.children.length) throw new DriveLocked('This Drive has content but no keys.', 'no_wrap');
+    dk = createDriveKey();
+    const handoff = await wrapHandoff(dk);
+    await api.setKeys({
+      set: [await wrapEscrow(dk, r.escrowPub), handoff.wrap],
+      handoffKey: handoff.handoffKey,
+      escrowPin: await sealEscrowPin(dk, await escrowKeyId(r.escrowPub)),
+    });
+  } else {
+    if (!r.wrap) throw new DriveLocked('This user’s Drive has no escrow wrap yet.', 'no_wrap');
+    dk = await unlockWithEscrow(pair.privateKey, r.wrap);
+    if (!dk) throw new DriveLocked('This user’s escrow wrap was made for another escrow key.', 'escrow_failed');
+  }
+  saveImpersonationKey(dk, u.id);
+  return DriveClient.create(dk, u);
+}
+
 // ── keeping wraps current (docs/DRIVE.md §3), for account.js / admin.js / login.js ──
 
 /** After a successful sign-in: unlock (or set up) the Drive for this tab. Never throws. */
-export async function unlockAtSignIn({ user, password, code, prfOutput, credentialId }) {
+export async function unlockAtSignIn({ user, password, code, prfOutput, credentialId, spentWraps }) {
   clearSessionKey();
   try {
-    await unlockDrive({ password, code, prfOutput, credentialId }, { user, passwordVerified: !!password, spentCode: !!code });
+    await unlockDrive({ password, code, prfOutput, credentialId }, { user, passwordVerified: !!password, spentWraps });
     return true;
   } catch {
     return false; // the Drive page asks
@@ -231,18 +300,35 @@ export async function unlockAtSignIn({ user, password, code, prfOutput, credenti
 }
 
 /**
- * Write wraps with DK known → true, or false when the Drive is off or locked.
- * Without DK in the tab, `password` (just confirmed by the server) may unlock it.
+ * The Drive key of `userId` for the Account page's upkeep, or null: the tab's
+ * key; without it, `password` (just confirmed by the server) may unlock it.
+ * The owner acting as the user (`impersonating`) uses that user's own tab
+ * slot, opened through the owner escrow when needed — never the owner's slot.
  */
-async function withKey(userId, fn, password) {
-  let st;
-  try { st = await loadState(); } catch { return false; }
-  if (!st.wraps.length) return false;
+async function upkeepKey(userId, st, { password, impersonating = false } = {}) {
+  if (impersonating) {
+    const kept = loadImpersonationKey(userId);
+    if (kept) return kept;
+    try {
+      return (await openAsOwner({ id: userId, role: 'user', impersonating: true }, st)).dk;
+    } catch {
+      return null;
+    }
+  }
   let dk = loadSessionKey(userId);
   if (!dk && password) {
     dk = await unlockWithPassword(password, st.driveSalt, st.wraps);
     if (dk) saveSessionKey(dk, userId);
   }
+  return dk;
+}
+
+/** Write wraps with DK known → true, or false when the Drive is off or locked. */
+async function withKey(userId, fn, opts) {
+  let st;
+  try { st = await loadState(); } catch { return false; }
+  if (!st.wraps.length) return false;
+  const dk = await upkeepKey(userId, st, opts);
   if (!dk) return false;
   await fn(dk, st);
   return true;
@@ -251,76 +337,58 @@ async function withKey(userId, fn, password) {
 /**
  * The password changed: a new `pw` wrap → 'ok' | 'off' (no Drive, or no key
  * yet) | 'locked' (no DK here). Without DK in the tab, the old password (when
- * the change was confirmed with it) unlocks it first.
+ * the change was confirmed with it) unlocks it first. The server marked the
+ * old wrap stale, so this needs no second confirmation. The owner acting as
+ * the user (`impersonating`): the server has dropped the old wrap (it opened
+ * only with the old password), so the new one is added, not overwritten.
  */
-export async function updatePasswordWrap({ userId, newPassword, oldPassword }) {
-  let dk = loadSessionKey(userId);
+export async function updatePasswordWrap({ userId, newPassword, oldPassword, impersonating = false }) {
   let st;
   try { st = await loadState(); } catch { return 'off'; }
   if (!st.wraps.length) return 'off';
-  if (!dk && oldPassword) {
-    dk = await unlockWithPassword(oldPassword, st.driveSalt, st.wraps);
-    if (dk) saveSessionKey(dk, userId);
-  }
+  const dk = await upkeepKey(userId, st, { password: oldPassword, impersonating });
   if (!dk) return 'locked';
+  if (impersonating && st.wraps.some((w) => w.kind === 'pw')) return 'kept';
   const { driveSalt, wrap } = await wrapPassword(dk, newPassword);
   await api.setKeys({ driveSalt, set: [wrap], remove: [] });
   return 'ok';
 }
 
 /**
- * New recovery codes: they replace every `recovery` wrap. Without DK, the old
- * codes' wraps are still removed (those codes no longer exist).
+ * New recovery codes: a wrap for each (the server has already dropped the old
+ * codes' wraps). → false without DK in the tab.
  */
-export async function replaceRecoveryWraps(userId, codes, { password } = {}) {
-  const done = await withKey(userId, async (dk, st) => {
+export async function replaceRecoveryWraps(userId, codes, { password, impersonating = false } = {}) {
+  return withKey(userId, async (dk) => {
     const set = [];
     for (const c of codes) set.push(await wrapRecovery(dk, c, await recoveryRef(c)));
-    const fresh = new Set(set.map((w) => w.ref));
-    const remove = st.wraps.filter((w) => w.kind === 'recovery' && !fresh.has(w.ref)).map((w) => ({ kind: 'recovery', ref: w.ref }));
-    await api.setKeys({ set, remove });
-  }, password);
-  if (!done) await removeRecoveryWraps();
-  return done;
-}
-
-/** All recovery codes are gone (the last passkey was removed). Needs no DK. */
-export async function removeRecoveryWraps() {
-  let st;
-  try { st = await loadState(); } catch { return false; }
-  const remove = st.wraps.filter((w) => w.kind === 'recovery').map((w) => ({ kind: 'recovery', ref: w.ref }));
-  if (remove.length) await api.setKeys({ set: [], remove });
-  return true;
+    if (set.length) await api.setKeys({ set });
+  }, { password, impersonating });
 }
 
 /** A passkey with PRF output: add (or replace) its wrap. */
-export function addPasskeyWrap(userId, prfOutput, credentialId, { password } = {}) {
+export function addPasskeyWrap(userId, prfOutput, credentialId, { password, impersonating = false } = {}) {
   return withKey(userId, async (dk) => {
     await api.setKeys({ set: [await wrapPrf(dk, prfOutput, credentialId)], remove: [] });
-  }, password);
-}
-
-/** A passkey was removed: drop its wrap (the server does too). Needs no DK. */
-export async function removePasskeyWrap(credentialId) {
-  try { await loadState(); } catch { return false; }
-  await api.setKeys({ set: [], remove: [{ kind: 'passkey', ref: credentialId }] });
-  return true;
+  }, { password, impersonating });
 }
 
 /**
  * The owner reset a user's password: with the owner's DK in this tab, open
- * the user's escrow wrap (logged by the server as drive.escrow_used) and write
- * a `pw` wrap for the new password → 'ok' | 'locked' (the owner's Drive is
- * locked) | 'no_escrow' | 'no_wrap' (the user has no Drive key or escrow wrap)
- * | 'failed'. The reset itself never depends on this.
+ * the user's escrow wrap (the server records it in the admin audit as
+ * drive.escrow_used) and write a `pw` wrap for the new password → 'ok' |
+ * 'locked' (the owner's Drive is locked) | 'no_escrow' | 'mismatch' (the
+ * server's escrow public key is not the owner's) | 'no_wrap' (the user has no
+ * Drive key or escrow wrap) | 'failed'. The reset itself never depends on this.
  */
 export async function escrowPasswordReset({ ownerId, userId, newPassword, reason = 'password reset' }) {
   const ownerDk = loadSessionKey(ownerId);
   if (!ownerDk) return 'locked';
   const st = await loadState().catch(() => null);
   if (!st || typeof st.escrowPriv !== 'string') return 'no_escrow';
-  let priv;
-  try { priv = await openEscrowPriv(ownerDk, st.escrowPriv); } catch { return 'no_escrow'; }
+  let pair;
+  try { pair = await openEscrowKeyPair(ownerDk, st.escrowPriv); } catch { return 'no_escrow'; }
+  if (!st.escrowPub || !sameEscrowKey(pair.publicJwk, st.escrowPub)) return 'mismatch';
   let r;
   try {
     r = await api.escrow(userId, reason);
@@ -331,7 +399,7 @@ export async function escrowPasswordReset({ ownerId, userId, newPassword, reason
   const wraps = Array.isArray(r.wraps) ? r.wraps : [];
   const wrap = r.wrap || wraps.find((w) => w && w.kind === 'escrow');
   if (!wrap) return 'no_wrap';
-  const dk = await unlockWithEscrow(priv, wrap);
+  const dk = await unlockWithEscrow(pair.privateKey, wrap);
   if (!dk) return 'failed';
   const { driveSalt, wrap: pw } = await wrapPassword(dk, newPassword);
   await api.setUserKeys(userId, { driveSalt, set: [pw] });
@@ -345,6 +413,15 @@ export class DriveClient {
     this.dk = dk;
     this.keys = keys;
     this.user = user;
+    /**
+     * Something about the escrow key the page must show (never handled
+     * silently), or null: { kind, text } with kind 'escrow_changed' (a user's
+     * Drive: the owner's escrow key is not the one this Drive pinned; nothing
+     * was re-wrapped — acceptEscrowKey() does it on the user's say) or, for
+     * the owner, 'escrow_mismatch' | 'escrow_unreadable' | 'escrow_missing'
+     * (restoreEscrowKey / newEscrowKey, with the owner's confirmation).
+     */
+    this.notice = null;
   }
 
   static async create(dk, user) {
@@ -352,38 +429,93 @@ export class DriveClient {
   }
 
   /**
-   * Bring wraps up to date after an unlock: the escrow wrap for the owner's
-   * current key, the owner's escrow key pair, a passkey's wrap, a stale `pw`
-   * wrap (password just verified by a sign-in), a spent recovery code's wrap.
+   * Bring wraps up to date after an unlock (never while the owner acts as the
+   * user): the escrow wrap (for the pinned escrow key only), the owner's
+   * escrow key pair checked against the server's public key, a passkey's
+   * wrap, a stale or missing `pw` wrap (the password just verified by a
+   * sign-in, or a hand-over being finished).
    */
-  async maintain(st, { password, prfOutput, credentialId, code, via, passwordVerified = false, spentCode = false } = {}) {
+  async maintain(st, { password, prfOutput, credentialId, via, passwordVerified = false } = {}) {
+    if (this.user.impersonating) return;
     const body = { set: [], remove: [] };
     const wraps = st.wraps || [];
     if (this.user.role === 'owner') {
-      let ok = false;
       if (typeof st.escrowPriv === 'string') {
-        try { await openEscrowPriv(this.dk, st.escrowPriv); ok = true; } catch { /* sealed under another key: replace it */ }
-      }
-      if (!ok || !st.escrowPub) {
+        let pair = null;
+        try { pair = await openEscrowKeyPair(this.dk, st.escrowPriv); } catch { this.#warn('escrow_unreadable'); }
+        if (pair && !sameEscrowKey(pair.publicJwk, st.escrowPub)) this.#warn('escrow_mismatch');
+      } else if (st.escrowPub) {
+        this.#warn('escrow_missing');
+      } else {
+        // The very first escrow key pair (no key anywhere yet).
         const kp = await createEscrowKeyPair();
         body.escrowPriv = await sealEscrowPriv(this.dk, kp.privateKey);
         body.escrowPub = kp.publicJwk;
       }
     } else if (st.escrowPub) {
       const current = wraps.find((w) => w.kind === 'escrow');
-      if (!current || escrowWrapKeyId(current) !== await escrowKeyId(st.escrowPub)) body.set.push(await wrapEscrow(this.dk, st.escrowPub));
+      const kid = await escrowKeyId(st.escrowPub);
+      const wrapKid = current ? escrowWrapKeyId(current) : null;
+      const pinned = st.escrowPin ? await openEscrowPin(this.dk, st.escrowPin) : null;
+      // Trust on first use: the first escrow key this Drive wraps to is pinned;
+      // a different key later is never wrapped to without the user's say.
+      const trusted = pinned ?? (st.escrowPin ? null : (wrapKid ?? kid));
+      if (trusted !== kid) {
+        this.notice = { kind: 'escrow_changed', kid, text: 'The administrator’s escrow key has changed since your Drive last used it, so your Drive was not re-keyed for the new one.' };
+      } else {
+        if (wrapKid !== kid) body.set.push(await wrapEscrow(this.dk, st.escrowPub));
+        if (!pinned) body.escrowPin = await sealEscrowPin(this.dk, kid);
+      }
     }
-    if (prfOutput && credentialId && via !== 'passkey') body.set.push(await wrapPrf(this.dk, prfOutput, credentialId));
-    if (password && passwordVerified && via !== 'pw') {
+    if (prfOutput && credentialId && via !== 'passkey' && !wraps.some((w) => w.kind === 'passkey' && w.ref === credentialId)) {
+      body.set.push(await wrapPrf(this.dk, prfOutput, credentialId));
+    }
+    const hasPw = wraps.some((w) => w.kind === 'pw');
+    if (password && passwordVerified && (st.pwStale || !hasPw || via === 'handoff')) {
       const { driveSalt, wrap } = await wrapPassword(this.dk, password);
       body.driveSalt = driveSalt;
       body.set.push(wrap);
     }
-    if (code && spentCode && via === 'recovery') {
-      const ref = await recoveryRef(code);
-      if (ref && wraps.some((w) => w.kind === 'recovery' && w.ref === ref)) body.remove.push({ kind: 'recovery', ref });
-    }
-    if (body.set.length || body.remove.length || body.escrowPriv) await api.setKeys(body);
+    if (body.set.length || body.escrowPriv || body.escrowPin) await api.setKeys(body);
+  }
+
+  #warn(kind) {
+    this.notice = { kind, text: NOTICE_TEXT[kind] };
+  }
+
+  /**
+   * The user accepts the owner's new escrow key (after the notice): wrap DK to
+   * it and pin it.
+   */
+  async acceptEscrowKey() {
+    const st = await loadState();
+    if (!st.escrowPub) return false;
+    const kid = await escrowKeyId(st.escrowPub);
+    await api.setKeys({ set: [await wrapEscrow(this.dk, st.escrowPub)], escrowPin: await sealEscrowPin(this.dk, kid) });
+    this.notice = null;
+    return true;
+  }
+
+  /**
+   * The owner puts back the escrow public key that belongs to their escrow
+   * private key. `step` is the confirmation ({ current } | { reauth }).
+   */
+  async restoreEscrowKey(step) {
+    const st = await loadState();
+    const pair = await openEscrowKeyPair(this.dk, st.escrowPriv);
+    await api.setKeys({ escrowPub: pair.publicJwk, ...step });
+    this.notice = null;
+  }
+
+  /**
+   * The owner makes a new escrow key pair (when theirs cannot be opened, or
+   * none matches the server). Every user's Drive then shows a notice before
+   * it is wrapped to it; escrow wraps for the old key no longer open.
+   */
+  async newEscrowKey(step) {
+    const kp = await createEscrowKeyPair();
+    await api.setKeys({ escrowPriv: await sealEscrowPriv(this.dk, kp.privateKey), escrowPub: kp.publicJwk, ...step });
+    this.notice = null;
   }
 
   /** { used, capacity } in bytes (capacity null = no limit). */
@@ -396,24 +528,33 @@ export class DriveClient {
     return fromUtf8(await openField(this.keys.names, field, id, sealed(value)));
   }
 
-  /** A server node → { id, parent, kind, name, type, mtime, size, chunks, created, updated } (name null if unreadable). */
+  /**
+   * A server node → { id, parent, kind, name, type, mtime, size, chunks,
+   * created, updated } (name null if unreadable). A file is readable only
+   * with its sealed metadata, whose size must be the server's and match the
+   * chunk count: a file whose metadata is missing, altered or disagrees is
+   * `unreadable`, never an empty (or cut) file (SECURITY.md §1).
+   */
   async decode(n) {
     if (!n || typeof n.id !== 'string') throw malformed();
     const base = { id: n.id, parent: n.parent ?? null, kind: n.kind === 'file' ? 'file' : 'dir', size: n.size ?? 0, chunks: n.chunks ?? 0, created: n.created ?? 0, updated: n.updated ?? 0 };
     if (n.id === ROOT) return { ...base, kind: 'dir', name: ROOT_NAME, type: null, mtime: 0 };
     let name = null;
     try { name = await this.#text('name', n.id, n.name); } catch { /* unreadable */ }
+    const badName = name === null;
     let type = null;
     let mtime = 0;
-    if (base.kind === 'file' && n.meta) {
+    if (base.kind === 'file') {
+      let ok = false;
       try {
         const m = JSON.parse(await this.#text('meta', n.id, n.meta));
         type = normalizeMime(m.type) || OCTET;
         mtime = Number.isSafeInteger(m.mtime) && m.mtime >= 0 ? m.mtime : 0;
-        if (Number.isSafeInteger(m.size) && m.size !== base.size) name = null; // the server's size does not match
-      } catch { name = null; }
+        ok = Number.isSafeInteger(m.size) && m.size === base.size && base.chunks === refChunks(base.size);
+      } catch { /* missing or unreadable metadata */ }
+      if (!ok) name = null;
     }
-    return { ...base, name, type: base.kind === 'file' ? (type || OCTET) : null, mtime, ...(name === null ? { unreadable: true } : {}) };
+    return { ...base, name, type: base.kind === 'file' ? (type || OCTET) : null, mtime, ...(name === null ? { unreadable: true } : {}), ...(badName ? { badName: true } : {}) };
   }
 
   async #fileKey(n) {
@@ -432,8 +573,9 @@ export class DriveClient {
     if (!r || !r.node || !Array.isArray(r.children)) throw malformed();
     const raw = r.children.filter((c) => c && c.state !== 'pending');
     const children = await Promise.all(raw.map((c) => this.decode(c)));
-    if (children.length && children.every((c) => c.unreadable)) {
-      clearSessionKey();
+    // A Drive whose names none decrypt: this tab's key is not its key.
+    if (children.length && children.every((c) => c.badName)) {
+      if (this.user.impersonating) clearImpersonationKey(); else clearSessionKey();
       throw new DriveLocked('This tab holds the wrong key for your Drive. Unlock it again.', 'wrong');
     }
     children.sort((a, b) => (a.kind === b.kind ? String(a.name ?? '').localeCompare(String(b.name ?? '')) : a.kind === 'dir' ? -1 : 1));

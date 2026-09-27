@@ -10,6 +10,7 @@ import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js'
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { requestOptions } from '../lib/webauthn.js';
+import { syncCredentialWraps } from './drive.js';
 
 const AUTH_LABEL = utf8('secbin-auth/v2');
 
@@ -35,9 +36,17 @@ async function signedIn(env, g, res) {
     }
     return err(res.status, res.error, res.message, res.until ? { until: res.until } : undefined);
   }
+  // A recovery code spent by this sign-in no longer unlocks the Drive either:
+  // its wrap goes now, and comes back once in this response, so this sign-in
+  // can still open the Drive with it (docs/DRIVE.md §3).
+  let spent = [];
+  if (typeof res.recoveryLeft === 'number') {
+    try { spent = (await syncCredentialWraps(env, res.user.id)).filter((w) => w.kind === 'recovery'); } catch (e) { console.warn('secbin: drive wraps not synced', e && e.message ? e.message : e); }
+  }
   const { cookie } = await issueSession(env, { uid: res.user.id, ver: res.user.ver, settings: res.settings });
   const out = { ok: true, user: { id: res.user.id, username: res.user.username, role: res.user.role } };
   if (typeof res.recoveryLeft === 'number') out.recoveryLeft = res.recoveryLeft;
+  if (spent.length) out.driveSpent = spent;
   return json(out, 200, { 'set-cookie': cookie });
 }
 

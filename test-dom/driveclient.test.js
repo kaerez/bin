@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   openDrive, unlockDrive, unlockAtSignIn, DriveLocked, DriveDisabled, escrowPasswordReset, updatePasswordWrap,
-  replaceRecoveryWraps, removeRecoveryWraps, removePasskeyWrap, addPasskeyWrap, checkName,
+  replaceRecoveryWraps, addPasskeyWrap, checkName,
 } from '../public/js/driveclient.js';
 import {
   loadSessionKey, clearSessionKey, saveSessionKey, createDriveKey, createEscrowKeyPair, sealEscrowPriv, wrapEscrow,
@@ -99,20 +99,25 @@ describe('unlock and set-up', () => {
 });
 
 describe('sign-in upkeep', () => {
-  it('a spent recovery code unlocks and loses its wrap; a verified password re-wraps a stale pw wrap', async () => {
+  it('a spent recovery code unlocks with the wrap its sign-in returned; a verified password re-wraps a stale pw wrap', async () => {
     install();
     const d = await unlockDrive({ password: PASSWORD });
     await replaceRecoveryWraps('u1', [CODE, 'ZZZZ-YYYY-XXXX-WWWW']);
     expect([...S.wraps.values()].filter((w) => w.kind === 'recovery')).toHaveLength(2);
-    // An admin reset without escrow: the pw wrap no longer matches the password.
+    // An admin reset without escrow: the pw wrap no longer matches the password (the server marks it stale).
     const stale = await wrapPassword(d.dk, 'the old password');
     S.driveSalt = stale.driveSalt;
     S.wraps.set('pw|pw', stale.wrap);
-    expect(await unlockAtSignIn({ user: S.user, password: 'the new password', code: CODE })).toBe(true);
+    S.pwStale = true;
+    // The recovery sign-in: the server removed the spent code's wrap and returned it once.
+    const spent = await recoveryRef(CODE);
+    const spentWrap = S.wraps.get(`recovery|${spent}`);
+    S.wraps.delete(`recovery|${spent}`);
+    expect(await unlockAtSignIn({ user: S.user, password: 'the new password', code: CODE, spentWraps: [spentWrap] })).toBe(true);
     expect(loadSessionKey('u1')).toEqual(d.dk);
     const wraps = [...S.wraps.values()];
-    const spent = await recoveryRef(CODE);
     expect(wraps.find((w) => w.kind === 'recovery' && w.ref === spent)).toBeUndefined();
+    expect(S.pwStale).toBe(false);
     expect(await unlockWithRecovery('ZZZZ-YYYY-XXXX-WWWW', wraps)).toEqual(d.dk);
     expect(await unlockWithPassword('the new password', S.driveSalt, wraps)).toEqual(d.dk);
     // A failed unlock never throws.
@@ -130,22 +135,22 @@ describe('sign-in upkeep', () => {
     clearSessionKey();
     await unlockDrive({ prfOutput: prf, credentialId: 'cred-1' });
     expect(loadSessionKey('u1')).toEqual(d.dk);
-    await removePasskeyWrap('cred-1');
-    expect([...S.wraps.values()].some((w) => w.kind === 'passkey')).toBe(false);
-    // Password change with the key in the tab, and without it (the old password unlocks first).
+    // Password change (the server marks the old pw wrap stale): with the key in
+    // the tab, and without it (the old password unlocks first) — no second confirmation.
+    S.pwStale = true;
     expect(await updatePasswordWrap({ userId: 'u1', newPassword: 'second password' })).toBe('ok');
     clearSessionKey();
+    S.pwStale = true;
     expect(await updatePasswordWrap({ userId: 'u1', newPassword: 'third password' })).toBe('locked');
     expect(await updatePasswordWrap({ userId: 'u1', newPassword: 'third password', oldPassword: 'second password' })).toBe('ok');
     expect(await unlockWithPassword('third password', S.driveSalt, [...S.wraps.values()])).toEqual(d.dk);
-    await replaceRecoveryWraps('u1', [CODE]);
-    await removeRecoveryWraps();
-    expect([...S.wraps.values()].some((w) => w.kind === 'recovery')).toBe(false);
-    // New codes while the Drive is locked here: the old codes' wraps still go.
-    await replaceRecoveryWraps('u1', [CODE]);
+    // New codes: a wrap each (the server dropped the old codes' wraps); none without the key here.
+    expect(await replaceRecoveryWraps('u1', [CODE])).toBe(true);
+    expect(await unlockWithRecovery(CODE, [...S.wraps.values()])).toEqual(d.dk);
     clearSessionKey();
     expect(await replaceRecoveryWraps('u1', ['ZZZZ-YYYY-XXXX-WWWW'])).toBe(false);
-    expect([...S.wraps.values()].some((w) => w.kind === 'recovery')).toBe(false);
+    // The client never removes a wrap itself (the server does, and removing needs the step-up).
+    expect(S.requests.filter((r) => r.path === '/api/private/drive/keys').some((r) => (r.body.remove || []).length)).toBe(false);
   }, 60000);
 
   it('an owner password reset re-keys the user\'s Drive through the escrow', async () => {

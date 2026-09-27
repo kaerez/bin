@@ -479,7 +479,7 @@ async function renderUsersInto() {
 
 /**
  * After a password reset: re-key the user's Drive for the new password
- * through the owner escrow (docs/DRIVE.md §3; the server logs the escrow use).
+ * through the owner escrow (docs/DRIVE.md §3; the admin audit records the escrow use).
  * Needs the owner's own Drive unlocked in this tab; otherwise the user unlocks
  * their Drive with a recovery code or passkey. The reset never depends on it.
  */
@@ -494,6 +494,7 @@ async function driveAfterReset(userId, newPassword) {
     ok: 'Their Drive now opens with the new password.',
     locked: 'Their Drive was not re-keyed (your own Drive is locked in this tab): they open it with a recovery code or a passkey.',
     failed: 'Their Drive could not be re-keyed: they open it with a recovery code or a passkey.',
+    mismatch: 'Their Drive was not re-keyed: the escrow public key on the server is not yours (it may have been replaced). Open your own Drive to review it.',
   }[r];
   if (note) toast(note, r === 'ok' ? {} : { error: true });
 }
@@ -980,7 +981,7 @@ function statementEditor(s, defs) {
   };
 
   return h('div.card.stack.st-editor', {}, h('h2.section-title', { text: 'Accessibility' }),
-    h('p.mono.muted', {}, 'The public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), '. A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees).'),
+    h('p.mono.muted', {}, 'The public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), '. Give a way to report a problem; list a coordinator if you have one.'),
     h('p.mono.muted', { id: HELP, text: 'Plain text only (no HTML or formatting). In paragraphs, each line is a paragraph; in lists, each line is one item. Empty sections are left out.' }),
     field('How to report a problem (both languages)', contact),
     field('Accessibility coordinator (optional; both languages)', coord),

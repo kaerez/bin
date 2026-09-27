@@ -108,11 +108,21 @@ describe('registration', () => {
     }
   });
 
-  it('is refused while impersonating', async () => {
+  it('works while impersonating, with no confirmation (the owner\'s session is the authority)', async () => {
     const u = await makeUser('pk-imp');
     const imp = await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent });
-    const r = await post('/api/private/me/passkeys/options', {}, cookieOf(imp));
-    expect(await errorOf(r)).toBe('impersonating');
+    const ic = cookieOf(imp);
+    const o = await post('/api/private/me/passkeys/options', {}, ic);
+    expect(o.status).toBe(200);
+    const { challengeId, publicKey } = await o.json();
+    const auth = new SoftAuthenticator();
+    const r = await post('/api/private/me/passkeys', { challengeId, credential: await auth.create(publicKey, ORIGIN), name: 'By owner' }, ic);
+    expect(r.status).toBe(201);
+    expect((await r.json()).codes).toHaveLength(20); // the account's first passkey: the codes go to the owner
+    // The passkey is the user's: it signs the user in.
+    const login = await passkeyLogin(auth);
+    expect(login.status).toBe(200);
+    expect((await login.json()).user.username).toBe('pk-imp');
   });
 });
 

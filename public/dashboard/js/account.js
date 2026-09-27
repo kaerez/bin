@@ -2,6 +2,8 @@
 // recovery codes, API keys (if allowed), and my activity log. Every change
 // is confirmed with the password (stretched locally) or, for an account with
 // a passkey, a fresh passkey check; the password is asked again every time.
+// The owner acting as the user ("Log in as") can change everything here with
+// no confirmation (the confirmation fields are hidden) and sets any password.
 // When the server has the human check (Turnstile) on, each card has a widget
 // and its buttons stay disabled until the check passes; every request spends
 // one token and the widget starts a fresh check for the next one.
@@ -9,22 +11,30 @@
 import '../../js/kdf-progress.js';
 import { changePassword, listKeys, createKey, updateKey, revokeKey, myActivity, ApiError, myPasskeys, passkeyRegisterOptions, addPasskey, removePasskey, regenerateRecoveryCodes, setSecondFactor, changeUsername } from '../../js/api.js';
 import { passkeysSupported, createPasskeyPrf } from '../../js/passkeys.js';
-import { DRIVE_PRF_SALT } from '../../js/drivekeys.js';
-import { updatePasswordWrap, replaceRecoveryWraps, removeRecoveryWraps, addPasskeyWrap, removePasskeyWrap } from '../../js/driveclient.js';
+import { DRIVE_PRF_SALT, holdSessionKeys, releaseSessionKeys } from '../../js/drivekeys.js';
+import { updatePasswordWrap, replaceRecoveryWraps, addPasskeyWrap } from '../../js/driveclient.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
 import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
 import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
-import { humanCheck } from '../../js/turnstile.js';
+import { humanCheck, turnstileSiteKey } from '../../js/turnstile.js';
+
+// This page may load Cloudflare's Turnstile script: before anything can load
+// it, the tab's Drive keys leave sessionStorage for this module's memory (the
+// changes below still use them); they go back only if the page turns out not
+// to load that script. Otherwise the Drive page asks to unlock again after a
+// visit here (SECURITY.md, Drive keys in the tab).
+holdSessionKeys();
+turnstileSiteKey().then((key) => { if (!key) releaseSessionKeys(); }).catch(() => {});
 
 const $ = (s) => document.querySelector(s);
 let profile;
 let lastActivity = null;
 let hasPasskey = false; // kept current by renderPasskeys()
 // The human checks of the passkeys and API keys cards (null while there is
-// nothing to change there, e.g. while impersonating).
+// nothing to change there, e.g. passkeys off).
 let passkeyCheck = null;
 let keyCheck = null;
 // One fresh token from `check` (null when the server has no human check).
@@ -33,8 +43,23 @@ const human = async (check) => (check ? (await check).take() : null);
 const CONFIRM_FIELDS = [['#name-current', 'Your password'], ['#pw-current', 'Current password'],
   ['#passkey-current', 'Your password (asked again for every change)'], ['#key-current', 'Your password (asked again for every change)']];
 
-/** Labels say that an empty password field means "use a passkey". */
+/** The owner is acting as this user (impersonating). */
+const acting = () => !!profile.impersonatedBy;
+
+/**
+ * Labels say that an empty password field means "use a passkey". While
+ * impersonating, nothing is confirmed: the fields are hidden.
+ */
 function labelConfirmFields() {
+  if (acting()) {
+    for (const [sel] of CONFIRM_FIELDS) {
+      const input = $(sel);
+      const label = $(`${sel}-label`);
+      if (label) label.hidden = true;
+      if (input) (input.closest('.pw') || input).hidden = true;
+    }
+    return;
+  }
   const alt = hasPasskey && passkeysSupported();
   for (const [sel, text] of CONFIRM_FIELDS) {
     const label = $(`${sel}-label`);
@@ -42,8 +67,12 @@ function labelConfirmFields() {
   }
 }
 
-/** The confirmation for one change (see confirm.js). */
-const confirmStep = (input) => confirmWith(input, profile.user.username, hasPasskey);
+/** The confirmation for one change (see confirm.js); none while impersonating. */
+const confirmStep = async (input) => {
+  if (!acting()) return confirmWith(input, profile.user.username, hasPasskey);
+  input.value = '';
+  return {};
+};
 
 /**
  * Keep the Drive's key wraps in step with a change (docs/DRIVE.md §3). Best
@@ -58,6 +87,7 @@ const refusal = (e) => (e instanceof ApiError && e.code === 'wrong_password' ? '
 
 (async () => {
   profile = await ready;
+  labelConfirmFields();
   renderSub();
   renderLimits();
   wireUsername();
@@ -70,12 +100,18 @@ const refusal = (e) => (e instanceof ApiError && e.code === 'wrong_password' ? '
 })();
 
 function renderSub() {
-  $('#acct-sub').textContent = `Signed in as ${profile.user.username}${profile.user.role === 'owner' ? ' (owner)' : ''}.`;
+  const name = profile.user.username;
+  if (acting()) {
+    // Unmistakable: the page is another user's account, changed as them.
+    $('#acct-title').replaceChildren(`${name}’s `, h('span.title-em', { text: 'account.' }));
+    $('#acct-sub').textContent = `You (${profile.impersonatedBy}) are acting as ${name}: every change here is made to ${name}’s account, without ${name}’s password.`;
+    return;
+  }
+  $('#acct-sub').textContent = `Signed in as ${name}${profile.user.role === 'owner' ? ' (owner)' : ''}.`;
 }
 
 function wireUsername() {
   const form = $('#name-form');
-  if (profile.impersonatedBy) { form.hidden = true; return; }
   $('#name-new').value = profile.user.username;
   const check = humanCheck($('#name-turnstile'), 'account', { gate: [$('#name-btn')] });
   form.addEventListener('submit', async (e) => {
@@ -91,7 +127,8 @@ function wireUsername() {
       const r = await changeUsername(name, step, await human(check));
       profile.user.username = r.username;
       renderSub();
-      showMsg(msg, `Your username is now ${r.username}. Use it the next time you sign in.`, false);
+      if (acting()) $('#imp-text').textContent = `You (${profile.impersonatedBy}) are acting as ${r.username}.`;
+      showMsg(msg, acting() ? `The username is now ${r.username}.` : `Your username is now ${r.username}. Use it the next time you sign in.`, false);
       toast('Username changed.');
     } catch (err) {
       const taken = err instanceof ApiError && err.code === 'username_taken';
@@ -136,14 +173,12 @@ function wirePassword() {
   const form = $('#pw-form');
   // The policy the administrator set for this account (checked here only:
   // the server never sees the password).
-  // The owner sets their own password freely; everyone else follows the policy.
-  const policy = profile.user.role === 'owner' ? null : profile.passwordPolicy;
+  // The owner sets any password, their own or (impersonating) the user's, as
+  // in Admin → Users; everyone else follows the policy.
+  const policy = profile.user.role === 'owner' || acting() ? null : profile.passwordPolicy;
   $('#pw-new-label').textContent = 'New password';
-  $('#pw-policy').textContent = policy ? describePolicy(policy) : 'As the owner, you choose any password.';
-  if (profile.impersonatedBy) {
-    form.hidden = true;
-    return;
-  }
+  $('#pw-policy').textContent = policy ? describePolicy(policy)
+    : acting() ? `As the owner, you choose any password for ${profile.user.username}.` : 'As the owner, you choose any password.';
   const check = humanCheck($('#pw-turnstile'), 'password', { gate: [$('#pw-btn')] });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -169,12 +204,18 @@ function wirePassword() {
       const r = await changePassword({ ...step, ...cred }, token);
       form.reset();
       // The Drive opens with the new password from now on.
-      const drive = await driveUpkeep(() => updatePasswordWrap({ userId: profile.user.id, newPassword, oldPassword }));
-      if (drive === 'locked') toast('Your Drive was locked in this tab, so it still opens with your old password (or a recovery code or passkey), not the new one.', { error: true });
+      const drive = await driveUpkeep(() => updatePasswordWrap({ userId: profile.user.id, newPassword, oldPassword, impersonating: acting() }));
+      if (drive === 'locked' || drive === 'kept') {
+        toast(acting()
+          ? `${profile.user.username}’s Drive was not re-keyed for the new password (${drive === 'kept' ? 'it has no other key, so its old password wrap stays' : 'unlock your own Drive in this tab first'}): they open it with a recovery code or a passkey.`
+          : 'Your Drive was locked in this tab, so it still opens with your old password (or a recovery code or passkey), not the new one.', { error: true });
+      }
       // Passkeys and recovery codes are not tied to the password.
       const still = r.passkeys ? ` Your ${r.passkeys} passkey${r.passkeys === 1 ? '' : 's'} and ${r.recoveryLeft} recovery code${r.recoveryLeft === 1 ? '' : 's'} still work: if someone else may have had access, remove any passkey you do not recognise and create new recovery codes below.` : '';
-      showMsg(msg, `Password changed. Your other sessions were signed out.${still}`, false);
-      toast('Password changed. Your other sessions were signed out.');
+      // Impersonating: the user's sessions end; the owner's carries on.
+      const done = acting() ? `Password changed. ${profile.user.username}’s sessions were signed out.` : 'Password changed. Your other sessions were signed out.';
+      showMsg(msg, acting() ? `${done} Their passkeys and recovery codes are unchanged.` : `${done}${still}`, false);
+      toast(done);
     } catch (err) {
       const text = refusal(err);
       showMsg(msg, text);
@@ -189,13 +230,12 @@ function wirePassword() {
 function wireKeys() {
   const card = $('#keys-card');
   // Existing keys can still be edited and revoked when new ones are not allowed.
-  if (!profile.impersonatedBy) keyCheck = humanCheck($('#key-turnstile'), 'account', { gate: profile.apiKeys.enabled ? [$('#key-create')] : [] });
+  keyCheck = humanCheck($('#key-turnstile'), 'account', { gate: profile.apiKeys.enabled ? [$('#key-create')] : [] });
   if (!profile.apiKeys.enabled) {
     $('#keys-sub').textContent = 'API keys are not enabled for your account. Ask the administrator if you need CLI access.';
     $('#key-form').hidden = true;
     return renderKeys();
   }
-  if (profile.impersonatedBy) { $('#key-form').hidden = true; $('#key-confirm').hidden = true; }
   $('#key-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const msg = $('#keys-msg');
@@ -294,13 +334,11 @@ async function renderKeys() {
         h('td.mono', { dataset: { label: 'Last used' }, text: formatDate(k.last_used) }),
         h('td.mono', { dataset: { label: 'Expires' }, text: k.expires ? formatDate(k.expires) : 'never' }),
         h('td.mono', { dataset: { label: 'Scopes' }, text: (k.scopes || []).join(', ') || '—' }), h('td.cell-actions', {}, actions));
-      if (!profile.impersonatedBy) {
-        actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', dataset: { focusKey: `key:${k.id}:edit` }, on: { click: () => editKeyRow(k, tr) } }));
-        const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `key:${k.id}:revoke` } });
-        armConfirm(rv, 'Revoke?', () => keyChange((step, token) => revokeKey(k.id, step, token), 'API key revoked.'));
-        keyCheck?.gate(rv); // waits for the card's human check, like the Create button
-        actions.appendChild(rv);
-      }
+      actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', dataset: { focusKey: `key:${k.id}:edit` }, on: { click: () => editKeyRow(k, tr) } }));
+      const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `key:${k.id}:revoke` } });
+      armConfirm(rv, 'Revoke?', () => keyChange((step, token) => revokeKey(k.id, step, token), 'API key revoked.'));
+      keyCheck?.gate(rv); // waits for the card's human check, like the Create button
+      actions.appendChild(rv);
       body.appendChild(tr);
     }
   } catch (e) {
@@ -363,12 +401,8 @@ async function renderPasskeys() {
   for (const p of st.passkeys) {
     const rm = h('button.btn.danger', { type: 'button', text: 'Remove' });
     armConfirm(rm, st.passkeys.length === 1 ? 'Remove (and its recovery codes)?' : 'Remove?', () => passkeyAction(
-      async (step, token) => removePasskey(p.id, step, await token()), async () => {
-        toast('Passkey removed.');
-        // Its Drive wrap goes; with the last passkey, the recovery codes (and their wraps) go too.
-        await driveUpkeep(() => removePasskeyWrap(p.id));
-        if (st.passkeys.length === 1) await driveUpkeep(() => removeRecoveryWraps());
-      },
+      // The server drops its Drive wrap (and, with the last passkey, the recovery codes' wraps).
+      async (step, token) => removePasskey(p.id, step, await token()), () => toast('Passkey removed.'),
     ));
     passkeyCheck?.gate(rm);
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Name' }, text: p.name }), h('td.mono', { dataset: { label: 'Added' }, text: formatDate(p.created) }),
@@ -381,7 +415,7 @@ async function renderPasskeys() {
   labelConfirmFields();
   $('#passkeys-sub').textContent = MODE_TEXT[st.mode] || $('#passkeys-sub').textContent;
   // The choice is offered in mode "any"; it needs a passkey to turn on.
-  $('#mfa-row').hidden = st.mode !== 'any' || !!profile.impersonatedBy;
+  $('#mfa-row').hidden = st.mode !== 'any';
   $('#mfa-on').disabled = !has;
   $(st.mfa ? '#mfa-on' : '#mfa-off').checked = true;
   $('#recovery-status').textContent = has
@@ -404,7 +438,6 @@ function wirePasskeys() {
   if (left !== null && /^\d+$/.test(left)) {
     showMsg($('#recovery-used'), `You signed in with a recovery code; ${left} left. If you lost your passkey, remove it and add a new one, or create new codes.`, false);
   }
-  if (profile.impersonatedBy) { $('#passkeys-actions').hidden = true; return renderPasskeys(); }
   const canCreate = passkeysSupported();
   if (!canCreate) {
     $('#passkey-form').hidden = true;
@@ -422,8 +455,8 @@ function wirePasskeys() {
       // PRF (where the authenticator supports it) lets this passkey unlock the Drive.
       const { credential, prf } = await createPasskeyPrf(o.publicKey, DRIVE_PRF_SALT);
       const r = await addPasskey({ challengeId: o.challengeId, credential, name, ...step }, await token());
-      if (prf) await driveUpkeep(() => addPasskeyWrap(profile.user.id, prf, typeof r.id === 'string' ? r.id : credential.rawId, { password }));
-      if (r.codes) await driveUpkeep(() => replaceRecoveryWraps(profile.user.id, r.codes, { password }));
+      if (prf) await driveUpkeep(() => addPasskeyWrap(profile.user.id, prf, typeof r.id === 'string' ? r.id : credential.rawId, { password, impersonating: acting() }));
+      if (r.codes) await driveUpkeep(() => replaceRecoveryWraps(profile.user.id, r.codes, { password, impersonating: acting() }));
       return r;
     }, (r) => {
       $('#passkey-name').value = '';
@@ -442,7 +475,7 @@ function wirePasskeys() {
   armConfirm($('#recovery-regen'), 'Replace all codes?', () => passkeyAction(
     async (step, token, password) => {
       const r = await regenerateRecoveryCodes(step, await token());
-      await driveUpkeep(() => replaceRecoveryWraps(profile.user.id, r.codes, { password })); // the new codes unlock the Drive; the old ones no longer do
+      await driveUpkeep(() => replaceRecoveryWraps(profile.user.id, r.codes, { password, impersonating: acting() })); // the new codes unlock the Drive; the old ones no longer do
       return r;
     }, (r) => { toast('New recovery codes created; the old ones no longer work.'); showCodes(r.codes); },
   ));

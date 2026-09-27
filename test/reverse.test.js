@@ -113,6 +113,9 @@ const received = async (cookie) => (await fetchJson('/api/private/drive/received
 /** What the received files not yet re-wrapped add to the Drive's use: their sealed path, metadata and wrap. */
 const overhead = (uid) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(
   'SELECT COALESCE(SUM(LENGTH(name) + LENGTH(meta) + LENGTH(fk)), 0) AS s FROM nodes WHERE rs IS NOT NULL').one().s);
+// The sealed fields of the Drive's own items (every item counts, docs/DRIVE.md §10).
+const ownSealed = (uid) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(
+  "SELECT COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0) AS s FROM nodes WHERE rs IS NULL AND id != 'root'").one().s);
 const audit = async (subject) => (await (await fetchJson(`/api/private/admin/audit?user=${subject}`, { cookie: oc })).json()).rows;
 
 describe('role options and migration 14', () => {
@@ -260,7 +263,7 @@ describe('the uploader', () => {
     const extra = await overhead(u.id);
     expect(extra).toBeGreaterThan(2 * 300); // two sealed paths, metadata and wraps
     expect(extra).toBeLessThan(2 * 2700);
-    expect(st.used).toBe(content.length + 4 + extra);
+    expect(st.used).toBe(content.length + 4 + extra + await ownSealed(u.id));
     expect((await (await node(u.cookie, folder)).json()).children).toEqual([]);
     expect((await node(u.cookie, f1.node)).status).toBe(404);
     expect((await fetchJson(`/api/private/drive/files/${f1.node}/chunk/0`, { cookie: u.cookie })).status).toBe(404);
@@ -286,11 +289,11 @@ describe('the uploader', () => {
       },
     });
     expect(acc.status).toBe(200);
-    // Taken in: only the other received file's sealed fields still count on top of the content.
+    // Taken in: the other received file's sealed fields, and the Drive's own items' (the taken-in file now among them).
     const left = await overhead(u.id);
     expect(left).toBeGreaterThan(0);
     expect(left).toBeLessThan(extra);
-    expect((await drive(u.cookie)).used).toBe(content.length + 4 + left);
+    expect((await drive(u.cookie)).used).toBe(content.length + 4 + left + await ownSealed(u.id));
     const kids = (await (await node(u.cookie, folder)).json()).children;
     expect(kids.map((k) => k.id)).toEqual([f1.node]);
     expect(fromUtf8(await openField(keys.names, 'name', it.id, kids[0].name))).toBe('contract.pdf');

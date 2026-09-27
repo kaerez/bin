@@ -9,7 +9,7 @@ import { loginProof } from './pwauth.js';
 import { showMsg, markInvalid, wirePeek, friendlyError } from './common.js';
 import { humanCheck } from './turnstile.js';
 import { passkeysSupported, usePasskeyPrf } from './passkeys.js';
-import { DRIVE_PRF_SALT } from './drivekeys.js';
+import { DRIVE_PRF_SALT, clearSessionKey } from './drivekeys.js';
 import { unlockAtSignIn } from './driveclient.js';
 
 const $ = (s) => document.querySelector(s);
@@ -27,6 +27,9 @@ if (new URLSearchParams(location.search).get('disabled') === '1') {
 })();
 
 wirePeek(['#login-pass', '#login-pass-peek']);
+// A Drive key left in this tab goes before the human check's (third-party)
+// script can load; the sign-in unlocks the Drive again (SECURITY.md).
+clearSessionKey();
 // Sign-in buttons stay disabled until the human check (when on) has passed.
 const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'), $('#passkey-btn')] });
 
@@ -37,7 +40,7 @@ const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'
  * Account when a recovery code was spent.
  */
 async function done(r, creds = {}) {
-  if (r && r.user && typeof r.user.id === 'string') await unlockAtSignIn({ user: r.user, ...creds });
+  if (r && r.user && typeof r.user.id === 'string') await unlockAtSignIn({ user: r.user, ...creds, spentWraps: r.driveSpent });
   $('#login-pass').value = '';
   if (r && typeof r.recoveryLeft === 'number') location.replace(`/dashboard/account/?recovery=${r.recoveryLeft}`);
   else location.replace('/dashboard/');

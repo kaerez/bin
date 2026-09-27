@@ -15,7 +15,7 @@ import {
   setReverseStretcher, createReverseKey, sealReversePriv, openReversePriv, linkProof, passwordGate, sealNote, openUpload, fragmentOf,
   newReverseId, pubFromFragment,
 } from '../public/js/reversekeys.js';
-import { createDriveKey, saveSessionKey, clearSessionKey, wrapRecovery, recoveryRef, deriveSubkeys, openField } from '../public/js/drivekeys.js';
+import { createDriveKey, saveSessionKey, clearSessionKey, saveImpersonationKey, clearImpersonationKey, wrapRecovery, recoveryRef, deriveSubkeys, openField } from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
 import { utf8, fromUtf8, bytesFromB64url } from '../public/js/bytes.js';
 import { CHUNK, TAG } from '../public/js/files.js';
@@ -39,7 +39,7 @@ const sha = async (b64) => {
   return btoa(String.fromCharCode(...d)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 };
 
-beforeEach(() => { document.body.replaceChildren(); delete globalThis.turnstile; clearSessionKey(); });
+beforeEach(() => { document.body.replaceChildren(); delete globalThis.turnstile; clearSessionKey(); clearImpersonationKey(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
 // ── the uploader page ─────────────────────────────────────────────────────────
@@ -352,7 +352,10 @@ describe('Drive: Receive files…', () => {
   });
 
   it('the owner acting as the user is not asked to confirm (the server asks for nothing then)', async () => {
-    await server();
+    await server({ locked: true });
+    // The owner's tab already opened this user's Drive through the escrow (docs/DRIVE.md §3).
+    S.impersonatedBy = 'owner';
+    saveImpersonationKey(dk, S.user.id);
     const r = await startDrive(mountPoint(), deps(PROFILE, { user: { ...S.user, impersonating: true } }));
     await r.app.ready;
     $('#drive-receive').click();
