@@ -152,24 +152,44 @@ async function createReverse(request, env, dir, a) {
     if (!rules.length) return invalid('List at least one file type, or allow any type.');
     types = { mode: body.types.mode, rules };
   }
-  const auth = await dir.authorizeReverse(uid, { expireSec: ttl, maxBytes });
-  if (!auth.ok) return fromDo(auth);
-  // New key material in the user's Drive: the user confirms with the password
-  // or a passkey (a stolen session alone cannot open a link that sends files
-  // to it). The owner acting as the user ("Log in as") confirms nothing, as
-  // for every other change to the account; the log keeps the real actor.
-  if (!a.actor) {
-    const g = await ipContext(env, request);
-    const step = await stepUpFrom(body, new URL(request.url));
-    const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
-    if (!v.ok) return afterRefusal(env, g, v, fromDo(v));
+  // The id is claimed in the share index first, atomically with the role's
+  // checks and its count of active reverse shares: an id another account
+  // holds is refused (409), and concurrent creates cannot pass the limit.
+  const claim = await dir.claimReverse(uid, { id: body.id, expireSec: ttl, maxBytes, label: body.label, lh: body.lh });
+  if (!claim.ok) return fromDo(claim);
+  let r;
+  try {
+    // New key material in the user's Drive: the user confirms with the
+    // password or a passkey (a stolen session alone cannot open a link that
+    // sends files to it). The owner acting as the user ("Log in as") confirms
+    // nothing, as for every other change to the account; the log keeps the
+    // real actor.
+    if (!a.actor) {
+      const g = await ipContext(env, request);
+      const step = await stepUpFrom(body, new URL(request.url));
+      const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
+      if (!v.ok) {
+        await dir.releaseReverse(uid, body.id);
+        return afterRefusal(env, g, v, fromDo(v));
+      }
+    }
+    r = await driveStub(env, uid).createReverse(uid, {
+      id: body.id, folder, priv, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl,
+      opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types },
+    });
+  } catch (e) {
+    await dir.releaseReverse(uid, body.id); // the id is free again
+    throw e;
   }
-  const r = await driveStub(env, uid).createReverse(uid, {
-    id: body.id, folder, priv, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl,
-    opts: { maxFiles, maxBytes: auth.maxBytes, maxFileBytes, types },
-  });
-  if (!r.ok) return fromDo(r);
-  await dir.recordShare({ id: body.id, uid, kind: 'reverse', label: body.label, created: r.created, expires: r.expires, views: null, lh: body.lh }, actorId(a));
+  if (!r.ok) {
+    await dir.releaseReverse(uid, body.id);
+    return fromDo(r);
+  }
+  const act = await dir.activateReverse(uid, body.id, { created: r.created, expires: r.expires }, actorId(a));
+  if (!act.ok) {
+    await driveStub(env, uid).endReverse(uid, body.id);
+    return fromDo(act);
+  }
   return json({ id: body.id, expires: r.expires }, 201);
 }
 
