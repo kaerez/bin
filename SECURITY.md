@@ -995,8 +995,9 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   Besides the per-network Guard, each link has its own lockout: 10 wrong passwords within 15
   minutes, from any networks, lock its password for 15 minutes (the right one too). An upload
   session with nothing unfinished lapses after 10 minutes idle, and a network may hold at most 5
-  open sessions per link (counted by an HMAC of the network under a random per-Drive key; the
-  address itself is not stored), so idle sessions cannot lock a link for everyone else.
+  open sessions per link (counted by 24 bits of a hash of the link id and the network; no key,
+  and the address itself is not stored), besides 100 per link, so idle sessions cannot easily
+  lock a link for everyone else.
 - **Limits.** Per link: expiry (at most the role's `maxExpireSec`), files, total bytes, largest
   file, file types; per role: `reverseEnabled` (with `driveEnabled`), `reverseMaxActive`,
   `reverseMaxBytes`; always the Drive's capacity and largest file. A file's sealed path, metadata

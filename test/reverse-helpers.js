@@ -23,9 +23,11 @@ export const dirStub = () => env.DIRECTORY.get(env.DIRECTORY.idFromName('directo
 export const driveOf = (uid) => env.DRIVE.get(env.DRIVE.idFromName(`drive:${uid}`));
 export const errorOf = async (r) => (await r.json()).error;
 
-export async function receiver(name, limits = {}) {
+export async function receiver(name, limits = {}, { keys = true } = {}) {
   const u = await makeUser(name);
   await enableDrive(u.id, { reverseEnabled: true, ...limits });
+  // A Drive that is set up (it has a key wrap): a link's private key is sealed with its key.
+  if (keys) await runInDurableObject(driveOf(u.id), (inst, state) => state.storage.sql.exec("INSERT INTO wraps (kind, ref, data) VALUES ('pw', 'pw', 'test-wrap')"));
   return u;
 }
 

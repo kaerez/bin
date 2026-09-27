@@ -1006,6 +1006,8 @@ export class DriveClient {
       return Math.max(0, Math.min(RECEIVED_MAX_DEPTH, MAX_DEPTH - depthOf.get(parent)));
     };
     const failure = (reason) => Object.assign(new Error(reason), { receivedReason: reason });
+    // A refusal by the Drive (full, folder full, too deep) fails the item; being signed out or losing the Drive stops the take-in.
+    const refused = (e) => e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403;
     const out = { added: 0, failed: 0, renamed: 0, flattened: 0, deferred: 0, more: false };
     let after = null;
     for (let page = 0; page < RECEIVED_MAX_PAGES; page++) {
@@ -1034,7 +1036,10 @@ export class DriveClient {
           const allowed = await levelsUnder(it.parent);
           const want = segs.slice(0, allowed).join('/');
           let parent;
-          try { parent = await ensure(it.parent, want); } catch (e) { throw e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 ? failure('place') : e; }
+          try { parent = await ensure(it.parent, want); } catch (e) {
+            if (!(e instanceof ApiError)) throw failure('name'); // a folder name this Drive cannot store
+            throw refused(e) ? failure('place') : e;
+          }
           // Deeper than allowed, or out of new folders: in the deepest folder there is.
           const flattened = segs.length > allowed || (want !== '' && folders.get(`${it.parent}\n${want}`) !== parent);
           const type = normalizeMime(got.type) || OCTET;
@@ -1051,7 +1056,7 @@ export class DriveClient {
             });
           } catch (e) {
             taken.delete(leaf);
-            throw e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 ? failure('place') : e;
+            throw refused(e) ? failure('place') : e;
           }
           out.added++;
           if (renamed) out.renamed++;
@@ -1080,10 +1085,15 @@ export class DriveClient {
    * of all of them, on the first page only).
    */
   async failedReceived(after = null) {
-    const [r, st] = await Promise.all([api.receivedFailedList(after), after ? null : api.state()]);
+    let total;
+    if (!after) {
+      const st = await api.state();
+      total = Number.isSafeInteger(st.receivedFailed) ? st.receivedFailed : null;
+      if (total === 0) return { items: [], more: false, next: null, total };
+    }
+    const r = await api.receivedFailedList(after);
     const items = Array.isArray(r.items) ? r.items : [];
-    const total = st && Number.isSafeInteger(st.receivedFailed) ? st.receivedFailed : items.length;
-    return { items, more: !!r.more, next: typeof r.next === 'string' ? r.next : null, ...(after ? {} : { total }) };
+    return { items, more: !!r.more, next: typeof r.next === 'string' ? r.next : null, ...(after ? {} : { total: total ?? items.length }) };
   }
 
   /** Put a failed received file back in the queue (the next take-in tries it again). */

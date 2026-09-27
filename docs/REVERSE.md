@@ -117,9 +117,10 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   - `reverse.sealed`: the sealed paths, metadata and wraps received (they count towards the
     link's byte limit); `reverse.pwfails`, `pwsince`, `pwlock`: wrong passwords in the current
     window and the lock after too many.
-  - `rsessions.net`: an HMAC of the uploader's network (the Guard's key, an IPv4 address or an
-    IPv6 prefix) under a random key of the Drive, for the per-network session cap: the address is
-    not stored; `rsessions.started`: when the session began.
+  - `rsessions.net`: 24 bits of SHA-256 over the link id and the uploader's network (the Guard's
+    key, an IPv4 address or an IPv6 prefix), for the per-network session cap; no key is involved
+    and the address is not stored (about 256 IPv4 addresses share each value);
+    `rsessions.started`: when the session began.
 - Received files are ordinary `nodes` rows (kind `file`, parent = the target folder), R2 objects
   under `d/<userId>/<nodeId>/<i>`, counted in the Drive's capacity from the moment they are
   reserved. Until it is re-wrapped, a received file also counts its sealed path, metadata and
@@ -134,7 +135,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   often its chunks are re-sent; the alarm purges it after that and gives its reservation back.
 - Hard ceilings: 1 000 reverse shares per Drive (an ended one is dropped 30 days after it ended —
   as long as the share index keeps its row — once all its received files are re-wrapped or
-  deleted), **5 open sessions per uploader network** and 1 000 per reverse share, 10 000 files
+  deleted), **5 open sessions per uploader network** and 100 per reverse share, 10 000 files
   per reverse share.
 
 ## 5. Options and role options
@@ -161,7 +162,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`. A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 drive_not_set_up` when the Drive has no key yet (the link's private key is sealed with it). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
 | `GET /api/private/drive/received` | received files waiting to be re-wrapped, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv }], more, next }`; `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
 | `POST /api/private/drive/received/<nodeId>` | re-wrapped: `{ parent, name, meta, fk }` (normal sealed fields; `parent` a folder) → `{ ok }` |

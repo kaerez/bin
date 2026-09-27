@@ -15,7 +15,10 @@ import {
   setReverseStretcher, createReverseKey, sealReversePriv, openReversePriv, linkProof, passwordGate, sealNote, openUpload, fragmentOf,
   newReverseId, pubFromFragment,
 } from '../public/js/reversekeys.js';
-import { createDriveKey, saveSessionKey, clearSessionKey, saveImpersonationKey, clearImpersonationKey, wrapRecovery, recoveryRef, deriveSubkeys, openField } from '../public/js/drivekeys.js';
+import {
+  createDriveKey, saveSessionKey, clearSessionKey, saveImpersonationKey, clearImpersonationKey, loadImpersonationKey, wrapRecovery, recoveryRef, deriveSubkeys, openField,
+  createEscrowKeyPair, sealEscrowPriv, wrapEscrow, wrapPassword,
+} from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
 import { utf8, fromUtf8, bytesFromB64url } from '../public/js/bytes.js';
 import { formatDate } from '../public/js/common.js';
@@ -591,5 +594,42 @@ describe('audit round 3: taking received files in', () => {
     button(second, 'Delete now').click();
     await until(() => !S.nodes.has(bad[1]));
     await until(() => !rows().some((tr) => tr.dataset.id === bad[1]));
+  }, 60000);
+});
+
+describe('the owner acting as the user: received files', () => {
+  it('opens the user\'s Drive through the escrow, takes a received file in (the link\'s key sealed with the user\'s Drive key) and downloads it', async () => {
+    S = fakeServer({ capacity: 50 * 1024 * 1024 });
+    globalThis.fetch = S.fetch;
+    // The owner's own Drive key is in the tab; the server has the owner's sealed escrow key.
+    const ownerDk = createDriveKey();
+    const kp = await createEscrowKeyPair();
+    S.escrowPub = kp.publicJwk;
+    S.ownerEscrowPriv = await sealEscrowPriv(ownerDk, kp.privateKey);
+    saveSessionKey(ownerDk, S.ownerId);
+    // The user's Drive: their key wrapped to their password and to the escrow key; a link on "Inbox".
+    dk = createDriveKey();
+    S.wraps.set('pw|pw', (await wrapPassword(dk, 'the user password')).wrap);
+    S.wraps.set('escrow|escrow', await wrapEscrow(dk, kp.publicJwk));
+    ids = await seedTree(S, dk, { Inbox: {} });
+    const rs = await existingReverse(ids.get('Inbox'));
+    const got = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Inbox'), path: 'from a client/contract.pdf', bytes: utf8('signed contract'), type: 'application/pdf' });
+    S.impersonatedBy = 'owner';
+    const user = { ...S.user, impersonating: true };
+    const r = await startDrive(mountPoint(), deps(PROFILE, { user }));
+    expect(r.state).toBe('open');
+    await r.app.ready;
+    await r.app.received;
+    expect(S.escrowUses).toBe(1);
+    expect(loadImpersonationKey(S.user.id)).toEqual(dk); // the user's key in its own slot, not a new one
+    expect(S.nodes.get(got).rs).toBeNull();
+    const folder = S.nodes.get(got).parent;
+    expect(fromUtf8(await openField((await deriveSubkeys(dk)).names, 'name', folder, S.nodes.get(folder).name))).toBe('from a client');
+    // Readable by the user's own key (nothing new was sealed for the owner), and downloadable here.
+    expect(fromUtf8(await openField((await deriveSubkeys(dk)).names, 'name', got, S.nodes.get(got).name))).toBe('contract.pdf');
+    const client = await drive.openDrive({ user });
+    const blob = await (await client.download(got)).blob();
+    expect(new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()))).toBe('signed contract');
+    expect([...S.wraps.keys()].sort()).toEqual(['escrow|escrow', 'pw|pw']);
   }, 60000);
 });

@@ -17,7 +17,7 @@
 // what to delete and deleting it.
 
 import { DurableObject } from 'cloudflare:workers';
-import { timingSafeEqualHex, randomBytes, utf8, b64urlFromBytes, bytesFromB64url } from '../public/js/bytes.js';
+import { timingSafeEqualHex, utf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, TAG } from '../public/js/files.js';
 
 const SCHEMA = `
@@ -46,8 +46,8 @@ CREATE INDEX IF NOT EXISTS rsessions_rid ON rsessions(rid);
 // (it then leaves the queue, docs/REVERSE.md §3). reverse.sealed: the sealed
 // paths, metadata and wraps received (they count towards the link's bytes);
 // reverse.pwfails / pwsince / pwlock: wrong passwords in the current window,
-// and a lock after too many. rsessions.net: a keyed hash of the uploader's
-// network (per-network session cap); rsessions.started: the session's start.
+// and a lock after too many. rsessions.net: 24 bits of a hash of the
+// uploader's network (per-network session cap); rsessions.started: its start.
 const COLUMNS = [
   ['nodes', 'rs', 'TEXT'], ['nodes', 'rsess', 'TEXT'], ['nodes', 'rfail', 'INTEGER'], ['nodes', 'rwhy', 'TEXT'],
   ['reverse', 'sealed', 'INTEGER NOT NULL DEFAULT 0'], ['reverse', 'pwfails', 'INTEGER NOT NULL DEFAULT 0'],
@@ -71,7 +71,7 @@ export const MAX_SHARES_PER_NODE = 1000;
  * files per share.
  */
 export const MAX_REVERSE = 1000;
-export const MAX_SESSIONS = 1000;
+export const MAX_SESSIONS = 100;
 export const MAX_SESSIONS_PER_NET = 5;
 export const MAX_REVERSE_FILES = 10000;
 /** An upload session with no unfinished file lapses after this long without activity. */
@@ -671,19 +671,15 @@ export class Drive extends DurableObject {
     return r.bytes + (r.sealed || 0);
   }
   /**
-   * A keyed hash of the uploader's network (the Guard's key: an IPv4 address
-   * or an IPv6 prefix) for the per-network session cap. The key is random per
-   * Drive, so the stored value does not give the address back.
+   * The uploader's network (the Guard's key: an IPv4 address or an IPv6
+   * prefix) as the per-network session cap counts it: 24 bits of SHA-256 over
+   * the link id and the network. No key is involved, and the value does not
+   * give the address back (about 256 IPv4 addresses share each value per link).
    */
-  async #netTag(net) {
+  async #netTag(id, net) {
     if (typeof net !== 'string' || !net) return null;
-    let k = this.#meta('netKey');
-    if (!k) {
-      k = b64urlFromBytes(randomBytes(32));
-      this.#setMeta('netKey', k);
-    }
-    const key = await crypto.subtle.importKey('raw', bytesFromB64url(k), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(net)))).slice(0, 32);
+    const d = new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(`secbin-reverse/v1 net\n${id}\n${net}`)));
+    return b64urlFromBytes(d.slice(0, 3));
   }
   /**
    * Reverse shares that ended more than REVERSE_KEEP_SEC ago (as long as the
@@ -713,6 +709,8 @@ export class Drive extends DurableObject {
   /** A new reverse share on folder `rec.folder` (values arrive validated). */
   async createReverse(uid, rec) {
     this.#bind(uid);
+    // The link's private key is sealed with the Drive's key (DK): a Drive without one has nothing to seal it with.
+    if (!this.sql.exec('SELECT 1 FROM wraps LIMIT 1').toArray().length) return fail(409, 'drive_not_set_up', 'Set up the Drive before receiving files into it.');
     const f = this.#node(rec.folder);
     if (!f || f.rs) return fail(404, 'not_found', 'The folder does not exist.');
     if (f.kind !== 'dir') return fail(400, 'not_a_folder', 'Files can only be received into a folder.');
@@ -809,7 +807,7 @@ export class Drive extends DurableObject {
    */
   async reverseBegin(uid, id, hash, ttl, { net = null, proofHash = null } = {}) {
     this.#bind(uid);
-    const tag = await this.#netTag(net); // before any check: nothing below awaits
+    const tag = await this.#netTag(id, net); // before any check: nothing below awaits
     const r = this.#reverse(id);
     if (this.#reverseState(r) !== 'active') return { status: 'gone' };
     const t = nowSec();

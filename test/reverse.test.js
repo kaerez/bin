@@ -61,6 +61,11 @@ describe('role options and migration 14', () => {
     expect(await errorOf(r.res)).toBe('drive_disabled');
     await driveLimits(u.id, { driveEnabled: true });
     expect(await me()).toBe(true);
+    // A Drive that is not set up yet has no key to seal the link's private key with.
+    r = await newReverse(u.cookie);
+    expect([r.res.status, await errorOf(r.res)]).toEqual([409, 'drive_not_set_up']);
+    expect(await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec('SELECT COUNT(*) AS c FROM shares WHERE id = ?', r.id).one().c)).toBe(0);
+    await runInDurableObject(driveOf(u.id), (inst, state) => state.storage.sql.exec("INSERT INTO wraps (kind, ref, data) VALUES ('pw', 'pw', 'test-wrap')"));
     expect((await newReverse(u.cookie)).res.status).toBe(201);
     // The owner: allowed; the public account: the options cannot be set.
     expect((await (await fetchJson('/api/private/me', { cookie: oc })).json()).caps.reverseEnabled).toBe(true);
@@ -565,6 +570,11 @@ describe('isolation and the account', () => {
     const acc = await fetchJson(`/api/private/drive/received/${f.node}`, { method: 'POST', cookie: ic, headers: intent, body: { parent: folder, name: enc(), meta: enc(), fk: enc(32) } });
     expect(acc.status).toBe(200);
     expect((await (await node(ic, folder)).json()).children.map((k) => k.id)).toEqual([f.node]);
+    // And downloads it (the chunk as stored: the content was never re-encrypted).
+    const chunk = await fetchJson(`/api/private/drive/files/${f.node}/chunk/0`, { cookie: ic });
+    expect(chunk.status).toBe(200);
+    const key = await importFileKey(b64urlFromBytes(f.fk));
+    expect(fromUtf8(await decryptChunk(key, 0, 1, new Uint8Array(await chunk.arrayBuffer())))).toBe('hello world');
     // Revoke (My shares).
     expect((await fetchJson(`/api/private/shares/${r.id}/revoke`, { method: 'POST', cookie: ic, headers: intent })).status).toBe(200);
     expect((await openLink(r, ip)).status).toBe(410);

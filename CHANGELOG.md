@@ -27,7 +27,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - the human check comes before the password on `begin`, and each link has its own lockout
     (10 wrong passwords in 15 minutes, from any networks: 15 minutes);
   - an upload session with nothing unfinished lapses after 10 minutes idle; at most 5 open
-    sessions per network per link (1 000 per link);
+    sessions per network per link (and still 100 per link);
   - `reverse.received` is one log entry per link per hour, adding up that hour's sessions;
   - received names are cleaned as everywhere (`cleanName`; Hebrew, Arabic, ZWNJ / ZWJ and LRM /
     RLM stay) and a renamed file is marked; a received path creates at most 8 folder levels and a
