@@ -127,6 +127,20 @@ describe('H-1: a user’s browser pins the escrow key', () => {
   }, 60000);
 });
 
+describe('L-1: finalize while a chunk write is in flight', () => {
+  it('the client finalizes again after "busy" instead of failing the upload', async () => {
+    install();
+    const dk = createDriveKey();
+    saveSessionKey(dk, 'u1');
+    S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
+    const c = await openDrive({ user: S.user });
+    S.busyFinalize = 2;
+    const id = await c.upload('root', fakeFile('late.txt', enc('written late')));
+    expect(S.nodes.get(id).state).toBe('ready');
+    expect(S.requests.filter((r) => r.path.endsWith('/finalize'))).toHaveLength(3);
+  }, 30000);
+});
+
 describe('L-6: a file needs its sealed metadata', () => {
   it('missing metadata or a size that disagrees makes it unreadable, never an empty file', async () => {
     install();

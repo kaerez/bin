@@ -641,7 +641,16 @@ export class DriveClient {
         if (onProgress) onProgress(done, size);
       }
       if (signal?.aborted) throw aborted(signal, 'Upload');
-      await api.finalize(id, token);
+      // "busy": an earlier attempt of a chunk (one this loop retried) is still being written.
+      for (let tries = 0; ; tries++) {
+        try {
+          await api.finalize(id, token);
+          break;
+        } catch (e) {
+          if (!(e instanceof ApiError && e.code === 'busy') || tries >= 20) throw e;
+          await new Promise((res) => setTimeout(res, 250));
+        }
+      }
     } catch (e) {
       api.remove(id).catch(() => {}); // free the capacity now (the server purges it later anyway)
       throw e;
