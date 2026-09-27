@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS rsessions (hash TEXT PRIMARY KEY, rid TEXT NOT NULL, 
 CREATE INDEX IF NOT EXISTS rsessions_rid ON rsessions(rid);
 `;
 // Columns added after the Drive first shipped (fresh objects get them from here too).
-const COLUMNS = [['nodes', 'rs', 'TEXT']];
+// nodes.rs: the reverse share of a received file not yet re-wrapped; nodes.rsess:
+// the upload session that reserved it (its chunks keep that session open).
+const COLUMNS = [['nodes', 'rs', 'TEXT'], ['nodes', 'rsess', 'TEXT']];
 
 export const ROOT = 'root';
 /** Node ids: 16 random bytes, base64url (chosen by the browser so it can bind encrypted fields to them). */
@@ -112,7 +114,11 @@ export class Drive extends DurableObject {
     return this.sql.exec('SELECT * FROM nodes WHERE id = ?', id).toArray()[0] || null;
   }
   #used() {
-    return this.sql.exec("SELECT COALESCE(SUM(size), 0) AS s FROM nodes WHERE kind = 'file'").one().s;
+    // A received file the user's browser has not re-wrapped yet also counts
+    // its sealed path, metadata and key wrap (the anonymous uploader chose
+    // them; docs/REVERSE.md §4).
+    return this.sql.exec(`SELECT COALESCE(SUM(size + CASE WHEN rs IS NULL THEN 0
+      ELSE LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0) END), 0) AS s FROM nodes WHERE kind = 'file'`).one().s;
   }
   #count() {
     return this.sql.exec('SELECT COUNT(*) AS c FROM nodes').one().c;
@@ -665,20 +671,19 @@ export class Drive extends DurableObject {
     const bad = this.#checkNew(node) || this.#checkParent(r.folder);
     if (bad) return bad.error === 'exists' ? bad : fail(bad.status === 404 ? 410 : bad.status, bad.status === 404 ? 'gone' : bad.error, bad.message);
     const fk = JSON.stringify({ kind: 'rs', data: wrap });
-    // The sealed fields take room too: they count against the capacity.
-    const used = this.#used();
-    if (used + size + name.length + meta.length + fk.length > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
+    // The sealed fields take room too: they count against the capacity (#used).
+    if (this.#used() + size + name.length + meta.length + fk.length > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
     const chunks = driveChunks(size);
     const t = nowSec();
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated, rs) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-        node, r.folder, name, meta, size, chunks, fk, uploadHash, t, t, id);
+      this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated, rs, rsess) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+        node, r.folder, name, meta, size, chunks, fk, uploadHash, t, t, id, hash);
       this.sql.exec('UPDATE reverse SET files = files + 1, bytes = bytes + ? WHERE id = ?', size, id);
       this.#touch(x, pendingSec);
     });
     this.#setMeta('pendingSec', String(pendingSec));
     await this.#schedulePurge();
-    return { ok: true, id: node, chunks, used: used + size };
+    return { ok: true, id: node, chunks, used: this.#used() };
   }
 
   /**
@@ -713,6 +718,9 @@ export class Drive extends DurableObject {
     }
     this.sql.exec('INSERT OR IGNORE INTO upchunks (node_id, i) VALUES (?, ?)', node, i);
     this.sql.exec('UPDATE nodes SET done = (SELECT COUNT(*) FROM upchunks WHERE node_id = ?), updated = ? WHERE id = ?', node, nowSec(), node);
+    // A large file's progress keeps the session that reserved it open (for its finalize).
+    const x = c.n.rsess ? this.#session(id, c.n.rsess) : null;
+    if (x) this.#touch(x, Number(this.#meta('pendingSec')) || 3600);
     await this.#schedulePurge();
     return { status: 'ok' };
   }
@@ -728,6 +736,7 @@ export class Drive extends DurableObject {
     if (this.inflight?.get(node)) return { status: 'busy' };
     const r = await this.finalize(uid, node, uploadHash);
     if (r.status !== 'ok') return r;
+    this.sql.exec('UPDATE nodes SET rsess = NULL WHERE id = ?', node);
     this.sql.exec('UPDATE rsessions SET files = files + 1, bytes = bytes + ? WHERE hash = ?', n.size, hash);
     this.#touch(x, pendingSec);
     return { status: 'ok' };
@@ -781,7 +790,7 @@ export class Drive extends DurableObject {
     }
     this.sql.exec('UPDATE nodes SET parent = ?, name = ?, meta = ?, fk = ?, rs = NULL, updated = ? WHERE id = ?', parent, name, meta, fk, nowSec(), node);
     this.#dropEndedReverse();
-    return { ok: true };
+    return { ok: true, used: this.#used() };
   }
 
   // ── pending-upload purge ──────────────────────────────────────────────────

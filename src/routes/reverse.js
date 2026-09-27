@@ -86,10 +86,7 @@ export async function handleReverseOwner(request, env, url, a) {
           const row = byId.get(x.id);
           // The index row decides (revoked, expired, locked by the admin); the Drive adds the counters.
           const status = row.status !== 'active' ? row.status : x.status === 'active' ? 'active' : 'ended';
-          const out = { ...x, label: row.label, locked: !!row.locked, status };
-          // Sealed with the user's Drive key: never handed to an impersonating owner.
-          if (a.actor) delete out.priv;
-          return out;
+          return { ...x, label: row.label, locked: !!row.locked, status };
         }),
       });
     }
@@ -100,8 +97,7 @@ export async function handleReverseOwner(request, env, url, a) {
   if (p === '/api/private/drive/received') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const r = await drive().received(uid);
-    // The shares' sealed keys stay with the user (an impersonating owner gets none).
-    return json({ items: r.items, keys: a.actor ? [] : r.keys, more: r.more });
+    return json({ items: r.items, keys: r.keys, more: r.more });
   }
 
   const m = p.match(/^\/api\/private\/drive\/received\/([^/]+)$/);
@@ -115,25 +111,17 @@ export async function handleReverseOwner(request, env, url, a) {
     const meta = encField(body.meta, MAX_META_CT);
     const fk = encField(body.fk, MAX_FK_CT);
     if (!parent || !name || !meta || !fk) return invalid('Send { parent, name, meta, fk } (encrypted fields as {iv, ct}).');
-    if (a.actor) return err(403, 'impersonating', 'Received files cannot be taken in while impersonating.');
     const r = await drive().acceptReceived(uid, node, { parent, name, meta, fk });
-    return r.ok ? json({ ok: true }) : fromDo(r);
+    if (!r.ok) return fromDo(r);
+    await dir.setDriveUsed(uid, r.used);
+    return json({ ok: true });
   }
   return null;
 }
 
 async function createReverse(request, env, dir, a) {
   const uid = a.user.id;
-  // The link's private key is sealed with the user's own Drive key, which an
-  // impersonating owner's tab does not hold.
-  if (a.actor) return err(403, 'impersonating', 'Upload links cannot be created while impersonating.');
   const body = await readJsonBody(request);
-  // New key material in the user's Drive: confirmed with the password or a
-  // passkey (a stolen session alone cannot open a link that sends files to it).
-  const g = await ipContext(env, request);
-  const step = await stepUpFrom(body, new URL(request.url));
-  const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
-  if (!v.ok) return afterRefusal(env, g, v, fromDo(v));
   if (typeof body.id !== 'string' || !REVERSE_ID_RE.test(body.id)) return invalid('id must be "r" and 16 random bytes (base64url).');
   const folder = typeof body.folder === 'string' && (body.folder === ROOT || NODE_ID_RE.test(body.folder)) ? body.folder : null;
   if (!folder) return invalid('folder must be a folder id.');
@@ -166,6 +154,16 @@ async function createReverse(request, env, dir, a) {
   }
   const auth = await dir.authorizeReverse(uid, { expireSec: ttl, maxBytes });
   if (!auth.ok) return fromDo(auth);
+  // New key material in the user's Drive: the user confirms with the password
+  // or a passkey (a stolen session alone cannot open a link that sends files
+  // to it). The owner acting as the user ("Log in as") confirms nothing, as
+  // for every other change to the account; the log keeps the real actor.
+  if (!a.actor) {
+    const g = await ipContext(env, request);
+    const step = await stepUpFrom(body, new URL(request.url));
+    const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
+    if (!v.ok) return afterRefusal(env, g, v, fromDo(v));
+  }
   const r = await driveStub(env, uid).createReverse(uid, {
     id: body.id, folder, priv, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl,
     opts: { maxFiles, maxBytes: auth.maxBytes, maxFileBytes, types },

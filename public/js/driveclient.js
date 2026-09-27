@@ -788,8 +788,13 @@ export class DriveClient {
     for (const k of Array.isArray(r.keys) ? r.keys : []) {
       try { keys.set(k.id, (await openReversePriv(this.dk, k.id, k.priv)).privateKey); } catch { /* sealed under another key */ }
     }
+    // As uploadTree: an existing folder of a name is reused, a clashing file name gets " (2)"….
     const folders = new Map(); // `${parent}\n${path}` → id
-    const listed = new Map(); // parent → Map(name → dir id)
+    const inside = new Map(); // folder id → { dirs: Map(name → id), names: Set }
+    const contentOf = async (id) => {
+      if (!inside.has(id)) inside.set(id, await this.names(id).catch(() => ({ dirs: new Map(), names: new Set() })));
+      return inside.get(id);
+    };
     const ensure = async (parent, dirPath) => {
       if (!dirPath) return parent;
       const key = `${parent}\n${dirPath}`;
@@ -797,13 +802,13 @@ export class DriveClient {
       const cut = dirPath.lastIndexOf('/');
       const up = await ensure(parent, cut < 0 ? '' : dirPath.slice(0, cut));
       const leaf = dirPath.slice(cut + 1);
-      if (!listed.has(up)) {
-        const { children } = await this.list(up).catch(() => ({ children: [] }));
-        listed.set(up, new Map(children.filter((c) => c.kind === 'dir' && c.name !== null).map((c) => [c.name, c.id])));
+      const here = await contentOf(up);
+      let id = here.dirs.get(leaf);
+      if (!id) {
+        id = await this.mkdir(up, uniqueName(here.names, leaf));
+        here.dirs.set(leaf, id);
+        inside.set(id, { dirs: new Map(), names: new Set() });
       }
-      const known = listed.get(up);
-      const id = known.get(leaf) ?? await this.mkdir(up, leaf);
-      known.set(leaf, id);
       folders.set(key, id);
       return id;
     };
@@ -821,15 +826,17 @@ export class DriveClient {
         const cut = path.lastIndexOf('/');
         const parent = await ensure(it.parent, cut < 0 ? '' : path.slice(0, cut));
         const type = normalizeMime(got.type) || OCTET;
+        const { names: taken } = await contentOf(parent);
+        const leaf = uniqueName(taken, path.slice(cut + 1));
         await api.acceptReceived(it.id, {
           parent,
-          name: await sealField(this.keys.names, 'name', it.id, path.slice(cut + 1)),
+          name: await sealField(this.keys.names, 'name', it.id, leaf),
           // The server's size is the one the chunks have: the metadata says the same.
           meta: await sealField(this.keys.names, 'meta', it.id, JSON.stringify({ type, mtime: got.mtime, size: it.size })),
           fk: await sealField(this.keys.files, 'fk', it.id, got.fk),
         });
         added++;
-        if (onItem) onItem({ id: it.id, path, parent });
+        if (onItem) onItem({ id: it.id, path, name: leaf, parent });
       } catch {
         failed++;
       }

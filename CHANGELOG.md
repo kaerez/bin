@@ -105,6 +105,27 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   script is `test-e2e/drive-int.mjs` (see `test-e2e/README.md`, not run in CI); Share… applies
   the file-type and folder-depth policy and can allow in-browser viewing, like the composer. My shares and Admin → Shares name drive shares
   "drive".
+- **Reverse shares ("Receive files…")** (docs/REVERSE.md): a user whose role allows it
+  (`reverseEnabled`, off by default, with the Drive; `reverseMaxActive`, default 10;
+  `reverseMaxBytes`, default 1 GiB; Directory migration 14 fills the Default role) creates an
+  upload link on a Drive folder: `/r/<id>#<key>`, with copy and a QR code. Anyone with it can
+  send files and folders into that folder without an account (file and folder pickers, drag and
+  drop, progress, the human check when Turnstile is on, Send disabled until it passes). Each
+  link has its own ECDH P-256 key pair made in the user's browser: the public key is the link's
+  fragment, the private key is sealed with the user's Drive key. The uploader's browser encrypts
+  each file like a Drive file and seals its path, type and key to the link's key; the user's
+  browser re-wraps received files into the Drive when it is unlocked (folders rebuilt from the
+  paths, clashing names get " (2)"). Options: expiry, most files, most bytes, largest file, file
+  types, a label, an encrypted note to the uploader, and an optional password that only gates
+  the uploader (Argon2id proof; the server keeps a hash; wrong ones count against the network's
+  Guard and are logged). Creating a link needs the account password or a passkey; the owner
+  acting as the user can do everything the user can, logged as the user's own action with the
+  owner as the real actor in the admin audit. Everything counts towards the Drive's capacity,
+  including a received file's sealed path and metadata until it is re-wrapped. Links are listed
+  in the dialog, in My shares (type "receive", files received) and Admin → Shares (filter
+  `reverse`); revoking, expiry, an admin lock or deleting the folder stops uploads, and files
+  already received stay. Logged: `share.created` / `share.revoked`, `reverse.received` (count
+  and size only), `reverse.bad_password`.
 - **Folder tree component** (`public/js/tree.js`): a WAI-ARIA tree (roving tabindex, arrow
   keys, Home/End, Enter/Space, `*`, type-ahead; `aria-expanded`/`aria-selected`/levels) with a
   right-pane folder browser. The composer's file list and the recipient's file view now show

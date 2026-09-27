@@ -821,8 +821,14 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   raw public key is the link's `#fragment` (never sent to the server). The private key is stored
   sealed with the user's Drive key (its `files` sub-key, bound to the share id), so only the
   user's unlocked Drive can open it; the owner can open it only through owner escrow of the
-  user's Drive key (logged, see above). A link cannot be created while the owner impersonates
-  the user.
+  user's Drive key (logged, see above), or while acting as the user ("Log in as") in a tab that
+  holds the user's Drive key.
+- **Creating a link** adds key material to the Drive (a key pair that can place files in it), so
+  the user confirms it with the account password or a passkey, as for API keys: a stolen session
+  alone cannot create one. Failed confirmations count like every other failed confirmation. The
+  owner acting as the user confirms nothing, as for every other change to the account; the
+  user's activity shows the action as the user's, and the owner-only admin audit records the
+  owner as the real actor.
 - **What an uploader's browser sends.** Each file is encrypted with a random file key exactly
   like a Drive file (8 MiB chunks, AES-256-GCM, no padding); its relative path and `{ type,
   mtime, size }` are sealed with a random metadata key; both keys are wrapped to the link's public
@@ -835,8 +841,9 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   link's rules and does not store it (as for file shares: a modified client could lie).
 - **Taking files in.** The user's browser opens each received file with the link's private key
   and re-wraps its name, metadata and file key under the Drive key; the content chunks are not
-  re-encrypted. Until then a received file is counted in the Drive's capacity but is not part of
-  the tree (not listed, readable, movable or shareable). A file that does not open (a corrupt or
+  re-encrypted. Until then a received file is counted in the Drive's capacity (its content and
+  its sealed path, metadata and wrap, which are capped at 1400, 1024 and a fixed size) but is not
+  part of the tree (not listed, readable, movable or shareable). A file that does not open (a corrupt or
   hostile upload) is not added; the user may delete it.
 - **The link proof and the password gate.** The server stores the SHA-256 of a link proof
   derived from the public key: an id alone (it appears in request paths) opens nothing and does
@@ -859,7 +866,9 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   atomically in the user's Drive object when a file is reserved; chunk sizes are checked exactly.
   Upload-session grants and upload tokens are 256-bit and stored as SHA-256 hashes; unfinished
   uploads are purged after the role's `filePendingSec` without progress and give their
-  reservation back. An uploader can fill the user's Drive up to the link's limits: the user
+  reservation back. A chunk whose write to R2 is still in flight blocks that file's finalize
+  (`409 busy`), so a late chunk write never lands on, or is deleted from, a finished file; a
+  write that finishes after its upload ended (cancelled, revoked, purged) is deleted. An uploader can fill the user's Drive up to the link's limits: the user
   chooses those limits, and revokes the link at any time.
 - **Ending.** Revoking a link, its expiry, an admin lock (paused), the role losing the option, or
   deleting its folder stops uploads at once; unfinished uploads are deleted; files already

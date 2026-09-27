@@ -271,7 +271,14 @@ function mountPoint() {
   document.body.firstChild.id = 'main';
   return mount;
 }
-const deps = (profile = PROFILE) => ({ drive, profile, user: S.user, revoke: (id) => fetch(`/api/private/shares/${id}/revoke`, { method: 'POST' }) });
+/** "Confirm it's you" (confirm.js) stand-in: the typed password becomes a { current } proof; an empty field is refused. */
+const confirm = async (input) => {
+  const v = input.value;
+  input.value = '';
+  if (!v) throw new Error('Enter your current password.'); // as confirmStep: a plain Error
+  return { current: `proof:${v}` };
+};
+const deps = (profile = PROFILE, extra = {}) => ({ drive, profile, user: S.user, confirm, canUsePasskey: async () => false, revoke: (id) => fetch(`/api/private/shares/${id}/revoke`, { method: 'POST' }), ...extra });
 const names = () => [...document.querySelectorAll('#drive-rows tr')].map((tr) => tr.children[1].textContent.trim());
 const dialog = () => document.querySelector('.drive-dialog [role="dialog"]');
 const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === text);
@@ -317,6 +324,13 @@ describe('Drive: Receive files…', () => {
     $('#drive-rev-pw-on').click();
     $('#drive-rev-pw').value = 'uploader-pass';
     $('#drive-rev-pw2').value = 'uploader-pass';
+    // Without the account password (the link adds key material): refused and marked, nothing sent.
+    expect($('#drive-rev-confirm').closest('.dfield').hidden).toBe(false);
+    button(dialog(), 'Create link').click();
+    await until(() => dialog().querySelector('#drive-rev-confirm[aria-invalid="true"]'));
+    expect(dialog().textContent).toContain('Enter your current password.');
+    expect(S.reverse).toHaveLength(0);
+    $('#drive-rev-confirm').value = 'my account password';
     button(dialog(), 'Create link').click();
     await until(() => $('#drive-rev-url'));
     const url = $('#drive-rev-url').textContent;
@@ -328,12 +342,27 @@ describe('Drive: Receive files…', () => {
     expect(raw).not.toContain('uploader-pass');
     expect(raw).not.toContain('Signed copies');
     expect(Object.keys(b.password).sort()).toEqual(['ph', 'salt', 't']);
+    expect(b.current).toBe('proof:my account password');
     // The link's key is not sent; the private key is sealed with this Drive's key.
     expect(raw).not.toContain(m[2]);
     expect(fragmentOf((await openReversePriv(dk, b.id, b.priv)).pub)).toBe(m[2]);
     expect(b.lh).toBe(await sha(await linkProof(pubFromFragment(m[2]))));
     expect(dialog().querySelector('.modal-sub').textContent).toMatch(/into “Documents” for 3 days/);
     expect($('#drive-rev-copy')).not.toBeNull();
+  });
+
+  it('the owner acting as the user is not asked to confirm (the server asks for nothing then)', async () => {
+    await server();
+    const r = await startDrive(mountPoint(), deps(PROFILE, { user: { ...S.user, impersonating: true } }));
+    await r.app.ready;
+    $('#drive-receive').click();
+    await until(() => dialog());
+    expect($('#drive-rev-confirm').closest('.dfield').hidden).toBe(true);
+    button(dialog(), 'Create link').click();
+    await until(() => $('#drive-rev-url'));
+    expect(S.reverse).toHaveLength(1);
+    expect(S.reverse[0].current).toBeUndefined();
+    expect(S.reverse[0].reauth).toBeUndefined();
   });
 
   it('validates the options (reverseOptions)', () => {
@@ -374,10 +403,12 @@ describe('Drive: received files', () => {
     await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'inbox/sub/a.txt', bytes: utf8('alpha') });
     await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'b.txt', bytes: utf8('bravo') });
     await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'c.txt', bytes: utf8('x'), bad: true });
+    // A name the folder already has gets " (2)", as for the user's own uploads.
+    await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'notes.md', bytes: utf8('other notes') });
     const r = await startDrive(mountPoint(), deps());
     await r.app.ready;
     await r.app.received;
-    expect(S.accepted).toHaveLength(2);
+    expect(S.accepted).toHaveLength(3);
     expect($('#drive-received').textContent).toMatch(/1 received file could not be opened/);
     // The re-wrapped fields are the Drive's own: sealed with DK's keys, bound to the node.
     const keys = await deriveSubkeys(dk);
@@ -388,7 +419,7 @@ describe('Drive: received files', () => {
     expect((await openField(keys.files, 'fk', id, b.fk)).length).toBe(32);
     // The folder shows them like any file; the path's folders exist.
     await r.app.open(ids.get('Documents'));
-    expect(names()).toEqual(['inbox', 'b.txt', 'notes.md']);
+    expect(names()).toEqual(['inbox', 'b.txt', 'notes (2).md', 'notes.md']);
     const inbox = [...S.nodes.values()].find((n) => n.kind === 'dir' && n.parent === ids.get('Documents') && !n.rs);
     await r.app.open(inbox.id);
     expect(names()).toEqual(['sub']);

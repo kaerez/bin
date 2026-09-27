@@ -307,7 +307,8 @@ leave open:
   admin: the data is gone.
 - **Received files** (reverse shares, [`REVERSE.md`](./REVERSE.md)). `nodes.rs` names the
   reverse share of a file an anonymous uploader sent and the user's browser has not yet
-  re-wrapped; such files count in the capacity but are left out of `children`, cannot be read,
+  re-wrapped; such files count in the capacity (their content and, until re-wrapped, their
+  sealed path, metadata and wrap) but are left out of `children`, cannot be read,
   moved, renamed or shared, and are listed by `GET /api/private/drive/received` until re-wrapped
   (`POST /api/private/drive/received/<id>`). Their `fk` is `{ kind: 'rs', data }`. Deleting a
   folder ends the reverse shares that target it or anything below it.

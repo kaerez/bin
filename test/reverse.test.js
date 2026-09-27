@@ -44,10 +44,15 @@ async function receiver(name, limits = {}) {
   return u;
 }
 
-/** Create a reverse share on `folder` as the user's browser would. */
-async function newReverse(cookie, { folder = 'root', password, note, id = newReverseId(), ...opts } = {}) {
+/**
+ * Create a reverse share on `folder` as the user's browser would, confirmed
+ * with the user's password (`confirm: false`: no confirmation, as the owner
+ * acting as the user sends).
+ */
+async function newReverse(cookie, { folder = 'root', password, note, id = newReverseId(), confirm = true, ...opts } = {}) {
   const { pub, privateKey } = await createReverseKey();
   const body = { id, folder, priv: await sealReversePriv(DK, id, privateKey), lh: await linkHash(pub), expire: '7d', ...opts };
+  if (confirm) body.current = proofFor(USER_PW);
   if (typeof password === 'string') body.password = await passwordGate(password, pub);
   else if (password !== undefined) body.password = password; // as sent (validation tests)
   if (typeof note === 'string') body.note = await sealNote(pub, id, note);
@@ -105,6 +110,9 @@ async function send(r, grant, opts = {}) {
   return f;
 }
 const received = async (cookie) => (await fetchJson('/api/private/drive/received', { cookie })).json();
+/** What the received files not yet re-wrapped add to the Drive's use: their sealed path, metadata and wrap. */
+const overhead = (uid) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(
+  'SELECT COALESCE(SUM(LENGTH(name) + LENGTH(meta) + LENGTH(fk)), 0) AS s FROM nodes WHERE rs IS NOT NULL').one().s);
 const audit = async (subject) => (await (await fetchJson(`/api/private/admin/audit?user=${subject}`, { cookie: oc })).json()).rows;
 
 describe('role options and migration 14', () => {
@@ -205,6 +213,18 @@ describe('creating a reverse share', () => {
     const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'k' } })).json()).key;
     const byKey = await fetchJson('/api/private/drive/reverse', { headers: { authorization: `Bearer ${key}` } });
     expect(byKey.status).toBe(403);
+    // A key with "read" and "manage" lists, extends and revokes reverse shares like any share (it cannot create one).
+    const mk = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'm', scopes: ['read', 'manage'] } })).json()).key;
+    const auth = { authorization: `Bearer ${mk}` };
+    const listed = await (await fetchJson('/api/private/shares', { headers: auth })).json();
+    expect(listed.rows.filter((x) => x.kind === 'reverse').length).toBe(3); // one revoked, two active
+    const b = listed.rows.find((x) => x.kind === 'reverse' && x.status === 'active');
+    expect(b.received).toEqual({ files: 0, bytes: 0 });
+    const ext = await fetchJson(`/api/private/shares/${b.id}`, { method: 'PATCH', headers: auth, body: { expires: b.expires + 60 } });
+    expect([ext.status, await errorOf(ext)]).toEqual([403, 'expiry_too_long']); // the role's 1 h applies to the key too
+    expect((await fetchJson(`/api/private/shares/${b.id}`, { method: 'PATCH', headers: auth, body: { label: 'by key' } })).status).toBe(200);
+    expect((await fetchJson(`/api/private/shares/${b.id}/revoke`, { method: 'POST', headers: { ...auth, ...intent } })).status).toBe(200);
+    expect((await fetchJson('/api/private/drive/reverse', { method: 'POST', headers: auth, body: {} })).status).toBe(403);
     const cross = await fetchJson('/api/private/drive/reverse', { method: 'POST', cookie: u.cookie, body: {}, headers: { ...intent, 'sec-fetch-site': 'cross-site' } });
     expect(cross.status).toBe(403);
     expect((await fetchJson('/api/private/drive/reverse')).status).toBe(401);
@@ -237,7 +257,10 @@ describe('the uploader', () => {
     // Until re-wrapped: counted, not in the tree, not shareable, not downloadable.
     const st = await drive(u.cookie);
     expect(st.received).toBe(2);
-    expect(st.used).toBe(content.length + 4);
+    const extra = await overhead(u.id);
+    expect(extra).toBeGreaterThan(2 * 300); // two sealed paths, metadata and wraps
+    expect(extra).toBeLessThan(2 * 2700);
+    expect(st.used).toBe(content.length + 4 + extra);
     expect((await (await node(u.cookie, folder)).json()).children).toEqual([]);
     expect((await node(u.cookie, f1.node)).status).toBe(404);
     expect((await fetchJson(`/api/private/drive/files/${f1.node}/chunk/0`, { cookie: u.cookie })).status).toBe(404);
@@ -263,6 +286,11 @@ describe('the uploader', () => {
       },
     });
     expect(acc.status).toBe(200);
+    // Taken in: only the other received file's sealed fields still count on top of the content.
+    const left = await overhead(u.id);
+    expect(left).toBeGreaterThan(0);
+    expect(left).toBeLessThan(extra);
+    expect((await drive(u.cookie)).used).toBe(content.length + 4 + left);
     const kids = (await (await node(u.cookie, folder)).json()).children;
     expect(kids.map((k) => k.id)).toEqual([f1.node]);
     expect(fromUtf8(await openField(keys.names, 'name', it.id, kids[0].name))).toBe('contract.pdf');
@@ -350,7 +378,7 @@ describe('the uploader', () => {
   });
 
   it('limits: files, bytes, file size, declared types, the Drive capacity and largest file; cancel gives a reservation back', async () => {
-    const u = await receiver('rev-lim', { driveMaxBytes: 100, driveMaxFileBytes: 60 });
+    const u = await receiver('rev-lim', { driveMaxBytes: 1000000, driveMaxFileBytes: 60 });
     const ip = freshIp();
     const r = await newReverse(u.cookie, { maxFiles: 2, maxBytes: 90, maxFileBytes: 50, types: { mode: 'allow', rules: ['ext:txt'] } });
     const grant = await grantOf(r, { ip });
@@ -379,7 +407,13 @@ describe('the uploader', () => {
     expect(f.res.status).toBe(409);
     expect(await errorOf(f.res)).toBe('too_many_files');
     expect((await (await openLink(r, ip)).json()).limits).toMatchObject({ filesLeft: 0, bytesLeft: 10 });
-    // The Drive's own limits apply too (80 of 100 bytes used; largest file 60).
+    // The Drive's own limits apply too: its largest file (60), and its capacity, where a
+    // received file's sealed path, metadata and wrap count as well as its content.
+    const per = (await overhead(u.id)) / 2; // two received files, same path and metadata lengths
+    expect(Number.isInteger(per)).toBe(true);
+    const used = (await drive(u.cookie)).used;
+    expect(used).toBe(80 + 2 * per);
+    await driveLimits(u.id, { driveMaxBytes: used + per + 20 });
     const r2 = await newReverse(u.cookie);
     const g2 = await grantOf(r2, { ip });
     f = await reserve(r2, g2, { size: 61, ip });
@@ -390,6 +424,11 @@ describe('the uploader', () => {
     expect(await errorOf(f.res)).toBe('drive_full');
     // Chunks: exact sizes, the right token, this share's files only.
     const small = await reserve(r2, g2, { bytes: new Uint8Array(10), ip });
+    expect(small.res.status).toBe(201);
+    // No room left for even an empty file's sealed fields.
+    f = await reserve(r2, g2, { size: 0, ip });
+    expect(f.res.status).toBe(413);
+    expect(await errorOf(f.res)).toBe('drive_full');
     expect((await putChunk(r2.id, small.node, 0, new Uint8Array(27), small.data.uploadToken, ip)).status).toBe(400);
     expect((await putChunk(r2.id, small.node, 0, new Uint8Array(26), b64urlFromBytes(randomBytes(32)), ip)).status).toBe(403);
     expect((await putChunk(r.id, small.node, 0, new Uint8Array(26), small.data.uploadToken, ip)).status).toBe(410);
@@ -462,7 +501,7 @@ describe('ending: revoke, expiry, the admin lock, the folder deleted, the purge'
     await send(r, grant, { ip });
     const half = await reserve(r, grant, { bytes: new Uint8Array(CHUNK + 1), ip });
     expect((await putChunk(r.id, half.node, 0, new Uint8Array(CHUNK + 16), half.data.uploadToken, ip)).status).toBe(200);
-    expect((await drive(u.cookie)).used).toBe(11 + CHUNK + 1);
+    expect((await drive(u.cookie)).used).toBe(11 + CHUNK + 1 + (await overhead(u.id)));
     expect((await fetchJson(`/api/private/shares/${r.id}/revoke`, { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
     for (const res of [await openLink(r, ip), await begin(r, { ip }), await reserve(r, grant, { ip }).then((x) => x.res),
       await putChunk(r.id, half.node, 1, new Uint8Array(17), half.data.uploadToken, ip)]) {
@@ -470,7 +509,7 @@ describe('ending: revoke, expiry, the admin lock, the folder deleted, the purge'
     }
     // The unfinished upload and its chunk are gone; the finished file stays (and can be taken in).
     expect(await env.FILES.get(`d/${u.id}/${half.node}/0`)).toBeNull();
-    expect((await drive(u.cookie)).used).toBe(11);
+    expect((await drive(u.cookie)).used).toBe(11 + (await overhead(u.id)));
     expect((await received(u.cookie)).items).toHaveLength(1);
     const row = (await (await fetchJson('/api/private/shares', { cookie: u.cookie })).json()).rows.find((x) => x.id === r.id);
     expect(row).toMatchObject({ status: 'revoked', received: { files: 1, bytes: 11 } });
@@ -548,7 +587,7 @@ describe('ending: revoke, expiry, the admin lock, the folder deleted, the purge'
     await runDurableObjectAlarm(driveOf(u.id));
     vi.useRealTimers();
     expect((await (await openLink(r, ip)).json()).limits.filesLeft).toBe(2);
-    expect((await drive(u.cookie)).used).toBe(11);
+    expect((await drive(u.cookie)).used).toBe(11 + (await overhead(u.id)));
     const gone = await runInDurableObject(driveOf(u.id), (inst, state) => state.storage.sql.exec('SELECT COUNT(*) AS c FROM nodes WHERE id = ?', half.node).one().c);
     expect(gone).toBe(0);
     // The session lapsed without "done": what it received is logged anyway.
@@ -559,16 +598,73 @@ describe('ending: revoke, expiry, the admin lock, the folder deleted, the purge'
       ...state.storage.sql.exec('SELECT upload_hash FROM nodes').toArray(), ...state.storage.sql.exec('SELECT hash FROM rsessions').toArray()]);
     expect(JSON.stringify(rows)).not.toContain(grant);
   });
+  it('a file still being uploaded keeps its session open: its chunks count as progress', async () => {
+    const u = await receiver('rev-slow', { filePendingSec: 600 });
+    const r = await newReverse(u.cookie);
+    const ip = freshIp();
+    const t0 = Date.now();
+    const grant = await grantOf(r, { ip });
+    const f = await reserve(r, grant, { bytes: new Uint8Array(10), ip });
+    expect(f.res.status).toBe(201);
+    vi.useFakeTimers({ now: t0 + 500 * 1000, toFake: ['Date'] });
+    expect((await putChunk(r.id, f.node, 0, new Uint8Array(26), f.data.uploadToken, ip)).status).toBe(200);
+    vi.setSystemTime(t0 + 1000 * 1000); // past the session's first 600 s, within 600 s of the chunk
+    const fin = await rv(r.id, `/files/${f.node}/finalize`, { headers: { 'x-reverse-grant': grant, 'x-upload-token': f.data.uploadToken }, ip });
+    expect(fin.status).toBe(200);
+    expect(await (await rv(r.id, '/done', { headers: { 'x-reverse-grant': grant }, ip })).json()).toEqual({ files: 1, bytes: 10 });
+    vi.useRealTimers();
+  });
 });
 
 describe('isolation and the account', () => {
-  it('an impersonating owner cannot create upload links (the key would be sealed with the owner\'s Drive key)', async () => {
+  it('the owner acting as the user ("Log in as") can do all of it, with no confirmation; the user sees it as their own', async () => {
     const u = await receiver('rev-imp');
     const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
-    const r = await newReverse(ic);
+    const { id: folder } = await mkdir(ic);
+    const r = await newReverse(ic, { folder, confirm: false, label: 'by the owner' });
+    expect(r.res.status).toBe(201);
+    // Listed with the sealed key: the tab that holds the user's Drive key rebuilds the link.
+    const x = (await (await fetchJson(`/api/private/drive/reverse?folder=${folder}`, { cookie: ic })).json()).reverse[0];
+    expect(x).toMatchObject({ id: r.id, label: 'by the owner', status: 'active' });
+    expect(fragmentOf((await openReversePriv(DK, r.id, x.priv)).pub)).toBe(fragmentOf(r.pub));
+    const ip = freshIp();
+    const grant = await grantOf(r, { ip });
+    const f = await send(r, grant, { ip });
+    expect((await rv(r.id, '/done', { headers: { 'x-reverse-grant': grant }, ip })).status).toBe(200);
+    // The received files and their keys; the re-wrap.
+    const rec = await received(ic);
+    expect(rec.items.map((i) => i.id)).toEqual([f.node]);
+    expect(rec.keys.map((k) => k.id)).toEqual([r.id]);
+    const acc = await fetchJson(`/api/private/drive/received/${f.node}`, { method: 'POST', cookie: ic, headers: intent, body: { parent: folder, name: enc(), meta: enc(), fk: enc(32) } });
+    expect(acc.status).toBe(200);
+    expect((await (await node(ic, folder)).json()).children.map((k) => k.id)).toEqual([f.node]);
+    // Revoke (My shares).
+    expect((await fetchJson(`/api/private/shares/${r.id}/revoke`, { method: 'POST', cookie: ic, headers: intent })).status).toBe(200);
+    expect((await openLink(r, ip)).status).toBe(410);
+    // The user's own activity shows the actions as theirs; the owner-only audit keeps the real actor.
+    const mine = (await (await fetchJson('/api/private/me/activity', { cookie: u.cookie })).json()).rows;
+    const log = await audit(u.id);
+    for (const [action, detail] of [['share.created', `id=${r.id} kind=reverse`], ['share.revoked', `id=${r.id}`]]) {
+      const own = mine.find((e) => e.action === action && e.detail.startsWith(detail));
+      expect(own, action).toBeTruthy();
+      expect(Object.keys(own).sort()).toEqual(['action', 'detail', 'id', 'ts']);
+      const real = log.find((e) => e.id === own.id);
+      expect(real, action).toMatchObject({ imp: 1, adm: 0 });
+      expect(real.actor_id).not.toBe(u.id);
+    }
+    expect(mine.filter((e) => e.detail.includes(r.id)).some((e) => /imperson/i.test(`${e.action} ${e.detail}`))).toBe(false);
+  });
+
+  it('the user confirms a new link with the password (or a passkey): none, or a wrong one, is refused', async () => {
+    const u = await receiver('rev-step');
+    let r = await newReverse(u.cookie, { confirm: false });
+    expect(r.res.status).toBe(400);
+    expect(await errorOf(r.res)).toBe('reauth_required');
+    r = await newReverse(u.cookie, { confirm: false, current: proofFor('not the password') });
     expect(r.res.status).toBe(403);
-    expect(await errorOf(r.res)).toBe('impersonating');
-    expect((await fetchJson('/api/private/drive/reverse', { cookie: ic })).status).toBe(200);
+    expect(await errorOf(r.res)).toBe('wrong_password');
+    expect((await (await fetchJson('/api/private/drive/reverse', { cookie: u.cookie })).json()).reverse).toEqual([]);
+    expect((await newReverse(u.cookie)).res.status).toBe(201);
   });
 
   it('a user cannot list, revoke or take in another user\'s reverse shares; deleting the account ends them', async () => {

@@ -67,7 +67,8 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     `{ kind: 'rs', data }` (a normal Drive file's `fk` is `{ iv, ct }`).
 - **The user's side:** when the Drive is unlocked, the browser lists the received items, opens
   each reverse share's private key with DK, unwraps `fk ‖ mk`, opens the path and metadata,
-  creates (or reuses, by name) the upload's folders under the target folder, and **re-wraps**
+  creates (or reuses, by name) the upload's folders under the target folder (a file whose name
+  the folder already has becomes "name (2).ext", as for the user's own uploads), and **re-wraps**
   the file into the normal Drive format — `name` (the leaf name) and `meta` under DK's `names`
   key, `fk` under DK's `files` key, all bound to the node id — then `POST`s it (§6). From then on
   it is an ordinary Drive file; the content chunks are never re-encrypted. An item that cannot be
@@ -85,12 +86,17 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     session grant (256 bits); `files` / `bytes` = finalized in the session, not yet logged.
   - `nodes.rs`: the reverse share of a **received** file that the user's browser has not yet
     re-wrapped. Received files are left out of folder listings, shares and moves until then.
+  - `nodes.rsess`: the session that reserved a received file, until it is finalized (its
+    chunks keep that session open).
 - Received files are ordinary `nodes` rows (kind `file`, parent = the target folder), R2 objects
   under `d/<userId>/<nodeId>/<i>`, counted in the Drive's capacity from the moment they are
-  reserved. Upload tokens are stored hashed (`upload_hash`), and a pending upload with no chunk for
+  reserved. Until it is re-wrapped, a received file also counts its sealed path, metadata and
+  wrap (the uploader chose them: at most 1400 + 1024 characters and the fixed-size wrap), so an
+  uploader cannot store data outside the capacity; once re-wrapped (name ≤ 512, meta ≤ 1024,
+  fk ≤ 128 characters) it counts like any Drive file. Upload tokens are stored hashed (`upload_hash`), and a pending upload with no chunk for
   the role's `filePendingSec` is purged by the Drive's alarm, as for the user's own uploads.
-- A session lasts the role's `filePendingSec` from its last file (reserved or finished), never
-  past the share's expiry.
+- A session lasts the role's `filePendingSec` from its last activity (a file reserved or
+  finished, or a chunk of a file it reserved), never past the share's expiry.
 - Hard ceilings: 1 000 reverse shares per Drive (an ended one is dropped 30 days after it ended —
   as long as the share index keeps its row — once all its received files are re-wrapped), 100
   open sessions per reverse share, 10 000 files per reverse share.
@@ -118,7 +124,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types? }` → `201 { id, expires }` (409 when the id is taken; `403 impersonating` while the owner impersonates: the key would be sealed with the owner's Drive key) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }` (409 when the id is taken). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
 | `GET /api/private/drive/received` | received files not yet re-wrapped (at most 500): `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv }], more }` |
 | `POST /api/private/drive/received/<nodeId>` | re-wrapped: `{ parent, name, meta, fk }` (normal sealed fields; `parent` a folder) → `{ ok }` |
@@ -159,6 +165,16 @@ counted by the Guard), `423 share_locked` (the admin locked it),
 `400 declaration_required` / `403 file_type_not_allowed`, `429 busy` (too many open sessions),
 `429 blocked`.
 
+### 6.3 The owner acting as the user ("Log in as")
+
+The owner impersonating a user can do everything the user can with reverse shares: create
+(without a confirmation, as for every other change to the account), list them with their sealed
+keys, take in received files, extend and revoke. It works exactly as for the user when the
+impersonating tab holds the user's Drive key (the Drive is unlocked there); without it, the Drive
+page asks to unlock and nothing can be sealed or opened. The user's own activity shows these
+actions as theirs (`share.created`, `share.revoked`, no actor); the owner-only admin audit keeps
+the real actor (`imp = 1`), as for every other action taken while impersonating.
+
 ## 7. Audit log
 
 In the user's activity log (and the admin's audit): `share.created` (`kind=reverse`) and
@@ -169,7 +185,8 @@ only), written when a session ends (`done`) or its unlogged uploads are found wh
 ## 8. UI
 
 - **Drive → Receive files…** (toolbar; the selected folder, else the open one): a dialog with the
-  options of §5, then the link with copy and a QR code, and the folder's reverse shares (label,
+  options of §5 and the account password (or, left empty, a passkey when the account has one;
+  hidden while the owner acts as the user), then the link with copy and a QR code, and the folder's reverse shares (label,
   created, expiry, files and bytes received, status) with Show link and Revoke.
 - The unlock prompt says how many received files are waiting; once unlocked the browser
   re-wraps them (a status line; then the folder shows them).

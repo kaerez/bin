@@ -451,6 +451,10 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey |
+| `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
+| `GET /api/private/drive/received` | → `{ items, keys, more }` — received files not yet taken into the Drive |
+| `POST /api/private/drive/received/:id` | `{ parent, name, meta, fk }` → `{ ok }` — a received file re-wrapped into the Drive |
 | `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (logged) |
 | `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (logged) |
 
@@ -458,6 +462,11 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 names, types or keys. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
 then also returns `refs: [{ chunks, size }]`), and its chunks are read with
 `GET /api/file/:id/chunk/:ref/:i` and the download grant.
+
+Reverse shares are listed, extended (a later `expires`) and revoked with the share routes above
+(kind `reverse`; an API key with `read` / `manage` can do that, not create one). The anonymous
+uploader's routes (`/api/reverse/:id/open`, `begin`, `files`, chunks, `finalize`, `done`) take no
+account at all: see [`REVERSE.md`](./REVERSE.md) §6.2.
 
 ## Security notes
 
