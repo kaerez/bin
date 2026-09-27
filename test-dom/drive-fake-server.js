@@ -74,8 +74,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       }
     }
     if ((m = p.match(/^\/api\/private\/drive\/nodes\/([^/]+)\/shares$/))) {
-      // A node's shares: those referencing it, or (for a folder) a file under it.
-      return ok({ shares: S.shares.filter((s) => s.nodes.some((x) => within(x, m[1]))).map(shareRow) });
+      // A node's active shares: those referencing it, or (for a folder) a file under it.
+      return ok({ shares: S.shares.filter((s) => s.status === 'active' && s.nodes.some((x) => within(x, m[1]))).map(shareRow) });
     }
     if ((m = p.match(/^\/api\/private\/shares\/([^/]+)\/revoke$/)) && method === 'POST') {
       const s = S.shares.find((x) => x.id === m[1]);

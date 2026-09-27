@@ -470,6 +470,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
 @keyframes timerPulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 
 /* ── messages / toast / footer ───────────────────────────────────────────── */
+.human-wait { margin: .4rem 0 0; font-size: .78rem; text-align: center; }
 .msg { font-family: var(--mono); font-size: .8125rem; color: var(--ink-2); letter-spacing: .01em; padding: 1.25rem 0; text-align: center; }
 .msg.error { color: var(--seal); }
 #toast { position: fixed; left: 50%; bottom: calc(2rem + env(safe-area-inset-bottom, 0px)); z-index: 50; transform: translateX(-50%) translateY(12px);

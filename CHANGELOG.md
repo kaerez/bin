@@ -98,6 +98,19 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   the public account's configuration) are still never deleted automatically; clearing by hand is
   unchanged. The settings travel in the settings part of an export and are validated on import.
   Check audit-trail retention duties (e.g. SOX) with Legal / Compliance before setting them.
+- **Drive — server** ([docs/DRIVE.md](./docs/DRIVE.md)): a `Drive` Durable Object per user (folder
+  tree, key wraps, share references; wrangler migration `v3`); the `/api/private/drive*` routes
+  (session only: folders, files with exact-size chunked uploads, move with cycle refusal, rename,
+  recursive delete that frees capacity, removes the R2 objects and ends the shares, key wraps, the
+  owner's escrow key); the owner's escrow route (`POST /api/private/admin/drive/escrow/<userId>`,
+  with a reason, logged `drive.escrow_used`) and password re-wrap after a reset
+  (`PUT /api/private/admin/drive/keys/<userId>`, logged `drive.pw_rewrapped`); the pending-upload
+  purge; and **Drive shares**: file shares that reference Drive files (`refs`;
+  `GET /api/file/<id>/chunk/<ref>/<i>`), kind "drive" in My shares and Admin → Shares, with the
+  same limits and quotas as file shares. Role options `driveEnabled` (off by default),
+  `driveMaxBytes` (1 GiB) and `driveMaxFileBytes` (Admin → Roles → Drive; Directory migration 13).
+  Admin → Users shows each user's Drive usage. Deleting an account deletes its Drive. Drive
+  content is not exported.
 - **Export / import everything, part by part.**
   - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
     default) and the public account.
@@ -298,6 +311,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Role editors:** the Sessions, File shares and Activity log sections carry the same kind of
+  explanation as the Owner role, and log retention says "keep forever" rather than "no limit".
+- **Admin UI:** the Legal / Compliance warnings are removed from every admin screen.
+- **Human check:** while the check is pending, "Waiting for the human check…" is shown under the
+  protected button (and linked to it for screen readers) instead of only in a tooltip.
 - **Everything an account may do is on its role** (migration 12):
   - the session timeouts, the file-share download window and the unfinished-upload deadline are
     role options; the owner's own are edited on the Owner role;

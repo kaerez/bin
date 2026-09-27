@@ -13,6 +13,7 @@ import { stepUpFrom, afterRefusal } from './stepup.js';
 import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib/turnstile.js';
 import { parseId } from '../lib/ids.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS } from '../lib/portable.js';
+import { escrowRoute, adminSetUserKeys, syncCredentialWraps, destroyDrive } from './drive.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
@@ -21,7 +22,7 @@ const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const SCOPE_RE = /^(global|role:default|role:[A-Za-z0-9_-]{16}|[A-Za-z0-9_-]{16})$/;
 const SCOPE_MSG = 'scope must be "global", "role:<id>" or the public account';
 const now = () => Math.floor(Date.now() / 1000);
-const SHARE_KINDS = ['text', 'files', 'url', 'secret'];
+const SHARE_KINDS = ['text', 'files', 'url', 'secret', 'drive'];
 const SHARE_STATUSES = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'];
 
 /** Parse the admin share-list filters from the query string (all optional). */
@@ -64,6 +65,11 @@ export async function handleAdmin(request, env, url) {
   if (a.actor) return err(403, 'impersonating', 'Return to your own account to use the admin panel.');
   if (a.user.role !== 'owner') return err(403, 'forbidden', 'Owner only.');
   const me = a.user.id;
+
+  // A user's Drive keys (docs/DRIVE.md §3, §6): open their escrow wrap (with a
+  // reason) / write their password wrap after a reset. Both logged.
+  const em = p.match(/^\/api\/private\/admin\/drive\/(escrow|keys)\/([A-Za-z0-9_-]{16})$/);
+  if (em) return em[1] === 'escrow' ? escrowRoute(request, env, me, em[2]) : adminSetUserKeys(request, env, me, em[2]);
 
   if (p === '/api/private/admin/shares') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -269,6 +275,8 @@ export async function handleAdmin(request, env, url) {
         if (url.searchParams.get('revokeShares') === '1') {
           for (const id of r.shares) await purgeShare(env, id);
         }
+        // The Drive goes with the account (its ciphertext, and every share of it).
+        await destroyDrive(env, uid);
         return json({ ok: true, revoked: url.searchParams.get('revokeShares') === '1' ? r.shares.length : 0 });
       }
       return methodNotAllowed('GET, PATCH, DELETE');
@@ -303,6 +311,7 @@ export async function handleAdmin(request, env, url) {
       const body = await readJsonBody(request);
       const step = uid === me ? await stepUpFrom(body, url) : {};
       const r = await dir.adminResetPasskeys(uid, me, { ...step, lockoutOff: g.off.all });
+      if (r.ok) await syncCredentialWraps(env, uid);
       return r.ok ? json(r) : afterRefusal(env, g, r, fromDir(r));
     }
     if (action === 'role') {

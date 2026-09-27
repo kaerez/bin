@@ -39,6 +39,7 @@ bucket_name = "secbin-files"
 # FileShare  — file shares: upload state, views, grants, R2 cleanup, one per id
 # Directory  — accounts, sessions, limits, quotas, settings, audit (singleton)
 # Guard      — brute-force tracking + IP blocks, sharded by IP hash
+# Drive      — a user's private encrypted folder tree, one per user (docs/DRIVE.md)
 [[durable_objects.bindings]]
 name = "BURN"
 class_name = "BurnPaste"
@@ -55,6 +56,10 @@ class_name = "Directory"
 name = "GUARD"
 class_name = "Guard"
 
+[[durable_objects.bindings]]
+name = "DRIVE"
+class_name = "Drive"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = [ "BurnPaste" ]
@@ -62,6 +67,10 @@ new_sqlite_classes = [ "BurnPaste" ]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = [ "FileShare", "Directory", "Guard" ]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = [ "Drive" ]
 
 # ── Variables ────────────────────────────────────────────────────────────────
 # Secrets are NOT set here — use `wrangler secret put <NAME>` (or the dashboard):

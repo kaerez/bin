@@ -128,7 +128,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowPriv? }` (`escrowPriv` for the owner only; `capacity` null = no limit; `driveSalt`, `escrowPub` null until set). A role without a Drive: `{ enabled: false }`, or an error with code `drive_disabled` (any 404, or a 403 other than `impersonating`, reads the same) |
+| `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowPriv? }` (`escrowPriv` for the owner only; `capacity` null = no limit; `driveSalt`, `escrowPub` null until set). A role without a Drive: `200 { enabled: false, wraps: [] }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
 | `PUT /api/private/drive/keys` | set wraps: `{ driveSalt?, set: [{kind, ref, data}], remove: [{kind, ref}], escrowPriv?, escrowPub? }` (the last two owner only) |
 | `GET /api/private/drive/nodes/<id>` | the node and its children: `{ node, children: [...], path: [...ancestors] }` (`root` for the top; `path` root first, the node itself may be included). Each node: `{ id, parent, kind: 'dir' \| 'file', name, meta?, fk?, size, chunks, state, created, updated }` with the sealed fields as stored (`{ iv, ct }` objects or their JSON text), `size` in plaintext bytes, times in seconds; children include `meta` and `fk` for files (else the client fetches each file node). 404 for an unknown id |
 | `POST /api/private/drive/folders` | `{ id, parent, name }` → `{ id }` (`id` chosen by the browser, §3; 409 if taken) |
@@ -257,64 +257,86 @@ stand-in. What each side relies on:
 - Capacity, sizes and chunk counts are enforced server-side; names and types are not (they are
   encrypted), so file-type rules for drive shares are enforced by the client, as for file shares.
 
-## 10. What the server must provide (shard A checklist)
+## 10. Server notes (as built)
 
-The browser side (shards B and C) is integrated and tested against an in-memory stand-in of the
-API (`test-dom/drive-fake-server.js`); the server has to match it:
+Details of the server side (`src/drive-do.js`, `src/routes/drive.js`) that the sections above
+leave open:
 
-1. **`/api/private/me`**: `caps.driveEnabled` (boolean) — the role's `driveEnabled` (the owner
-   always true, the public account false). The nav and the page read only this.
-2. **Login responses** (password, recovery code, passkey, second step) keep `user: { id, role }`,
-   and `/api/auth/session` keeps `user` and `impersonatedBy`: the sign-in unlock and the tab key's
-   user binding use them.
-3. **`GET /api/private/drive`** exactly as §6, including `{ enabled: false }` (or
-   `drive_disabled`) for a role without a Drive, `capacity: null` for no limit, `escrowPub` for
-   every user once the owner has one, `escrowPriv` for the owner only.
-4. **`PUT /api/private/drive/keys`**: `set` / `remove` by `(kind, ref)` (removing a missing wrap
-   is not an error); kinds `pw` (ref `pw`), `recovery` (ref = the code's server-side hash, hex
-   `SHA-256("secbin-recovery/v1:" ‖ normalised code)`, as `src/directory-do.js` stores it),
-   `passkey` (ref = the credential id, base64url, as stored for the passkey), `escrow` (ref
-   `escrow`); `data` a string of at most 1024 characters; `driveSalt` 16 bytes base64url;
-   `escrowPriv` / `escrowPub` from the owner only (the public key into the Directory, §4);
-   403 `impersonating` while impersonating.
-5. **Wrap housekeeping on the server:** deleting a passkey (by the user or the owner) removes
-   its `passkey` wrap; deleting a user deletes their Drive (nodes, wraps, R2 `d/<uid>/…`).
-   Recovery-code regeneration, spent codes and the codes dropped with the last passkey are
-   handled by the browser (§3); where the server itself drops recovery codes without a browser
-   in the loop (e.g. an admin action), it should drop their `recovery` wraps too.
-6. **Node ids from the browser:** `POST /api/private/drive/folders` and `/files` take `id`
-   (`/^[A-Za-z0-9_-]{22}$/`, 409 when taken), check that `parent` is one of the user's folders,
-   and echo `id`.
-7. **Files:** `POST /api/private/drive/files` answers `chunks = ceil(size / 8 MiB)` (the client
-   refuses anything else) and an `uploadToken`; checks `driveMaxBytes` (capacity, counting
-   pending uploads) and `driveMaxFileBytes`. `PUT …/chunk/<i>` accepts exactly
-   `min(8 MiB, size − i · 8 MiB) + 16` bytes with the right `X-Upload-Token` (4xx otherwise; the
-   client retries a 5xx once). `POST …/finalize` checks every chunk is there → `{ ok }`. A
-   zero-byte file has no chunks and finalizes at once. `GET …/chunk/<i>` returns the raw bytes.
-8. **Nodes:** `GET /api/private/drive/nodes/<id>` as §6 (node shape, `path` root first, times in
-   seconds, children with `meta` and `fk`); `PATCH` refuses cycles (409) and root changes;
-   `DELETE` is recursive, works on pending nodes, frees capacity, and ends every share that
-   references a removed file.
-9. **Shares:** `POST /api/private/drive/shares` with `nodes` = the user's **ready file** ids
-   (`refs[i]` = `nodes[i]`), `views`, `expire`, `paste` (+ `acc`), optional `deletable`, `label`,
-   `types`, `depth` → `{ id, deletetoken }` with an `f…` id, creating an active FileShare with
-   `refs` (§7) and a Directory row of kind `drive`; the same role checks as a file share
-   (`files`, `maxViews`, `allowUnlimitedViews`, `maxExpireSec`, `maxFilesPerShare`,
-   `openerDelete`, the declared file-type / depth policy, quotas of kind `files`, receipts).
-   `GET /api/private/drive/nodes/<id>/shares` returns My-shares rows (§6), for a folder those of
-   the files under it. The existing revoke, My shares and Admin → Shares routes handle kind
-   `drive` (ending a share never touches `d/` objects).
-10. **Recipients:** `POST /api/file/<id>/open` for a drive share adds `refs: [{ chunks, size }]`
-    (in `nodes` order), and `GET /api/file/<id>/chunk/<ref>/<i>` serves chunk `i` of file `ref`
-    under the download grant (`X-Download-Grant`), as `public/js/downloads.js` fetches it.
-11. **Owner routes:** `POST /api/private/admin/drive/escrow/<userId>` `{ reason }` →
-    `{ wrap, wraps }` (404 or 409 when the user has no Drive or no escrow wrap), logged
-    `drive.escrow_used` with the reason; `PUT /api/private/admin/drive/keys/<userId>` with only
-    a `pw` wrap and `driveSalt`, logged `drive.pw_rewrapped`. Owner only, never while
-    impersonating.
-12. **Role options** (§5) with a Directory migration materialising them in the Default role and
-    the role editors' **Drive** section; the `/dashboard/drive/` page itself needs nothing more
-    than the existing dashboard handling (signed-in only).
+- **Access.** Every `/api/private/drive*` route needs a session (an API key gets
+  `403 api_key_not_allowed`); the public account gets `403 drive_unavailable`. With the role's
+  Drive off, `GET /api/private/drive` answers `200 { enabled: false, wraps: [], … }` and every
+  other Drive route `403 drive_disabled`. `GET /api/private/drive` also returns `maxFile` (the
+  largest file allowed); `capacity` and `maxFile` are `null` when the role sets no limit (the
+  hard 100 GiB then applies). `GET /api/private/me` has `caps.driveEnabled` (false for the public
+  account, true for the owner). While impersonating, `PUT …/drive/keys` is
+  `403 impersonating`; the admin routes are closed as usual.
+- **Nodes.** `id` may be omitted (the server then picks one, which cannot be bound into the
+  AAD). `PATCH` also accepts `meta`. `path` lists the ancestors as full nodes, root first.
+  Children include pending files (`state: 'pending'`, `done` = chunks received). `DELETE`
+  answers `{ ok, deleted, sharesEnded }`. Hard ceilings per Drive: 100 000 items, 10 000 per
+  folder, 64 folder levels, 64 wraps, 1 000 shares per item.
+- **Files.** Capacity counts every file's `size`, pending uploads included (reserved at
+  `POST …/files`). Chunks may arrive in any order; sending one again replaces it (internal table
+  `upchunks(node_id, i)`; `done` is their count). A pending upload with no chunk received for the
+  role's `filePendingSec` is purged by the alarm, with its chunks. A file is readable and
+  shareable only once finalized.
+- **Wraps.** `pw` and `escrow` have `ref` = their kind; a `passkey` wrap must name one of the
+  account's passkeys and a `recovery` wrap one of its current codes. The server drops the wraps
+  of passkeys and codes the account no longer has (a passkey removed, codes regenerated, the
+  owner's "remove all passkeys"). Setting `escrowPub` is logged (`drive.escrow_key_set`).
+- **Owner routes.** The escrow route needs a `reason` of 3–500 characters, logs every call
+  (`drive.escrow_used`, with the reason) and answers `wrap: null` when the user has none;
+  `PUT /api/private/admin/drive/keys/<userId>` refuses the owner's own id (use one's own Drive)
+  and logs `drive.pw_rewrapped`. Both are direct admin actions: in the audit, not in the user's
+  own log.
+- **Shares.** A folder id in `nodes` is refused (`400 not_a_file`); files must be finalized
+  (`409 not_ready`). `acc`, when sent both inside `paste` and next to it, must be the same. The
+  stream-size caps (`maxShareBytes`, `maxFileBytes`) do not apply (nothing is uploaded; the files
+  are within the Drive's own limits). The response also carries `expires`.
+  `GET …/nodes/<id>/shares` lists the active shares that reference the node or, for a folder,
+  any file below it (a shared folder is stored as its files), as My shares rows
+  (`id`, `kind`, `label`, `created`, `expires`, `views_total`, `left`, `status`, `locked`) plus the
+  aliases `state` (= `status`) and `maxViews` (= `views_total`); revoke them as any share.
+  Deleting a node ends its shares (and those of every file below it) even when locked by the
+  admin: the data is gone.
+- **Accounts.** Deleting an account deletes its Drive (every R2 object, every share of it). The
+  Directory mirrors each Drive's usage (`drive_usage`); Admin → Users gets
+  `drive: { enabled, used, capacity }` per user (`capacity` null = no limit; `drive` null for the
+  public account).
 
-The end-to-end suite for the integrated Drive (the unlock at sign-in and on the page, the tree,
-every action, shares and revoke, the recipient's view of a drive share) waits for these routes.
+## 11. Browser ↔ server integration checklist
+
+What the browser (`public/js/driveclient.js`, the Drive page, the sign-in) relies on, and how the
+server (§10) meets it. The browser side is also tested against an in-memory stand-in of this
+API (`test-dom/drive-fake-server.js`), which must stay in step with the server.
+
+1. **Nav:** `/api/private/me` → `caps.driveEnabled` (owner true, public account false).
+2. **Account:** login responses keep `user: { id, role }`; `/api/auth/session` keeps `user` and
+   `impersonatedBy` (the sign-in unlock and the tab key's user binding use them).
+3. **State:** `GET /api/private/drive` as §6; `{ enabled: false }` and the 403s read as "no
+   Drive"; `capacity: null` (no limit) shows "no limit" without a meter.
+4. **Keys:** `PUT /api/private/drive/keys` by `(kind, ref)`; removing a missing wrap is no
+   error; `recovery` refs are the server's code hashes (hex
+   `SHA-256("secbin-recovery/v1:" ‖ normalised code)`), `passkey` refs the stored credential ids
+   (base64url of the raw id, as `passkeys.js` sends `rawId`); the server drops wraps of passkeys
+   and codes that are gone; `403 impersonating` while impersonating (the client never asks then).
+5. **Ids:** the browser always sends its 22-character node id (the AAD binds it); `409` when taken.
+6. **Files:** `chunks = ceil(size / 8 MiB)` exactly (the client refuses any other answer), chunk
+   `i` exactly `min(8 MiB, size − i · 8 MiB) + 16` bytes under `X-Upload-Token`, finalize, and
+   raw chunk reads; capacity counts pending uploads; a failed upload's pending node is deleted by
+   the client (`DELETE`), else purged by the alarm.
+7. **Listing:** `path` root first (full nodes); children include `meta` and `fk` for files and
+   pending uploads (`state: 'pending'`, hidden by the client); folders have no `size`; times in
+   seconds; the root's `name` is null (the client names it).
+8. **Moves:** `PATCH` refuses cycles and the root; `DELETE` is recursive and ends the shares of
+   everything below.
+9. **Shares:** `POST /api/private/drive/shares` takes file ids only (`400 not_a_file` for a
+   folder; the client flattens), finalized files only; `types` / `depth` when a policy applies;
+   `→ { id, deletetoken }` with an `f…` id. `GET …/nodes/<id>/shares` returns My-shares rows,
+   for a folder those of the files below it; revoke is `POST /api/private/shares/<id>/revoke`;
+   My shares and Admin → Shares show kind `drive`.
+10. **Recipients:** `POST /api/file/<id>/open` adds `refs: [{ chunks, size }]` in `nodes` order;
+    `GET /api/file/<id>/chunk/<ref>/<i>` under `X-Download-Grant`.
+11. **Owner:** `POST /api/private/admin/drive/escrow/<userId>` `{ reason }` → `{ wrap, wraps }`
+    (`wrap: null` → the client reports `no_wrap`); `PUT /api/private/admin/drive/keys/<userId>`
+    with only a `pw` wrap and `driveSalt`.

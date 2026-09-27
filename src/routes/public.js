@@ -119,9 +119,10 @@ export async function handlePublic(request, env, url) {
     return err(410, 'moved', 'Creating notes now requires an account: POST /api/private/paste.');
   }
 
-  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|chunk)(?:\/(\d{1,6}))?)?$/);
+  // /chunk/<i> reads a file share's stream; /chunk/<ref>/<i> a Drive share's file.
+  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|chunk)(?:\/(\d{1,6})(?:\/(\d{1,6}))?)?)?$/);
   if (!m) return null;
-  const [, kind, rawId, action, idx] = m;
+  const [, kind, rawId, action, idx, idx2] = m;
   const id = decodePathSegment(rawId);
 
   // Before any Guard accounting: another site can make a visitor's browser
@@ -159,7 +160,7 @@ export async function handlePublic(request, env, url) {
   }
   if (action === 'chunk' && info.file && idx !== undefined) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
-    return downloadChunk(request, env, g, id, Number(idx));
+    return idx2 === undefined ? downloadChunk(request, env, g, id, Number(idx)) : downloadChunk(request, env, g, id, Number(idx2), Number(idx));
   }
   return err(404, 'not_found', 'Not found.');
 }
@@ -206,7 +207,9 @@ async function openFile(env, g, id, { lh, kh }) {
   const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client);
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
-    return json({ paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded, viewer: policy.viewer });
+    const out = { paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded, viewer: policy.viewer };
+    if (r.refs) out.refs = r.refs; // a Drive share: its files' chunk counts and sizes
+    return json(out);
   }
   if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
   if (r.status === 'busy') {
@@ -248,10 +251,12 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
   return goneFor(env, g, id, err(410, 'gone', GONE), lh);
 }
 
-async function downloadChunk(request, env, g, id, i) {
+/** Chunk i of a file share's stream, or (with `ref`) chunk i of a Drive share's file number `ref`. */
+async function downloadChunk(request, env, g, id, i, ref = null) {
   const grant = request.headers.get('x-download-grant') || '';
   if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) return failed(env, g, err(403, 'bad_grant', 'A valid X-Download-Grant header is required.'));
-  const r = await fileStub(env, id).chunkAccess(await hashToken(grant), i);
+  const stub = fileStub(env, id);
+  const r = ref === null ? await stub.chunkAccess(await hashToken(grant), i) : await stub.chunkAccessRef(await hashToken(grant), ref, i);
   if (r.status === 'bad_index') return err(404, 'not_found', 'No such chunk.');
   if (r.status !== 'ok') return failed(env, g, err(r.status === 'bad_grant' ? 403 : 410, r.status === 'bad_grant' ? 'bad_grant' : 'gone',
     r.status === 'bad_grant' ? 'The download window has expired — open the link again.' : GONE));

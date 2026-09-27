@@ -92,7 +92,7 @@ function exportCard(users, profile) {
 
   return h('div.card.stack', {},
     h('h2.section-title', { text: 'Export' }),
-    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. The owner account, sessions and shares are never exported. Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
+    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. The owner account, sessions and shares are never exported, and neither is Drive content (files, folders, keys): Drive options travel with the roles. Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
     h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
     h('div.toolbar', {}, h('span.field-label', { text: 'Users' }), scope), pick,
     h('fieldset.range', {}, h('legend', { text: 'For each exported user' }), ...userChecks.map((c) => c.el)),

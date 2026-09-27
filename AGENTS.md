@@ -6,12 +6,13 @@ described in [README.md](./README.md); the threat model and security design in
 
 ## How to work
 
-- **Plan → shard → fan out.** Always work this way, to finish the plan and tasks faster:
+- **Plan → plan sharding → fan out.** Always work this way, for every plan and every task (and
+  subtask), to finish them faster:
   1. **Plan:** break the request into atomic tasks (and subtasks) in the task list, with their
      dependencies.
-  2. **Shard:** group the tasks into independent units of work that do not touch the same core
+  2. **Plan sharding:** group the tasks into independent units of work that do not touch the same core
      files in conflicting ways.
-  3. **Fan out:** run the shards at the same time, as parallel agents / sessions (one per task,
+  3. **Fan out:** run the shards at the same time, as parallel agents / sessions / tasks (one per task,
      each in its own git worktree and branch from `main`, with its own `wrangler dev` port range
      and its own local state), parallel subtasks, and parallel background commands and
      subcommands. Shard long checks too: split the end-to-end suites across several dev-server
@@ -30,6 +31,11 @@ described in [README.md](./README.md); the threat model and security design in
   auto-merge for each PR (when the repository allows it) so it merges itself once green, and
   delete the branch after the merge (GitHub's "Automatically delete head branches"). After a PR is
   merged, follow-up work starts on a new branch from the latest `main`.
+- **Merging:** turn on auto-merge for each PR (when the repository allows it) and delete the
+  branch after the merge. Never merge two PRs back to back: every merge to `main` triggers a
+  production build, and builds that finish out of order deploy an older commit last. Wait until
+  the previous merge's production build ("Workers Builds" on the `main` commit) has finished
+  before merging the next, and after merging check that production serves the new code.
 - **Track every request.** Break the maintainer's messages into atomic requirements, keep them in
   the task list, and before calling work finished check each one against the code (not against
   commit messages). Answer questions explicitly; say plainly when something is not done.
