@@ -6,9 +6,10 @@
 //   pw       — Argon2id(NFC(password), driveSalt, 64 MiB, t=3, p=1) → HKDF → AES-GCM;
 //   recovery — HKDF over a recovery code's normalised text, one wrap per code;
 //   passkey  — HKDF over the WebAuthn PRF output for DRIVE_PRF_SALT;
-//   escrow   — ECDH P-256 (ephemeral × the owner's escrow key) → HKDF;
-//   handoff  — HKDF over a one-time random key (a Drive the owner created
-//              while acting as the user, until the user's first sign-in).
+//   escrow   — ECDH P-256 (ephemeral × the owner's escrow key) → HKDF.
+// The owner also has an ECDSA P-256 signing key: it signs the escrow public
+// key, so users' browsers accept a new escrow key only when the signing key
+// they pinned endorses it.
 // Every sealed value carries AAD "secbin-drive/v1\n<field>\n<nodeId>\n" so the
 // server cannot move a value to another node, field or wrap.
 //
@@ -229,30 +230,6 @@ export async function unlockWithPrf(prfOutput, credentialId, wraps) {
   return null;
 }
 
-/**
- * A hand-over wrap: DK wrapped under a fresh one-time key → { handoffKey,
- * wrap }. Used when the owner, acting as a user, creates that user's Drive:
- * the user's browser opens it at their next sign-in and writes the password
- * wrap; the server then deletes both (docs/DRIVE.md §3).
- */
-export async function wrapHandoff(dk) {
-  const key = randomBytes(DK_BYTES);
-  return { handoffKey: b64urlFromBytes(key), wrap: await wrapWith(await kekFrom(key, 'kek-handoff'), 'handoff', 'handoff', dk) };
-}
-
-/** DK from the hand-over wrap, or null. */
-export async function unlockWithHandoff(handoffKey, wraps) {
-  let key;
-  try { key = bytesFromB64url(handoffKey); } catch { return null; }
-  if (key.length !== DK_BYTES) return null;
-  const kek = await kekFrom(key, 'kek-handoff');
-  for (const w of listOf(wraps, 'handoff')) {
-    const dk = await unwrapWith(kek, w);
-    if (dk) return dk;
-  }
-  return null;
-}
-
 // ── owner escrow ───────────────────────────────────────────────────────────
 
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
@@ -327,24 +304,86 @@ export function sameEscrowKey(a, b) {
 }
 
 /**
- * The escrow key this Drive trusts, sealed under DK (field `escrowPin`, node
- * "drive"): its kid. A user's browser pins the first escrow key it wraps to
- * and never re-wraps to another one without the user's say (trust on first use).
+ * What this Drive trusts, sealed under DK (field `escrowPin`, node "drive"):
+ * `{ escrow, sign }` — the kid of the escrow key its escrow wrap is for, and
+ * the kid of the owner's signing key (null when there was none). A user's
+ * browser pins them the first time (trust on first use) and re-wraps to
+ * another escrow key only when the pinned signing key signed it (or when the
+ * user accepts it).
  */
-export async function sealEscrowPin(dk, kid) {
+export async function sealEscrowPin(dk, pin) {
   const { names } = await deriveSubkeys(dk);
-  return sealField(names, 'escrowPin', 'drive', String(kid));
+  const v = typeof pin === 'string' ? { escrow: pin, sign: null } : { escrow: String(pin.escrow), sign: pin.sign ? String(pin.sign) : null };
+  return sealField(names, 'escrowPin', 'drive', JSON.stringify(v));
 }
 
-/** The pinned kid, or null (none; or it does not open with this DK — altered). */
+/** The pin `{ escrow, sign }`, or null (none; or it does not open with this DK — altered). */
 export async function openEscrowPin(dk, sealed) {
   if (!sealed) return null;
   try {
     const { names } = await deriveSubkeys(dk);
-    return new TextDecoder().decode(await openField(names, 'escrowPin', 'drive', sealed));
+    const text = new TextDecoder().decode(await openField(names, 'escrowPin', 'drive', sealed));
+    const v = JSON.parse(text);
+    if (!v || typeof v.escrow !== 'string') return null;
+    return { escrow: v.escrow, sign: typeof v.sign === 'string' ? v.sign : null };
   } catch {
     return null;
   }
+}
+
+// ── the owner's signing key (endorses the escrow public key) ──────────────
+
+const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
+const SIGN = { name: 'ECDSA', hash: 'SHA-256' };
+const endorsement = (jwk) => utf8(`secbin-drive/v1 escrow-endorse\n${jwk.x}\n${jwk.y}`);
+
+/** The owner's signing key pair: { publicJwk, privateKey } (extractable, to be sealed). */
+export async function createSigningKeyPair() {
+  const kp = await crypto.subtle.generateKey(ECDSA, true, ['sign', 'verify']);
+  return { publicJwk: cleanJwk(await crypto.subtle.exportKey('jwk', kp.publicKey)), privateKey: kp.privateKey };
+}
+
+/** The signing private key (PKCS#8) sealed under the owner's DK → data string (field `escrowSign`). */
+export async function sealSigningKey(dk, privateKey) {
+  const { files } = await deriveSubkeys(dk);
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
+  const { iv, ct } = await seal(files, aad('escrowSign', 'drive'), pkcs8);
+  return [VERSION, b64urlFromBytes(iv), b64urlFromBytes(ct)].join('.');
+}
+
+/** The signing key back → { privateKey, publicJwk }; DecryptError on a wrong DK. */
+export async function openSigningKey(dk, data) {
+  const seg = segments(data, 2);
+  if (!seg || seg[0].length !== 12) throw new DecryptError('invalid signing key');
+  const { files } = await deriveSubkeys(dk);
+  const pkcs8 = await open(files, aad('escrowSign', 'drive'), seg[0], seg[1]);
+  try {
+    const full = await crypto.subtle.exportKey('jwk', await crypto.subtle.importKey('pkcs8', pkcs8, ECDSA, true, ['sign']));
+    return { privateKey: await crypto.subtle.importKey('pkcs8', pkcs8, ECDSA, false, ['sign']), publicJwk: cleanJwk(full) };
+  } catch {
+    throw new DecryptError('invalid signing key');
+  }
+}
+
+/** The signing key's signature over an escrow public key (raw r ‖ s, base64url). */
+export async function endorseEscrowKey(signPrivateKey, escrowJwk) {
+  return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign(SIGN, signPrivateKey, endorsement(cleanJwk(escrowJwk)))));
+}
+
+/** Whether `sig` is `signJwk`'s signature over `escrowJwk`. */
+export async function escrowKeyEndorsed(signJwk, escrowJwk, sig) {
+  try {
+    const key = await crypto.subtle.importKey('jwk', cleanJwk(signJwk), ECDSA, false, ['verify']);
+    return await crypto.subtle.verify(SIGN, key, bytesFromB64url(sig), endorsement(cleanJwk(escrowJwk)));
+  } catch {
+    return false;
+  }
+}
+
+/** The kid of a signing public JWK (as escrowKeyId). */
+export async function signingKeyId(publicJwk) {
+  const pub = await crypto.subtle.importKey('jwk', cleanJwk(publicJwk), ECDSA, true, ['verify']);
+  return keyId(new Uint8Array(await crypto.subtle.exportKey('raw', pub)));
 }
 
 async function escrowKek(privateKey, publicKey, epkRaw) {

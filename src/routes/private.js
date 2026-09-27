@@ -121,7 +121,7 @@ export async function handlePrivate(request, env, url, ctx) {
     // The Drive's password wrap opens only with the old password now: stale
     // (the user's browser writes the new one next), or — set by the owner
     // acting as the user — handled like an admin reset (docs/DRIVE.md §3).
-    await drivePasswordChanged(env, a.user.id, { reset: !!a.actor, escrow: !!a.actor });
+    await drivePasswordChanged(env, a.user.id, { reset: !!a.actor });
     // Impersonating: the user's sessions end, the owner's session (bound to
     // the owner's own session version) carries on unchanged.
     if (a.actor) return withAuth(a, json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }));

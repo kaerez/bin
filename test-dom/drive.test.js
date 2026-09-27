@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startDrive, checkName, shareOptions, toFraction, modifiedOf, pathOf, sortChildren, successNote } from '../public/dashboard/js/drive-app.js';
 import * as drive from '../public/js/driveclient.js';
-import { createDriveKey, saveSessionKey, loadSessionKey, clearSessionKey, wrapRecovery, recoveryRef, wrapPrf, DRIVE_PRF_SALT } from '../public/js/drivekeys.js';
+import { createDriveKey, saveSessionKey, loadSessionKey, clearSessionKey, wrapRecovery, recoveryRef, wrapPrf, DRIVE_PRF_SALT, createEscrowKeyPair } from '../public/js/drivekeys.js';
 import { deriveAccess, openPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { TAG } from '../public/js/files.js';
@@ -136,6 +136,7 @@ describe('startDrive states', () => {
 
   it('set-up (no key yet): only the password is offered', async () => {
     S = fakeServer();
+    S.escrowPub = (await createEscrowKeyPair()).publicJwk; // the owner's escrow key exists
     globalThis.fetch = S.fetch;
     const mount = mountPoint();
     const r = await startDrive(mount, deps());
@@ -218,6 +219,8 @@ describe('startDrive states', () => {
   it('impersonating without the owner’s own Drive unlocked in the tab: a notice saying what to do (no prompt, nothing sent)', async () => {
     S = fakeServer();
     globalThis.fetch = S.fetch;
+    const w = await wrapRecovery(createDriveKey(), CODE, await recoveryRef(CODE)); // the user's Drive exists
+    S.wraps.set(`${w.kind}|${w.ref}`, w);
     S.impersonatedBy = 'owner';
     const mount = mountPoint();
     const r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true } }));

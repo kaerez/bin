@@ -237,6 +237,8 @@ export async function startDrive(mount, deps) {
     if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
       // The owner acting as a user: what is missing to open their Drive.
       if (deps.user && deps.user.impersonating) { mount.replaceChildren(impersonatingNotice(e.reason, deps)); return { state: 'impersonating', reason: e.reason }; }
+      // No owner escrow key yet: the Drive is set up (at sign-in) once there is one.
+      if (e.reason === 'not_ready') { mount.replaceChildren(notReadyNotice()); return { state: 'not_ready' }; }
       return { state: 'locked', unlocked: unlockView(mount, deps, e) };
     }
     mount.replaceChildren(h('div.card.drive-notice', {}, h('p.msg.error', { role: 'alert', text: `The Drive could not be opened: ${friendlyError(e)}` })));
@@ -247,6 +249,8 @@ export async function startDrive(mount, deps) {
 
 /** Why the owner, acting as a user, cannot open that user's Drive, and what to do. */
 const IMP_NOTICES = {
+  no_drive: ['The user hasn’t signed in since the Drive was enabled',
+    'Their Drive is created in their browser the next time they sign in. Until then there is nothing to open, and nothing is created while you act as them.'],
   owner_locked: ['Unlock your own Drive first',
     'You open this user’s Drive with your escrow key, which your own Drive holds, and your Drive is not unlocked in this tab. Return to admin (the banner above), open Drive and unlock it, then log in as this user again.'],
   no_escrow: ['You have no escrow key yet',
@@ -267,6 +271,12 @@ function impersonatingNotice(reason, deps) {
     h(`p.modal-sub${reason === 'escrow_mismatch' ? '.msg.error' : ''}`, { role: reason === 'escrow_mismatch' ? 'alert' : null, text: text.replace('this user', who) }));
 }
 
+function notReadyNotice() {
+  return h('div.card.drive-notice', { id: 'drive-not-ready', role: 'status' },
+    h('h2.section-title', { text: 'Drive is not ready yet' }),
+    h('p.modal-sub', { text: 'The owner must sign in once before Drives can be set up. Your Drive is then set up the next time you sign in (or open this page).' }));
+}
+
 function disabledNotice() {
   return h('div.card.drive-notice', { id: 'drive-disabled' },
     h('h2.section-title', { text: 'Drive is not enabled for your account' }),
@@ -282,8 +292,7 @@ function disabledNotice() {
  * only the password can create the Drive's key.
  */
 function unlockView(mount, deps, lockedErr) {
-  const handoff = !!lockedErr && lockedErr.reason === 'handoff';
-  const setup = !!lockedErr && (lockedErr.reason === 'setup' || handoff);
+  const setup = !!lockedErr && lockedErr.reason === 'setup';
   const withPasskey = !setup && !(lockedErr && Array.isArray(lockedErr.credentialIds) && !lockedErr.credentialIds.length);
   return new Promise((resolve) => {
     const msg = h('p.msg.error', { id: 'drive-unlock-msg', role: 'alert', hidden: true });
@@ -336,12 +345,10 @@ function unlockView(mount, deps, lockedErr) {
       if (show) code.focus();
     });
     mount.replaceChildren(h('div.card.drive-unlock', { id: 'drive-unlock' },
-      h('h2.section-title', { text: setup ? (handoff ? 'Finish setting up your Drive' : 'Set up your Drive') : 'Unlock your Drive' }),
+      h('h2.section-title', { text: setup ? 'Set up your Drive' : 'Unlock your Drive' }),
       h('p.modal-sub', {
-        text: handoff
-          ? 'Your administrator created your Drive for you. Enter your account password to finish setting it up: from then on it opens with your password, in your browser.'
-          : setup
-            ? 'Your Drive is encrypted with a key that only you can open. Enter your account password to create it: the key is made here, in your browser, and kept only until you sign out or close the tab.'
+        text: setup
+          ? 'Your Drive is encrypted with a key that only you can open. Enter your account password to create it: the key is made here, in your browser, and kept only until you sign out or close the tab.'
           : 'Your Drive is encrypted with a key that only you can open, and this tab does not have it yet. Confirm it is you: the key is unlocked here, in your browser, and kept only until you sign out or close the tab.',
       }),
       pwForm,
@@ -366,6 +373,7 @@ function banners(client, deps) {
       h('p', { text: `You are in ${who}’s Drive, opened with your escrow key: browse, upload, download, move, rename, delete and share as they would.` }),
       h('p.muted', { text: `Their own keys (password, recovery codes, passkeys) cannot be removed or replaced while you act as ${who}: those unlock their Drive for them, and only they can confirm such a change. What you do here is recorded in the admin audit, not in their activity.` })));
   }
+  if (deps.user && deps.user.role === 'owner' && !deps.user.impersonating && !client.notice) out.push(rotateTool(client, deps));
   const n = client.notice;
   if (!n) return out;
   const msg = h('p.msg.error', { id: 'drive-notice-msg', role: 'alert', hidden: true });
@@ -391,16 +399,16 @@ function banners(client, deps) {
     return out;
   }
   // The owner: the escrow key pair needs attention; changing it needs the password (or a passkey).
-  const restore = n.kind === 'escrow_mismatch';
+  const restore = n.kind === 'escrow_mismatch' || n.kind === 'escrow_unsigned';
   const pw = h('input.input', { id: 'drive-escrow-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024' });
   const go = h('button.btn.danger', { type: 'submit', id: 'drive-escrow-fix', text: restore ? 'Restore the escrow public key' : 'Create a new escrow key' });
   const form = h('form.form.drive-unlock-form', { novalidate: true }, field('Your password (or leave it empty to confirm with a passkey)', pw), go);
   const box = h('div.card.drive-notice', { id: 'drive-escrow-alert', role: 'alert' },
-    h('h2.section-title', { text: restore ? 'Your escrow public key was replaced' : 'Your escrow key needs attention' }),
+    h('h2.section-title', { text: n.kind === 'escrow_mismatch' ? 'Your escrow public key was replaced' : 'Your escrow key needs attention' }),
     h('p', { text: n.text }),
     h('p.muted', {
       text: restore
-        ? 'Restoring puts back the public key that belongs to your escrow private key, so users’ Drives are wrapped to your key again.'
+        ? 'Restoring puts back (and signs) the public key that belongs to your escrow private key, so users’ Drives are wrapped to your key again.'
         : 'A new escrow key replaces the old one: escrow wraps made for the old key no longer open, and each user is asked to trust the new key before their Drive is wrapped to it.',
     }),
     form, msg);
@@ -421,6 +429,37 @@ function banners(client, deps) {
   });
   out.push(box);
   return out;
+}
+
+/**
+ * The owner's "replace the escrow key" (a rotation, docs/DRIVE.md §3): needs
+ * the owner's password or a passkey; users' browsers re-wrap to the new key
+ * at their next unlock (it is signed), and the old key is kept until then.
+ */
+function rotateTool(client, deps) {
+  const pw = h('input.input', { id: 'drive-rotate-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024' });
+  const go = h('button.btn', { type: 'submit', id: 'drive-rotate-btn', text: 'Replace the escrow key' });
+  const msg = h('p.msg.error', { id: 'drive-rotate-msg', role: 'alert', hidden: true });
+  const form = h('form.form.drive-unlock-form', { novalidate: true }, field('Your password (or leave it empty to confirm with a passkey)', pw), go);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    go.disabled = true;
+    msg.hidden = true;
+    try {
+      const { confirmStep, canUsePasskey } = await import('./confirm.js');
+      const step = await confirmStep(pw, deps.profile.user.username, !pw.value && await canUsePasskey());
+      await client.rotateEscrowKey(step);
+      toast('A new escrow key is in place: each user’s Drive moves to it at its next unlock.');
+    } catch (err) {
+      showMsg(msg, friendlyError(err));
+    } finally {
+      go.disabled = false;
+    }
+  });
+  return h('details.card.drive-notice', { id: 'drive-escrow-tools' },
+    h('summary', { text: 'Escrow key' }),
+    h('p.muted', { text: 'Your escrow key opens every user’s Drive (with a reason from Admin, or while you act as a user). Replacing it signs the new key with your signing key: each user’s browser moves their Drive to it at its next unlock, and the old key is kept, sealed in your Drive, until every Drive has moved.' }),
+    form, msg);
 }
 
 // ── the Drive ───────────────────────────────────────────────────────────────

@@ -45,9 +45,11 @@ What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3, §9): the owner, logged i
 the user's Drive through the owner escrow (the owner's own Drive unlocked in the tab), reads and
 downloads the user's file, uploads one and shares it (a recipient opens the link); the user's key
 sits in its own tab slot and goes when the impersonation ends; removing the user's password wrap
-is refused; a user with no Drive yet gets one that their next sign-in finishes; the notice when
-the owner's Drive is locked; Hebrew and spoofing names in the Drive page; and nothing new in the
-user's own activity while the admin audit names the owner. Same set-up as `drive-int.mjs` (a
+is refused; a user who has not signed in since the Drive was enabled shows the notice and gets
+nothing created, and their first sign-in then sets the Drive up by itself (password and escrow
+wraps); the notice when the owner's Drive is locked; Hebrew and spoofing names in the Drive page;
+and the user's own activity listing the Drive actions done as them, as theirs and with no trace
+of the impersonation, while the admin audit names the owner. Same set-up as `drive-int.mjs` (a
 fresh server with no owner yet):
 
 ```sh

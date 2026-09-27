@@ -20,7 +20,7 @@ import { encryptPaste } from '../public/js/crypto.js';
 import { utf8 } from '../public/js/bytes.js';
 import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16 } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
-import { enc, enableDrive, someBytes } from './drive-helpers.js';
+import { enc, enableDrive, someBytes, escrowWrap } from './drive-helpers.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 
@@ -302,14 +302,13 @@ describe('cache policy (Workers Caching)', () => {
     await enableDrive(dv.id);
     const dc = dv.cookie;
     const wrapData = () => `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(48))}`;
-    const escData = () => `1.${b64urlFromBytes(randomBytes(65))}.${b64urlFromBytes(randomBytes(16))}.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(48))}`;
     const nid = () => b64urlFromBytes(randomBytes(16));
     record('GET /dashboard/drive/ (user)', await raw('/dashboard/drive/', { headers: { cookie: dc } }));
     record('GET /api/private/drive (no Drive, 200)', await get('/api/private/drive', { cookie: noDrive.cookie }));
     record('POST /api/private/drive/folders (no Drive, 403)', await get('/api/private/drive/folders', { method: 'POST', cookie: noDrive.cookie, body: {} }));
     record('GET /api/private/drive (user, 200)', await get('/api/private/drive', { cookie: dc }));
     record('GET /api/private/drive (key, 403)', await get('/api/private/drive', { headers: { authorization: `Bearer ${all}` } }));
-    record('PUT /api/private/drive/keys (first set-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }, { kind: 'escrow', ref: 'escrow', data: escData() }] } }));
+    record('PUT /api/private/drive/keys (first set-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }, await escrowWrap()] } }));
     record('PUT /api/private/drive/keys (replace without step-up, 400)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }] } }));
     record('PUT /api/private/drive/keys (step-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }], current: proofFor(USER_PW) } }));
     record('GET /api/private/drive/keys (405)', await get('/api/private/drive/keys', { cookie: dc }));

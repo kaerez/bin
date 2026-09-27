@@ -5,6 +5,7 @@ import { SELF } from 'cloudflare:test';
 import { ORIGIN, fetchJson, owner, intent } from './helpers.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { driveChunkSize } from '../src/drive-do.js';
+import { escrowKid } from '../src/routes/drive.js';
 
 /** An opaque {iv, ct} field as the browser would send it (random bytes: the server cannot tell). */
 export const enc = (n = 32) => ({ iv: b64urlFromBytes(randomBytes(12)), ct: b64urlFromBytes(randomBytes(n + 16)) });
@@ -67,3 +68,25 @@ export async function uploadFile(cookie, parent, size) {
 export const del = (cookie, id) => fetchJson(`/api/private/drive/nodes/${id}`, { method: 'DELETE', cookie, headers: intent });
 export const node = async (cookie, id) => fetchJson(`/api/private/drive/nodes/${id}`, { cookie });
 export const drive = async (cookie) => (await fetchJson('/api/private/drive', { cookie })).json();
+
+/**
+ * The owner's escrow key (docs/DRIVE.md §3: it exists before any user's Drive):
+ * set once (a stand-in public key; the server only checks its form) and
+ * returned. A user's Drive is set up with an escrow wrap for it (escrowWrap).
+ */
+export async function ensureEscrow() {
+  const oc = await owner();
+  const st = await drive(oc);
+  if (st.escrowPub) return st.escrowPub;
+  const jwk = { kty: 'EC', crv: 'P-256', x: b64urlFromBytes(randomBytes(32)), y: b64urlFromBytes(randomBytes(32)) };
+  const priv = `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(150))}`;
+  const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: oc, headers: intent, body: { escrowPub: jwk, escrowPriv: priv } });
+  if (r.status !== 200) throw new Error(`escrow key: ${r.status} ${await r.text()}`);
+  return jwk;
+}
+
+/** An escrow wrap (opaque stand-in data) for the owner's current escrow key. */
+export async function escrowWrap() {
+  const kid = await escrowKid(await ensureEscrow());
+  return { kind: 'escrow', ref: 'escrow', data: `1.${b64urlFromBytes(randomBytes(65))}.${kid}.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(48))}` };
+}
