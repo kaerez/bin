@@ -246,6 +246,12 @@ const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x
  */
 export const PUBLIC_ID = 'public-user-0000';
 /**
+ * Most users the admin share list filters by at once. The ids are bound as one
+ * JSON array (`json_each(?)`), not one parameter each, so the list stays well
+ * clear of SQLite's bound-parameter limit (about 100 in a Durable Object).
+ */
+export const MAX_SHARE_FILTER_USERS = 500; // ~19 bytes per id in the URL: stays well under the 16 KB URL limit
+/**
  * Limits that mean nothing for the public account: it has no API keys, no
  * dashboard to see read receipts in, no password or passkeys, and its log
  * entries are the server's. They cannot be set for it (inheriting is fine).
@@ -1786,8 +1792,9 @@ export class Directory extends DurableObject {
     const off = Math.max(0, offset | 0);
     const where = [];
     const args = [];
-    const ids = (Array.isArray(users) ? users : []).filter((u) => typeof u === 'string').slice(0, 100);
-    if (ids.length) { where.push(`s.user_id IN (${ids.map(() => '?').join(', ')})`); args.push(...ids); }
+    const ids = (Array.isArray(users) ? users : []).filter((u) => typeof u === 'string').slice(0, MAX_SHARE_FILTER_USERS);
+    // One JSON array parameter for any number of users (one `?` each would exceed the limit).
+    if (ids.length) { where.push('s.user_id IN (SELECT value FROM json_each(?))'); args.push(JSON.stringify(ids)); }
     if (kind) { where.push('s.kind = ?'); args.push(String(kind)); }
     if (status) { where.push('s.status = ?'); args.push(String(status)); }
     if (q) { where.push("s.label LIKE ? ESCAPE '\\'"); args.push(`%${String(q).slice(0, 100).replace(/[%_\\]/g, (c) => '\\' + c)}%`); }

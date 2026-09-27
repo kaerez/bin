@@ -54,6 +54,48 @@ describe('admin share list', () => {
     expect((await fetchJson(`/api/private/admin/shares?users=${a.id},../x&kind=evil&status=x&createdFrom=-1&limit=9999`, { cookie: oc })).status).toBe(200);
   });
 
+  it('filters by hundreds of users at once, with the same order, totals and paging (bound-parameter limit)', async () => {
+    const a = await makeUser('many-filter-a');
+    const b = await makeUser('many-filter-b');
+    const c = await makeUser('many-filter-c');
+    const made = [
+      await createNote(a.cookie, {}, { label: 'bulk one' }),
+      await createNote(b.cookie, {}, { label: 'bulk two' }),
+      await createNote(c.cookie, {}, { label: 'bulk three' }),
+      await createNote(a.cookie, {}, { label: 'other' }),
+    ];
+    // Distinct creation times, so "newest first" is fully determined.
+    const t0 = Math.floor(Date.now() / 1000);
+    const dir = env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
+    await runInDurableObject(dir, async (instance) => {
+      made.forEach((n, i) => instance.sql.exec('UPDATE shares SET created = ? WHERE id = ?', t0 - 100 + i, n.id));
+    });
+    const newestFirst = made.map((n) => n.id).reverse();
+    // 260 ids, the real users far past the first 100 (the rest match nobody).
+    const ids = Array.from({ length: 260 }, (_, i) => `zz${String(i).padStart(14, '0')}`);
+    ids[120] = a.id; ids[200] = b.id; ids[259] = c.id;
+    const qs = `?users=${ids.join(',')}`;
+
+    const r = await fetchJson(`/api/private/admin/shares${qs}`, { cookie: oc });
+    expect(r.status).toBe(200);
+    const all = await r.json();
+    expect(all.total).toBe(4);
+    expect(all.rows.map((x) => x.id)).toEqual(newestFirst);
+    const page1 = await adminList(`${qs}&limit=2&offset=1`);
+    expect(page1.total).toBe(4);
+    expect(page1.rows.map((x) => x.id)).toEqual(newestFirst.slice(1, 3));
+    expect((await adminList(`${qs}&limit=2&offset=3`)).rows.map((x) => x.id)).toEqual(newestFirst.slice(3));
+    // Parameters bound after the user list still line up.
+    const bulk = await adminList(`${qs}&q=bulk&limit=1&offset=1`);
+    expect(bulk.total).toBe(3);
+    expect(bulk.rows.map((x) => x.id)).toEqual([made[1].id]);
+
+    // The Directory method itself takes the whole list too.
+    const direct = await runInDurableObject(dir, (instance) => instance.adminListShares({ users: [...ids, ...ids.map((x) => `${x}x`)], limit: 200 }));
+    expect(direct.total).toBe(4);
+    expect(direct.rows.map((x) => x.id)).toEqual(newestFirst);
+  });
+
   it('is owner-only', async () => {
     const u = await makeUser('not-an-admin');
     expect((await fetchJson('/api/private/admin/shares', { cookie: u.cookie })).status).toBe(403);

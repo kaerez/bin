@@ -300,6 +300,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   expired, used-up, revoked or deleted shares no longer count as invalid fetches; the settings
   explain per-IP protection versus account lockout; IP rules accept ranges (`a-b`) as well as
   CIDR; every save confirms with a clear toast (errors in red).
+- **Admin shares filter with many users:** filtering the admin share list by about 100 or more
+  users no longer fails with a server error (SQLite's bound-parameter limit). The user ids are
+  now bound as one JSON array parameter, and the server takes up to 500 of them (before, only
+  the first 100 counted); order, totals and paging are unchanged.
 - **iOS:** icons no longer blow up to full width when a stale stylesheet is served (intrinsic
   SVG sizes), and the service worker now always revalidates static assets with the server
   (cache version 2 drops the old cache).
