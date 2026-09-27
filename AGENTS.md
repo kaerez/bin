@@ -28,6 +28,11 @@ described in [README.md](./README.md); the threat model and security design in
 - **One PR per coherent change**, as a draft first, from a branch off `main`. Merge only when CI
   is green (the maintainer allows merging your own green PRs); use a merge commit. After a PR is
   merged, follow-up work starts on a new branch from the latest `main`.
+- **Merging:** turn on auto-merge for each PR (when the repository allows it) and delete the
+  branch after the merge. Never merge two PRs back to back: every merge to `main` triggers a
+  production build, and builds that finish out of order deploy an older commit last. Wait until
+  the previous merge's production build ("Workers Builds" on the `main` commit) has finished
+  before merging the next, and after merging check that production serves the new code.
 - **Track every request.** Break the maintainer's messages into atomic requirements, keep them in
   the task list, and before calling work finished check each one against the code (not against
   commit messages). Answer questions explicitly; say plainly when something is not done.
