@@ -214,10 +214,14 @@ labelled fields, AA contrast in both themes, reduced-motion support, reflow down
   text size, readable font, stop animations, keyboard-focus highlight, and marking of headings
   and links. The choices are saved in the browser and applied before the page paints. It is a
   convenience; the pages do not rely on it.
-- **Statement.** `/accessibility/` is a bilingual accessibility statement, defaulting to
-  **partial conformance** with the known limitations listed. Set the contact for reporting
-  problems, and a coordinator if you must appoint one, under Admin → Settings → Accessibility
-  statement.
+- **Statement.** `/accessibility/` shows an accessibility statement that the owner edits under
+  Admin → Settings → Accessibility: the title, commitment, standard and status, last review
+  date, what has been done, known limitations, how to report a problem, and a coordinator if
+  you must appoint one. It is plain text (one paragraph or list item per line). The default is
+  English only and claims **partial conformance**; you can add a second language (its code and
+  direction, e.g. `he` right to left), shown below the first with its own `lang` and `dir`.
+  Untranslated headings fall back to the main language's. Without JavaScript the page shows a
+  short note instead. The statement is part of the Settings part of an export.
 - **Before publishing.** Have the statement reviewed by an accessibility professional (in
   Israel, a מורשה לנגישות השירות) or by Legal. This project does not decide whether a
   deployment is obliged, exempt or conformant.
