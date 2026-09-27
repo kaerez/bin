@@ -1,6 +1,8 @@
 // private.js — /api/private/*: everything that needs an account. Share
-// creation (notes + file uploads) accepts a session or an API key; the account,
-// "My shares" and admin surfaces are session-only.
+// creation (notes + file uploads), the policy and "My shares" (list, one
+// share, receipts, label / extend / revoke) accept a session or an API key
+// with the matching scope; the account, its keys and credentials and the admin
+// surfaces are session-only.
 
 import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
 import { authenticate, issueSession, actorId } from '../lib/auth.js';
@@ -86,6 +88,9 @@ export async function handlePrivate(request, env, url, ctx) {
     if (!r.ok) return fromDir(r);
     return withAuth(a, json({ url: r.url, urlRules: r.urlRules }));
   }
+
+  // ── My shares (session, or an API key: "read" to look, "manage" to change) ─
+  if (p === '/api/private/shares' || p.startsWith('/api/private/shares/')) return handleShares(request, env, url);
 
   // ── session-only surfaces ─────────────────────────────────────────────────
   const a = await authenticate(request, env);
@@ -200,31 +205,48 @@ export async function handlePrivate(request, env, url, ctx) {
     return json(r, p === '/api/private/me/passkeys' ? 201 : 200);
   }
 
+  return err(404, 'not_found', 'Not found.');
+}
+
+/**
+ * "My shares": the list, one share, its read receipts, and label / extend /
+ * revoke. A session, or an API key with "read" (GET) or "manage" (anything
+ * else); either way only the caller's own shares, the admin's locks apply, and
+ * a key's extensions are held to the account's API limits.
+ */
+async function handleShares(request, env, url) {
+  const p = url.pathname;
+  const a = await authenticate(request, env, { allowApiKey: true, scope: request.method === 'GET' ? 'read' : 'manage' });
+  const dir = directory(env);
   if (p === '/api/private/shares') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     return withAuth(a, json(await listShares(env, a, url)));
   }
   const sm = p.match(/^\/api\/private\/shares\/([^/]+)(\/revoke|\/opens)?$/);
-  if (sm) {
-    const id = decodePathSegment(sm[1]);
-    const info = id && shareInfo(id);
-    if (!info) return err(404, 'not_found', 'Share not found.');
-    if (sm[2] === '/opens') {
-      // Read receipts: times always, details as the admin allows this account.
-      if (request.method !== 'GET') return methodNotAllowed('GET');
-      const r = await dir.shareOpens(a.user.id, id);
-      return withAuth(a, r.ok ? json({ total: r.total, fields: r.fields, rows: r.rows }) : fromDir(r));
-    }
-    if (sm[2]) {
-      if (request.method !== 'POST') return methodNotAllowed('POST');
-      assertIntent(request);
-      return revokeShare(env, a, id, info);
-    }
-    if (request.method !== 'PATCH') return methodNotAllowed('PATCH');
-    return updateShare(request, env, a, id, info);
+  if (!sm) return err(404, 'not_found', 'Not found.');
+  const id = decodePathSegment(sm[1]);
+  const info = id && shareInfo(id);
+  if (!info) return err(404, 'not_found', 'Share not found.');
+  if (sm[2] === '/opens') {
+    // Read receipts: times always, details as the admin allows this account.
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    const r = await dir.shareOpens(a.user.id, id);
+    return withAuth(a, r.ok ? json({ total: r.total, fields: r.fields, rows: r.rows }) : fromDir(r));
   }
-
-  return err(404, 'not_found', 'Not found.');
+  if (sm[2]) {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertIntent(request);
+    return withAuth(a, await revokeShare(env, a, id, info));
+  }
+  if (request.method === 'GET') {
+    const row = await dir.getShare(a.user.id, id);
+    if (!row) return err(404, 'not_found', 'Share not found.');
+    const [share] = await withLiveStatus(env, dir, [row], a.user.id);
+    delete share.user_id;
+    return withAuth(a, json({ share }));
+  }
+  if (request.method !== 'PATCH') return methodNotAllowed('GET, PATCH');
+  return withAuth(a, await updateShare(request, env, a, id, info));
 }
 
 async function sessionSettings(env) {
@@ -414,7 +436,7 @@ async function updateShare(request, env, a, id, info) {
   const row = await dir.getShare(a.user.id, id);
   if (!row) return err(404, 'not_found', 'Share not found.');
   if (row.locked) return shareLocked();
-  return changeShare(env, dir, row, info, body, { uid: a.user.id, actor: actorId(a) });
+  return changeShare(env, dir, row, info, body, { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId });
 }
 
 const shareLocked = () => err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
@@ -425,7 +447,7 @@ const shareLocked = () => err(423, 'share_locked', 'The administrator has locked
  * is bounded only by the hard protocol maxima and may change locked shares.
  * Views and expiry can only grow — the stores cannot shrink them safely.
  */
-export async function changeShare(env, dir, row, info, body, { uid, actor, admin = null }) {
+export async function changeShare(env, dir, row, info, body, { uid, actor, admin = null, channel = 'all', keyId = null }) {
   const id = row.id;
   const patch = {};
   if (body.label !== undefined) patch.label = body.label;
@@ -443,7 +465,7 @@ export async function changeShare(env, dir, row, info, body, { uid, actor, admin
   if (change.views !== undefined || change.expires !== undefined) {
     if (row.status !== 'active') return err(409, 'not_active', 'Only active shares can be changed.');
     if (!admin) {
-      const ok = await dir.authorizeIncrease(uid, { views: change.views, expireAt: change.expires });
+      const ok = await dir.authorizeIncrease(uid, { views: change.views, expireAt: change.expires }, channel);
       if (!ok.ok) return fromDir(ok);
     }
     // Re-check the lock right before touching the store (the admin may have
@@ -465,7 +487,7 @@ export async function changeShare(env, dir, row, info, body, { uid, actor, admin
     if (change.expires !== undefined) patch.expires = r.expires;
   }
   if (Object.keys(patch).length === 0) return err(400, 'invalid', 'Nothing to change.');
-  const u = await dir.updateShare(uid, id, patch, actor, { admin });
+  const u = await dir.updateShare(uid, id, patch, actor, { admin, keyId });
   return u.ok ? json({ ok: true }) : fromDir(u);
 }
 
@@ -489,7 +511,7 @@ async function revokeShare(env, a, id, info) {
   // share locked in the meantime is refused before any content is destroyed.
   // A share already marked revoked (an earlier purge failed) is purged again.
   if (row.status !== 'revoked') {
-    const u = await dir.updateShare(a.user.id, id, { status: 'revoked' }, actorId(a));
+    const u = await dir.updateShare(a.user.id, id, { status: 'revoked' }, actorId(a), { keyId: a.keyId });
     if (!u.ok) return fromDir(u);
   }
   await purgeShare(env, id, info);

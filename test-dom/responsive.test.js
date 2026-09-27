@@ -154,6 +154,27 @@ describe('dashboard tables carry data-label for the stacked mobile layout', () =
     for (const t of tables) expectLabelled(t);
   });
 
+  it('Account: the API help has an example per use case in each language, and the new scopes are offered', async () => {
+    mountPage('public/dashboard/account/index.html');
+    await import('../public/dashboard/js/account.js');
+    await settle();
+    const boxes = [...document.querySelectorAll('input[name="key-scope"]')].map((b) => `${b.value}:${b.checked}`);
+    expect(boxes).toEqual(['notes:true', 'files:true', 'policy:true', 'read:false', 'manage:false']);
+    const sel = document.getElementById('api-lang');
+    expect([...sel.options].map((o) => o.value)).toEqual(['curl', 'node', 'python']);
+    const pres = () => [...document.querySelectorAll('#api-examples pre.api-example')];
+    expect(pres().map((p) => p.id)).toEqual(['create-note', 'create-files', 'list', 'receipts', 'label', 'extend', 'revoke', 'delete', 'policy'].map((i) => `api-example-${i}`));
+    expect(document.getElementById('api-example-list').textContent).toMatch(/^curl .*\/api\/private\/shares\?status=active/);
+    expect(document.getElementById('api-example-policy').textContent).toContain(`${location.origin}/api/private/policy`);
+    sel.value = 'python';
+    sel.dispatchEvent(new Event('change'));
+    expect(pres()).toHaveLength(9);
+    expect(document.getElementById('api-example-revoke').textContent).toContain('requests.post(');
+    expect(pres().every((p) => p.dataset.lang === 'python')).toBe(true);
+    // No key ever appears in the page; the examples read SECBIN_API_KEY.
+    expect(document.getElementById('api-help').textContent).not.toMatch(/sbk_[A-Za-z0-9_-]{8,}/);
+  });
+
   it('Admin: users, IP rules, blocks, tracking and audit rows are labelled', async () => {
     mountPage('public/dashboard/admin/index.html');
     await import('../public/dashboard/js/admin.js');

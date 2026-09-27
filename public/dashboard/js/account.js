@@ -13,6 +13,7 @@ import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } f
 import { h, clear, showMsg, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError } from '../../js/common.js';
 import { copyText, flashCopied, toast } from '../../js/ui.js';
 import { ready } from './nav.js';
+import { apiExamples, API_LANGS } from './apiexamples.js';
 import { humanCheck } from '../../js/turnstile.js';
 
 const $ = (s) => document.querySelector(s);
@@ -54,6 +55,7 @@ const refusal = (e) => (e instanceof ApiError && e.code === 'wrong_password' ? '
   wirePassword();
   wirePasskeys();
   wireKeys();
+  renderApiExamples();
   loadActivity(true);
   $('#activity-more').onclick = () => loadActivity(false);
 })();
@@ -192,13 +194,37 @@ function wireKeys() {
       toast(refusal(err), { error: true });
     }
   });
-  // A copy-pasteable example with this server's address (no key in it).
-  $('#api-example-policy').textContent = `curl -H "Authorization: Bearer $SECBIN_API_KEY" ${location.origin}/api/private/policy`;
   void card;
   renderKeys();
 }
 
-const KEY_SCOPES = [['notes', 'create notes'], ['files', 'upload files'], ['policy', 'read my policy']];
+/**
+ * "Using the API": an example per use case, in the chosen language, with this
+ * server's address (never a key: the examples read SECBIN_API_KEY).
+ */
+function renderApiExamples() {
+  const sel = $('#api-lang');
+  if (!sel) return;
+  const all = apiExamples(location.origin);
+  sel.replaceChildren(...API_LANGS.map(([v, t]) => h('option', { value: v, text: t })));
+  const draw = () => {
+    const lang = sel.value;
+    clear($('#api-examples')).append(...all.map((e) => {
+      const pre = h('pre.mono.api-example', { id: `api-example-${e.id}`, dataset: { lang }, text: e.code[lang] });
+      const copy = h('button.copy-btn', { type: 'button', text: 'copy', 'aria-label': `Copy the example: ${e.title}` });
+      copy.onclick = async () => flashCopied(copy, (await copyText(e.code[lang])) ? 'copied' : 'failed');
+      return h('div.stack.api-case', { dataset: { example: e.id } },
+        h('p', {}, h('strong', { text: e.title }), ' — ', e.scope ? h('span', {}, 'scope ', h('code', { text: e.scope })) : 'no API key: the delete token is the capability'),
+        pre, h('div.btn-row', {}, copy));
+    }));
+  };
+  sel.addEventListener('change', draw);
+  draw();
+}
+
+// As API_SCOPES in src/lib/settings.js (and the checkboxes in account/index.html).
+const KEY_SCOPES = [['notes', 'create notes'], ['files', 'upload files'], ['policy', 'read my policy'],
+  ['read', 'list my shares & receipts'], ['manage', 'label, extend & revoke my shares']];
 
 async function keyChange(fn, done) {
   const msg = $('#keys-msg');
