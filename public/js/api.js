@@ -23,8 +23,8 @@ async function readJson(res) {
   try { return await res.json(); } catch { return null; }
 }
 
-async function request(path, { method = 'GET', body, headers = {}, raw = false } = {}) {
-  const init = { method, headers: { ...headers }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual' };
+async function request(path, { method = 'GET', body, headers = {}, raw = false, signal } = {}) {
+  const init = { method, headers: { ...headers }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual', ...(signal ? { signal } : {}) };
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json';
     init.body = JSON.stringify(body);
@@ -61,6 +61,12 @@ export const expireShare = (kind, id, { linkProof, keyProof }) =>
 /** One encrypted chunk of a file share, under a download grant. */
 export async function fetchChunk(id, i, grant) {
   const res = await request(`/api/file/${enc(id)}/chunk/${i}`, { headers: { 'x-download-grant': grant }, raw: true });
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+/** Chunk `i` of file `ref` of a Drive share (manifest v3), under a download grant. */
+export async function fetchRefChunk(id, ref, i, grant) {
+  const res = await request(`/api/file/${enc(id)}/chunk/${ref}/${i}`, { headers: { 'x-download-grant': grant }, raw: true });
   return new Uint8Array(await res.arrayBuffer());
 }
 
@@ -163,13 +169,37 @@ export const admin = {
   lockShare: (id, locked) => request(`${A}/shares/${enc(id)}/lock`, { method: 'POST', body: { locked } }),
 };
 
+// ── Drive (docs/DRIVE.md §6; public/js/driveclient.js does the crypto) ──────
+const D = '/api/private/drive';
+export const drive = {
+  state: () => request(D),
+  setKeys: (body) => request(`${D}/keys`, { method: 'PUT', headers: INTENT, body }),
+  node: (id) => request(`${D}/nodes/${enc(id)}`),
+  mkdir: (body) => request(`${D}/folders`, { method: 'POST', headers: INTENT, body }),
+  createFile: (body) => request(`${D}/files`, { method: 'POST', headers: INTENT, body }),
+  putChunk: (id, i, bytes, uploadToken, signal) => putChunkTo(`${D}/files/${enc(id)}/chunk/${i}`, bytes, uploadToken, signal),
+  finalize: (id, uploadToken) => request(`${D}/files/${enc(id)}/finalize`, { method: 'POST', headers: { ...INTENT, 'x-upload-token': uploadToken } }),
+  async chunk(id, i, signal) {
+    const res = await request(`${D}/files/${enc(id)}/chunk/${i}`, { raw: true, signal });
+    return new Uint8Array(await res.arrayBuffer());
+  },
+  update: (id, patch) => request(`${D}/nodes/${enc(id)}`, { method: 'PATCH', headers: INTENT, body: patch }),
+  remove: (id) => request(`${D}/nodes/${enc(id)}`, { method: 'DELETE', headers: INTENT }),
+  share: (body) => request(`${D}/shares`, { method: 'POST', headers: INTENT, body }),
+  shares: (id) => request(`${D}/nodes/${enc(id)}/shares`),
+  // The owner, for a user: open their escrow wrap (logged) / write their `pw` wrap after a reset.
+  escrow: (userId, reason) => request(`${A}/drive/escrow/${enc(userId)}`, { method: 'POST', headers: INTENT, body: { reason } }),
+  setUserKeys: (userId, body) => request(`${A}/drive/keys/${enc(userId)}`, { method: 'PUT', headers: INTENT, body }),
+};
+
 /** Binary chunk upload (kept separate: `request` is JSON-only). */
 export const uploadChunk = (id, i, bytes, uploadToken) => putChunkTo(`/api/private/file/${enc(id)}/chunk/${i}`, bytes, uploadToken);
 
-async function putChunkTo(path, bytes, uploadToken) {
+async function putChunkTo(path, bytes, uploadToken, signal) {
   const res = await fetch(path, {
     method: 'PUT', body: bytes, cache: 'no-store', credentials: 'same-origin', redirect: 'manual',
     headers: { 'content-type': 'application/octet-stream', 'x-upload-token': uploadToken },
+    ...(signal ? { signal } : {}),
   });
   if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
   const data = await readJson(res);

@@ -5,10 +5,12 @@
 import { me, logout, admin, ApiError } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError } from '../../js/common.js';
+import { clearSessionKey } from '../../js/drivekeys.js';
 
 const $ = (s) => document.querySelector(s);
 
 function toLogin(reason) {
+  clearSessionKey(); // signed out: forget the tab's Drive key (docs/DRIVE.md §3)
   location.replace(reason === 'account_disabled' ? '/dashboard/login/?disabled=1' : '/dashboard/login/');
 }
 

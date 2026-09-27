@@ -518,6 +518,42 @@ codes as safe as the password.
   authenticator) and the recovery-code hashes. Passkeys work only under the same hostname
   (WebAuthn binds them to it); recovery codes work anywhere.
 
+### Drive keys
+
+The Drive (design and contract: [`docs/DRIVE.md`](./docs/DRIVE.md)) is encrypted in the browser
+under a per-user **Drive key** (DK, 32 random bytes; `public/js/drivekeys.js`). The server
+stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it cannot open.
+
+- **Sub-keys and fields.** HKDF-SHA-256 from DK gives an AES-256-GCM key for names and
+  metadata and one for the per-file keys. Every sealed value (and every wrap) carries AAD naming
+  its field and node id (or wrap kind and ref), so the server cannot move a name, a file key or a
+  wrap to another node or kind; node ids are chosen by the browser for that reason. File content
+  uses the file-share chunk format under a random per-file key, with the chunk index and count in
+  the AAD, so reordering and truncation are detected; the encrypted metadata also carries the
+  size, checked against what the server reports.
+- **Wraps.** `pw`: a second Argon2id derivation of the password (64 MiB, t = 3, p = 1) with a
+  Drive-only salt; the login proof is a different Argon2 output and never unlocks the Drive.
+  `recovery`: HKDF over each recovery code (80 random bits, so no stretching is needed); a code
+  spent at sign-in loses its wrap. `passkey`: HKDF over the WebAuthn PRF output for a fixed salt;
+  the PRF output never leaves the browser (it is not part of the assertion sent to the server).
+  `escrow`: see below. The Argon2 cost is fixed in the client and never taken from the server.
+- **In the tab.** After sign-in, DK is kept in the tab's `sessionStorage` (bound to the user id)
+  until sign-out, a session ending, or the tab closing. It is readable by script on the origin;
+  the CSP and Trusted Types (§4) keep other script out, as for the rest of the app. While the
+  owner impersonates a user, the tab keeps the owner's own key and never stores the user's.
+- **Owner escrow (a deliberate design choice).** Each user's DK is also wrapped to the owner's
+  escrow public key (ECDH P-256 with an ephemeral key); the owner's escrow private key is stored
+  sealed under the owner's own DK. The owner can therefore decrypt any user's Drive. It is used
+  to re-key a user's Drive after an admin password reset, and every use is logged
+  (`drive.escrow_used`, with the user and the reason). **This needs review by Legal /
+  Compliance before production use** (GDPR transparency towards users, access-control and audit
+  requirements); nothing here is legal or compliance advice.
+- **Failure modes.** A sign-in never fails because the Drive cannot be unlocked; the Drive page
+  asks. A Drive that has content but no wraps is never given a new key (that would make its
+  content unreadable). After an admin reset without escrow (the owner's Drive locked), the user
+  unlocks with a recovery code or passkey; a sign-in with the new password plus a passkey (with
+  PRF) or a recovery code as the second step writes a fresh `pw` wrap.
+
 ### Read receipts
 
 - Every successful open of an account's share (a wrong link or password is not an open) is
