@@ -31,7 +31,7 @@ describe('model', () => {
     expect(JSON.stringify(p)).not.toMatch(/fully (conforms|compliant)|full conformance/i);
     expect(JSON.stringify(p)).not.toMatch(/[֐-׿]/); // no Hebrew by default
     expect(p.statements[0].done).toHaveLength(8);
-    expect(p.statements[0].limits).toHaveLength(4);
+    expect(p.statements[0].limits).toHaveLength(3);
     // Says what was tested, and claims no screen-reader testing that was not done.
     expect(JSON.stringify(p)).not.toMatch(/every combination of screen reader/i);
     expect(p.statements[0].reviewNote.join(' ')).toMatch(/accessibility tree/);
@@ -77,7 +77,7 @@ describe('renderer', () => {
     expect(texts('h1')).toEqual(['Accessibility statement']);
     expect(texts('h2')).toEqual(['Our commitment', 'Standard and status', 'What we have done', 'Known limitations', 'Report a problem or ask for an adjustment']);
     expect(root.querySelectorAll('ul.statement-list')).toHaveLength(2);
-    expect(root.querySelectorAll('ul.statement-list li')).toHaveLength(12);
+    expect(root.querySelectorAll('ul.statement-list li')).toHaveLength(11);
     const t = root.querySelector('time');
     expect(t.getAttribute('datetime')).toBe('2026-09-25');
     expect(t.parentElement.textContent).toMatch(/^Last technical review: .*2026\. This was an automated/);
