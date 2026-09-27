@@ -272,7 +272,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   moved from `public/accessibility/index.html` into settings (Admin → Settings →
   Accessibility, which also holds the contact and coordinator); the built-in Hebrew version
   is gone (add Hebrew, or any language, as the second language). `/api/config` serves the
-  whole statement. Settings changes are logged per changed key, long text by its length.
+  whole statement, which the page renders as text only (no HTML). The statement travels in
+  the settings part of an export / import (re-validated there), and "Restore the default
+  statement" puts the English-only default back (second language off and cleared; the
+  contact and coordinator stay). Settings changes are logged per changed key, long text by
+  its length.
 - **Role editors:** the Sessions, File shares and Activity log sections carry the same kind of
   explanation as the Owner role, and log retention says "keep forever" rather than "no limit".
 - **Admin UI:** the Legal / Compliance warnings are removed from every admin screen.

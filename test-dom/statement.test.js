@@ -4,6 +4,8 @@
 // lists, lang/dir and the admin's contact from text only — markup in the
 // settings stays text — and a second language falls back to the main
 // language's headings, marked with that language.
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, beforeEach } from 'vitest';
 
 globalThis.__SECBIN_STATEMENT_NO_AUTOMOUNT = true;
@@ -137,5 +139,19 @@ describe('renderer', () => {
     expect(root.querySelector('article').getAttribute('dir')).toBe('ltr');
     expect(texts('li')).toEqual(['ok']);
     expect(root.querySelector('time')).toBeNull();
+  });
+});
+
+describe('admin editor', () => {
+  const admin = readFileSync(join(import.meta.dirname, '..', 'public/dashboard/js/admin.js'), 'utf8');
+  it('sits in Settings → Accessibility, with the contact and coordinator, and can restore the default', () => {
+    const ed = admin.slice(admin.indexOf('function statementEditor('));
+    expect(ed).toContain("h('h2.section-title', { text: 'Accessibility' })");
+    for (const k of ['a11y.contact', 'a11y.coordinator', 'a11y.reviewed']) expect(ed).toContain(`'${k}'`);
+    expect(ed).toContain("text: 'Restore the default statement'");
+    expect(ed).not.toMatch(/innerHTML|insertAdjacentHTML|outerHTML/);
+  });
+  it('carries no Legal / Compliance warnings (removed from every admin screen)', () => {
+    expect(admin).not.toMatch(/\bLegal\b|\bCompliance\b/);
   });
 });

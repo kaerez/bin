@@ -224,7 +224,8 @@ labelled fields, AA contrast in both themes, reduced-motion support, reflow down
   English only and claims **partial conformance**; you can add a second language (its code and
   direction, e.g. `he` right to left), shown below the first with its own `lang` and `dir`.
   Untranslated headings fall back to the main language's. Without JavaScript the page shows a
-  short note instead. The statement is part of the Settings part of an export.
+  short note instead. The statement is part of the Settings part of an export. "Restore the
+  default statement" puts the English-only default back in the form (save to publish it).
 - **Before publishing.** Have the statement reviewed by an accessibility professional (in
   Israel, a מורשה לנגישות השירות) or by Legal. This project does not decide whether a
   deployment is obliged, exempt or conformant.

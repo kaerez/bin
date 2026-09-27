@@ -876,21 +876,29 @@ function statementEditor(s, defs) {
   alt.box.hidden = !altOn.checked;
   altOn.onchange = () => { alt.box.hidden = !altOn.checked; if (altOn.checked) alt.lang.focus(); };
 
+  let restored = false; // set by "Restore the default statement" until the next save
   const saveBtn = h('button.cta', { type: 'button', text: 'Save accessibility statement' });
   saveBtn.onclick = async () => {
-    const patch = { 'a11y.contact': contact.value, 'a11y.coordinator': coord.value, 'a11y.reviewed': reviewed.value, ...main.read(), ...(altOn.checked ? alt.read() : { 'a11y.alt.lang': '' }) };
+    // With the second language off, its text is kept for later, unless the
+    // default was restored (then it is cleared too).
+    const patch = { 'a11y.contact': contact.value, 'a11y.coordinator': coord.value, 'a11y.reviewed': reviewed.value, ...main.read(), ...(altOn.checked || restored ? alt.read() : { 'a11y.alt.lang': '' }) };
     if (altOn.checked && !patch['a11y.alt.lang']) { alt.lang.focus(); return msg('Enter the second language’s code (for example he), or turn the second language off.', true); }
     const r = await guard(() => admin.settings(patch), 'Accessibility statement saved.');
     if (!r) return;
     // Show what the server stored (trimmed, blank lines removed).
     contact.value = r.settings['a11y.contact']; coord.value = r.settings['a11y.coordinator']; reviewed.value = r.settings['a11y.reviewed'];
     main.fill(r.settings);
-    if (r.settings['a11y.alt.lang']) alt.fill(r.settings);
+    if (r.settings['a11y.alt.lang'] || restored) alt.fill(r.settings);
+    restored = false;
   };
-  const resetBtn = h('button.btn', { type: 'button', text: 'Restore the default English text' });
+  // The default statement (English only, no second language) back in the
+  // form; the contact and coordinator are this server's own and stay.
+  const resetBtn = h('button.btn', { type: 'button', text: 'Restore the default statement' });
   resetBtn.onclick = () => {
-    main.fill(defs); reviewed.value = defs['a11y.reviewed'];
-    msg('The default English text is back in the form. Save to publish it.');
+    main.fill(defs); alt.fill(defs); reviewed.value = defs['a11y.reviewed'];
+    altOn.checked = false; alt.box.hidden = true;
+    restored = true;
+    msg('The default statement (English only) is back in the form. Save to publish it.');
   };
 
   return h('div.card.stack.st-editor', {}, h('h2.section-title', { text: 'Accessibility' }),

@@ -6,7 +6,7 @@
 // settings part of an export / import (re-validated there).
 import { describe, it, expect, beforeAll } from 'vitest';
 import { owner, makeUser, fetchJson, proofFor } from './helpers.js';
-import { A11Y_KEYS, A11Y_MAX_TOTAL } from '../public/js/a11ystatement.js';
+import { A11Y_KEYS, A11Y_MAX_TOTAL, A11Y_DEFAULTS, publicStatement } from '../public/js/a11ystatement.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -143,5 +143,21 @@ describe('accessibility statement settings', () => {
     const r = await importDoc(d, false);
     expect(r.status).toBe(409);
     expect((await config()).statements[1].title).toBe('بيان إمكانية الوصول');
+  });
+
+  it('the owner can restore the default (English only), keeping the contact and coordinator', async () => {
+    // What "Restore the default statement" then "Save" sends: every statement
+    // field at its default, the second language off and cleared.
+    expect((await save({ 'a11y.contact': 'access@example.test', 'a11y.coordinator': 'Dana' })).status).toBe(200);
+    expect((await config()).statements).toHaveLength(2); // edited, with a second language (above)
+    const restore = Object.fromEntries(A11Y_KEYS.filter((k) => k !== 'a11y.contact' && k !== 'a11y.coordinator').map((k) => [k, A11Y_DEFAULTS[k]]));
+    const u = await makeUser('a11y-restorer');
+    expect((await save(restore, u.cookie)).status).toBe(403);
+    const r = await save(restore);
+    expect(r.status).toBe(200);
+    const s = (await r.json()).settings;
+    for (const k of Object.keys(restore)) expect(s[k], k).toBe(A11Y_DEFAULTS[k]);
+    expect(await config()).toEqual(publicStatement({ ...A11Y_DEFAULTS, 'a11y.contact': 'access@example.test', 'a11y.coordinator': 'Dana' }));
+    expect(JSON.stringify(await config())).not.toMatch(/[\u0590-\u05ff\u0600-\u06ff]/);
   });
 });
