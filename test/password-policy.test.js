@@ -19,7 +19,10 @@ describe('password policy', () => {
     expect((await limits(v.id, { pwMinLength: 20, pwSymbol: true })).status).toBe(200);
     expect(await policy(v.cookie)).toMatchObject({ pwMinLength: 20, pwDigit: true, pwSymbol: true });
     expect(await policy(oc)).toEqual({ pwMinLength: 12, pwUpper: false, pwLower: false, pwDigit: false, pwSymbol: false });
-    for (const bad of [{ pwMinLength: 11 }, { pwMinLength: 129 }, { pwMinLength: null }, { pwUpper: 'yes' }]) {
+    // Any minimum from 1 is accepted (below the default of 12 too).
+    expect((await limits('global', { pwMinLength: 4 })).status).toBe(200);
+    expect(await policy(u.cookie)).toMatchObject({ pwMinLength: 4 });
+    for (const bad of [{ pwMinLength: 0 }, { pwMinLength: 129 }, { pwMinLength: null }, { pwUpper: 'yes' }]) {
       expect((await limits('global', bad)).status).toBe(400);
     }
     // The Default role always holds a value: "inherit" is refused there; set the defaults back.

@@ -212,6 +212,11 @@ forms automated attacks target: login, a signed-in password change (Account) and
 anonymous share. Setup, admin password resets, recipients opening links, file chunks and
 API keys are never challenged.
 
+- **Client side** (`public/js/turnstile.js`). The protected buttons (log in, sign in with a
+  passkey, change password, create an anonymous share) stay disabled until the widget has issued
+  a token, and again after each token is used (one token per call) until the next one arrives; if
+  the widget cannot load they stay disabled and the page says why. This is a usability guard:
+  the server-side check below is what enforces it.
 - **Server-side verification** (`src/lib/turnstile.js`). Each protected call must carry
   `X-Secbin-Turnstile`, which is redeemed with Cloudflare's siteverify. The call passes only
   when the token:
@@ -554,7 +559,9 @@ codes as safe as the password.
 - An export can hold password **verifiers** (enough to test guesses offline) and the whole
   configuration, so it exists only encrypted: the server builds the plaintext document for the
   signed-in owner, and the browser encrypts it before saving (`public/js/exportcrypt.js`:
-  passphrase ≥ 12 characters → Argon2id m = 64 MiB, t = 3 → AES-256-GCM, with the fixed KDF
+  any passphrase the owner chooses, empty included (no length rule: its strength, and so how
+  well the verifiers inside resist an offline guess, is the owner's responsibility; with none,
+  anyone who gets the file can read it, and the export form says so) → Argon2id m = 64 MiB, t = 3 → AES-256-GCM, with the fixed KDF
   parameters, salt and IV bound into the AAD). A crafted file cannot ask for more KDF work.
 - Export and import both require the **owner's password again** (step-up): a stolen session
   cookie alone cannot exfiltrate verifiers or replace credentials. Wrong passwords count like
@@ -653,7 +660,7 @@ codes as safe as the password.
   together. Pair it with Cloudflare WAF / rate-limiting rules (a Turnstile challenge is planned).
 - **Notice:** the composer shows an admin-editable notice (`public.notice`,
   `public.noticeText`, on by default) explaining the identifier; the wording is yours to approve.
-- **Administration:** Admin → Public access lists trackers (hash prefix, created, last seen,
+- **Administration:** the Public role (Admin → Roles) lists trackers (hash prefix, created, last seen,
   uses, blocked reason) and can unblock, block or forget one (forgetting also clears its
   counters). Conflicts and admin actions are audited.
 - File uploads by the public account (when the admin enables files) use the same upload-token

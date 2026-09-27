@@ -57,6 +57,8 @@ const LIMIT_UI = [
   ['passkeysMax', 'Passkeys: at most', 'int', { nullable: false }],
   ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
   ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
+  ['fileGrantSec', 'File shares: recipients may download for this long after opening', 'dur', { nullable: false }],
+  ['filePendingSec', 'File shares: an unfinished upload is discarded after', 'dur', { nullable: false }],
 ];
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
@@ -112,7 +114,7 @@ async function refreshOverview() {
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
-  ({ users: renderUsers, roles: renderRoles, shares: () => renderShares(panel('shares')), settings: renderSettings, viewer: renderViewer, security: renderSecurity, public: renderPublic, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
+  ({ users: renderUsers, roles: renderRoles, shares: () => renderShares(panel('shares')), settings: renderSettings, security: renderSecurity, public: renderPublic, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────
@@ -337,7 +339,7 @@ async function renderUsers() {
   await refreshOverview(); // the global password policy may have just changed
   const [data, roleList] = await Promise.all([guard(() => admin.users()), guard(() => admin.roles())]);
   if (!data) return;
-  const assignable = (roleList?.roles || []).filter((r) => !r.locked);
+  const assignable = (roleList?.roles || []).filter((r) => !r.locked && !r.fixed);
   const user = h('input.input', { placeholder: 'username', maxlength: '64', 'aria-label': 'New username', autocomplete: 'off' });
   // The owner may set any password; the policy applies when users change their own.
   const newPolicy = overview?.defaults?.inherited;
@@ -357,7 +359,7 @@ async function renderUsers() {
     h('p.mono.muted', { text: `You may set any password. When users change their own, it must follow their policy (${describePolicy(newPolicy)}), checked in the browser only: the server never sees passwords.` })));
 
   const body = h('tbody');
-  // The built-in public account is managed under Public access, and the owner
+  // The built-in public account is managed on the Public role, and the owner
   // (you) on Account: neither is listed here.
   for (const u of data.users.filter((x) => x.role !== 'public' && x.role !== 'owner')) {
     const actions = h('div.btn-row.row-actions');
@@ -506,7 +508,11 @@ async function renderRoles(openId = null) {
   for (const r of data.roles) {
     const actions = h('div.btn-row.row-actions');
     if (r.locked) {
-      actions.appendChild(h('span.mono.muted', { text: 'locked: everything allowed, no limits; the owner only' }));
+      actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', on: { click: () => openRole(r.id) } }));
+      actions.appendChild(h('span.mono.muted', { text: 'everything allowed, no limits; the owner only' }));
+    } else if (r.fixed) {
+      actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', on: { click: () => openRole(r.id) } }));
+      actions.appendChild(h('span.mono.muted', { text: 'anonymous visitors only; cannot be renamed, deleted or assigned' }));
     } else {
       actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', on: { click: () => openRole(r.id) } }));
       const dup = h('button.btn', { type: 'button', text: 'Duplicate' });
@@ -524,13 +530,116 @@ async function renderRoles(openId = null) {
       }
     }
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'Role' }, text: r.name }),
-      h('td.mono', { dataset: { label: 'Users' }, text: String(r.users) }),
+      h('td.mono', { dataset: { label: 'Users' }, text: r.fixed ? 'anonymous' : String(r.users) }),
       h('td.mono', { dataset: { label: 'Kind' }, text: r.locked ? 'built in, locked' : r.builtin ? 'built in' : 'custom' }),
       h('td.cell-actions', {}, actions)));
   }
   p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Role', 'Users', 'Kind', ''].map((t) => h('th', { text: t })))), body)));
   p.appendChild(h('div', { id: 'role-detail' }));
   if (openId) openRole(openId);
+}
+
+/**
+ * The Owner role: everything is allowed with no limits and that cannot
+ * change; only the owner's own session timeouts and file-share windows can
+ * (they are server settings, since the owner has no role options).
+ */
+async function ownerRole(box) {
+  await refreshOverview();
+  if (!overview) return;
+  const s = overview.settings;
+  const defs = overview.defaults.settings;
+  const fields = [];
+  const dur = (key, label) => {
+    const c = durationInput(s[key]);
+    fields.push([key, label, () => c.read()]);
+    return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono.muted', { text: `default: ${limitText('dur', defs[key])}` }));
+  };
+  const save = h('button.cta', { type: 'button', text: 'Save' });
+  box.append(h('h2.section-title', { text: 'Owner role' }),
+    h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
+    h('div.card.stack', {},
+      h('h3.field-label', { text: 'Your sessions' }), dur('session.idleSec', 'Sign out after being idle for'), dur('session.absSec', 'Sign out in any case after'),
+      h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
+      h('div.btn-row', {}, save)));
+  save.onclick = async () => {
+    const patch = {};
+    for (const [k, label, read] of fields) {
+      const v = read();
+      if (!Number.isFinite(v)) return msg(`Enter a value for "${label}".`, true);
+      patch[k] = v;
+    }
+    await guard(() => admin.settings(patch), 'Owner role saved.');
+  };
+}
+
+/**
+ * The Public role: the built-in public (anonymous) account's capabilities,
+ * limits, quotas and viewer rules, and how anonymous senders are counted.
+ * Cannot be renamed, deleted or given to a user. The on/off switch stays
+ * under Public access.
+ */
+async function publicRole(box, reopen) {
+  await refreshOverview();
+  if (!overview) return;
+  const s = overview.settings;
+  const data = await guard(() => admin.publicAccess());
+  const detail = await guard(() => admin.user(PUBLIC_ID));
+  if (!data || !detail) return;
+  box.append(h('h2.section-title', { text: 'Public role' }),
+    h('p.mono.muted', { text: `The built-in public account's role: what anonymous senders on the home page may do. It cannot be renamed, deleted or given to a user. Anonymous sharing is ${s['public.enabled'] ? 'on' : 'off'} (Public access).` }));
+
+  const radios = TRACKING.map(([v, label, hint]) => {
+    const r = h('input', { type: 'radio', name: 'public-tracking', value: v, checked: s['public.tracking'] === v });
+    return h('label.radio-opt', {}, r, h('span', {}, h('strong', { text: label }), h('span.mono.muted.block', { text: hint })));
+  });
+  const notice = h('input', { type: 'checkbox', checked: s['public.notice'] });
+  const noticeText = h('textarea.input', { rows: '3', maxlength: '1000', 'aria-label': 'Notice text' });
+  noticeText.value = s['public.noticeText'];
+  const perIp = numberInput(s['public.newTrackersPerIp'], { label: 'New anonymous identifiers per network' });
+  const perWin = durationInput(s['public.newTrackersWindowSec']);
+  const idle = durationInput(s['public.trackerIdleSec']);
+  const save = h('button.cta', { type: 'button', text: 'Save tracking and notice' });
+  save.onclick = async () => {
+    const mode = radios.map((l) => l.querySelector('input')).find((r) => r.checked)?.value || 'tracker';
+    const patch = {
+      'public.tracking': mode, 'public.notice': notice.checked, 'public.noticeText': noticeText.value,
+      'public.newTrackersPerIp': perIp.read(), 'public.newTrackersWindowSec': perWin.read(), 'public.trackerIdleSec': idle.read(),
+    };
+    for (const [k, v] of Object.entries(patch)) if (typeof v === 'number' && !Number.isFinite(v)) return msg(`Enter a value for ${k}.`, true);
+    if (await guard(() => admin.settings(patch), 'Public role saved.')) reopen();
+  };
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Counting anonymous senders' }),
+    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the mode and the notice.' }),
+    h('fieldset.range', {}, h('legend', { text: 'How anonymous creators are counted' }), ...radios),
+    h('label.inline', {}, notice, ' Show a notice on the public composer'),
+    h('label.field', {}, h('span.field-label', { text: 'Notice text' }), noticeText),
+    h('div.limit-row', {}, h('span.field-label', { text: 'New senders (browser ids) per network' }), perIp, h('span.field-label', { text: 'per' }), perWin),
+    h('div.limit-row', {}, h('span.field-label', { text: 'Forget idle browser ids after' }), idle),
+    h('p.muted', { text: 'A browser id is stored only when it first creates a share; that is when the per-network limit is spent. Clearing browser storage gives a new id, so tracker mode allows up to (new senders × quota) shares per network per window.' }),
+    h('div.btn-row', {}, save)));
+
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities, limits, viewer, file shares' }),
+    limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, inherited: overview.defaults.inherited, onSaved: reopen, omit: PUBLIC_OMIT })));
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas (counted per anonymous sender, in addition to global quotas)' }), quotasEditor(PUBLIC_ID, detail.quotas)));
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Viewer rules (used when "Use this role\'s own viewer rules" is yes)' }), rulesEditor(PUBLIC_ID, detail.viewerRules)));
+
+  const t = data.trackers;
+  const body = h('tbody');
+  for (const r of t.rows) {
+    const act = (action, label, cls = 'btn') => h(`button.${cls}`, { type: 'button', text: label, on: { click: async () => { if (await guard(() => admin.tracker(r.id, action), `Browser id ${action === 'forget' ? 'forgotten' : `${action}ed`}.`)) reopen(); } } });
+    body.appendChild(h('tr', {},
+      h('td.mono', { dataset: { label: 'Id' }, text: r.id }),
+      h('td.mono', { dataset: { label: 'First seen' }, text: formatDate(r.created) }),
+      h('td.mono', { dataset: { label: 'Last seen' }, text: formatDate(r.last_seen) }),
+      h('td.mono', { dataset: { label: 'Shares' }, text: String(r.uses) }),
+      h('td', { dataset: { label: 'Status' } }, r.blocked ? h('span.pill.bad', { text: r.reason === 'conflict' ? 'blocked: conflicting copies' : 'blocked' }) : h('span.pill.ok', { text: 'ok' })),
+      h('td.cell-actions', {}, h('div.btn-row', {}, r.blocked ? act('unblock', 'Unblock') : act('block', 'Block', 'btn.danger'), act('forget', 'Forget', 'btn')))));
+  }
+  box.appendChild(h('div.card.stack', {},
+    h('h3.field-label', { text: `Anonymous browser ids (${t.total}, ${t.blocked} blocked)` }),
+    h('p.mono.muted', { text: 'Ids are shown as a prefix of their keyed hash; the ids themselves are not stored. Forgetting one also resets its quota usage.' }),
+    t.rows.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Id', 'First seen', 'Last seen', 'Shares', 'Status', ''].map((x) => h('th', { text: x })))), body)) : h('p.mono.muted', { text: 'None yet.' })));
 }
 
 const uniqueName = (base, roles) => {
@@ -544,7 +653,11 @@ const uniqueName = (base, roles) => {
 async function openRole(id, { scroll = true } = {}) {
   const box = clear($('#role-detail'));
   const reopen = () => openRole(id, { scroll: false });
-  if (id === 'default') {
+  if (id === 'owner') {
+    await ownerRole(box);
+  } else if (id === 'public') {
+    await publicRole(box, reopen);
+  } else if (id === 'default') {
     await refreshOverview();
     box.appendChild(h('h2.section-title', { text: 'Default role' }));
     box.appendChild(h('p.mono.muted', { text: 'Applies to every user without another role, and is what other roles follow for the options they leave on "same as Default". Every option has a value here. The owner is never affected.' }));
@@ -598,14 +711,9 @@ async function renderSettings() {
   const dflt = (text) => h('span.mono.muted', { text: `default: ${text}` });
   const dur = (key, label) => { const c = durationInput(s[key]); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(limitText('dur', defs[key]))); };
   const int = (key, label) => { const c = numberInput(s[key], { label }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(String(defs[key]))); };
-  const mib = (key, label, max) => { const c = numberInput(s[key], { step: 1, scale: MiB, label: `${label} (MiB)` }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono', { text: `MiB (max ${max})` }), dflt(formatBytes(defs[key]))); };
   const scopeRule = (scope, label) => h('div.card.stack', {}, h('h3.field-label', { text: label }),
     int(`guard.${scope}.max`, 'Failures allowed'), dur(`guard.${scope}.windowSec`, 'Within'), dur(`guard.${scope}.blockSec`, 'Then block the IP for'));
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Your sessions (owner)' }),
-    h('p.mono.muted', { text: 'Session timeouts for everyone else are set per role (Admin → Roles).' }),
-    dur('session.idleSec', 'Idle timeout'), dur('session.absSec', 'Absolute timeout')));
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'File shares' }),
-    mib('files.maxShareBytes', 'Max share size (all files)', '2048'), dur('files.grantSec', 'Download window after opening'), dur('files.pendingSec', 'Unfinished upload deadline')));
+  p.appendChild(h('p.mono.muted', { text: 'Server-wide settings only. What accounts may do (sessions, file shares, the viewer, passkeys, password policy, quotas) is set per role under Roles; the owner\'s own session timeouts and file-share windows are on the Owner role, and anonymous sharing on the Public role.' }));
   p.appendChild(h('div.stack', {}, h('h2.section-title', { text: 'Brute-force protection (per IP)' }),
     h('p.mono.muted', { text: 'Counts failures per network address (IPv6 per the tracking prefix below) and blocks that address for a while, whoever it is and whichever account it tries: it stops one source from guessing. Account lockout (below) is the other half: it counts wrong passwords per account, from any address, and locks only that account: it stops many sources guessing one account.' }),
     scopeRule('login', 'Login'), scopeRule('setup', 'Setup'),
@@ -657,83 +765,16 @@ async function renderPublic() {
   const p = clear(panel('public'));
   await refreshOverview();
   if (!overview) return;
-  const s = overview.settings;
-  const data = await guard(() => admin.publicAccess());
-  const detail = await guard(() => admin.user(PUBLIC_ID));
-  if (!data || !detail) return;
-
-  const on = h('input', { type: 'checkbox', checked: s['public.enabled'] });
-  const radios = TRACKING.map(([v, label, hint]) => {
-    const r = h('input', { type: 'radio', name: 'public-tracking', value: v, checked: s['public.tracking'] === v });
-    return h('label.radio-opt', {}, r, h('span', {}, h('strong', { text: label }), h('span.mono.muted.block', { text: hint })));
-  });
-  const notice = h('input', { type: 'checkbox', checked: s['public.notice'] });
-  const noticeText = h('textarea.input', { rows: '3', maxlength: '1000', 'aria-label': 'Notice text' });
-  noticeText.value = s['public.noticeText'];
-  const perIp = numberInput(s['public.newTrackersPerIp'], { label: 'New anonymous identifiers per network' });
-  const perWin = durationInput(s['public.newTrackersWindowSec']);
-  const idle = durationInput(s['public.trackerIdleSec']);
-  const save = h('button.cta', { type: 'button', text: 'Save public access' });
-  save.onclick = async () => {
-    const mode = radios.map((l) => l.querySelector('input')).find((r) => r.checked)?.value || 'tracker';
-    const patch = {
-      'public.enabled': on.checked, 'public.tracking': mode, 'public.notice': notice.checked, 'public.noticeText': noticeText.value,
-      'public.newTrackersPerIp': perIp.read(), 'public.newTrackersWindowSec': perWin.read(), 'public.trackerIdleSec': idle.read(),
-    };
-    for (const [k, v] of Object.entries(patch)) if (typeof v === 'number' && !Number.isFinite(v)) return msg(`Enter a value for ${k}.`, true);
-    const ok = await guard(() => admin.settings(patch), 'Public access saved.');
-    if (ok) renderPublic();
-  };
-
+  const on = h('input', { type: 'checkbox', checked: overview.settings['public.enabled'] });
+  const save = h('button.cta', { type: 'button', text: 'Save' });
+  save.onclick = () => guard(() => admin.settings({ 'public.enabled': on.checked }), on.checked ? 'Anonymous sharing is on.' : 'Anonymous sharing is off.');
+  const toRole = h('button.btn', { type: 'button', text: 'Edit the Public role', on: { click: () => { selectTab('roles'); renderRoles('public'); } } });
   p.appendChild(h('div.card.stack', {},
     h('h2.section-title', { text: 'Public (anonymous) sharing' }),
-    h('p.subtitle', { text: 'When on, the home page offers the composer to anyone, as the built-in public account: no password, no dashboard, no API keys. Its capabilities, limits and quotas are set below; quotas are counted per anonymous creator.' }),
-    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the mode and the notice before turning this on.' }),
+    h('p.subtitle', { text: 'When on, the home page offers the composer to anyone, as the built-in public account: no password, no dashboard, no API keys. What anonymous senders may do, how they are counted, the notice they see and their browser ids are set on the Public role (Roles).' }),
+    h('p.type-hint.warn', { role: 'note', text: 'Tracking anonymous visitors (cookies, browser storage, network addresses) is regulated (GDPR / ePrivacy and others). Have your Legal and Compliance team approve the Public role\'s tracking mode and notice before turning this on.' }),
     h('label.inline', {}, on, ' Allow anonymous sharing'),
-    h('fieldset.range', {}, h('legend', { text: 'How anonymous creators are counted' }), ...radios),
-    h('label.inline', {}, notice, ' Show a notice on the public composer'),
-    h('label.field', {}, h('span.field-label', { text: 'Notice text' }), noticeText),
-    h('div.limit-row', {}, h('span.field-label', { text: 'New senders (browser ids) per network' }), perIp, h('span.field-label', { text: 'per' }), perWin),
-    h('div.limit-row', {}, h('span.field-label', { text: 'Forget idle browser ids after' }), idle),
-    h('p.muted', { text: 'A browser id is stored only when it first creates a share; that is when the per-network limit is spent. Clearing browser storage gives a new id, so tracker mode allows up to (new senders × quota) shares per network per window.' }),
-    h('div.btn-row', {}, save)));
-
-  p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public account: capabilities & limits' }),
-    limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, inherited: overview.defaults.inherited, onSaved: renderPublic, omit: PUBLIC_OMIT })));
-  p.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Public quotas (counted per anonymous creator, in addition to global quotas)' }), quotasEditor(PUBLIC_ID, detail.quotas)));
-
-  const t = data.trackers;
-  const body = h('tbody');
-  for (const r of t.rows) {
-    const act = (action, label, cls = 'btn') => h(`button.${cls}`, { type: 'button', text: label, on: { click: async () => { if (await guard(() => admin.tracker(r.id, action), `Browser id ${action === 'forget' ? 'forgotten' : `${action}ed`}.`)) renderPublic(); } } });
-    body.appendChild(h('tr', {},
-      h('td.mono', { dataset: { label: 'Id' }, text: r.id }),
-      h('td.mono', { dataset: { label: 'First seen' }, text: formatDate(r.created) }),
-      h('td.mono', { dataset: { label: 'Last seen' }, text: formatDate(r.last_seen) }),
-      h('td.mono', { dataset: { label: 'Shares' }, text: String(r.uses) }),
-      h('td', { dataset: { label: 'Status' } }, r.blocked ? h('span.pill.bad', { text: r.reason === 'conflict' ? 'blocked: conflicting copies' : 'blocked' }) : h('span.pill.ok', { text: 'ok' })),
-      h('td.cell-actions', {}, h('div.btn-row', {}, r.blocked ? act('unblock', 'Unblock') : act('block', 'Block', 'btn.danger'), act('forget', 'Forget', 'btn')))));
-  }
-  p.appendChild(h('div.card.stack', {},
-    h('h3.field-label', { text: `Anonymous browser ids (${t.total}, ${t.blocked} blocked)` }),
-    h('p.mono.muted', { text: 'Ids are shown as a prefix of their keyed hash; the ids themselves are not stored. Forgetting one also resets its quota usage.' }),
-    t.rows.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Id', 'First seen', 'Last seen', 'Shares', 'Status', ''].map((x) => h('th', { text: x })))), body)) : h('p.mono.muted', { text: 'None yet.' })));
-}
-
-// ── viewer ───────────────────────────────────────────────────────────────────
-async function renderViewer() {
-  const p = clear(panel('viewer'));
-  await refreshOverview();
-  if (!overview) return;
-  const s = overview.settings;
-  const on = h('input', { type: 'checkbox', checked: s['viewer.enabled'], id: 'viewer-enabled' });
-  const save = h('button.btn', { type: 'button', text: 'Save' });
-  save.onclick = () => guard(() => admin.settings({ 'viewer.enabled': on.checked }), 'Viewer settings saved.');
-  const toRoles = h('button.btn', { type: 'button', text: 'Roles', on: { click: () => { selectTab('roles'); renderRoles('default'); } } });
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'In-browser viewer' }),
-    h('label.inline', {}, on, ' Enabled for the whole server (turning it off takes effect for existing links immediately)'),
-    h('p.mono.muted', { text: 'Who may use it, the largest file it opens and its rules are set per role (Admin → Roles; Default for everyone without another role). The sender also opts in per share.' }),
-    h('div.btn-row', {}, save, toRoles)));
+    h('div.btn-row', {}, save, toRole)));
 }
 
 // ── security ─────────────────────────────────────────────────────────────────

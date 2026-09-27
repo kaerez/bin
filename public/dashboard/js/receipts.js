@@ -6,7 +6,7 @@
 import { h, formatDate, friendlyError } from '../../js/common.js';
 
 const COLUMNS = [
-  [null, 'When', (r) => formatDate(r.ts)],
+  [null, 'Opened at', (r) => formatDate(r.ts)],
   ['receiptIp', 'Address', (r) => r.ip || '—'],
   ['receiptLocation', 'Location', (r) => [r.city, r.region, r.country].filter(Boolean).join(', ') || '—'],
   ['receiptBrowser', 'Browser', (r) => [r.browser, r.browser_ver].filter(Boolean).join(' ') || '—'],

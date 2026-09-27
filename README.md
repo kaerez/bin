@@ -63,7 +63,7 @@ flowchart TD
 | Safe in-browser viewer | Optional, admin-governed: text, Markdown, code, images, PDF (hardened pdf.js, no PDF scripting), audio/video. Nothing executes. |
 | Accounts | Built-in login; one owner/admin; users with one role each (capabilities, limits, quotas, password policy, passkeys, sessions) and API keys. |
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, label shares, and see **read receipts** — every open with its time (and, if the admin allows, the opener's address, location, browser, system and languages). |
-| Admin | Users, impersonation ("log in as"), password resets, limits, quotas, session timeouts, file-size caps, viewer policy, brute-force rules, IP allow/block rules, audit log. |
+| Admin | Users, roles (limits, quotas, session timeouts, file-size caps, viewer policy), impersonation ("log in as"), password resets, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
 | Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. Needs Legal/Compliance review before use — see SECURITY.md. |
 | CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
@@ -144,8 +144,8 @@ working.
   (HS256, `SIG`) and then encrypted (A256GCM, `ENC`). Idle and absolute timeouts are set by the
   owner. Rotating `SIG`/`ENC` signs everyone out.
 - **Passwords** are stretched in the browser with Argon2id; the server only stores a hash of the
-  result. The **password policy** (minimum length 12–128, and optionally an upper-case letter, a
-  lower-case letter, a digit and a symbol) is set globally and per user, shown next to every
+  result. The **password policy** (minimum length 1–128, 12 by default, and optionally an
+  upper-case letter, a lower-case letter, a digit and a symbol) is set per role, shown next to every
   password field and **enforced by the browser only**: the server never sees a password, so it
   cannot check one. The owner always has the built-in policy (12 characters).
 - **Users** (owner only): create, disable, delete (optionally revoking their shares), reset a
@@ -157,15 +157,18 @@ working.
   notes/files on or off, max views, unlimited views allowed, max expiry, max share size, max
   single-file size, max files per share, the in-browser viewer and its largest file, API keys
   (on/off, max count or no limit), link rules, file types, read-receipt details, log retention,
-  the password policy, passkeys (mode and how many), session timeouts, quotas and viewer rules.
+  the password policy, passkeys (mode and how many), session timeouts, the file-share download
+  window and upload deadline, quotas and viewer rules. Turning the viewer off in a role takes
+  effect on that role's existing links at once (each open carries the sender's current policy).
   The Default role holds a value for everything; other roles follow it for whatever they leave
-  unset. The locked Owner role never restricts the owner (the owner's session timeouts and
-  per-IP protection still apply).
+  unset. The locked Owner role never restricts the owner; only the owner's own session timeouts
+  and file-share windows are set there (per-IP protection still applies). The built-in Public
+  role holds the public account's options (below); it cannot be renamed, deleted or assigned.
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
   *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).
-- **Settings** — session timeouts, file-share size cap (default 100 MiB, max 2 GiB), download
-  window, upload deadline, viewer policy, brute-force rules, lockout rules.
+- **Settings** — server-wide only: brute-force rules, lockout rules, log retention and the
+  accessibility statement. Everything an account may do is on its role.
 - **Security** — current blocks and tracked IPs per scope, manual allow/block rules for IPv4/IPv6
   addresses, CIDR blocks and ranges such as `10.0.0.5-10.0.0.20` (allow beats block).
 - **Import / export** — the owner exports the system configuration and/or some or all users
@@ -178,8 +181,10 @@ working.
   account's limits and quotas (seeded conservatively: notes only, ≤ 10 views, ≤ 7 days, 10 per
   day). Limits are counted per browser (a random identifier kept in a cookie, the ETag cache,
   localStorage and IndexedDB, self-healing; unresolvable conflicts are blocked), per network, or
-  both (permissive or restrictive). The composer shows an editable notice. **Get Legal /
-  Compliance sign-off first** (ePrivacy/GDPR); see [SECURITY.md](./SECURITY.md).
+  both (permissive or restrictive). The composer shows an editable notice. Admin → Public access
+  only turns it on or off; the limits, quotas, viewer rules, counting mode, notice and browser ids
+  are on the Public role (Admin → Roles). **Get Legal / Compliance sign-off first**
+  (ePrivacy/GDPR); see [SECURITY.md](./SECURITY.md).
 - **Activity log** — kept for at most a set age and number of entries (defaults 365 days and
   500 000), with per-user limits; entries about the owner are kept until cleared. The owner can
   clear everything, one account's entries or entries older than a date (password required; no
@@ -189,7 +194,8 @@ working.
   passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
   none. The admin can remove a user's passkeys if they lose them all.
 - **Human check (optional):** Cloudflare Turnstile on login, password changes and anonymous
-  share creation when `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET` are both set (see Deploying).
+  share creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
+  disabled until the check has passed, and again after each use until the next one passes.
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup
   only). Default off.

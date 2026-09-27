@@ -7,7 +7,7 @@
 
 import { admin, ApiError } from '../../js/api.js';
 import { loginProof } from '../../js/pwauth.js';
-import { sealExport, openExport, ExportCryptError, MIN_PASSPHRASE } from '../../js/exportcrypt.js';
+import { sealExport, openExport, ExportCryptError } from '../../js/exportcrypt.js';
 import { h, clear, showMsg, formatDate, friendlyError } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 
@@ -51,6 +51,11 @@ function exportCard(users, profile) {
   const userChecks = USER_PARTS.map(([k, label, note]) => ({ k, ...check(label, k === 'config', note) }));
   const pass1 = pw('Export passphrase', 'new-password');
   const pass2 = pw('Repeat export passphrase', 'new-password');
+  // An empty passphrase is allowed, but then the encryption protects nothing.
+  const noPass = h('p.type-hint.warn', { role: 'note', text: 'No passphrase: the file is still encrypted, but with a key anyone can derive, so anyone who gets it can read the password verifiers (enough to test guesses offline), API-key hashes, passkeys, recovery-code hashes and the Turnstile secret in it.' });
+  const syncNoPass = () => { noPass.hidden = pass1.value !== ''; };
+  pass1.addEventListener('input', syncNoPass);
+  syncNoPass();
   const mine = pw('Your password', 'current-password');
   const msg = h('p.msg', { role: 'status', hidden: true });
   const go = h('button.btn', { type: 'button', text: 'Encrypt and download' });
@@ -63,7 +68,6 @@ function exportCard(users, profile) {
     if (!anySys && (who === 'all' ? users.length === 0 : who.length === 0)) return showMsg(msg, 'Choose some system parts and/or some users.');
     if (who !== 'all' && scope.value === 'some' && !who.length) return showMsg(msg, 'Select at least one user.');
     if ((who === 'all' || who.length) && !Object.values(parts).some(Boolean)) return showMsg(msg, 'Choose what to export for the users.');
-    if (pass1.value.length < MIN_PASSPHRASE) return showMsg(msg, `Use an export passphrase of at least ${MIN_PASSPHRASE} characters.`);
     if (pass1.value !== pass2.value) return showMsg(msg, 'The two passphrases differ.');
     if (!mine.value) return showMsg(msg, 'Enter your password to confirm.');
     go.disabled = true;
@@ -73,9 +77,11 @@ function exportCard(users, profile) {
       const { document } = await admin.exportData({ current, system: anySys ? system : false, users: who, ...parts });
       const text = await sealExport(document, pass1.value);
       download(text, `secbin-export-${location.hostname}-${new Date().toISOString().slice(0, 10)}.json`);
-      showMsg(msg, `Exported ${document.system ? 'the system configuration and ' : ''}${document.users.length} user${document.users.length === 1 ? '' : 's'}. Keep the file and its passphrase apart.`, false);
+      const what = `Exported ${document.system ? 'the system configuration and ' : ''}${document.users.length} user${document.users.length === 1 ? '' : 's'}.`;
+      showMsg(msg, pass1.value ? `${what} Keep the file and its passphrase apart.` : `${what} No passphrase: anyone with the file can read it.`, false);
       toast('Export saved.');
       pass1.value = pass2.value = mine.value = '';
+      syncNoPass();
     } catch (e) {
       showMsg(msg, e instanceof ExportCryptError ? e.message : friendlyError(e));
       toast(e instanceof ExportCryptError ? e.message : friendlyError(e), { error: true });
@@ -90,7 +96,7 @@ function exportCard(users, profile) {
     h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
     h('div.toolbar', {}, h('span.field-label', { text: 'Users' }), scope), pick,
     h('fieldset.range', {}, h('legend', { text: 'For each exported user' }), ...userChecks.map((c) => c.el)),
-    h('div.toolbar', {}, field('Export passphrase', pass1, `at least ${MIN_PASSPHRASE} characters`), field('Repeat', pass2)),
+    h('div.toolbar', {}, field('Export passphrase (optional)', pass1), field('Repeat', pass2)), noPass,
     field('Your password (confirms it is you)', mine),
     h('div.btn-row', {}, go), msg);
 }
