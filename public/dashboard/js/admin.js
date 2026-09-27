@@ -978,7 +978,7 @@ function statementEditor(s, defs) {
   };
 
   return h('div.card.stack.st-editor', {}, h('h2.section-title', { text: 'Accessibility' }),
-    h('p.mono.muted', {}, 'The public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), '. A way to report a problem is required; list a coordinator only if the law requires you to appoint one (in Israel, from 25 employees).'),
+    h('p.mono.muted', {}, 'The public ', h('a', { href: '/accessibility/', text: 'accessibility statement' }), '. Give a way to report a problem; list a coordinator if you have one.'),
     h('p.mono.muted', { id: HELP, text: 'Plain text only (no HTML or formatting). In paragraphs, each line is a paragraph; in lists, each line is one item. Empty sections are left out.' }),
     field('How to report a problem (both languages)', contact),
     field('Accessibility coordinator (optional; both languages)', coord),

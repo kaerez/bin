@@ -12,6 +12,7 @@ import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib/turnstile.js';
 import { parseId } from '../lib/ids.js';
+import { MAX_SHARE_FILTER_USERS } from '../directory-do.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
 import { escrowRoute, adminSetUserKeys, syncCredentialWraps, destroyDrive, drivePasswordChanged } from './drive.js';
 
@@ -33,7 +34,7 @@ export function shareFilters(sp) {
     const n = Number(v);
     return Number.isSafeInteger(n) && n >= 0 ? n : null;
   };
-  const users = (sp.get('users') || '').split(',').map((u) => u.trim()).filter((u) => ID_RE.test(u)).slice(0, 100);
+  const users = (sp.get('users') || '').split(',').map((u) => u.trim()).filter((u) => ID_RE.test(u)).slice(0, MAX_SHARE_FILTER_USERS);
   const kind = SHARE_KINDS.includes(sp.get('kind')) ? sp.get('kind') : '';
   const status = SHARE_STATUSES.includes(sp.get('status')) ? sp.get('status') : '';
   const lockedRaw = sp.get('locked');
@@ -283,7 +284,7 @@ export async function handleAdmin(request, env, url) {
         // so the account is deleted only once nothing of its Drive is left;
         // on a failure the account stays and deleting it again retries.
         try {
-          await destroyDrive(env, dir, uid, me);
+          await destroyDrive(env, dir, uid, { id: me, adm: true }); // an admin action: never in the user's activity
         } catch (e) {
           if (e && e.status && e.status < 600) throw e; // e.g. 503 not_configured
           console.warn('secbin: drive not destroyed', e && e.message ? e.message : e);

@@ -350,11 +350,16 @@ async function setKeys(request, env, url, dir, a, pol, body) {
   const first = cur.wraps.length === 0;
   const handoffWrap = out.set.some((w) => w.kind === 'handoff');
   if (a.actor) {
-    // The owner acting as the user: only the Drive's first set-up, through the escrow.
-    const setupOnly = first && !cur.content && out.remove.length === 0 && out.driveSalt === undefined
-      && out.set.every((w) => w.kind === 'escrow' || w.kind === 'handoff') && out.set.some((w) => w.kind === 'escrow');
-    if (!setupOnly) {
-      return err(403, 'impersonating', 'While acting as a user you can open and use their Drive, and create it the first time, but never remove or replace their own keys.');
+    // The owner acting as the user: the Drive's first set-up through the
+    // escrow, or wraps added for credentials the owner gave the user (a new
+    // password once the server dropped the old wrap, new recovery codes, a
+    // new passkey) — never a wrap removed or replaced.
+    const setup = first && !cur.content && out.driveSalt === undefined && out.set.every((w) => w.kind === 'escrow' || w.kind === 'handoff') && out.set.some((w) => w.kind === 'escrow');
+    const addOnly = !first && out.set.every((w) => ['pw', 'recovery', 'passkey'].includes(w.kind) && !existing.has(wrapKey(w)))
+      && (out.driveSalt === undefined || (out.set.some((w) => w.kind === 'pw') && !existing.has('pw\npw')))
+      && out.escrowPin === undefined && out.handoffKey === undefined;
+    if (out.remove.length || jwk !== undefined || out.escrowPriv !== undefined || !(setup || (addOnly && out.set.length))) {
+      return err(403, 'impersonating', 'While acting as a user you can open and use their Drive, create it the first time and add keys for what you give them, but never remove or replace their own keys.');
     }
     if (handoffWrap !== (out.handoffKey !== undefined)) return invalid('The hand-over wrap and its key go together.');
   } else if (handoffWrap || out.handoffKey !== undefined) {
@@ -389,7 +394,11 @@ async function setKeys(request, env, url, dir, a, pol, body) {
     const e = await dir.setEscrowPub(uid, jwk);
     if (!e.ok) return fromDir(e);
   }
-  if (a.actor) await dir.driveImpLog(a.actor.id, uid, 'drive.setup', 'created while acting as the user (escrow wrap; the password wrap waits for the user)');
+  if (a.actor) {
+    await dir.driveImpLog(a.actor.id, uid, first ? 'drive.setup' : 'drive.keys_added', first
+      ? 'created while acting as the user (escrow wrap; the password wrap waits for the user)'
+      : `while acting as the user: ${out.set.map((w) => w.kind).join(', ')}`);
+  }
   return json({ ok: true });
 }
 
@@ -599,8 +608,8 @@ export async function destroyDrive(env, dir, uid, actor) {
  * The account's password changed (`reset`: set by the owner): the Drive's
  * `pw` wrap opens only with the old password now (docs/DRIVE.md §3).
  */
-export async function drivePasswordChanged(env, uid, { reset = false } = {}) {
+export async function drivePasswordChanged(env, uid, { reset = false, escrow = false } = {}) {
   const c = await directory(env).credentialRefs(uid);
   if (!c || !c.drive) return null;
-  return driveStub(env, uid).passwordChanged(uid, { reset });
+  return driveStub(env, uid).passwordChanged(uid, { reset, escrow });
 }

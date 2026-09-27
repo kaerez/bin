@@ -297,18 +297,35 @@ export async function unlockAtSignIn({ user, password, code, prfOutput, credenti
 }
 
 /**
- * Write wraps with DK known → true, or false when the Drive is off or locked.
- * Without DK in the tab, `password` (just confirmed by the server) may unlock it.
+ * The Drive key of `userId` for the Account page's upkeep, or null: the tab's
+ * key; without it, `password` (just confirmed by the server) may unlock it.
+ * The owner acting as the user (`impersonating`) uses that user's own tab
+ * slot, opened through the owner escrow when needed — never the owner's slot.
  */
-async function withKey(userId, fn, password) {
-  let st;
-  try { st = await loadState(); } catch { return false; }
-  if (!st.wraps.length) return false;
+async function upkeepKey(userId, st, { password, impersonating = false } = {}) {
+  if (impersonating) {
+    const kept = loadImpersonationKey(userId);
+    if (kept) return kept;
+    try {
+      return (await openAsOwner({ id: userId, role: 'user', impersonating: true }, st)).dk;
+    } catch {
+      return null;
+    }
+  }
   let dk = loadSessionKey(userId);
   if (!dk && password) {
     dk = await unlockWithPassword(password, st.driveSalt, st.wraps);
     if (dk) saveSessionKey(dk, userId);
   }
+  return dk;
+}
+
+/** Write wraps with DK known → true, or false when the Drive is off or locked. */
+async function withKey(userId, fn, opts) {
+  let st;
+  try { st = await loadState(); } catch { return false; }
+  if (!st.wraps.length) return false;
+  const dk = await upkeepKey(userId, st, opts);
   if (!dk) return false;
   await fn(dk, st);
   return true;
@@ -318,18 +335,17 @@ async function withKey(userId, fn, password) {
  * The password changed: a new `pw` wrap → 'ok' | 'off' (no Drive, or no key
  * yet) | 'locked' (no DK here). Without DK in the tab, the old password (when
  * the change was confirmed with it) unlocks it first. The server marked the
- * old wrap stale, so this needs no second confirmation.
+ * old wrap stale, so this needs no second confirmation. The owner acting as
+ * the user (`impersonating`): the server has dropped the old wrap (it opened
+ * only with the old password), so the new one is added, not overwritten.
  */
-export async function updatePasswordWrap({ userId, newPassword, oldPassword }) {
-  let dk = loadSessionKey(userId);
+export async function updatePasswordWrap({ userId, newPassword, oldPassword, impersonating = false }) {
   let st;
   try { st = await loadState(); } catch { return 'off'; }
   if (!st.wraps.length) return 'off';
-  if (!dk && oldPassword) {
-    dk = await unlockWithPassword(oldPassword, st.driveSalt, st.wraps);
-    if (dk) saveSessionKey(dk, userId);
-  }
+  const dk = await upkeepKey(userId, st, { password: oldPassword, impersonating });
   if (!dk) return 'locked';
+  if (impersonating && st.wraps.some((w) => w.kind === 'pw')) return 'kept';
   const { driveSalt, wrap } = await wrapPassword(dk, newPassword);
   await api.setKeys({ driveSalt, set: [wrap], remove: [] });
   return 'ok';
@@ -339,19 +355,19 @@ export async function updatePasswordWrap({ userId, newPassword, oldPassword }) {
  * New recovery codes: a wrap for each (the server has already dropped the old
  * codes' wraps). → false without DK in the tab.
  */
-export async function replaceRecoveryWraps(userId, codes, { password } = {}) {
+export async function replaceRecoveryWraps(userId, codes, { password, impersonating = false } = {}) {
   return withKey(userId, async (dk) => {
     const set = [];
     for (const c of codes) set.push(await wrapRecovery(dk, c, await recoveryRef(c)));
     if (set.length) await api.setKeys({ set });
-  }, password);
+  }, { password, impersonating });
 }
 
 /** A passkey with PRF output: add (or replace) its wrap. */
-export function addPasskeyWrap(userId, prfOutput, credentialId, { password } = {}) {
+export function addPasskeyWrap(userId, prfOutput, credentialId, { password, impersonating = false } = {}) {
   return withKey(userId, async (dk) => {
     await api.setKeys({ set: [await wrapPrf(dk, prfOutput, credentialId)], remove: [] });
-  }, password);
+  }, { password, impersonating });
 }
 
 /**

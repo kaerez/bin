@@ -420,9 +420,32 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   roles deleted any per-user overrides and wrote one audit entry with how many (`roles.migrated`),
   so an account that was restricted individually falls back to the Default role until it is
   given a role. Review Users → Role after upgrading (recommendation).
-- **Impersonation** ("log in as"): owner only, never nested, no admin access or key minting
-  while impersonating; each action is logged with the real actor (the user's own activity view
-  shows it as theirs).
+- **Impersonation** ("log in as"): the owner can do everything the user can, the Drive
+  included; it is invisible to the user (the user's activity shows the actions as theirs), and
+  the owner-only admin audit keeps the start, end and real actor.
+  - **Who:** the owner only, never nested, never of the owner's own account. The session is
+    bound to the owner's session version, so it ends when the owner's password changes or the
+    owner is disabled; it also ends when the user is disabled.
+  - **What stays out of reach:** the admin panel (every `/api/private/admin/*` route but
+    "Return to admin" refuses with `impersonating`), and with it minting keys for the owner.
+    Keys created on the user's Account page are the user's.
+  - **No confirmation:** changes to the account (password, username, passkeys, recovery codes,
+    the sign-in choice, API keys) need no password or passkey check: the owner's session is the
+    authority. The Directory accepts that only from the enabled owner impersonating another
+    account (`{ id, imp: true }`); anyone else still confirms.
+  - **Credentials:** a password the owner sets is exempt from the password policy (as in Admin →
+    Users); it ends the user's sessions, not the owner's. Passkeys can be added and removed and
+    recovery codes regenerated (the new codes are shown to the owner). Existing passkeys and
+    recovery codes are never removed unless asked: a password or username change keeps them, and
+    only the passkey removed goes (removing the last passkey drops the recovery codes and the
+    second step, as it does for the user).
+  - **Human check:** with Turnstile on, the Account page's widgets apply to the owner acting as
+    the user exactly as to the user (`password` and `account` tokens): the check runs in the
+    owner's browser, so nothing in the impersonation flow prevents it.
+  - **Logging:** the user's own activity shows each action taken while impersonating as the
+    user's own, with no actor, and does not list the start or end of an impersonation. The
+    owner-only admin audit records `impersonate.start`, `impersonate.end` and, for each action,
+    the owner as the real actor (`imp`).
 - **Admin share management**: the owner sees every user's shares and can change a share's label, views
   and expiry, revoke it, or **lock** it.
   - **Only metadata:** it never gains access to share content, which stays end-to-end
@@ -514,7 +537,8 @@ codes as safe as the password.
   passkey check answers a one-time `reauth` challenge (5 minutes, at most 3 pending per
   account), for that account only, with one of its own passkeys. Failed checks, by password or
   by passkey, count toward the same limit (every session ends after `lockout.max` within the
-  window) and against the IP login guard. None of these actions is possible while impersonating.
+  window) and against the IP login guard. The owner impersonating the account makes these
+  changes without a confirmation (see Impersonation above).
 - **The owner, for other users.** As with setting a user's password, the owner changes another
   user's API keys (create, change, revoke) and removes their passkeys without a confirmation.
   On the owner's own account the admin routes ask for it, as Account does. A passkey can only be

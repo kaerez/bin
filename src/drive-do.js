@@ -254,15 +254,18 @@ export class Drive extends DurableObject {
   /**
    * The account's password changed (`reset`: set by the owner). The `pw` wrap
    * still opens with the old password, which may be the compromised one: after
-   * a reset it goes at once when another wrap the user can open (a passkey or
-   * a recovery code) remains, else it is marked stale; after the user's own
-   * change it is marked stale (their browser writes the new one right away).
-   * A stale wrap may be replaced without the step-up, and goes when it is.
+   * a reset it goes at once when another wrap remains that can open the Drive
+   * (a passkey or a recovery code; with `escrow`, the owner acting as the
+   * user, whose browser adds the new wrap through the escrow, also the escrow
+   * wrap), else it is marked stale; after the user's own change it is marked
+   * stale (their browser writes the new one right away). A stale wrap may be
+   * replaced without the step-up, and goes when it is.
    */
-  async passwordChanged(uid, { reset = false } = {}) {
+  async passwordChanged(uid, { reset = false, escrow = false } = {}) {
     this.#bind(uid);
     if (!this.sql.exec("SELECT 1 FROM wraps WHERE kind = 'pw'").toArray().length) return { ok: true, pw: 'none' };
-    const other = this.sql.exec("SELECT COUNT(*) AS c FROM wraps WHERE kind IN ('passkey', 'recovery')").one().c > 0;
+    const kinds = escrow ? "('passkey', 'recovery', 'escrow')" : "('passkey', 'recovery')";
+    const other = this.sql.exec(`SELECT COUNT(*) AS c FROM wraps WHERE kind IN ${kinds}`).one().c > 0;
     if (reset && other) {
       this.ctx.storage.transactionSync(() => {
         this.sql.exec("DELETE FROM wraps WHERE kind = 'pw'");

@@ -13,7 +13,7 @@
 import { env, SELF, runInDurableObject, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src/index.js';
-import { ORIGIN, owner, makeUser, fetchJson, intent, cookieOf, salt16, freshIp, proofFor, USER_PW, proofHeaders } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, intent, cookieOf, salt16, freshIp, proofFor, USER_PW, proofHeaders, login } from './helpers.js';
 import { enc, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, drive, DIR_BYTES, FILE_BYTES } from './drive-helpers.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import { encryptPaste } from '../public/js/crypto.js';
@@ -338,6 +338,28 @@ describe('Impersonation: the owner uses the user’s whole Drive', () => {
       expect(acts, a).toContain(a);
     }
     for (const r of rows.filter((x) => x.action.startsWith('drive.') || x.action.startsWith('share.'))) expect(r).toMatchObject({ actor: 'owner', imp: 1, adm: 1 });
+  });
+
+  it('a password the owner sets while acting as the user: the old wrap goes, the owner adds the new one (adding only)', async () => {
+    const u = await makeUser('aud-imp-pw');
+    await enableDrive(u.id);
+    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC() }] })).status).toBe(200);
+    const before = await activity(u.cookie);
+    const ic = await impersonate(u.id);
+    const ch = await fetchJson('/api/private/me/password', { method: 'POST', cookie: ic, body: { salt: salt16(), t: 3, proof: proofFor('set-by-the-owner-1') } });
+    expect(ch.status).toBe(200);
+    // The old password no longer opens the Drive; the escrow still does.
+    expect((await drive(ic)).wraps.map((w) => w.kind)).toEqual(['escrow']);
+    const pw = { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }] };
+    expect((await keys(ic, pw)).status).toBe(200); // added, not replaced
+    expect((await keys(ic, { ...pw, driveSalt: salt16() })).status).toBe(403); // now it would replace it
+    expect((await drive(ic)).pwStale).toBe(false);
+    const rows = (await audit(u.id)).filter((r) => r.action === 'drive.keys_added');
+    expect(rows[0]).toMatchObject({ actor: 'owner', imp: 1, adm: 1 });
+    // The user sees the password change as theirs (#59), nothing of the Drive.
+    const uc = await login('aud-imp-pw', 'set-by-the-owner-1', freshIp()); // the owner's change ended the user's sessions
+    const after = (await activity(uc)).filter((r) => !before.some((x) => x.id === r.id) && r.action !== 'login');
+    expect(after.map((r) => r.action)).toEqual(['password.changed']);
   });
 
   it('creates a user’s Drive the first time (escrow and hand-over wraps); the user’s password wrap follows at their sign-in', async () => {
