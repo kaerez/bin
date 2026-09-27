@@ -481,10 +481,10 @@ async function renderSettings() {
   p.appendChild(h('div.stack', {}, h('h2.section-title', { text: 'Brute-force protection (per IP)' }),
     h('p.mono.muted', { text: 'Counts failures per network address (IPv6 per the tracking prefix below) and blocks that address for a while, whoever it is and whichever account it tries: it stops one source from guessing. Account lockout (below) is the other half: it counts wrong passwords per account, from any address, and locks only that account: it stops many sources guessing one account.' }),
     scopeRule('login', 'Login'), scopeRule('setup', 'Setup'),
-    scopeRule('invalid', 'Invalid fetches (links that never existed, wrong #key, wrong password, bad tokens; shares that expired, were used up, revoked or deleted are not counted)'),
+    scopeRule('invalid', 'Invalid fetches: links that never existed, a wrong #key or password, bad tokens. Not counted: opening a share that expired, was used up, revoked or deleted with its correct link (#key); a wrong #key for such a share still counts'),
     h('div.card.stack', {}, int('guard.v6Prefix', 'IPv6 tracking prefix (/n)'))));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Activity log' }),
-    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. Per-user limits (Defaults & quotas or a user) can keep less about an account. Entries about the owner are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
+    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. Per-user limits (Defaults & quotas or a user) can keep less about an account. Entries about the owner, entries the owner made (admin actions, impersonation) and server-wide changes (settings, global limits, IP rules, exports) are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
     dur('log.maxAgeSec', 'Keep entries for at most'), int('log.maxEntries', 'Keep at most this many entries')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),

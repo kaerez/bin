@@ -4,7 +4,8 @@
 // the admin; IP rules as ranges; fetches of shares that ended are not counted
 // as invalid.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson, freshIp, createNote, openNote, salt16, proofFor, USER_PW, intent } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, createNote, openNote, proofHeaders, salt16, proofFor, USER_PW, intent } from './helpers.js';
+import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
 import { genId } from '../src/lib/ids.js';
 import { normalizeRule, parseRule, ruleContains, parseIp } from '../src/lib/ip.js';
@@ -93,7 +94,7 @@ describe('IP rules: ranges as well as CIDR', () => {
 });
 
 describe('invalid fetches exclude shares that ended', () => {
-  it('re-fetching a used-up share is not counted; unknown ids are', async () => {
+  it('re-fetching a used-up share with its link is not counted; a wrong #key and unknown ids are', async () => {
     expect((await settings({ 'guard.invalid.max': 3 })).status).toBe(200);
     invalidateGuardCaches();
     const u = await makeUser('ux-invalid');
@@ -104,6 +105,14 @@ describe('invalid fetches exclude shares that ended', () => {
     for (let i = 0; i < 6; i++) {
       expect((await fetchJson(`/api/paste/${note.id}`, { ip: late })).status).toBe(410); // never 429
     }
+    // Opening it again with the right link (#key): gone, never counted.
+    const open = async (fragment, ip) => fetchJson(`/api/paste/${note.id}/open`, { method: 'POST', headers: (await proofHeaders(note.body.adata, fragment)).headers, ip });
+    for (let i = 0; i < 6; i++) expect((await open(note.fragment, late)).status).toBe(410);
+    // A wrong #key for the ended share is a guess: counted.
+    const guesser = freshIp();
+    const guesses = [];
+    for (let i = 0; i < 5; i++) guesses.push((await open(b64urlFromBytes(randomBytes(32)), guesser)).status);
+    expect(guesses).toContain(429);
     const prober = freshIp();
     const codes = [];
     for (let i = 0; i < 5; i++) codes.push((await fetchJson(`/api/paste/${genId('b')}`, { ip: prober })).status);

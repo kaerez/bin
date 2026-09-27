@@ -157,11 +157,17 @@ compromise. Defenses:
     Admin-written regular expressions run in senders' browsers (the admin is trusted; a costly
     pattern slows only the composer).
   - **Never allowed**, on either side and whatever the rules say: `javascript:`, `data:`,
-    `vbscript:`, `file:`, `blob:`, `about:`, browser-internal and extension schemes. The recipient
-    does not know the sender's rules, so it accepts any other scheme, shows a host-less link
-    (`tel:`, `mailto:`, …) in full and says it opens another app.
-  - The recipient sees the host as the browser resolves it (punycode) with a look-alike warning for
-  internationalized names and a warning for plain HTTP, and opens it with a confirmed second
+    `vbscript:`, `file:`, `blob:`, `about:`, browser-internal and extension schemes.
+  - **What a recipient may open.** The recipient does not know the sender's rules, and a modified
+    sender client could ignore them. So the page opens only `http:`, `https:`, `mailto:`, `tel:`
+    and `sms:` links. Any other scheme the rules may allow (`vscode:`, `ssh:`, `smb:`,
+    `search-ms:`, …) is shown in full with **Copy only** and a warning. Otherwise an app link
+    offered on this trusted origin could be a malware-delivery step. The composer tells the
+    sender so.
+  - The recipient sees the host as the browser resolves it (punycode), and **the full link**
+  (for app links the host alone would hide the path and query that carry what the link does).
+  There is a look-alike warning for internationalized names and a warning for plain HTTP. The
+  link opens with a confirmed second
   click through `window.open(…, 'noopener,noreferrer')`, so the destination gets no
   `Referer` and no handle to this page.
 - **Credential shares** (`fmt: "secret"`) are validated fail-closed and rendered field by field
@@ -355,9 +361,13 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     rows are kept in the share index; they are not pruned.
 - **Brute-force protection** (admin-configurable, per IP; IPv6 aggregated to /64 by default):
   - `login`, `setup`, and `invalid` — share ids that never existed, **wrong `#` keys, wrong share
-    passwords**, bad download grants and bad delete/upload tokens. Fetching a share that did
-    exist but has expired, been used up, revoked or deleted (it is still in the share index,
-    which keeps ended shares for 30 days) is a recipient arriving late and is **not** counted;
+    passwords**, bad download grants and bad delete/upload tokens. Opening a share that did
+    exist but has expired, been used up, revoked or deleted, **with its correct link** (`#`
+    key), is a recipient arriving late and is **not** counted. The share index keeps each
+    share's link-proof hash (the same value the share's own record held) for the 30 days it
+    keeps ended shares, so a **wrong `#` key** for an ended share is still counted, as for a
+    live one. The first metadata fetch carries no proof and is not counted for a known share.
+    Shares created before this change have no stored hash and are never counted;
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking;
   - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges
@@ -471,13 +481,24 @@ codes as safe as the password.
 - Every successful open of an account's share (a wrong link or password is not an open) is
   recorded: the time, and what the opener's request itself revealed — the IP address,
   Cloudflare's coarse location (country, region, city), the browser and version, the operating
-  system and the `Accept-Language` languages. At most 1000 per share are kept (oldest first), for
-  as long as the activity log (same age limits; clearing an account's log clears its receipts).
+  system and the `Accept-Language` languages.
+- **Throttling and retention.** Recording is throttled so that someone holding a link cannot
+  flood the single Directory object or push the genuine receipts out:
+  - at most one stored receipt per share and address per minute; beyond 5 opens a minute from
+    one address the Worker stops recording that address for the minute;
+  - at most 30 receipts per share per minute;
+  - at most 1000 per share, where **the first 100 are kept for good** and the rest is a rolling
+    window.
+
+  Opens that are not stored individually are still counted (`total`), except for such a flood. Receipts last as long as the activity log (same age limits), and clearing an account's
+  log clears its receipts and counters. They are deleted with their share's record, 30 days
+  after the share ended.
 - The sender sees the time of every open in My shares; the other details only as far as the
   admin allows that account (`receiptIp`, `receiptLocation`, `receiptBrowser`, `receiptOs`,
   `receiptLanguages`, all off by default). The admin always sees everything. Anonymous (public)
   shares are recorded for the admin only.
-- The share page tells recipients before they reveal or unlock a share that opening is recorded.
+- The share page tells recipients that opening is recorded: before they reveal or unlock a share,
+  and on the note or files view itself (a share without a password or view limit opens at once).
   These are recipients' personal data (GDPR): decide what senders may see, the retention period
   and the notice wording with your Legal / Compliance team.
 
@@ -486,8 +507,12 @@ codes as safe as the password.
 - The activity/audit log is kept for at most `log.maxAgeSec` (default 365 days) and
   `log.maxEntries` (default 500 000, oldest deleted first); per-user limits
   (`logMaxAgeSec`, `logMaxEntries`) can keep less about an account. Pruning runs hourly and
-  every 500 writes. Entries about the owner are exempt (global settings never apply to the
-  owner) and are removed only by hand.
+  every 500 writes. Three kinds of entry are never pruned automatically, only removed by hand:
+  - entries about the owner (global settings never apply to the owner);
+  - entries the owner made, meaning admin actions including impersonation;
+  - server-wide entries with no subject: settings, global limits, IP rules, exports.
+
+  So a flood of anonymous activity cannot push the record of configuration changes out.
 - The owner can **clear** the log — everything, or one account's entries, optionally only those
   older than a date. It needs the owner's password again (like export), and, as configured, it
   **leaves no record**: after a clear, nothing in the system shows that entries existed or were

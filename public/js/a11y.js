@@ -45,7 +45,7 @@ export function readSaved(storage = globalThis.localStorage) {
   const out = { ...DEFAULTS };
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return out;
   for (const k of Object.keys(FLAGS)) if (typeof saved[k] === 'boolean') out[k] = saved[k];
-  if (saved.fontScale in FONT) out.fontScale = saved.fontScale;
+  if (typeof saved.fontScale === 'string' && Object.hasOwn(FONT, saved.fontScale)) out.fontScale = saved.fontScale;
   if (saved.lang === 'en' || saved.lang === 'he') out.lang = saved.lang;
   return out;
 }

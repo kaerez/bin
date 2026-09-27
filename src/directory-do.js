@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts IN
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
   created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL,
-  locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER);
+  locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER, opens_total INTEGER NOT NULL DEFAULT 0, lh TEXT);
 CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id, created);
 CREATE TABLE IF NOT EXISTS ip_rules (id TEXT PRIMARY KEY, cidr TEXT NOT NULL, action TEXT NOT NULL, expires INTEGER,
   note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS opens (id INTEGER PRIMARY KEY AUTOINCREMENT, share_id
   browser TEXT NOT NULL DEFAULT '', browser_ver TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', langs TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id);
 CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts);
+CREATE INDEX IF NOT EXISTS opens_ts ON opens(ts);
+CREATE INDEX IF NOT EXISTS activity_ts ON activity(ts);
 CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, public_key TEXT NOT NULL,
   alg INTEGER NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, transports TEXT NOT NULL DEFAULT '',
   backup_eligible INTEGER NOT NULL DEFAULT 0, backed_up INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, last_used INTEGER);
@@ -132,6 +134,19 @@ const MIGRATIONS = [
     m.sql.exec('CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL)');
     m.sql.exec("DELETE FROM webauthn_challenges WHERE purpose = 'login'");
   },
+  // 8: read-receipt counter (every open, stored or throttled) and time indexes
+  // for log and receipt pruning
+  (m) => {
+    m.addColumn('shares', 'opens_total', 'INTEGER NOT NULL DEFAULT 0');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS opens_ts ON opens(ts)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS activity_ts ON activity(ts)');
+  },
+  // 9: each share's link-proof hash, kept after its content is gone, so a late
+  // fetch with the right link is told apart from a guess (shares from before
+  // this have none and are never counted, as before)
+  (m) => {
+    m.addColumn('shares', 'lh', 'TEXT');
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -171,6 +186,15 @@ const SHARE_PRUNE_SEC = 30 * 86400;
  */
 export const API_SCOPES = ['notes', 'files', 'policy'];
 const MAX_OPENS_PER_SHARE = 1000;
+// Read receipts are throttled so that a link holder cannot flood this object
+// or push the genuine receipts out: one per share and address per window, at
+// most OPENS_PER_MINUTE per share, and the first OPENS_KEEP_FIRST are kept
+// for good (the rest is a rolling window). Every open that reaches this
+// object counts in shares.opens_total (the Worker drops only floods: more than
+// 5 a minute from one address for one share).
+const OPENS_DEDUPE_SEC = 60;
+const OPENS_PER_MINUTE = 30;
+const OPENS_KEEP_FIRST = 100;
 // Passkeys (see the passkeys section and src/lib/webauthn.js).
 const MAX_PASSKEYS = 10;
 const RECOVERY_CODES = 20;
@@ -1421,14 +1445,14 @@ export class Directory extends DurableObject {
   }
 
   // ── shares index ("My shares") ───────────────────────────────────────────
-  async recordShare({ id, uid, kind, label, created, expires, views }, actorId = uid) {
+  async recordShare({ id, uid, kind, label, created, expires, views, lh = null }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
     // Upsert that never touches the lock columns: re-recording an id must not
     // silently unlock it.
-    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
       ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, kind = excluded.kind, label = excluded.label, created = excluded.created,
-        expires = excluded.expires, views_total = excluded.views_total, status = 'active'`,
-      id, uid, kind, l, created, expires, views ?? null);
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active', lh = excluded.lh`,
+      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null);
     this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
   }
 
@@ -1440,7 +1464,7 @@ export class Directory extends DurableObject {
     const args = status ? [uid, like, String(status)] : [uid, like];
     const rows = this.sql.exec(
       `SELECT id, kind, label, created, expires, views_total, status, locked,
-        (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id) AS opens FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
+        MAX(shares.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id)) AS opens FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
       ...args, lim, off).toArray();
     // The total counts what the filters match, so pagination is correct.
     const total = this.sql.exec(`SELECT COUNT(*) AS c FROM shares ${where}`, ...args).one().c;
@@ -1468,14 +1492,23 @@ export class Directory extends DurableObject {
   async recordOpen(shareId, info = {}) {
     const r = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0];
     if (!r) return;
+    const ts = now();
     // eslint-disable-next-line no-control-regex
     const t = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, n);
+    const ip = t(info.ip, 64);
+    this.sql.exec('UPDATE shares SET opens_total = opens_total + 1 WHERE id = ?', shareId);
+    // Throttle (see OPENS_*): the same address again within the window, or a
+    // burst beyond the per-minute cap, is counted but not stored again.
+    if (this.sql.exec('SELECT 1 FROM opens WHERE share_id = ? AND ip = ? AND ts > ? LIMIT 1', shareId, ip, ts - OPENS_DEDUPE_SEC).toArray().length) return;
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ? AND ts > ?', shareId, ts - 60).one().c >= OPENS_PER_MINUTE) return;
     this.sql.exec(`INSERT INTO opens (share_id, user_id, ts, ip, country, region, city, browser, browser_ver, os, langs)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, shareId, r.user_id, now(), t(info.ip, 64), t(info.country, 8), t(info.region, 64),
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, shareId, r.user_id, ts, ip, t(info.country, 8), t(info.region, 64),
     t(info.city, 64), t(info.browser, 32), t(info.version, 8), t(info.os, 32), t(info.langs, 200));
     const c = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
     if (c > MAX_OPENS_PER_SHARE) {
-      this.sql.exec('DELETE FROM opens WHERE id IN (SELECT id FROM opens WHERE share_id = ? ORDER BY id ASC LIMIT ?)', shareId, c - MAX_OPENS_PER_SHARE);
+      // Keep the first receipts (who opened it first) and the most recent ones.
+      this.sql.exec(`DELETE FROM opens WHERE id IN (SELECT id FROM opens WHERE share_id = ? ORDER BY id ASC LIMIT ? OFFSET ?)`,
+        shareId, c - MAX_OPENS_PER_SHARE, OPENS_KEEP_FIRST);
     }
   }
 
@@ -1489,7 +1522,10 @@ export class Directory extends DurableObject {
     if (!s || (!admin && s.user_id !== uid)) return fail(404, 'not_found', 'Share not found.');
     const lim = Math.max(1, Math.min(MAX_OPENS_PER_SHARE, limit | 0));
     const rows = this.sql.exec('SELECT ts, ip, country, region, city, browser, browser_ver, os, langs FROM opens WHERE share_id = ? ORDER BY id DESC LIMIT ?', shareId, lim).toArray();
-    const total = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
+    // Every open counts, including those not stored individually (throttled, or before receipts existed).
+    const stored = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
+    const counted = this.sql.exec('SELECT opens_total FROM shares WHERE id = ?', shareId).toArray()[0]?.opens_total ?? 0;
+    const total = Math.max(stored, counted);
     let fields = RECEIPT_FIELDS;
     if (!admin) {
       const owner = this.#user(s.user_id);
@@ -1526,8 +1562,18 @@ export class Directory extends DurableObject {
    * or ended within the last SHARE_PRUNE_SEC). Fetches of such ids that find
    * nothing — expired, used up, revoked, deleted — are not "invalid".
    */
-  async isKnownShare(id) {
-    return this.sql.exec('SELECT 1 FROM shares WHERE id = ?', id).toArray().length > 0;
+  /**
+   * A fetch of a share whose content is gone (expired, used up, revoked or
+   * deleted): 'ok' when the id was a share and the request's link-proof hash
+   * `lh` (if it sent one) matches it, 'wrong_link' when it does not, and
+   * 'unknown' when the id was never a share. Shares recorded before link
+   * hashes were kept answer 'ok'.
+   */
+  async goneShare(id, lh = null) {
+    const r = this.sql.exec('SELECT lh FROM shares WHERE id = ?', id).toArray()[0];
+    if (!r) return 'unknown';
+    if (typeof lh !== 'string' || typeof r.lh !== 'string') return 'ok';
+    return r.lh.length === lh.length && timingSafeEqualHex(r.lh, lh) ? 'ok' : 'wrong_link';
   }
 
   async isShareLocked(id) {
@@ -1598,7 +1644,7 @@ export class Directory extends DurableObject {
     range('s.created', createdFrom, createdTo);
     range('s.expires', expiresFrom, expiresTo);
     const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const rows = this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status, (SELECT COUNT(*) FROM opens o WHERE o.share_id = s.id) AS opens,
+    const rows = this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status, MAX(s.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = s.id)) AS opens,
       s.locked, s.locked_at, lu.username AS locked_by
       FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by
       ${w} ORDER BY s.created DESC LIMIT ? OFFSET ?`, ...args, lim, off).toArray();
@@ -2037,22 +2083,35 @@ export class Directory extends DurableObject {
     const ts = now();
     const owner = this.#owner();
     const oid = owner ? owner.id : '';
-    this.sql.exec('DELETE FROM activity WHERE ts < ? AND subject_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
+    // Never removed automatically: entries about the owner, entries the owner
+    // made (admin actions, impersonation) and server-wide entries with no
+    // subject (settings, global limits, IP rules, exports). Only the owner can
+    // clear those, by hand.
+    const PRUNABLE = 'subject_id IS NOT NULL AND subject_id != ? AND (actor_id IS NULL OR actor_id != ?)';
+    this.sql.exec(`DELETE FROM activity WHERE ts < ? AND ${PRUNABLE}`, ts - s['log.maxAgeSec'], oid, oid);
     // Read receipts live as long as the log does.
     this.sql.exec('DELETE FROM opens WHERE ts < ? AND user_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
-    for (const u of this.sql.exec("SELECT * FROM users WHERE role IN ('user', 'public')").toArray()) {
+    // Per-account limits: visit only the accounts they apply to (every account
+    // when a global value is set, otherwise those with their own value).
+    const LOG_KEYS = "('logMaxAgeSec', 'logMaxEntries')";
+    const global = this.sql.exec(`SELECT 1 FROM limits WHERE user_id = '' AND channel = 'all' AND key IN ${LOG_KEYS} LIMIT 1`).toArray().length;
+    const users = global
+      ? this.sql.exec("SELECT * FROM users WHERE role IN ('user', 'public')").toArray()
+      : this.sql.exec(`SELECT * FROM users WHERE role IN ('user', 'public') AND id IN (SELECT user_id FROM limits WHERE channel = 'all' AND key IN ${LOG_KEYS})`).toArray();
+    for (const u of users) {
       const L = this.#effective(u).all;
       if (L.logMaxAgeSec !== null) {
-        this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND ts < ?', u.id, ts - L.logMaxAgeSec);
+        this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND ts < ? AND (actor_id IS NULL OR actor_id != ?)', u.id, ts - L.logMaxAgeSec, oid);
         this.sql.exec('DELETE FROM opens WHERE user_id = ? AND ts < ?', u.id, ts - L.logMaxAgeSec);
       }
       if (L.logMaxEntries !== null) {
-        this.sql.exec('DELETE FROM activity WHERE subject_id = ? AND id NOT IN (SELECT id FROM activity WHERE subject_id = ? ORDER BY id DESC LIMIT ?)', u.id, u.id, L.logMaxEntries);
+        this.sql.exec(`DELETE FROM activity WHERE subject_id = ? AND (actor_id IS NULL OR actor_id != ?)
+          AND id NOT IN (SELECT id FROM activity WHERE subject_id = ? ORDER BY id DESC LIMIT ?)`, u.id, oid, u.id, L.logMaxEntries);
       }
     }
-    const count = this.sql.exec('SELECT COUNT(*) AS c FROM activity WHERE subject_id IS NOT ?', oid).one().c;
+    const count = this.sql.exec(`SELECT COUNT(*) AS c FROM activity WHERE ${PRUNABLE}`, oid, oid).one().c;
     if (count > s['log.maxEntries']) {
-      this.sql.exec('DELETE FROM activity WHERE id IN (SELECT id FROM activity WHERE subject_id IS NOT ? ORDER BY id ASC LIMIT ?)', oid, count - s['log.maxEntries']);
+      this.sql.exec(`DELETE FROM activity WHERE id IN (SELECT id FROM activity WHERE ${PRUNABLE} ORDER BY id ASC LIMIT ?)`, oid, oid, count - s['log.maxEntries']);
     }
   }
 
@@ -2083,6 +2142,12 @@ export class Directory extends DurableObject {
     const oq = q.replace('subject_id = ?', 'user_id = ?');
     const opens = this.sql.exec(`SELECT COUNT(*) AS c FROM opens${oq}`, ...args).one().c;
     this.sql.exec(`DELETE FROM opens${oq}`, ...args);
+    // The open counters go too, unless only older entries were cleared (a
+    // counter cannot be split by date).
+    if (before === undefined || before === null) {
+      if (scope === 'user') this.sql.exec('UPDATE shares SET opens_total = 0 WHERE user_id = ?', userId);
+      else this.sql.exec('UPDATE shares SET opens_total = 0');
+    }
     return { ok: true, deleted: n, receipts: opens };
   }
 
@@ -2117,6 +2182,8 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM ip_rules WHERE expires IS NOT NULL AND expires < ?', ts);
     this.sql.exec("UPDATE shares SET status = 'expired' WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
     this.sql.exec("DELETE FROM shares WHERE status != 'active' AND locked = 0 AND expires < ?", ts - SHARE_PRUNE_SEC);
+    // Receipts go with their share: once the share row is gone nobody can see them.
+    this.sql.exec('DELETE FROM opens WHERE share_id NOT IN (SELECT id FROM shares)');
     await this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
   }
 }

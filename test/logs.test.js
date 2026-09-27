@@ -38,11 +38,25 @@ describe('activity log', () => {
     const { users } = await (await fetchJson('/api/private/admin/users', { cookie: oc })).json();
     const ownerId = users.find((x) => x.role === 'owner').id;
     const rows = await audit();
-    expect(rows.every((r) => r.subject_id === ownerId)).toBe(true); // 365-day default removed the rest
+    // The 365-day default removed the rest; kept: entries about the owner, by
+    // the owner (admin actions) and server-wide ones (no subject).
+    expect(rows.every((r) => r.subject_id === ownerId || r.actor_id === ownerId || r.subject_id === null)).toBe(true);
+    expect(rows.some((r) => r.subject_id === u.id && r.actor_id === u.id)).toBe(false);
+    expect(rows.some((r) => r.action === 'user.created' && r.subject_id === u.id)).toBe(true); // an admin action
     expect(rows.length).toBeGreaterThan(0);
     // Per-account size: a fresh burst keeps only the newest 10.
     for (let i = 0; i < 14; i++) await createNote(u.cookie);
     await runInDurableObject(dirStub(), async (inst) => { await inst.alarm(); });
-    expect((await audit(u.id)).length).toBe(10);
+    // The newest 10 of the user's own entries, plus the admin's entries about them.
+    const mineNow = await audit(u.id);
+    expect(mineNow.filter((r) => r.actor_id === u.id)).toHaveLength(10);
+    expect(mineNow.filter((r) => r.actor_id === ownerId).length).toBeGreaterThan(0);
+  });
+
+  it('never prunes server-wide configuration changes automatically', async () => {
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'viewer.enabled': false } });
+    await runInDurableObject(dirStub(), async (_inst, state) => { state.storage.sql.exec('UPDATE activity SET ts = ts - ?', 400 * 86400); });
+    await runInDurableObject(dirStub(), async (inst) => { await inst.alarm(); });
+    expect((await audit()).some((r) => r.action === 'settings.updated' && r.subject_id === null)).toBe(true);
   });
 });
