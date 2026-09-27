@@ -6,7 +6,7 @@
 // browsers assemble a Blob in memory.
 
 import { fetchChunk, fetchRefChunk } from './api.js';
-import { decryptChunk, importFileKey, chunkSpan, CHUNK, basename, filesUnder, ManifestError } from './files.js';
+import { decryptChunk, importFileKey, chunkSpan, CHUNK, basename, filesUnder, ManifestError, cleanName } from './files.js';
 import { refChunks } from './refsmanifest.js';
 import { createZipWriter } from './zip.js';
 
@@ -109,10 +109,10 @@ export class RefsReader {
   }
 }
 
-/** A filesystem-safe download name (the browser sanitizes further). */
+/** A filesystem-safe download name, without spoofing characters (files.js cleanName; the browser sanitizes further). */
 export function safeName(name) {
   // eslint-disable-next-line no-control-regex
-  const n = String(name).replace(/[\u0000-\u001f\u007f/\\]/g, '_').replace(/^\.+/, '_').slice(0, 200);
+  const n = cleanName(name).replace(/[\u0000-\u001f\u007f/\\]/g, '_').replace(/^\.+/, '_').slice(0, 200);
   return n || 'download';
 }
 
@@ -175,7 +175,7 @@ export async function saveZip(reader, dirPath, zipName, onBytes) {
   const disk = await diskSink(zipName, total);
   const sink = disk || memorySink();
   const zip = createZipWriter(sink);
-  const rel = (p) => (prefix ? p.slice(prefix.length) : p);
+  const rel = (p) => cleanName(prefix ? p.slice(prefix.length) : p);
   try {
     for (const d of dirs) await zip.addDir(rel(d.path));
     for (const f of files) await zip.addFile(rel(f.path), f.mtime, reader.stream(f, onBytes));

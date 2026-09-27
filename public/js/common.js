@@ -3,6 +3,7 @@
 // password reveal toggles, formatting, and friendly error text.
 
 import { ApiError } from './api.js';
+import { cleanName } from './files.js';
 
 /** h('tag.class', { attr: v, on: { click } }, ...children) — DOM construction only. */
 // Attributes whose value is a URL the browser may navigate to or fetch.
@@ -46,6 +47,22 @@ export function h(spec, props = {}, ...children) {
     el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
   }
   return el;
+}
+
+/**
+ * A file or folder name for display: cleaned (files.js cleanName), inside a
+ * bidi isolate that takes its direction from the name itself, with the
+ * extension (from the last dot) as its own left-to-right isolate — so a name
+ * never reorders the text around it and always shows its real extension,
+ * whatever its script (Hebrew, Arabic, …). `suffix` (e.g. "/") follows it.
+ */
+export function nameEl(name, { suffix = '' } = {}) {
+  const n = cleanName(name);
+  const dot = n.lastIndexOf('.');
+  const parts = dot > 0 && dot < n.length - 1
+    ? [h('span.fstem', { text: n.slice(0, dot) }), h('bdi.fext', { dir: 'ltr', text: n.slice(dot) })]
+    : [h('span.fstem', { text: n })];
+  return h('bdi.fname', { dir: 'auto' }, ...parts, ...(suffix ? [h('span.fsuffix', { text: suffix })] : []));
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';

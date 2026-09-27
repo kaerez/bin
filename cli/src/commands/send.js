@@ -15,7 +15,7 @@
 import { parseArgs } from 'node:util';
 import { encryptPaste, MAX_PLAINTEXT } from '../../vendor/crypto.js';
 import {
-  buildManifest, checkMime, CHUNK, encryptChunk, importFileKey, layout, ManifestError, readStreamChunk,
+  buildManifest, checkMime, CHUNK, cleanName, encryptChunk, importFileKey, layout, ManifestError, readStreamChunk,
 } from '../../vendor/files.js';
 import { refuseInlineApiKey, resolveApiKey } from '../apikey.js';
 import { ApiError, Client } from '../client.js';
@@ -94,9 +94,13 @@ export async function cmdSend(args, io) {
   // ── everything local first ────────────────────────────────────────────────
   const { files, dirs } = await collect(positionals, io);
   applyMimeOverrides(files, values.mime);
+  // Names are shared without spoofing characters (bidi overrides and isolates,
+  // U+200B, U+FEFF, line separators): cleaned, NFC, and the sender is told.
+  const renamed = files.filter((f) => cleanName(f.path) !== f.path).length + dirs.filter((d) => cleanName(d) !== d).length;
+  if (renamed) io.stderr(`secbin: ${renamed} name${renamed === 1 ? '' : 's'} had hidden direction or spacing characters, removed (renamed in the share)\n`);
   let l;
   try {
-    l = layout(files.map((f) => ({ path: f.path, type: f.type, size: f.size, mtime: f.mtime })), dirs);
+    l = layout(files.map((f) => ({ path: cleanName(f.path), type: f.type, size: f.size, mtime: f.mtime })), dirs.map(cleanName));
   } catch (e) {
     if (e instanceof ManifestError) throw new UsageError(`cannot build the share: ${e.message}`);
     throw e;

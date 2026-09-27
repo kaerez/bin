@@ -37,10 +37,16 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     account if that fails;
   - the Account page keeps the tab's Drive key out of `sessionStorage` while the Turnstile
     script may load; login and the public composer clear it first.
-- **File and folder names without bidi or invisible characters:** file shares, the viewer, the
-  CLI and the Drive refuse names carrying bidi controls, zero-width characters or U+0085 / U+2028
-  / U+2029 (`files.js` `checkPath`, the Drive's `checkName`), so `invoice<U+202E>fdp.exe` can no
-  longer pose as a PDF. A share id is never moved to another account when it is recorded again.
+- **File and folder names: real names in every script, no extension spoofing.** Names in
+  Hebrew (niqqud included), Arabic, Persian (ZWNJ), emoji sequences (ZWJ) and with LRM / RLM
+  marks are kept exactly as they are in file shares, the viewer, the CLI and the Drive. Only
+  the characters that can disguise a name are removed (bidi overrides, embeddings and isolates,
+  U+200B, U+FEFF, U+0085, U+2028, U+2029; then NFC; `files.js` `cleanName`), and the sender is
+  told when a name changed (a received one is marked "renamed"): `invoice<U+202E>fdp.exe`
+  becomes `invoicefdp.exe`. Every name is shown in a bidi isolate with its extension as its own
+  left-to-right isolate (`common.js` `nameEl`): the Drive's tree, table and dialogs, the
+  composer's file list, the viewer, downloads and ZIPs. A share id is never moved to another
+  account when it is recorded again.
 - **Log in as: the user's whole Drive.** The owner acting as a user opens that user's Drive with
   the owner escrow (the owner's own Drive unlocked in the tab) and can browse, upload, download,
   move, rename, delete, share and revoke; the user's key stays in its own tab slot and goes when

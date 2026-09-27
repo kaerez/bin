@@ -17,7 +17,7 @@
 // state is carried by aria-expanded on the treeitem itself, so there is no
 // nested interactive control. DOM built with createElement/textContent only.
 
-import { h } from './common.js';
+import { h, nameEl } from './common.js';
 
 let seq = 0;
 
@@ -47,7 +47,7 @@ export function createTree(opts) {
     const n = { id, name, parent, leaf: !!leaf, loaded: !!leaf, expanded: false, children: [], loading: null };
     const textId = `${prefix}-${++idSeq}`;
     n.twisty = h('span.tree-twisty', { 'aria-hidden': 'true' });
-    n.text = h('span.tree-text', { id: textId, text: name });
+    n.text = h('span.tree-text', { id: textId }, nameEl(name)); // bidi-isolated (common.js nameEl)
     n.label = h('span.tree-label', {}, n.twisty, h('span.tree-icon', { 'aria-hidden': 'true' }), n.text);
     n.group = h('ul.tree-group', { role: 'group', hidden: true });
     n.li = h('li.tree-item', { role: 'treeitem', tabindex: '-1', 'aria-selected': 'false', 'aria-labelledby': textId, dataset: { id } }, n.label, n.group);
@@ -98,7 +98,7 @@ export function createTree(opts) {
       if (k && k.parent !== id) { detach(k); k = null; }
       if (!k) k = makeNode(c.id, c.name, id, c.leaf);
       else {
-        if (k.name !== c.name) { k.name = c.name; k.text.textContent = c.name; paintToggle(k); }
+        if (k.name !== c.name) { k.name = c.name; k.text.replaceChildren(nameEl(c.name)); paintToggle(k); }
         if (c.leaf && !k.children.length) { k.leaf = true; k.loaded = true; k.expanded = false; paintToggle(k); }
       }
       next.push(k.id);
@@ -336,8 +336,8 @@ const parentPath = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : ''
 export function crumbTrail(nav, trail) {
   nav.replaceChildren(...trail.flatMap((x, i) => {
     const el = i === trail.length - 1
-      ? h('span.crumb', { 'aria-current': 'location', text: x.name })
-      : h('button.crumb.linkbtn', { type: 'button', text: x.name, on: { click: x.go } });
+      ? h('span.crumb', { 'aria-current': 'location' }, nameEl(x.name))
+      : h('button.crumb.linkbtn', { type: 'button', on: { click: x.go } }, nameEl(x.name));
     return i ? [h('span.crumb-sep', { 'aria-hidden': 'true', text: '/' }), el] : [el];
   }));
   return nav;

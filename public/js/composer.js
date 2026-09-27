@@ -9,10 +9,10 @@
 import { encryptPaste } from './crypto.js';
 import { ApiError } from './api.js';
 import { expireSeconds, MAX_VIEWS } from './format.js';
-import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk, checkPath, checkMime, buildTree, basename } from './files.js';
+import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk, checkPath, checkMime, buildTree, basename, cleanName } from './files.js';
 import { detectMime, normalizeMime, COMMON_TYPES } from './mime.js';
 import { $, showView, toast, copyText, flashCopied, tablistKeys } from './ui.js';
-import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from './common.js';
+import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint, nameEl } from './common.js';
 import { walkEntry } from './walk.js';
 import { folderBrowser } from './tree.js';
 import { buildSecret, describeHost, describeUrlRules, parseShareUrl, urlRulesOf, ShareTypeError } from './sharetypes.js';
@@ -253,9 +253,17 @@ function wireFiles() {
   renderList();
 }
 
+// Names that lost hidden characters (files.js cleanName) in the last add, told once.
+let renamedInAdd = 0;
+function tellRenamed() {
+  if (renamedInAdd) toast(`${renamedInAdd === 1 ? '1 name' : `${renamedInAdd} names`} had hidden direction or spacing characters, removed: ${renamedInAdd === 1 ? 'it was' : 'they were'} renamed.`);
+  renamedInAdd = 0;
+}
+
 async function addFileList(list) {
   for (const f of list) await addFile(f.webkitRelativePath || f.name, f);
   renderList();
+  tellRenamed();
 }
 
 /** Walk a drop: files and whole folders (recursively, including empty ones). */
@@ -268,14 +276,24 @@ async function addDataTransfer(dt) {
   }
   for (const entry of entries) await walkEntry(entry, addFile, addDirectory);
   renderList();
+  tellRenamed();
 }
 
-function addDirectory(path) {
+/** The path to share: cleaned of spoofing characters (counted for the note). */
+function cleaned(raw) {
+  const path = cleanName(raw);
+  if (path !== raw) renamedInAdd++;
+  return path;
+}
+
+function addDirectory(raw) {
+  const path = cleaned(raw);
   try { checkPath(path); } catch (e) { toast(`Skipped "${path}": ${e.message}`); return; }
   if (!items.has(path)) items.set(path, { path, dir: true });
 }
 
-async function addFile(path, file) {
+async function addFile(raw, file) {
+  const path = cleaned(raw);
   try { checkPath(path); } catch (e) { toast(`Skipped "${path}": ${e.message}`); return; }
   if (items.has(path) && !items.get(path).dir) { toast(`Already added: ${path}`); return; }
   let head = null;
@@ -399,7 +417,7 @@ function renderList() {
     for (const d of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       const li = h('li.tree-dir', {},
         h('div.tree-row', {},
-          h('button.tree-name.tree-open', { type: 'button', text: `${d.name}/`, title: `Open ${d.name}`, on: { click: () => open(d.path) } }),
+          h('button.tree-name.tree-open', { type: 'button', title: `Open ${d.name}`, on: { click: () => open(d.path) } }, nameEl(d.name, { suffix: '/' })),
           h('span.tree-sub.mono', { text: `${count(d)} ${count(d) === 1 ? 'file' : 'files'} · ${formatBytes(size(d))}` }),
           h('button.btn.tree-btn', { type: 'button', text: 'Remove folder', 'aria-label': `Remove folder ${d.path}`, on: { click: () => removed(ul, li, () => removePrefix(d.path, false)) } })));
       ul.appendChild(li);
@@ -412,7 +430,7 @@ function renderList() {
         if (t) { it.type = t; typeIn.value = t; typeIn.removeAttribute('aria-invalid'); } else { typeIn.setAttribute('aria-invalid', 'true'); it.type = typeIn.value; }
       });
       const li = h('li.tree-file', {},
-        h('div.tree-row', {}, h('span.tree-name', { text: basename(f.path) }), h('span.tree-sub.mono', { text: formatBytes(f.size) }), typeIn,
+        h('div.tree-row', {}, h('span.tree-name', {}, nameEl(basename(f.path))), h('span.tree-sub.mono', { text: formatBytes(f.size) }), typeIn,
           h('button.btn.tree-btn', { type: 'button', text: 'Remove', 'aria-label': `Remove ${f.path}`, on: { click: () => removed(ul, li, () => items.delete(f.path)) } })));
       ul.appendChild(li);
     }

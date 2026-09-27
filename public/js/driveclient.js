@@ -19,7 +19,7 @@ import {
 } from './drivekeys.js';
 import { encryptPaste } from './crypto.js';
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from './bytes.js';
-import { CHUNK, encryptChunk, importFileKey, checkPath, MAX_ENTRIES, INVISIBLE_RE } from './files.js';
+import { CHUNK, encryptChunk, importFileKey, checkPath, MAX_ENTRIES, cleanName } from './files.js';
 import { detectMime, normalizeMime, OCTET } from './mime.js';
 import { RefsReader, saveFile, saveZip } from './downloads.js';
 import { buildRefsManifest, refChunks } from './refsmanifest.js';
@@ -92,13 +92,16 @@ function uniqueName(taken, name) {
 }
 
 /**
- * A node name as typed, or throws: no "/", "\", control characters, bidi or
- * invisible characters (files.js INVISIBLE_RE), "." or ".."; 1–255 bytes.
+ * A node name → the name to store (cleaned: files.js cleanName strips the
+ * bidi overrides and isolates, U+200B, U+FEFF and U+0085 / U+2028 / U+2029,
+ * then NFC), or throws: no "/", "\", control characters, "." or ".."; 1–255
+ * bytes. Hebrew, Arabic, ZWNJ / ZWJ and LRM / RLM stay as they are.
  */
-export function checkName(name) {
+export function checkName(raw) {
+  const name = typeof raw === 'string' ? cleanName(raw) : raw;
   // eslint-disable-next-line no-control-regex
-  if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\u0000-\u001f\u007f/\\]/.test(name) || INVISIBLE_RE.test(name)) {
-    throw new Error('Names cannot be empty, "." or "..", or contain "/", "\\", control characters or invisible (bidi, zero-width) characters.');
+  if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\u0000-\u001f\u007f/\\]/.test(name)) {
+    throw new Error('Names cannot be empty, "." or "..", or contain "/", "\\" or control characters.');
   }
   if (utf8(name).length > MAX_NAME_BYTES) throw new Error(`Names can be at most ${MAX_NAME_BYTES} bytes long.`);
   return name;
@@ -544,7 +547,12 @@ export class DriveClient {
     const base = { id: n.id, parent: n.parent ?? null, kind: n.kind === 'file' ? 'file' : 'dir', size: n.size ?? 0, chunks: n.chunks ?? 0, created: n.created ?? 0, updated: n.updated ?? 0 };
     if (n.id === ROOT) return { ...base, kind: 'dir', name: ROOT_NAME, type: null, mtime: 0 };
     let name = null;
-    try { name = await this.#text('name', n.id, n.name); } catch { /* unreadable */ }
+    let renamed = false;
+    try {
+      const raw = await this.#text('name', n.id, n.name);
+      name = cleanName(raw); // an older name with spoofing characters shows (and downloads) cleaned
+      renamed = name !== raw;
+    } catch { /* unreadable */ }
     const badName = name === null;
     let type = null;
     let mtime = 0;
@@ -558,7 +566,7 @@ export class DriveClient {
       } catch { /* missing or unreadable metadata */ }
       if (!ok) name = null;
     }
-    return { ...base, name, type: base.kind === 'file' ? (type || OCTET) : null, mtime, ...(name === null ? { unreadable: true } : {}), ...(badName ? { badName: true } : {}) };
+    return { ...base, name, type: base.kind === 'file' ? (type || OCTET) : null, mtime, ...(name === null ? { unreadable: true } : {}), ...(badName ? { badName: true } : {}), ...(renamed && name !== null ? { renamed: true } : {}) };
   }
 
   async #fileKey(n) {
@@ -694,7 +702,7 @@ export class DriveClient {
     let before = 0;
     for (const e of entries) {
       if (signal?.aborted) throw aborted(signal, 'Upload');
-      const path = checkPath(e.path);
+      const path = checkPath(cleanName(e.path));
       path.split('/').forEach(checkName);
       if (e.dir) { await ensure(path); continue; }
       const cut = path.lastIndexOf('/');
@@ -791,8 +799,7 @@ export class DriveClient {
       if (!r || !r.node) throw malformed();
       const d = await this.decode(r.node);
       if (d.unreadable) throw new Error('A file or folder name cannot be read.');
-      checkName(d.name); // paths for ZIPs and manifests: never ".." or "/" from a name
-      const name = uniqueName(top, d.name);
+      const name = uniqueName(top, checkName(d.name)); // paths for ZIPs and manifests: never ".." or "/" from a name
       if (++out.count > MAX_ENTRIES) throw new Error(`At most ${MAX_ENTRIES} files and folders at once.`);
       if (d.kind === 'file') {
         out.files.push({ ...(await this.#fileEntry(r.node, name)), id });
@@ -814,8 +821,8 @@ export class DriveClient {
       if (++out.count > MAX_ENTRIES) throw new Error(`At most ${MAX_ENTRIES} files and folders at once.`);
       const d = await this.decode(c);
       if (d.unreadable) throw new Error('A file or folder name cannot be read.');
-      checkName(d.name); // paths for ZIPs and manifests: never ".." or "/" from a name
-      const p = path ? `${path}/${uniqueName(taken, d.name)}` : uniqueName(taken, d.name);
+      const leaf = uniqueName(taken, checkName(d.name)); // paths for ZIPs and manifests: never ".." or "/" from a name
+      const p = path ? `${path}/${leaf}` : leaf;
       if (d.kind === 'file') {
         out.files.push({ ...(await this.#fileEntry(c, p)), id: c.id });
       } else {
