@@ -466,6 +466,10 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - **Logging:** they are recorded in the audit log as direct admin actions, and they do not
     appear in the user's own activity. Impersonation is different: it acts *as* the user and
     shows up as the user's own.
+- **The user's own activity** (Account → My activity) lists only what the user did, what was done
+  as them while impersonating, and system events about them (for example a lockout). Admin
+  actions on the account (created, disabled, enabled, role or limits changed, password reset)
+  and on its shares are recorded in the owner-only admin audit and are not shown to the user.
   - **Locks:** a locked share is frozen for its sender (no edits, no revoke) and for its delete
     token, until the owner unlocks it. Natural expiry and view exhaustion still apply. Locked
     rows are kept in the share index; they are not pruned.

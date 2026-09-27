@@ -874,9 +874,11 @@ export class Directory extends DurableObject {
     // actor, so actions the owner took while impersonating appear as the
     // user's own, and the start and end of an impersonation are not shown
     // (the owner-only admin audit keeps the start, the end and the real
-    // actor). Direct admin-panel actions on the user's shares (adm) are not
-    // shown either.
-    const where = "subject_id = ? AND adm = 0 AND action NOT IN ('impersonate.start', 'impersonate.end')";
+    // actor). Admin actions on the user (created, disabled, role changed,
+    // password reset, …) and on their shares (adm) are never shown: only what
+    // the user did, what was done as them, and system events (no actor).
+    const where = "subject_id = ? AND adm = 0 AND (actor_id = subject_id OR actor_id IS NULL OR imp = 1)"
+      + " AND action NOT IN ('impersonate.start', 'impersonate.end')";
     const rows = before
       ? this.sql.exec(`SELECT id, ts, action, detail FROM activity WHERE ${where} AND id < ? ORDER BY id DESC LIMIT ?`, uid, before, lim).toArray()
       : this.sql.exec(`SELECT id, ts, action, detail FROM activity WHERE ${where} ORDER BY id DESC LIMIT ?`, uid, lim).toArray();
