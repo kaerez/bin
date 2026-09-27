@@ -251,8 +251,7 @@ API keys are never challenged.
   off if that is unacceptable.
 - **Privacy.** Turnstile runs Cloudflare's client-side challenge and sends browser signals to
   Cloudflare. For GDPR, treat Cloudflare as a processor for this purpose and describe it in
-  your privacy notice. Confirm the lawful basis and any consent requirement with your Legal /
-  Compliance team; this document is not legal advice.
+  your privacy notice.
 
 ### Accessibility widget and statement
 
@@ -361,12 +360,28 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
 - **CSRF**: state-changing calls must be non-simple (JSON content type or `X-Secbin-Intent`), are
   refused when `Sec-Fetch-Site` is `cross-site` **or `same-site`** (a sibling subdomain is not
   trusted), and cookies are SameSite=Strict. The API has no CORS.
-- **API keys** (`sbk_…`, stored hashed) authenticate share creation only — never account or
-  admin endpoints. The owner decides who may hold keys and how many; API limits and quotas can
-  only narrow the account's limits. Revoking API permission disables existing keys at once.
-  - **Scopes:** each key carries a subset of `notes`, `files` and `policy`, chosen at creation
-    and fixed for its lifetime; a call outside them is `403 scope_denied`. Issue each automation
-    the narrowest key it needs (least privilege) and an expiry.
+- **API keys** (`sbk_…`, stored hashed) authenticate share creation, the policy read and the
+  key user's own shares (list, receipts, label, extend, revoke) — never the account itself
+  (profile, password, passkeys, keys, activity) or admin endpoints (`403 api_key_not_allowed`).
+  The owner decides who may hold keys and how many; API limits and quotas can only narrow the
+  account's limits. Revoking API permission disables existing keys at once.
+  - **Scopes:** each key carries a subset of `notes`, `files`, `policy` (create), `read` (list
+    the user's shares, one share, and its read receipts) and `manage` (label, extend views /
+    expiry, revoke). A key created without a choice gets the three creation scopes only; `read`
+    and `manage` are always an explicit choice. Scopes are chosen at creation and can be changed
+    later (by the user with their password or a passkey, or by the owner); a call
+    outside them is `403 scope_denied`. Issue each automation the narrowest key it needs (least
+    privilege) and an expiry.
+  - **Same rules as the dashboard:** a key sees and changes only its user's shares (anything
+    else is `404`), cannot touch a share the owner has locked (`423`), can only grow views and
+    expiry, and is held to the account's **API** limits when extending. A revoke needs
+    `X-Secbin-Intent: 1`. Every change made with a key is logged with the key's id
+    (`apikey=<id>`), never the key.
+  - **Exposure:** a leaked `read` key reveals the user's share labels (not encrypted), sizes,
+    dates and read receipts (which may include recipients' network addresses, locations and
+    browsers, as far as the owner enables receipt details — personal data); a leaked `manage`
+    key can revoke the user's shares (availability) but can never read their content, which
+    stays encrypted with keys the server never holds.
   - **Storage:** the key is shown once. Keep it in a secrets manager (for example HashiCorp Vault
     or AWS Secrets Manager) and pass it through the environment, never in source code, shell
     history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`
@@ -510,15 +525,16 @@ codes as safe as the password.
     Manage → Passkeys), after which the password alone signs in. This needs the acting
     admin's own current password, so a stolen admin session alone cannot strip anyone's
     second factor; wrong passwords count as for a password change.
-  - Passwords and passkeys are separate. An admin password reset, an import that overwrites an
-    account's credentials, and a user's own password change all keep the passkeys and
-    recovery codes. After a takeover, remove them as well. After a user's own change, Account
+  - Passwords and passkeys are separate. An admin password reset and a user's own password
+    change keep the passkeys and recovery codes, and an import never changes an existing
+    account's password, recovery codes or passkeys (it can only add passkeys). After a takeover, remove them as well. After a user's own change, Account
     says how many still work and asks the user to remove any passkey they do not recognise.
   - Owner recovery through `AUTHN` also removes the owner's passkeys.
-- Passkeys and recovery codes leave the server only in an export where the owner chose
-  "Passkeys and recovery codes". The file carries the public keys (useless without the
-  authenticator) and the recovery-code hashes. Passkeys work only under the same hostname
-  (WebAuthn binds them to it); recovery codes work anywhere.
+- Passkeys and recovery codes leave the server only in an export where the owner ticked
+  "Passkeys" or "Recovery codes" (separate parts) for that account, the owner's own row
+  included. The file carries the public keys (useless without the authenticator), each with the
+  WebAuthn user handle it was registered under, and the recovery-code hashes. Passkeys work only
+  under the same hostname (WebAuthn binds them to it); recovery codes work anywhere.
 
 ### Read receipts
 
@@ -543,8 +559,7 @@ codes as safe as the password.
   shares are recorded for the admin only.
 - The share page tells recipients that opening is recorded: before they reveal or unlock a share,
   and on the note or files view itself (a share without a password or view limit opens at once).
-  These are recipients' personal data (GDPR): decide what senders may see, the retention period
-  and the notice wording with your Legal / Compliance team.
+  The admin decides what senders may see; receipts are kept as long as the activity log.
 
 ### Activity log retention and clearing
 
@@ -568,10 +583,7 @@ codes as safe as the password.
 - The owner can **clear** the log — everything, or one account's entries, optionally only those
   older than a date. It needs the owner's password again (like export), and, as configured, it
   **leaves no record**: after a clear, nothing in the system shows that entries existed or were
-  removed. Audit trails can be subject to retention duties (for example SOX record-keeping for
-  systems in scope, or PCI DSS audit-log retention); decide the retention settings — the
-  owner's own limits included, since they cover every admin action — and who may clear with
-  your Legal / Risk / Compliance team. This document is not legal or compliance advice.
+  removed. The owner's own limits cover every admin action.
 
 ### Admin export / import
 
@@ -590,16 +602,27 @@ codes as safe as the password.
   server) and again when importing (only what is ticked is applied).
   - System parts: settings; roles; IP rules; Turnstile keys, off by default because they
     include the secret; the public account.
-  - User parts: credentials; role; API keys; passkeys and recovery codes.
+  - User parts, per user (a table of users × parts, with Select all / Deselect all): credentials;
+    role; API keys; passkeys; recovery codes. The owner's row holds only its passkeys and
+    recovery codes.
 - **API keys** travel as their stored hashes, so the same keys keep working on the target, and
   revoking a key on one server does not revoke it on the other. The import preview says so,
-  and refuses a key or passkey that already belongs to another account on the target.
-- Never exported: the owner account, sessions, shares, usage counters and the activity log. An
-  import can never create or replace an owner; the accounts it creates are plain users.
+  and refuses a key that already belongs to another account on the target; a passkey (credential
+  id) or recovery code that already belongs to an account there is skipped, never moved.
+- **Imports never remove or overwrite an existing account's credentials** (a maintainer rule).
+  An account that already exists, the owner included, only gets its role set (if chosen; never
+  the owner's, which is always Owner) and the file's passkeys added (if chosen, within the role's
+  passkey limit). Its password verifier, disabled flag, recovery codes, API keys, existing
+  passkeys, "Password and passkey" choice and sessions are left untouched, so a crafted or stale
+  file cannot lock anyone out or replace a credential; the worst it can do to an existing
+  account is add a passkey, which the owner sees in the preview (by name) and which is logged.
+  New accounts are created from the chosen parts.
+- Never exported: the owner's password, role and API keys, sessions, shares, usage counters and
+  the activity log. An import can never create or replace an owner; the accounts it creates are
+  plain users.
 - **Treat an export as a credential store.** One that holds verifiers, API key hashes and the
   Turnstile secret is as sensitive as the database. Keep the file and its passphrase apart,
-  export only the parts you need, and delete files you no longer need (recommendation). Where
-  exports may be kept at all is a decision for your Security and Compliance teams.
+  export only the parts you need, and delete files you no longer need (recommendation).
 - Imports are re-validated field by field on the server with the same checkers as the admin API
   (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
   previewed as a dry run, and are applied in one storage transaction or not at all. Replacing
@@ -611,21 +634,14 @@ codes as safe as the password.
   and `export.users` (which accounts, with or without verifiers), `import.system`,
   `settings.updated`, `limits.updated`, `quotas.updated`, `viewer_rules.updated`,
   `iprule.added` (with the values) and `user.imported`.
-- The passphrase is the only protection of the file: keep file and passphrase apart. Whether
-  exported verifiers may leave the environment at all is a policy decision for your Security /
-  Compliance function.
+- The passphrase is the only protection of the file: keep file and passphrase apart.
 
 ### Public (anonymous) access
 
-> [!IMPORTANT]
-> **Legal / Compliance review required before enabling.** Anonymous sharing lets anyone publish
-> content from your domain, and the tracker below stores an identifier on the visitor's device
-> for rate limiting. Storing or reading such an identifier is regulated in the EU/UK (ePrivacy
-> Directive art. 5(3), PECR) and the identifier and the keyed network hash are pseudonymous
-> personal data under GDPR. Whether the "strictly necessary" exemption applies, which lawful
-> basis and retention period apply, what the on-page notice must say, and how abuse reports are
-> handled are decisions for your Legal, Risk and Compliance functions — this document is not
-> legal or compliance advice.
+> [!NOTE]
+> Anonymous sharing lets anyone publish content from your domain, and the tracker below stores
+> an identifier on the visitor's device for rate limiting (see the notice setting on the Public
+> role).
 
 - **Off by default** (`public.enabled`). When off, every `/api/public/*` route except the
   profile answers `403 public_disabled` and the landing page shows no composer.

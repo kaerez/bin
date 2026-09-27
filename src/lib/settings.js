@@ -231,6 +231,18 @@ export const PASSWORD_POLICY_KEYS = ['pwMinLength', 'pwUpper', 'pwLower', 'pwDig
 
 /** Hard ceiling on API keys per account, whatever the limit says. */
 export const MAX_API_KEYS = 1000;
+/**
+ * What an API key may do (chosen when it is created or edited):
+ *   notes  — create notes (every format)       files  — upload file shares
+ *   policy — read the account's policy (GET /api/private/policy, used by the CLI)
+ *   read   — list the key user's shares, one share, and its read receipts
+ *   manage — label, extend (views / expiry) and revoke the key user's shares
+ * A key created without a choice gets DEFAULT_KEY_SCOPES (creation only —
+ * least privilege): read and manage are always opted into. No scope reaches
+ * the account, its keys or credentials, or the admin panel.
+ */
+export const API_SCOPES = Object.freeze(['notes', 'files', 'policy', 'read', 'manage']);
+export const DEFAULT_KEY_SCOPES = Object.freeze(['notes', 'files', 'policy']);
 
 // Keys the API channel may restrict further (never widen).
 export const API_LIMIT_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec',

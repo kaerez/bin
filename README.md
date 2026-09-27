@@ -65,8 +65,8 @@ flowchart TD
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, label shares, and see **read receipts** — every open with its time (and, if the admin allows, the opener's address, location, browser, system and languages). |
 | Admin | Users, roles (limits, quotas, session timeouts, file-size caps, viewer policy), impersonation ("log in as"), password resets, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
-| Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. Needs Legal/Compliance review before use — see SECURITY.md. |
-| CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete — with API keys. |
+| Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. See SECURITY.md. |
+| CLI | [`secbin`](./cli/README.md): create notes, send files/folders, get/view, delete, and list, show, read receipts of, label, extend and revoke your shares — with API keys. |
 | Installable | A PWA: install from the banner (or the browser menu; on iOS, Share → Add to Home Screen). The service worker caches only the static shell — never shares or API responses. |
 | Minimal surface | Strict CSP, self-hosted fonts, no third-party scripts, no analytics, no outbound requests. |
 
@@ -172,11 +172,15 @@ working.
   accessibility statement. Everything an account may do is on its role.
 - **Security** — current blocks and tracked IPs per scope, manual allow/block rules for IPv4/IPv6
   addresses, CIDR blocks and ranges such as `10.0.0.5-10.0.0.20` (allow beats block).
-- **Import / export** — the owner exports the system configuration and/or some or all users
-  (credentials and/or configuration; never the owner, sessions, API keys or shares) to a file
-  **encrypted in the browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a
-  file after decrypting it locally: a preview (dry run) first, per-user skip/create/overwrite
-  or rename, then an all-or-nothing import. Both need the owner's password again.
+- **Import / export** — the owner exports the system configuration and/or some or all users,
+  part by part (a table of users × parts with Select all / Deselect all: credentials, role, API
+  keys, passkeys, recovery codes; the owner is a row too, with only its passkeys and recovery
+  codes; never the owner's password, sessions or shares) to a file **encrypted in the
+  browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a file after
+  decrypting it locally: the parts chosen again per user, a preview (dry run), per-user
+  skip/create/update or rename, then an all-or-nothing import. An import never removes or
+  overwrites an existing account's credentials: an existing account (the owner included) only
+  gets its role set and the imported passkeys added. Both need the owner's password again.
 - **Public access** (off by default) — a built-in `(public)` account that cannot sign in,
   be deleted or hold API keys. When enabled, the home page shows a composer limited to that
   account's limits and quotas (seeded conservatively: notes only, ≤ 10 views, ≤ 7 days, 10 per
@@ -184,14 +188,13 @@ working.
   localStorage and IndexedDB, self-healing; unresolvable conflicts are blocked), per network, or
   both (permissive or restrictive). The composer shows an editable notice. Admin → Public access
   only turns it on or off; the limits, quotas, viewer rules, counting mode, notice and browser ids
-  are on the Public role (Admin → Roles). **Get Legal / Compliance sign-off first**
-  (ePrivacy/GDPR); see [SECURITY.md](./SECURITY.md).
+  are on the Public role (Admin → Roles); see [SECURITY.md](./SECURITY.md).
 - **Activity log** — kept for at most a set age and number of entries (defaults 365 days and
   500 000), with per-role limits. Entries about the owner and the owner's own actions
   (impersonation included) follow the owner's limits instead (Owner role; kept until cleared by
   default); server-wide configuration changes are never deleted automatically. The owner can
   clear everything, one account's entries or entries older than a date (password required; no
-  record is kept of the clearing — check retention duties with Legal / Compliance first).
+  record is kept of the clearing).
 - **Passkeys:** each account can add passkeys (Account) and sign in with one instead of the
   password, or require one after the password; 20 one-time recovery codes stand in for a lost
   passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
@@ -226,9 +229,6 @@ labelled fields, AA contrast in both themes, reduced-motion support, reflow down
   Untranslated headings fall back to the main language's. Without JavaScript the page shows a
   short note instead. The statement is part of the Settings part of an export. "Restore the
   default statement" puts the English-only default back in the form (save to publish it).
-- **Before publishing.** Have the statement reviewed by an accessibility professional (in
-  Israel, a מורשה לנגישות השירות) or by Legal. This project does not decide whether a
-  deployment is obliged, exempt or conformant.
 
 ## Installing as an app (PWA)
 
@@ -267,7 +267,10 @@ secbin get 'https://bin.example.com/p/f…#…' --out ./downloads
 ```
 
 See [`cli/README.md`](./cli/README.md). To call the REST API directly (curl, Python, Node), see
-[`docs/API.md`](./docs/API.md) and [`examples/api/`](./examples/api/).
+[`docs/API.md`](./docs/API.md) and [`examples/api/`](./examples/api/). Each API key has scopes:
+`notes`, `files` and `policy` to create (the default), and, when chosen, `read` (list your shares
+and their read receipts) and `manage` (label, extend and revoke them) — only ever your own
+shares, never the account or the admin panel.
 
 ## Architecture
 

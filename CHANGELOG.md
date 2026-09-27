@@ -44,8 +44,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - stored challenges are capped per account;
   - removing an account's passkeys from the admin panel (the owner's included) needs the
     admin's own password;
-  - an admin password reset, or an import that overwrites credentials, keeps the account's
-    passkeys and recovery codes (passwords and passkeys are separate);
+  - an admin password reset keeps the account's passkeys and recovery codes (passwords and
+    passkeys are separate), and an import never removes or overwrites an existing account's
+    credentials (see Changed);
   - a recovery code alone always signs in, whatever the passkey mode or the user's "passkey
     after password" choice (Turnstile, per-IP blocking and the lockout still apply);
   - the second step respects the account lockout;
@@ -58,21 +59,46 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **API key scopes `read` and `manage`** (#31): besides creating (`notes`, `files`, `policy`),
+  a key can list the user's shares, one share and its read receipts (`read`: `GET
+  /api/private/shares`, `GET …/shares/:id` — new — and `GET …/shares/:id/opens`) and label,
+  extend and revoke them (`manage`: `PATCH …/shares/:id`, `POST …/shares/:id/revoke`) — only
+  the key user's own shares, under the owner's share locks and, for extensions, the account's
+  API limits; changes made with a key are logged with its id. Both are opt-in: a key created
+  without a choice still gets the creation scopes only. Account → API keys and Admin → Users
+  offer and list the new scopes; exports and imports carry them. `docs/API.md` and the
+  Account page's "Using the API" help document every endpoint a key can use, with examples for
+  every use case in curl, Node.js and Python (new `examples/api/create-files.mjs` /
+  `create_files.py` for the file upload flow, `--encrypt-only` modes for curl, and
+  `shares.mjs` / `shares.py` for list, show, receipts, label, extend, revoke, policy and delete;
+  the Python examples use `requests`). The CLI gains `secbin list`, `show`, `receipts` (`read`)
+  and `label`, `extend`, `revoke` (`manage`). Existing keys keep exactly the creation scopes
+  they had. A `read` key can fetch read receipts, which include the recipients' network
+  addresses and locations when the owner enables those details.
+
 - **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
   `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
   owner made (admin actions, impersonation). Both default to keep forever, as before. Server-wide
   configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile,
   the public account's configuration) are still never deleted automatically; clearing by hand is
   unchanged. The settings travel in the settings part of an export and are validated on import.
-  Check audit-trail retention duties (e.g. SOX) with Legal / Compliance before setting them.
 - **Export / import everything, part by part.**
   - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
     default) and the public account.
-  - Per user: credentials, role, API keys (the same keys keep working) and passkeys with
-    recovery codes (passkeys only on the same hostname).
-  - Each part is ticked when exporting and again when importing, with a note on what it holds.
-  - The preview warns about keys that keep working, passkeys from another hostname and Turnstile
-    keys, and refuses keys or passkeys that already belong to another account.
+  - Per user: credentials, role, API keys (the same keys keep working), passkeys (only on the
+    same hostname; with the "Password and passkey" choice) and recovery codes (hashes; they work
+    anywhere). Passkeys and recovery codes are separate parts, each optional.
+  - The owner is one of the rows: its passkeys and recovery codes can be exported (off by
+    default), never its password, role or API keys.
+  - Each part is ticked per user, in a table of users × parts with "Select all" / "Deselect all"
+    for the users and for every part, when exporting and again when importing, with a note on
+    what each part holds.
+  - The preview lists, per account, what changes and what is skipped and why (a passkey already
+    registered here, one that does not fit the role's passkey limit, recovery codes that belong
+    to another account), and warns about keys that keep working, passkeys from another hostname
+    and Turnstile keys; API keys that already belong to another account are refused.
+  - Each passkey carries the WebAuthn user handle it was registered under, so a passkey added to
+    an account with another handle still signs in without a username.
 
 - **Link rules say the form of a scheme:** `scheme:name://` allows links written with `//`
   (http and https are always written this way) and `scheme:name:` allows links without it
@@ -93,8 +119,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - The role is chosen per user in Users. The Defaults & quotas tab is gone (its options are
     the Default role's), and so are all per-user settings.
   - **Upgrade note:** existing per-user overrides are removed (one audit entry says how many).
-  - Export and import carry roles: `system.roles`, and each user's `config: { role }`. Older
-    files' per-user settings are accepted and ignored, with a warning.
+  - Export and import carry roles: `system.roles`, and each user's `role`. Export files from
+    before per-user parts (`config`, the combined passkeys-and-codes part) are refused.
 
 - **Account:** change your username; edit an API key's name and scopes; confirm changes with a
   passkey instead of the password; how you sign in is a choice under Passkeys: "Password or
@@ -168,16 +194,15 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   default); a composer on the home page with an editable notice and the delete token on
   success; counting per browser tracker (cookie + ETag + localStorage + IndexedDB, self-healing,
   blocked on unresolvable conflicts, new senders rate-limited per network on first
-  creation), per network, or both (permissive / restrictive); tracker administration (unblock, block, forget). Requires Legal /
-  Compliance review before it is enabled.
+  creation), per network, or both (permissive / restrictive); tracker administration (unblock, block, forget).
 - **Works without WebAssembly** (iOS/macOS Lockdown Mode, including Chrome on iOS): Argon2id
   falls back to a pure-JavaScript build (@noble/hashes, pinned) with the same output, and a
   progress bar shows slow derivations.
 - **Encrypted admin import/export** (Admin → Import / export): system configuration and/or
-  selected users (credentials and/or configuration), never the owner, sessions or API keys;
-  encrypted in the browser with a passphrase; imports are decrypted locally, previewed, then
-  applied all-or-nothing, with per-user skip/create/overwrite/rename. Both require the owner's
-  password again.
+  selected users, part by part (see "Export / import everything"), never the owner's password,
+  sessions or shares; encrypted in the browser with a passphrase; imports are decrypted locally,
+  previewed, then applied all-or-nothing, with per-user skip/create/update/rename. Both require
+  the owner's password again.
 - **Link and credential shares** (`fmt` `url` / `secret`), off until the administrator allows
   them globally or per user:
   - links: http(s) only, no embedded credentials; the recipient sees the real host (punycode,
@@ -296,6 +321,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Imports never remove or overwrite an existing account's credentials** (the owner's
+  included). An account that already exists only gets its role set (if that part is chosen;
+  never the owner's) and the imported passkeys added (if that part is chosen); its password,
+  disabled flag, recovery codes, API keys, passkeys, "Password and passkey" choice and sessions
+  stay. The parts that cannot apply are shown but disabled on the import screen. New accounts
+  are created from the chosen parts. "Overwrite" is gone; the per-user action is "create" or
+  "update existing", and a mismatch with what is there is refused.
 - **The accessibility statement is admin-edited and English only by default** (#35): the text
   moved from `public/accessibility/index.html` into settings (Admin → Settings →
   Accessibility, which also holds the contact and coordinator); the built-in Hebrew version
@@ -307,7 +339,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   its length.
 - **Role editors:** the Sessions, File shares and Activity log sections carry the same kind of
   explanation as the Owner role, and log retention says "keep forever" rather than "no limit".
-- **Admin UI:** the Legal / Compliance warnings are removed from every admin screen.
+- **No Legal / Compliance notes:** removed from every admin screen and from the docs (README, SECURITY, CHANGELOG); `AGENTS.md` now says not to add them.
 - **Human check:** while the check is pending, "Waiting for the human check…" is shown under the
   protected button (and linked to it for screen readers) instead of only in a tooltip.
 - **Everything an account may do is on its role** (migration 12):

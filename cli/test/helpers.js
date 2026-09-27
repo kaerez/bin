@@ -169,6 +169,75 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       return json(200, { ok: true, id: up[1], expires });
     }
 
+    // ── the key user's shares ("read" / "manage"; policy.noRead / noManage drop a scope) ──
+    if (u.pathname === '/api/private/shares') {
+      if (method !== 'GET') return err(405, 'method_not_allowed');
+      const denied = auth();
+      if (denied) return denied;
+      if (policy.noRead) return err(403, 'scope_denied', 'This API key does not have the "read" scope.');
+      const all = [...notes.entries(), ...[...files.entries()].filter(([, f]) => f.state === 'active' || f.state === 'revoked')]
+        .map(([id, r]) => ({ id, kind: id[0] === 'f' ? 'files' : 'text', label: r.label ?? '', created: 0, expires: r.paste?.meta.expires ?? 0,
+          views_total: r.views ?? null, left: r.revoked ? null : r.left ?? null, opens: 0, status: r.revoked ? 'revoked' : 'active', locked: r.locked ? 1 : 0 }))
+        .filter((r) => !u.searchParams.get('status') || r.status === u.searchParams.get('status'));
+      const off = Number(u.searchParams.get('offset')) || 0;
+      return json(200, { rows: all.slice(off, off + (policy.pageSize ?? 50)), total: all.length });
+    }
+    // One share (GET, "read"), its receipts (GET …/opens, "read"; rec.receipts), label / extend (PATCH, "manage").
+    const so = /^\/api\/private\/shares\/([^/]+)(\/opens)?$/.exec(u.pathname);
+    if (so) {
+      const denied = auth();
+      if (denied) return denied;
+      const rec = notes.get(so[1]) ?? files.get(so[1]);
+      const need = method === 'GET' ? 'read' : 'manage';
+      if ((need === 'read' && policy.noRead) || (need === 'manage' && policy.noManage)) return err(403, 'scope_denied', `This API key does not have the "${need}" scope.`);
+      if (!rec) return err(404, 'not_found', 'Share not found.');
+      if (so[2]) {
+        if (method !== 'GET') return err(405, 'method_not_allowed');
+        const rows = rec.receipts ?? [];
+        return json(200, { total: rows.length, fields: policy.receiptFields ?? [], rows });
+      }
+      const row = () => ({ id: so[1], kind: so[1][0] === 'f' ? 'files' : 'text', label: rec.label ?? '', created: rec.paste?.meta.created ?? 0,
+        expires: rec.paste?.meta.expires ?? 0, views_total: rec.views ?? null, left: rec.left ?? null, opens: (rec.receipts ?? []).length,
+        status: rec.revoked ? 'revoked' : 'active', locked: rec.locked ? 1 : 0 });
+      if (method === 'GET') return json(200, { share: row() });
+      if (method !== 'PATCH') return err(405, 'method_not_allowed');
+      if (h.get('content-type') !== 'application/json') return err(415, 'unsupported_media_type');
+      if (rec.locked) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
+      const body = readBody() ?? {};
+      if (body.label === undefined && body.views === undefined && body.expires === undefined) return err(400, 'invalid', 'Nothing to change.');
+      if (body.label !== undefined) {
+        if (typeof body.label !== 'string' || body.label.length > 100) return err(400, 'invalid_label', 'Labels are up to 100 characters.');
+        rec.label = body.label;
+      }
+      if (body.views !== undefined) {
+        if (rec.views === null || rec.views === undefined) return err(400, 'invalid', 'This note already has unlimited views.');
+        if (body.views !== null && !(Number.isSafeInteger(body.views) && body.views >= rec.views)) return err(400, 'invalid', 'Views can only grow.');
+        if (body.views === null && policy.allowUnlimitedViews === false) return err(403, 'unlimited_views_disabled', 'Unlimited views are not allowed for this account via the API.');
+        rec.left = body.views === null ? null : rec.left + (body.views - rec.views);
+        rec.views = body.views;
+      }
+      if (body.expires !== undefined) {
+        if (!Number.isSafeInteger(body.expires) || body.expires <= now()) return err(400, 'invalid_expiry', 'Expiry must be in the future and within 365 days.');
+        if (rec.paste) rec.paste.meta.expires = body.expires;
+        else rec.expiresAt = body.expires;
+      }
+      return json(200, { ok: true });
+    }
+    const sr = /^\/api\/private\/shares\/([^/]+)\/revoke$/.exec(u.pathname);
+    if (sr) {
+      if (method !== 'POST') return err(405, 'method_not_allowed');
+      const denied = auth();
+      if (denied) return denied;
+      if (policy.noManage) return err(403, 'scope_denied', 'This API key does not have the "manage" scope.');
+      if (h.get('x-secbin-intent') !== '1') return err(400, 'missing_intent', 'This request requires the "X-Secbin-Intent: 1" header.');
+      const rec = notes.get(sr[1]) ?? files.get(sr[1]);
+      if (!rec) return err(404, 'not_found', 'Share not found.');
+      if (rec.locked) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
+      rec.revoked = true;
+      if (notes.has(sr[1])) notes.delete(sr[1]);
+      return json(200, { ok: true });
+    }
+
     // ── public share API ────────────────────────────────────────────────────
     const m = /^\/api\/(paste|file)\/([^/]+)(?:\/(open|chunk|expire)(?:\/(\d+))?)?$/.exec(u.pathname);
     if (!m) return err(404, 'not_found', 'Not found.');
