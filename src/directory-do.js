@@ -250,7 +250,7 @@ export const PUBLIC_ID = 'public-user-0000';
  * JSON array (`json_each(?)`), not one parameter each, so the list stays well
  * clear of SQLite's bound-parameter limit (about 100 in a Durable Object).
  */
-export const MAX_SHARE_FILTER_USERS = 1000;
+export const MAX_SHARE_FILTER_USERS = 500; // ~19 bytes per id in the URL: stays well under the 16 KB URL limit
 /**
  * Limits that mean nothing for the public account: it has no API keys, no
  * dashboard to see read receipts in, no password or passkeys, and its log
