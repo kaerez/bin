@@ -154,6 +154,22 @@ describe('L-2: many shares of one item', () => {
   });
 });
 
+describe('names in every script (shared checks, run in the Worker runtime)', () => {
+  const REAL = ['דוח שנתי 2026.pdf', 'שָׁלוֹם.txt', 'report-דוח.docx', 'تقرير.pdf', 'می\u200cخواهم.txt', '👨\u200d👩\u200d👧 family.jpg', 'תיקייה/משנה/דוח.pdf'];
+  it('file-share (v2) and Drive-share (v3) manifests keep them unchanged; spoofing characters are cleaned, not refused', async () => {
+    const files = await import('../public/js/files.js');
+    const { buildRefsManifest, validateRefsManifest } = await import('../public/js/refsmanifest.js');
+    const l = files.layout(REAL.map((path, i) => ({ path, type: 'application/octet-stream', size: i + 1, mtime: 0 })), ['תיקייה/ריקה']);
+    const v2 = files.validateManifest(JSON.parse(JSON.stringify(files.buildManifest({ entries: l.entries, total: l.total }))));
+    expect(v2.entries.filter((e) => !e.dir).map((e) => e.path)).toEqual(REAL);
+    const v3 = validateRefsManifest(JSON.parse(JSON.stringify(buildRefsManifest({ files: REAL.map((path) => ({ path, size: 1, type: 'text/plain', mtime: 0, fk: b64urlFromBytes(randomBytes(32)) })), dirs: ['תיקייה'] }))));
+    expect(v3.entries.filter((e) => !e.dir).map((e) => e.path)).toEqual(REAL);
+    for (const n of REAL) expect(files.cleanName(n)).toBe(n);
+    expect(files.cleanName('invoice\u202efdp.exe')).toBe('invoicefdp.exe');
+    expect(files.checkPath('invoice\u202efdp.exe')).toBe('invoice\u202efdp.exe'); // a received one is cleaned for display, not refused
+  });
+});
+
 describe('audit round 3: a share id never changes hands', () => {
   it('recordShare refuses an id another account holds (the row stays theirs); the same account may re-record it', async () => {
     const a = await makeUser('aud-rec-a');

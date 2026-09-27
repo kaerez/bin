@@ -31,26 +31,34 @@ const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 // ── paths ─────────────────────────────────────────────────────────────────────
 
 /**
- * Characters a file or folder name must not carry, beyond the C0 controls and
- * DEL: bidi controls (U+061C, U+200E-U+200F, U+202A-U+202E, U+2066-U+2069),
- * zero-width characters (U+200B-U+200D, U+2060, U+FEFF) and the line breaks
- * U+0085, U+2028 and U+2029. They can make a name display as something else
- * ("invoice\u202efdp.exe" shows as "invoiceexe.pdf") or split it across
- * lines. (Other C1 controls are escaped wherever a terminal shows a name.)
+ * The characters stripped from every file and folder name (cleanName): the
+ * bidi overrides, embeddings and isolates (U+202A-U+202E, U+2066-U+2069),
+ * which can make a name display as something else ("invoice" U+202E "fdp.exe"
+ * shows as "invoiceexe.pdf"), the zero-width space and BOM (U+200B, U+FEFF)
+ * and the line breaks U+0085, U+2028 and U+2029. Everything real names use
+ * stays: Hebrew and Arabic (niqqud and harakat included), ZWNJ / ZWJ
+ * (U+200C, U+200D: Persian words, emoji sequences) and the marks LRM, RLM
+ * and ALM (U+200E, U+200F, U+061C). Display adds its own isolation
+ * (common.js nameEl), so a name never reorders the text around it.
  */
-export const INVISIBLE_RE = /[\u0085\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/;
+export const SPOOF_RE = /[\u0085\u200b\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g;
+
+/** A name or path with the spoofing characters (SPOOF_RE) removed, NFC-normalised. */
+export function cleanName(name) {
+  return String(name).replace(SPOOF_RE, '').normalize('NFC');
+}
 
 /**
  * Validate a relative POSIX path and return it unchanged, or throw. Rejects
  * empty/"."/".." segments, absolute paths, backslashes, NUL and all control
- * characters, bidi and invisible characters (INVISIBLE_RE), over-long
- * segments and paths. Never "repairs" a path — a manifest
+ * characters, over-long segments and paths. (Names are cleaned, not refused,
+ * for spoofing characters: cleanName.) Never "repairs" a path — a manifest
  * carrying one of these is malformed (fail closed; no zip-slip, no traversal).
  */
 export function checkPath(p) {
   if (typeof p !== 'string' || p.length === 0) throw new ManifestError('empty path');
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f\\]/.test(p) || INVISIBLE_RE.test(p)) throw new ManifestError('illegal character in path');
+  if (/[\u0000-\u001f\u007f\\]/.test(p)) throw new ManifestError('illegal character in path');
   if (utf8(p).length > MAX_PATH_BYTES) throw new ManifestError('path too long');
   if (p.startsWith('/')) throw new ManifestError('absolute path');
   for (const seg of p.split('/')) {

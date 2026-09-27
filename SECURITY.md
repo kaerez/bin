@@ -139,6 +139,15 @@ compromise. Defenses:
   and `srcdoc`. URL-valued attributes (`href`, `src`, …) accept only relative URLs, `http`,
   `https`, `mailto` and `blob:` URLs, plus `data:image/*` for images. Markdown is a
   raw-HTML-free subset with an `http`/`https`/`mailto` link allowlist.
+- **File names cannot disguise themselves.** The characters that can make a name display as
+  something else — bidi overrides, embeddings and isolates (U+202A–U+202E, U+2066–U+2069) —
+  and U+200B, U+FEFF, U+0085, U+2028 and U+2029 are removed from every file and folder name
+  (then NFC; `files.js` `cleanName`) when a file share, a Drive item or a CLI share is made and
+  when a received one is shown or saved (marked "renamed"); names are never refused for them.
+  Every name is shown in a bidi isolate with its extension as its own left-to-right isolate
+  (`common.js` `nameEl`), so `invoice<U+202E>fdp.exe` appears as `invoicefdp.exe` with the
+  extension `.exe`. Everything real names use stays: Hebrew and Arabic (with niqqud and
+  harakat), ZWNJ / ZWJ and LRM / RLM / ALM.
 - **Safe viewer** (optional, admin-governed, sender opt-in per share):
   - text/Markdown/code: inert DOM, size-capped;
   - images: the type comes from our own signature sniffing (never the sender's label); the

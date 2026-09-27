@@ -17,7 +17,7 @@
 // point (public/dashboard/js/drive.js passes the client module); it is
 // separate from the boot so it can be tested.
 
-import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, nameEl } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { createTree, crumbTrail } from '../../js/tree.js';
 import { progressBar } from '../../js/progress.js';
@@ -25,7 +25,7 @@ import { walkEntry } from '../../js/walk.js';
 import { expireSeconds, MAX_VIEWS } from '../../js/format.js';
 import { passkeysSupported } from '../../js/passkeys.js';
 import { utf8 } from '../../js/bytes.js';
-import { INVISIBLE_RE } from '../../js/files.js';
+import { cleanName } from '../../js/files.js';
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
@@ -34,18 +34,28 @@ const MAX_NAME_BYTES = 255; // as the client (driveclient.js checkName)
 
 // ── pure helpers (unit-tested) ──────────────────────────────────────────────
 
-/** A node name as typed → { name } (trimmed, NFC) or { error }. Names are encrypted, so only the client checks them. */
+/**
+ * A node name as typed → { name, renamed? } or { error }: trimmed, cleaned
+ * (files.js cleanName: bidi overrides and isolates, U+200B, U+FEFF and line
+ * separators removed, NFC; `renamed` when that changed it). Hebrew, Arabic,
+ * ZWNJ / ZWJ and LRM / RLM are kept. Names are encrypted, so only the client
+ * checks them.
+ */
 export function checkName(raw) {
-  const name = String(raw ?? '').trim().normalize('NFC');
+  const typed = String(raw ?? '').trim().normalize('NFC');
+  const name = cleanName(typed).trim();
   if (!name) return { error: 'Enter a name.' };
   if (utf8(name).length > MAX_NAME_BYTES) return { error: `Names can be at most ${MAX_NAME_BYTES} bytes long.` };
   if (/[/\\]/.test(name)) return { error: 'Names cannot contain / or \\.' };
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(name)) return { error: 'Names cannot contain control characters.' };
-  if (INVISIBLE_RE.test(name)) return { error: 'Names cannot contain invisible characters (direction marks, zero-width characters, line separators).' };
   if (name === '.' || name === '..') return { error: 'That name is reserved.' };
-  return { name };
+  return name === typed ? { name } : { name, renamed: true };
 }
+
+/** How many of `names` lose characters to cleanName (told to the user after an upload). */
+const renamedCount = (names) => names.filter((n) => cleanName(n) !== n).length;
+const RENAMED = (n) => `${n === 1 ? '1 name' : `${n} names`} had hidden direction or spacing characters, removed: ${n === 1 ? 'it was' : 'they were'} renamed.`;
 
 /**
  * The share options → { views, expire, expiryText } or { error }, with the
@@ -189,6 +199,7 @@ function nameDialog({ title, sub, value = '', action, submit, fallback }) {
       const err = await submit(c.name);
       if (err) { d.error(err, input); return; }
       d.close();
+      if (c.renamed) toast(`Saved as “${c.name}”: hidden direction or spacing characters were removed.`);
     } catch (e) {
       d.error(friendlyError(e), input);
     } finally {
@@ -591,8 +602,8 @@ function mountApp(mount, client, deps) {
     const check = h('input', { type: 'checkbox', 'aria-label': `Select ${name}`, checked: selected.has(c.id) });
     check.addEventListener('change', () => { if (check.checked) selected.add(c.id); else selected.delete(c.id); updateButtons(); });
     const nameCell = c.kind === 'dir'
-      ? h('button.tree-open.drive-open', { type: 'button', title: `Open ${name}`, on: { click: () => open(c.id, { focus: true }) } }, h('span.tree-icon', { 'aria-hidden': 'true' }), h('span', { text: name }))
-      : h('span.drive-fname', { text: name });
+      ? h('button.tree-open.drive-open', { type: 'button', title: `Open ${name}`, on: { click: () => open(c.id, { focus: true }) } }, h('span.tree-icon', { 'aria-hidden': 'true' }), c.name ? nameEl(name) : h('span', { text: name }))
+      : h('span.drive-fname', {}, c.name ? nameEl(name) : h('span', { text: name }));
     const sharesBtn = h('button.btn.tree-btn', { type: 'button', text: 'Shares', 'aria-label': `Shares of ${name}`, on: { click: () => sharesDialog(c) } });
     return h('tr', { dataset: { id: c.id, kind: c.kind } },
       h('td.cell-check', {}, check),
@@ -719,7 +730,7 @@ function mountApp(mount, client, deps) {
     const d = openDialog({
       title: `Delete ${describe(items)}?`,
       sub: `${dirs ? 'Folders are deleted with everything in them. ' : ''}Every share of ${items.length === 1 ? 'it' : 'them'} stops working at once. This cannot be undone.`,
-      body: [h('ul.drive-del-list', {}, ...items.slice(0, 8).map((i) => h('li.mono', { text: i.kind === 'dir' ? `${i.name}/` : i.name })), items.length > 8 ? h('li.mono', { text: `… and ${items.length - 8} more` }) : null)],
+      body: [h('ul.drive-del-list', {}, ...items.slice(0, 8).map((i) => h('li.mono', {}, nameEl(i.name || '(unnamed)', { suffix: i.kind === 'dir' ? '/' : '' }))), items.length > 8 ? h('li.mono', { text: `… and ${items.length - 8} more` }) : null)],
       fallback: focusPane,
     });
     const cancel = btn('Cancel', () => d.close(), 'modal-btn');
@@ -781,6 +792,8 @@ function mountApp(mount, client, deps) {
         done += f.size;
       }
     });
+    const renamed = renamedCount(files.map((f) => f.name));
+    if (ok && renamed) toast(RENAMED(renamed));
     if (ok || done) await refresh([target]);
   }
 
@@ -790,7 +803,9 @@ function mountApp(mount, client, deps) {
     const top = new Set(entries.map((e) => e.path.split('/')[0]));
     const files = entries.filter((e) => !e.dir).length;
     const label = top.size === 1 && (entries[0].dir || entries[0].path.includes('/')) ? `Uploading ${[...top][0]}/` : `Uploading ${files} ${files === 1 ? 'file' : 'files'}`;
-    await transfer(label, (progress, signal) => client.uploadTree(target, entries, { signal, onProgress: progress }));
+    const ok = await transfer(label, (progress, signal) => client.uploadTree(target, entries, { signal, onProgress: progress }));
+    const renamed = renamedCount(entries.map((e) => e.path));
+    if (ok && renamed) toast(RENAMED(renamed));
     await refresh([target]);
   }
 

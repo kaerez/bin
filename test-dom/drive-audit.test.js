@@ -167,23 +167,70 @@ describe('L-6: a file needs its sealed metadata', () => {
   }, 30000);
 });
 
-describe('names: no bidi or invisible characters (audit round 3, L-5)', () => {
-  it('checkPath, the client’s checkName and the page’s checkName refuse them; ordinary names pass', async () => {
-    const { checkPath } = await import('../public/js/files.js');
+// Real names in every script stay exactly as they are; only the spoofing
+// characters go (files.js cleanName), and display isolates the name and its
+// extension (common.js nameEl).
+const REAL_NAMES = ['דוח שנתי 2026.pdf', 'שָׁלוֹם.txt', 'report-דוח.docx', 'تقرير.pdf', 'می\u200cخواهم.txt', '👨\u200d👩\u200d👧 family.jpg', 'נקודה\u200f.txt'];
+
+describe('names: real names kept, spoofing characters removed (audit round 3, L-5)', () => {
+  it('cleanName, checkPath and both checkName keep Hebrew, niqqud, Arabic, ZWNJ / ZWJ and LRM / RLM unchanged', async () => {
+    const { checkPath, cleanName } = await import('../public/js/files.js');
     const { checkName } = await import('../public/js/driveclient.js');
     const page = await import('../public/dashboard/js/drive-app.js');
-    for (const bad of ['invoice\u202efdp.exe', 'a\u200bb.txt', 'x\u2028y', 'nel\u0085.txt', 'rtl\u2067x', 'b\ufeffom', 'lrm\u200e.txt']) {
-      expect(() => checkPath(bad), JSON.stringify(bad)).toThrow();
-      expect(() => checkPath(`dir/${bad}`)).toThrow();
-      expect(() => checkName(bad)).toThrow(/invisible/);
-      expect(page.checkName(bad).error).toMatch(/invisible/);
+    for (const n of REAL_NAMES) {
+      expect(cleanName(n), n).toBe(n.normalize('NFC'));
+      expect(checkPath(n)).toBe(n);
+      expect(checkName(n)).toBe(n.normalize('NFC'));
+      expect(page.checkName(n)).toEqual({ name: n.normalize('NFC') });
     }
-    for (const ok of ['report.pdf', 'café résumé.txt', 'עברית.txt', '日本語.md']) {
-      expect(checkPath(ok)).toBe(ok);
-      expect(checkName(ok)).toBe(ok);
-      expect(page.checkName(ok)).toEqual({ name: ok });
-    }
+    expect(checkPath('תיקייה/משנה/דוח.pdf')).toBe('תיקייה/משנה/דוח.pdf');
   });
+
+  it('strips overrides, isolates, U+200B, U+FEFF and line separators — "invoice<RLO>fdp.exe" becomes invoicefdp.exe — and says so', async () => {
+    const { cleanName } = await import('../public/js/files.js');
+    const { checkName } = await import('../public/js/driveclient.js');
+    const page = await import('../public/dashboard/js/drive-app.js');
+    expect(cleanName('invoice\u202efdp.exe')).toBe('invoicefdp.exe');
+    for (const [raw, out] of [['a\u200bb.txt', 'ab.txt'], ['x\u2028y', 'xy'], ['nel\u0085.txt', 'nel.txt'], ['rtl\u2067x\u2069.txt', 'rtlx.txt'], ['b\ufeffom', 'bom'], ['e\u0301.txt', '\u00e9.txt']]) {
+      expect(cleanName(raw)).toBe(out);
+      expect(checkName(raw)).toBe(out);
+    }
+    expect(page.checkName('invoice\u202efdp.exe')).toEqual({ name: 'invoicefdp.exe', renamed: true });
+  });
+
+  it('shows every name in a bidi isolate with its real extension as its own LTR isolate', async () => {
+    const { nameEl } = await import('../public/js/common.js');
+    for (const n of [...REAL_NAMES, 'invoice\u202efdp.exe', 'README']) {
+      const el = nameEl(n);
+      expect(el.tagName).toBe('BDI');
+      expect(el.getAttribute('dir')).toBe('auto');
+      const clean = n.replace(/\u202e/g, '').normalize('NFC');
+      expect(el.textContent).toBe(clean);
+      const ext = el.querySelector('bdi.fext');
+      const dot = clean.lastIndexOf('.');
+      if (dot > 0) {
+        expect(ext.getAttribute('dir')).toBe('ltr');
+        expect(ext.textContent).toBe(clean.slice(dot));
+      } else {
+        expect(ext).toBeNull();
+      }
+    }
+    expect(nameEl('invoice\u202efdp.exe').querySelector('.fext').textContent).toBe('.exe');
+  });
+
+  it('the Drive stores and lists them unchanged (and cleans a spoofing one, marked renamed)', async () => {
+    install();
+    const dk = createDriveKey();
+    saveSessionKey(dk, 'u1');
+    S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
+    const c = await openDrive({ user: S.user });
+    const dir = await c.mkdir('root', 'תיקייה');
+    for (const n of REAL_NAMES) await c.upload(dir, fakeFile(n, enc(n)));
+    await c.upload(dir, fakeFile('invoice\u202efdp.exe', enc('x')));
+    const names = (await c.list(dir)).children.map((x) => x.name).sort();
+    expect(names).toEqual([...REAL_NAMES.map((n) => n.normalize('NFC')), 'invoicefdp.exe'].sort());
+    expect((await c.list('root')).children.map((x) => x.name)).toEqual(['תיקייה']);
+  }, 60000);
 });
 
 describe('DK exposure: pages with third-party script', () => {
