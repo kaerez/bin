@@ -664,13 +664,15 @@ export class Drive extends DurableObject {
     if (opts.maxBytes !== null && opts.maxBytes !== undefined && r.bytes + size > opts.maxBytes) return fail(413, 'share_full', 'This link has no room left for that file.', { max: opts.maxBytes, used: r.bytes });
     const bad = this.#checkNew(node) || this.#checkParent(r.folder);
     if (bad) return bad.error === 'exists' ? bad : fail(bad.status === 404 ? 410 : bad.status, bad.status === 404 ? 'gone' : bad.error, bad.message);
+    const fk = JSON.stringify({ kind: 'rs', data: wrap });
+    // The sealed fields take room too: they count against the capacity.
     const used = this.#used();
-    if (used + size > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
+    if (used + size + name.length + meta.length + fk.length > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
     const chunks = driveChunks(size);
     const t = nowSec();
     this.ctx.storage.transactionSync(() => {
       this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated, rs) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-        node, r.folder, name, meta, size, chunks, JSON.stringify({ kind: 'rs', data: wrap }), uploadHash, t, t, id);
+        node, r.folder, name, meta, size, chunks, fk, uploadHash, t, t, id);
       this.sql.exec('UPDATE reverse SET files = files + 1, bytes = bytes + ? WHERE id = ?', size, id);
       this.#touch(x, pendingSec);
     });
@@ -679,13 +681,40 @@ export class Drive extends DurableObject {
     return { ok: true, id: node, chunks, used: used + size };
   }
 
-  /** A chunk of a received file being uploaded (only one of this share's). */
+  /**
+   * A chunk of a received file being uploaded (only one of this share's).
+   * While its write to R2 is in flight the file cannot be finalized (so a
+   * late write never lands on, or is removed from, a finished file); if the
+   * upload ended meanwhile (cancelled, revoked, purged) the object is deleted.
+   */
   async reversePutChunk(uid, id, node, uploadHash, i, bytes) {
     this.#bind(uid);
     const n = this.#node(node);
-    if (!n || n.rs !== id) return { status: 'gone' };
-    if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
-    return this.putChunk(uid, node, uploadHash, i, bytes);
+    if (!n || n.rs !== id || this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
+    const c = this.#pending(node, uploadHash);
+    if (c.status !== 'ok') return c;
+    if (!Number.isInteger(i) || i < 0 || i >= c.n.chunks) return { status: 'bad_index' };
+    const expected = driveChunkSize(c.n.size, i);
+    if (!bytes || bytes.byteLength !== expected) return { status: 'bad_size', expected };
+    const key = driveChunkKey(uid, node, i);
+    this.inflight ??= new Map();
+    this.inflight.set(node, (this.inflight.get(node) ?? 0) + 1);
+    try {
+      await this.env.FILES.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
+    } finally {
+      const left = this.inflight.get(node) - 1;
+      if (left > 0) this.inflight.set(node, left); else this.inflight.delete(node);
+    }
+    const again = this.#pending(node, uploadHash);
+    if (again.status !== 'ok') {
+      // Still pending is the only way here to finish; anything else means the upload ended.
+      await this.env.FILES.delete(key);
+      return { status: 'gone' };
+    }
+    this.sql.exec('INSERT OR IGNORE INTO upchunks (node_id, i) VALUES (?, ?)', node, i);
+    this.sql.exec('UPDATE nodes SET done = (SELECT COUNT(*) FROM upchunks WHERE node_id = ?), updated = ? WHERE id = ?', node, nowSec(), node);
+    await this.#schedulePurge();
+    return { status: 'ok' };
   }
 
   /** Finish a received file: counted in the session (for the log). */
@@ -696,6 +725,7 @@ export class Drive extends DurableObject {
     const n = this.#node(node);
     if (!n || n.rs !== id) return { status: 'gone' };
     if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
+    if (this.inflight?.get(node)) return { status: 'busy' };
     const r = await this.finalize(uid, node, uploadHash);
     if (r.status !== 'ok') return r;
     this.sql.exec('UPDATE rsessions SET files = files + 1, bytes = bytes + ? WHERE hash = ?', n.size, hash);

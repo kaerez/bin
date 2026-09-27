@@ -10,7 +10,7 @@
 import { env, SELF, runDurableObjectAlarm, runInDurableObject, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import worker from '../src/index.js';
-import { owner, makeUser, fetchJson, intent, freshIp, ORIGIN, proofFor, USER_PW } from './helpers.js';
+import { owner, makeUser, fetchJson, intent, freshIp, ORIGIN, proofFor, USER_PW, cookieOf } from './helpers.js';
 import { enableDrive, driveLimits, mkdir, uploadFile, node, drive, enc } from './drive-helpers.js';
 import { SCHEMA_VERSION, PUBLIC_ID } from '../src/directory-do.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
@@ -562,6 +562,15 @@ describe('ending: revoke, expiry, the admin lock, the folder deleted, the purge'
 });
 
 describe('isolation and the account', () => {
+  it('an impersonating owner cannot create upload links (the key would be sealed with the owner\'s Drive key)', async () => {
+    const u = await receiver('rev-imp');
+    const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
+    const r = await newReverse(ic);
+    expect(r.res.status).toBe(403);
+    expect(await errorOf(r.res)).toBe('impersonating');
+    expect((await fetchJson('/api/private/drive/reverse', { cookie: ic })).status).toBe(200);
+  });
+
   it('a user cannot list, revoke or take in another user\'s reverse shares; deleting the account ends them', async () => {
     const u = await receiver('rev-iso-a');
     const v = await receiver('rev-iso-b');

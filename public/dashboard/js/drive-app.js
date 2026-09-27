@@ -23,6 +23,7 @@ import { expireSeconds, MAX_VIEWS } from '../../js/format.js';
 import { passkeysSupported } from '../../js/passkeys.js';
 import { utf8 } from '../../js/bytes.js';
 import { normalizeRules } from '../../js/filepolicy.js';
+import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
@@ -860,6 +861,12 @@ function mountApp(mount, client, deps) {
     const pw2 = h('input.input', { id: 'drive-rev-pw2', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
     const pwBox = h('div.drive-share-pw', { hidden: true }, field('Password', pw1), field('Repeat the password', pw2));
     pwOn.addEventListener('change', () => { pwBox.hidden = !pwOn.checked; if (pwOn.checked) pw1.focus(); });
+    // A link adds key material to the Drive: confirmed like an API key (password, or a passkey).
+    const confirmIn = h('input.input', { id: 'drive-rev-confirm', type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false' });
+    const confirmText = h('label.field-label', { for: 'drive-rev-confirm', text: 'Your account password (to confirm it is you)' });
+    let withPasskey = false;
+    (deps.canUsePasskey || canUsePasskey)().then((ok) => { withPasskey = !!ok; confirmText.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
+    const confirm = deps.confirm || ((input) => confirmStep(input, deps.profile?.user?.username, withPasskey));
     const listBox = h('div.drive-reverse-list', { id: 'drive-rev-list' }, h('p.msg', { role: 'status', text: 'Loading this folder’s links…' }));
     const form = h('div.drive-reverse-form', { id: 'drive-rev-form' },
       h('div.label-row', {}, h('label.field-label', { for: 'drive-rev-label', text: 'Label (optional, for your own reference)' }), labelIn, hint),
@@ -871,7 +878,8 @@ function mountApp(mount, client, deps) {
         field('Largest file, MB (empty: no limit)', fileMb)),
       field('File types', typeMode), typeRules,
       h('label.viewer-opt', {}, pwOn, 'Ask uploaders for a password (it only lets them in; you never need it, and it does not encrypt anything)'),
-      pwBox);
+      pwBox,
+      h('div.dfield', {}, confirmText, confirmIn));
     const d = openDialog({
       title: `Receive files into “${folder.name}”`,
       sub: 'Anyone with the link can upload files and folders into this folder, without an account. They are encrypted in the uploader’s browser for you alone; you see them here the next time your Drive is unlocked. Uploads count towards your Drive’s storage.',
@@ -891,12 +899,15 @@ function mountApp(mount, client, deps) {
       }
       create.disabled = true;
       create.querySelector('.send-txt').textContent = 'Creating…';
+      confirmIn.removeAttribute('aria-invalid');
       try {
-        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types });
+        const step = await confirm(confirmIn);
+        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, step });
         pw1.value = pw2.value = '';
         reverseResult(d, r, o, folder);
       } catch (e) {
-        d.error(friendlyError(e));
+        const confirmFailed = e && ['wrong_password', 'reauth_failed', 'reauth_required', 'invalid_credential'].includes(e.code);
+        d.error(confirmFailed ? 'That did not confirm it is you — enter your account password again.' : friendlyError(e), confirmFailed ? confirmIn : null);
         create.disabled = false;
         create.querySelector('.send-txt').textContent = 'Create link';
       }

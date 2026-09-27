@@ -711,9 +711,11 @@ export class DriveClient {
    * hash, the note sealed with the link key, and — with a password — the
    * gate the server checks (it only lets the uploader in; it protects nothing).
    * opts: label, note, password, expire ("7d"), maxFiles, maxBytes,
-   * maxFileBytes (null = none), types ({ mode, rules } or null).
+   * maxFileBytes (null = none), types ({ mode, rules } or null), and `step`:
+   * the "confirm it's you" part ({ current } or { reauth }, as for API keys) —
+   * a link adds key material to the Drive, so the server asks for it.
    */
-  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null } = {}) {
+  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {} } = {}) {
     const id = newReverseId();
     const { pub, privateKey } = await createReverseKey();
     const body = {
@@ -723,6 +725,7 @@ export class DriveClient {
     if (note) body.note = await sealNote(pub, id, note);
     if (password) body.password = await passwordGate(password, pub);
     if (label) body.label = label;
+    Object.assign(body, step);
     const r = await api.createReverse(body);
     if (r.id !== id) throw malformed();
     return { url: reverseUrl(id, pub), id, expires: r.expires };
@@ -783,6 +786,8 @@ export class DriveClient {
       try {
         if (!priv) throw new Error('no key');
         const got = await openUpload(priv, it.rs, it);
+        // The uploader's sealed size must be the server's (the chunks follow from it): else it fails closed.
+        if (got.size !== it.size) throw new Error('size mismatch');
         const path = checkPath(got.path);
         path.split('/').forEach(checkName);
         const cut = path.lastIndexOf('/');

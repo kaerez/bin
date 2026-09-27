@@ -13,7 +13,8 @@ anything in this file is a coordinated change: update it first.
   share goes; the drive data stays**. Shares reference the drive's stored ciphertext; nothing is
   copied or re-encrypted.
 - Deleting a drive item ends every share that references it (recipients get "gone").
-- Later (task #24, reverse share): anonymous uploads land in a drive folder the user chooses.
+- **Reverse shares** ("Receive files…", [`REVERSE.md`](./REVERSE.md)): anonymous uploads land in
+  a Drive folder the user chooses, encrypted to that user's key.
 - Terminology: the person who owns a drive is the **user**; "owner" means the admin.
 
 ## 2. What the server sees
@@ -299,6 +300,12 @@ leave open:
   aliases `state` (= `status`) and `maxViews` (= `views_total`); revoke them as any share.
   Deleting a node ends its shares (and those of every file below it) even when locked by the
   admin: the data is gone.
+- **Received files** (reverse shares, [`REVERSE.md`](./REVERSE.md)). `nodes.rs` names the
+  reverse share of a file an anonymous uploader sent and the user's browser has not yet
+  re-wrapped; such files count in the capacity but are left out of `children`, cannot be read,
+  moved, renamed or shared, and are listed by `GET /api/private/drive/received` until re-wrapped
+  (`POST /api/private/drive/received/<id>`). Their `fk` is `{ kind: 'rs', data }`. Deleting a
+  folder ends the reverse shares that target it or anything below it.
 - **Accounts.** Deleting an account deletes its Drive (every R2 object, every share of it). The
   Directory mirrors each Drive's usage (`drive_usage`); Admin → Users gets
   `drive: { enabled, used, capacity }` per user (`capacity` null = no limit; `drive` null for the

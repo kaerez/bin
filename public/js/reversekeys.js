@@ -27,10 +27,23 @@ const aad = (field, ...ids) => utf8(`secbin-reverse/v1\n${field}\n${ids.map((x) 
 export const REVERSE_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
 /** The link's fragment: the raw (uncompressed, 65-byte) public key, base64url. */
 export const FRAGMENT_RE = /^[A-Za-z0-9_-]{87}$/;
-/** Longest relative path an uploader may send (bytes). */
-export const MAX_PATH_BYTES = 2048;
-/** Longest note to the uploader (characters). */
+/** Longest relative path an uploader may send (UTF-8 bytes). */
+export const MAX_PATH_BYTES = 1024;
+/** Longest note to the uploader (UTF-8 bytes; a longer one is cut at a character boundary). */
 export const MAX_NOTE = 1000;
+
+/** `text` cut to at most `max` UTF-8 bytes, never inside a character. */
+function cutUtf8(text, max) {
+  let out = '';
+  let n = 0;
+  for (const ch of String(text ?? '')) {
+    const b = utf8(ch).length;
+    if (n + b > max) break;
+    out += ch;
+    n += b;
+  }
+  return out;
+}
 
 export const newReverseId = () => `r${b64urlFromBytes(randomBytes(16))}`;
 export const newNodeId = () => b64urlFromBytes(randomBytes(16));
@@ -157,7 +170,7 @@ async function noteKey(pub) {
 }
 
 export async function sealNote(pub, id, text) {
-  const t = String(text ?? '').slice(0, MAX_NOTE);
+  const t = cutUtf8(text, MAX_NOTE);
   return out(await seal(await noteKey(pub), aad('note', id), utf8(t)));
 }
 

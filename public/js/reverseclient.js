@@ -155,7 +155,16 @@ export class ReverseUpload {
         if (onProgress) onProgress(done, size);
       }
       if (signal?.aborted) throw aborted(signal);
-      await this.api.finalize(this.id, this.grant, node, token);
+      // 409 busy: a retried chunk's first write is still being stored; try again shortly.
+      for (let k = 0; ; k++) {
+        try {
+          await this.api.finalize(this.id, this.grant, node, token);
+          break;
+        } catch (e) {
+          if (!(e instanceof ApiError && e.code === 'busy') || k >= 10) throw e;
+          await new Promise((r) => setTimeout(r, 500 * (k + 1)));
+        }
+      }
     } catch (e) {
       this.api.cancel(this.id, this.grant, node, token).catch(() => {}); // give the reservation back now
       throw e;

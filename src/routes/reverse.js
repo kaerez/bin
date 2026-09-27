@@ -17,6 +17,7 @@ import { genToken, hashToken } from '../lib/ids.js';
 import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { stepUpFrom, afterRefusal } from './stepup.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { expireSeconds, isProof, ARGON2, MAX_TTL } from '../../public/js/format.js';
 import { MAX_CHUNK_CT } from '../../public/js/files.js';
@@ -29,11 +30,17 @@ export const REVERSE_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
 const B64_43 = /^[A-Za-z0-9_-]{43}$/;
 const SALT_RE = /^[A-Za-z0-9_-]{22}$/;
 const WRAP_RE = /^1\.[A-Za-z0-9_-]{87}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{107}$/;
-const MAX_NOTE_CT = 2048;
-const MAX_PRIV_CT = 512;
-const MAX_NAME_CT = 4096;
-const MAX_META_CT = 8192;
-const MAX_FK_CT = 256;
+// Caps on the sealed fields, just above what the browsers produce: a note of
+// 1000 bytes, a PKCS#8 P-256 key, an upload's path of 1024 bytes, its
+// metadata JSON; the Drive-format name / meta / fk of a re-wrapped file.
+const MAX_NOTE_CT = 1400;
+const MAX_PRIV_CT = 256;
+const MAX_PATH_CT = 1400;
+const MAX_META_CT = 1024;
+const MAX_NAME_CT = 512;
+const MAX_FK_CT = 128;
+/** Bound parameters per query stay well under the Durable Object SQLite limit (100). */
+const ID_BATCH = 80;
 const GONE = 'This link no longer accepts files: it has expired or was revoked.';
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const invalid = (message) => err(400, 'invalid', message);
@@ -71,14 +78,18 @@ export async function handleReverseOwner(request, env, url, a) {
       const folder = url.searchParams.get('folder');
       if (folder !== null && folder !== ROOT && !NODE_ID_RE.test(folder)) return invalid('folder must be a folder id.');
       const r = await drive().listReverse(uid, folder);
-      const rows = await dir.sharesByIds(uid, r.reverse.map((x) => x.id));
+      const rows = [];
+      for (let i = 0; i < r.reverse.length; i += ID_BATCH) rows.push(...await dir.sharesByIds(uid, r.reverse.slice(i, i + ID_BATCH).map((x) => x.id)));
       const byId = new Map(rows.map((x) => [x.id, x]));
       return json({
         reverse: r.reverse.filter((x) => byId.has(x.id)).map((x) => {
           const row = byId.get(x.id);
           // The index row decides (revoked, expired, locked by the admin); the Drive adds the counters.
           const status = row.status !== 'active' ? row.status : x.status === 'active' ? 'active' : 'ended';
-          return { ...x, label: row.label, locked: !!row.locked, status };
+          const out = { ...x, label: row.label, locked: !!row.locked, status };
+          // Sealed with the user's Drive key: never handed to an impersonating owner.
+          if (a.actor) delete out.priv;
+          return out;
         }),
       });
     }
@@ -89,7 +100,8 @@ export async function handleReverseOwner(request, env, url, a) {
   if (p === '/api/private/drive/received') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const r = await drive().received(uid);
-    return json({ items: r.items, keys: r.keys, more: r.more });
+    // The shares' sealed keys stay with the user (an impersonating owner gets none).
+    return json({ items: r.items, keys: a.actor ? [] : r.keys, more: r.more });
   }
 
   const m = p.match(/^\/api\/private\/drive\/received\/([^/]+)$/);
@@ -103,6 +115,7 @@ export async function handleReverseOwner(request, env, url, a) {
     const meta = encField(body.meta, MAX_META_CT);
     const fk = encField(body.fk, MAX_FK_CT);
     if (!parent || !name || !meta || !fk) return invalid('Send { parent, name, meta, fk } (encrypted fields as {iv, ct}).');
+    if (a.actor) return err(403, 'impersonating', 'Received files cannot be taken in while impersonating.');
     const r = await drive().acceptReceived(uid, node, { parent, name, meta, fk });
     return r.ok ? json({ ok: true }) : fromDo(r);
   }
@@ -111,7 +124,16 @@ export async function handleReverseOwner(request, env, url, a) {
 
 async function createReverse(request, env, dir, a) {
   const uid = a.user.id;
+  // The link's private key is sealed with the user's own Drive key, which an
+  // impersonating owner's tab does not hold.
+  if (a.actor) return err(403, 'impersonating', 'Upload links cannot be created while impersonating.');
   const body = await readJsonBody(request);
+  // New key material in the user's Drive: confirmed with the password or a
+  // passkey (a stolen session alone cannot open a link that sends files to it).
+  const g = await ipContext(env, request);
+  const step = await stepUpFrom(body, new URL(request.url));
+  const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
+  if (!v.ok) return afterRefusal(env, g, v, fromDo(v));
   if (typeof body.id !== 'string' || !REVERSE_ID_RE.test(body.id)) return invalid('id must be "r" and 16 random bytes (base64url).');
   const folder = typeof body.folder === 'string' && (body.folder === ROOT || NODE_ID_RE.test(body.folder)) ? body.folder : null;
   if (!folder) return invalid('folder must be a folder id.');
@@ -280,6 +302,7 @@ export async function handleReversePublic(request, env, url) {
     if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'This upload session has ended.'));
     if (r.status === 'forbidden') return failed(env, g, err(403, 'bad_token', 'Wrong upload token.'));
     if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
+    if (r.status === 'busy') return json({ error: 'busy', message: 'A chunk of this file is still being stored. Try again in a moment.' }, 409, { 'retry-after': '1' });
     if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finished.');
     return json({ ok: true });
   }
@@ -299,7 +322,7 @@ export async function handleReversePublic(request, env, url) {
 async function createFile(request, env, g, drive, uid, id, tg, grant) {
   const body = await readJsonBody(request);
   const node = typeof body.id === 'string' && NODE_ID_RE.test(body.id) ? body.id : null;
-  const name = encField(body.name, MAX_NAME_CT);
+  const name = encField(body.name, MAX_PATH_CT);
   const meta = encField(body.meta, MAX_META_CT);
   const wrap = typeof body.wrap === 'string' && WRAP_RE.test(body.wrap) ? body.wrap : null;
   if (!node || !name || !meta || !wrap) return invalid('Send { id, name, meta, size, wrap, types? } (encrypted as the uploader page does).');

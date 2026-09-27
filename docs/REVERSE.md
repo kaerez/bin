@@ -79,8 +79,8 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   lock, `lh`) maps the id to its user; it is what My shares and Admin → Shares list.
 - **The user's Drive DO** (docs/DRIVE.md §4), new tables and one column:
   - `reverse(id, folder, priv, lh, ph, salt, t, note, opts, files, bytes, created, expires,
-    status)`: `opts` is JSON `{ maxFiles, maxBytes, maxFileBytes, types }`; `files` / `bytes`
-    count reserved uploads (a purged or cancelled upload gives its share back).
+    status, ended)`: `opts` is JSON `{ maxFiles, maxBytes, maxFileBytes, types }`; `files` /
+    `bytes` count reserved uploads (a purged or cancelled upload gives its share back).
   - `rsessions(hash, rid, expires, files, bytes)`: upload sessions; `hash` = SHA-256 of the
     session grant (256 bits); `files` / `bytes` = finalized in the session, not yet logged.
   - `nodes.rs`: the reverse share of a **received** file that the user's browser has not yet
@@ -89,8 +89,11 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   under `d/<userId>/<nodeId>/<i>`, counted in the Drive's capacity from the moment they are
   reserved. Upload tokens are stored hashed (`upload_hash`), and a pending upload with no chunk for
   the role's `filePendingSec` is purged by the Drive's alarm, as for the user's own uploads.
-- Hard ceilings: 1 000 reverse shares per Drive (ended ones are dropped once all their received
-  files are re-wrapped), 100 open sessions per reverse share, 10 000 files per reverse share.
+- A session lasts the role's `filePendingSec` from its last file (reserved or finished), never
+  past the share's expiry.
+- Hard ceilings: 1 000 reverse shares per Drive (an ended one is dropped 30 days after it ended —
+  as long as the share index keeps its row — once all its received files are re-wrapped), 100
+  open sessions per reverse share, 10 000 files per reverse share.
 
 ## 5. Options and role options
 
@@ -115,7 +118,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types? }` → `201 { id, expires }` (409 when the id is taken) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types? }` → `201 { id, expires }` (409 when the id is taken; `403 impersonating` while the owner impersonates: the key would be sealed with the owner's Drive key) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
 | `GET /api/private/drive/received` | received files not yet re-wrapped (at most 500): `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv }], more }` |
 | `POST /api/private/drive/received/<nodeId>` | re-wrapped: `{ parent, name, meta, fk }` (normal sealed fields; `parent` a folder) → `{ ok }` |
@@ -123,9 +126,12 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares); `PATCH /api/private/shares/<id>` changes the label or extends the expiry |
 
 A row: `{ id, folder, label, created, expires, status, locked, priv, password: bool, note: bool,
-maxFiles, maxBytes, maxFileBytes, types, files, bytes }` (`status`: `active`, `revoked`, `expired`,
-`used` — no files or bytes left —, `ended`). `GET /api/private/drive` adds `received` (the number
-of received files not yet re-wrapped). `GET /api/private/me` has `caps.reverseEnabled`.
+maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
+has it: `active`, `revoked`, `expired`, `ended`; `pending` = received files not yet re-wrapped).
+`GET /api/private/drive` adds `received` (the number of received files not yet re-wrapped).
+`GET /api/private/me` has `caps.reverseEnabled`. My shares and Admin → Shares rows of kind
+`reverse` carry `received: { files, bytes }`; `PATCH /api/private/shares/<id>` accepts `label`
+and a later `expires` (not `views`).
 
 ### 6.2 The uploader (anonymous; `/api/reverse/<id>/…`)
 
@@ -144,11 +150,14 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 | `DELETE …/files/<nodeId>` | `X-Reverse-Grant`, `X-Upload-Token` | cancel an unfinished upload (its reservation is given back) |
 | `POST …/done` | `X-Reverse-Grant` | end the session: `{ files, bytes }` (logged) |
 
-Errors: `404 not_found` (never a reverse share), `410 gone` (revoked, expired, used up, its folder
-deleted, or the user's role no longer allows it), `423 share_locked` (the admin locked it),
+Errors: `404 not_found` (never a reverse share), `410 gone` (revoked, expired, its folder
+deleted, or the user's role no longer allows it; a late visitor with the right link proof is not
+counted by the Guard), `423 share_locked` (the admin locked it),
 `403 bad_link`, `401 password_required` (the password is needed; `{ salt, t }` in the body),
-`403 bad_password`, `403 bad_grant`, `403 turnstile_*`, `413 file_too_large` / `share_full` /
-`drive_full`, `409 too_many_files`, `403 file_type_not_allowed`, `429 blocked`.
+`403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 turnstile_*`, `413 file_too_large` /
+`share_full` / `drive_full`, `409 too_many_files` (none left: `open` shows `filesLeft: 0`),
+`400 declaration_required` / `403 file_type_not_allowed`, `429 busy` (too many open sessions),
+`429 blocked`.
 
 ## 7. Audit log
 
@@ -170,5 +179,6 @@ only), written when a session ends (`done`) or its unlogged uploads are found wh
   `public/js/turnstile.js`), a file picker, a folder picker, drag and drop of files and folders,
   and progress. DOM only through `h()`; the page gets the Turnstile CSP when Turnstile is on and
   the strict one otherwise, and is never cached by the service worker.
-- My shares / Admin → Shares: kind "receive"; views column shows the files received; revoke, lock
-  and extend (expiry only) as for other shares.
+- My shares / Admin → Shares: kind "receive" (filter value `reverse`); the views column shows the
+  files received; revoke, lock and extend (expiry only) as for other shares.
+- Empty folders in an upload are not sent (only files are received; their paths make the folders).
