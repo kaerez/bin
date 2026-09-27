@@ -747,6 +747,48 @@ codes as safe as the password.
 - Missing or garbage environment variables never throw; the feature that needs them reports
   that it is unavailable.
 
+### Edge caching (Workers Caching)
+
+`wrangler.toml` turns on Workers Caching (`[cache] enabled = true`), so Cloudflare consults a
+shared cache before invoking the fetch handler. That cache follows RFC 9111: a response
+without `Cache-Control` is stored heuristically (a `200` for two hours, a `404` for three
+minutes), and the only automatic bypasses are an `Authorization` request header and a
+`Set-Cookie` response header. A GET authenticated by the session cookie is **not** bypassed,
+so a per-user page or JSON answer without an explicit policy could be served to the next
+visitor of the same URL.
+
+The rule: **nothing the Worker returns is stored in the edge cache.**
+
+- The top-level fetch handler (`src/index.js`) passes every response through
+  `withCachePolicy` (`src/lib/http.js`): route results, `HttpError`s, the `503` for a missing
+  binding, the `500` for an unexpected exception, and a route that returned nothing.
+- `withCachePolicy` sets `Cloudflare-CDN-Cache-Control: no-store` on every response.
+  Cloudflare's cache reads it before `Cache-Control` and strips it before the browser.
+- It sets `Cache-Control: no-store` on any response without a Cache-Control of its own
+  (the no-store fallback), so neither the browser nor any other cache keeps it either.
+- The routes already mark what they return: every JSON answer (`json` / `err`), redirect,
+  dashboard page and chunk download is `no-store`. That covers `/api/private/*`, `/api/auth/*`,
+  `/dashboard*`, share heads and opens (notes, burn notes, files), download grants and
+  ciphertext chunks, delete-by-token, `/api/config`, and every 404, 405 and error.
+- Two responses keep a browser policy of their own and still stay out of the edge cache:
+  - the anonymous home page (`/`, `/index.html` without a valid session) keeps the asset
+    server's `public, max-age=0, must-revalidate`, so the service worker can keep it as the
+    offline shell. A cached copy would skip the signed-in redirect and the owner's Turnstile
+    headers;
+  - the tracker (`GET /api/public/t`) keeps `private, no-cache`, so the browser holds the ETag
+    copy. It also sets a cookie, and `private` alone already keeps it out of shared caches.
+- No response is marked cacheable at the edge. `/api/config` is identical for everyone, but it
+  honours the manual IP block rules and must follow the owner's changes (the viewer policy,
+  Turnstile) at once. It is cached per isolate for 30 seconds instead, and that cache is
+  dropped on every admin change.
+- There is no per-entrypoint override (`[exports.<name>.cache]`): the default export is the
+  only fetch entrypoint, and Durable Object calls are never cached.
+- `test/cache-policy.test.js` walks the routes (anonymous and signed in, success and error,
+  404, 405, a thrown exception, a missing binding) and checks that every response has a
+  Cache-Control, carries the edge `no-store`, and is `no-store` unless it is one of the two
+  exceptions. `test-node/headers.test.js` checks the two config files and that the long-lived
+  rules in `public/_headers` cover only paths the Worker never runs for.
+
 ## 7. Cryptographic summary
 
 Per-share random CEK; AES-256-GCM with fresh IVs; Argon2id (m=64 MiB, p=1, t∈[1,10]) for

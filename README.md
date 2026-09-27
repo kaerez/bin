@@ -122,6 +122,15 @@ secbin is a single Cloudflare Worker: Static Assets, KV, R2 and four Durable Obj
 5. Disable the `workers.dev` route if you do not use it (optional — the Worker authenticates
    every restricted request itself).
 
+**Placement and caching.** `wrangler.toml` turns on Smart Placement (`[placement] mode =
+"smart"`: the Worker runs where requests complete fastest, usually near its Durable Objects)
+and Workers Caching (`[cache] enabled = true`, Wrangler 4.69 or later). Nothing the Worker
+returns is cached at the edge: every response carries `Cloudflare-CDN-Cache-Control: no-store`,
+and `Cache-Control: no-store` unless it sets its own (only the public home page and the
+anonymous tracker do, for the browser). Static files served without the Worker keep the
+caching in `public/_headers`. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) (Placement and
+caching) and [`SECURITY.md`](./SECURITY.md) §6 (Edge caching).
+
 **Optional: Cloudflare Turnstile.** Create a widget in the Cloudflare dashboard (Turnstile →
 Add widget, with your hostname), then set `TURNSTILE_SITEKEY` (public; a plain variable is fine)
 and `TURNSTILE_SECRET` (a secret). Alternatively, paste both keys in Admin → Security → Human
