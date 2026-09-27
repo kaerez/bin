@@ -414,6 +414,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **My activity shows only the user's own actions:** admin actions on the account (created,
+  disabled, enabled, role or limits changed, password reset) are in the owner-only admin audit and
+  no longer appear in the user's own activity.
 - **Log in as covers the whole account:** acting as a user, the owner can now do everything the
   user can, the Drive included. The Account page shows every form (username, password,
   passkeys, recovery codes, the sign-in choice, API keys) without the "confirm it's you"
