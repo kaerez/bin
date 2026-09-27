@@ -441,5 +441,5 @@ print(res.status_code, res.json())  # {"url": ..., "urlRules": [...]}
 - Every key creation, change and revocation, every share created with a key and every change a
   key makes to a share is recorded in your activity log (and the administrator's audit log).
 - Read receipts can contain personal data about the people who opened a share (network address,
-  location, browser, languages — only the details the administrator enables). Handle what you
-  fetch accordingly; retention and lawful use are for your Legal / Compliance team to decide.
+  location, browser, languages — only the details the administrator enables). Treat what you
+  fetch as sensitive: keep it only as long as you need it and protect it like the key itself.

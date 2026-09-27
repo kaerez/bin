@@ -72,8 +72,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   `shares.mjs` / `shares.py` for list, show, receipts, label, extend, revoke, policy and delete;
   the Python examples use `requests`). The CLI gains `secbin list`, `show`, `receipts` (`read`)
   and `label`, `extend`, `revoke` (`manage`). Existing keys keep exactly the creation scopes
-  they had. Note for Compliance: a `read` key can fetch read receipts, which may hold
-  recipients' network addresses and locations as far as the owner enables receipt details.
+  they had. A `read` key can fetch read receipts, which include the recipients' network
+  addresses and locations when the owner enables those details.
 
 - **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
   `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
