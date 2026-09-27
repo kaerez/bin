@@ -44,7 +44,7 @@ secbin is self-hosted, so **there is no built-in default server**.
 | Setting | Meaning |
 | --- | --- |
 | `SECBIN_SERVER` / `-s, --server <origin>` | The server origin, e.g. `https://secbin.example.com`. **Required** for `create`, `send`, and `delete <bare-id>`. `get` and `delete <url>` take the origin from the share URL. |
-| `SECBIN_API_KEY` / `--api-key-file <path>` | Your account API key (`sbk_…`), **required** to create shares. Get one from **Dashboard → Account → API keys**; this is only available if your admin enabled API access. The key file must not be accessible to other users (`chmod 600`). The key is never accepted as a plain flag value, and it is sent only as `Authorization: Bearer …` to the creation endpoints. |
+| `SECBIN_API_KEY` / `--api-key-file <path>` | Your account API key (`sbk_…`), **required** to create shares (scopes `notes` / `files`; `policy` for link rules) and for `list` (`read`) and `revoke` (`manage`). Get one from **Dashboard → Account → API keys**; this is only available if your admin enabled API access. The key file must not be accessible to other users (`chmod 600`). The key is never accepted as a plain flag value, and it is sent only as `Authorization: Bearer …` to the account endpoints (never to a share link or delete endpoint). |
 | `SECBIN_NO_ANIMATION=1` | Disables non-essential TUI motion (intro, shine, spinner) while keeping colors. `NO_COLOR` disables colors. |
 
 ```bash
@@ -217,6 +217,17 @@ a URL. A bare id needs `--server` or `SECBIN_SERVER`.
 allowed it (`--recipient-can-delete`): no token, but the full link and, if set, the password
 (`--password-env <VAR>` or a prompt). It spends no view.
 
+### `secbin list` and `secbin revoke <share-url | id>`
+
+`secbin list` prints your account's shares (id, kind, status, views left, opens, expiry,
+label), every page of them; `--status <active|revoked|expired|consumed|deleted|ended>`
+filters, and `-j, --json` prints `{total, rows}`. It needs an API key with the **`read`**
+scope. `secbin revoke` destroys one of your shares at once, like **Revoke** on the
+dashboard's My shares page; it needs the **`manage`** scope and refuses shares the
+administrator has locked. Both use `SECBIN_SERVER` (or `--server`) and your API key.
+Labels, extensions and read receipts are in the dashboard and the REST API
+([`docs/API.md`](https://github.com/kaerez/bin/blob/main/docs/API.md)).
+
 ### `secbin update` / `secbin version`
 
 These commands only trust an npm release that meets all three conditions:
@@ -253,7 +264,7 @@ pulling the repository and re-running `npm install -g ./cli`.
 - **Passwords, delete tokens and API keys are never accepted as plain flag values.** They
   come only from a hidden prompt, an environment variable or a `0600` key file.
 - `--text` puts the note itself in argv. Pipe stdin or use `--file` for anything sensitive.
-- Server error messages are stripped of control characters before they are printed, so a
+- Server error messages and share labels are stripped of control characters before they are printed, so a
   hostile server cannot inject terminal escapes.
 - See the project's [`SECURITY.md`](https://github.com/kaerez/bin/blob/main/SECURITY.md)
   for the full threat model.

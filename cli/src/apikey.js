@@ -50,7 +50,7 @@ async function readKeyFile(path, io) {
  * The API key for create/send: --api-key-file wins over $SECBIN_API_KEY.
  * Throws a UsageError (exit 2) when none is configured or it is malformed.
  */
-export async function resolveApiKey({ file, io }) {
+export async function resolveApiKey({ file, io, what = 'creating shares' }) {
   let key;
   let source;
   if (file !== undefined) {
@@ -60,7 +60,7 @@ export async function resolveApiKey({ file, io }) {
     key = io.env.SECBIN_API_KEY;
     source = 'SECBIN_API_KEY';
     if (key === undefined || key === '') {
-      throw new UsageError(`creating shares needs an API key — set SECBIN_API_KEY or pass --api-key-file <path>; ${HOW_TO_GET}`);
+      throw new UsageError(`${what} needs an API key — set SECBIN_API_KEY or pass --api-key-file <path>; ${HOW_TO_GET}`);
     }
     key = key.trim();
   }

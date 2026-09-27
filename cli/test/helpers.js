@@ -169,6 +169,34 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       return json(200, { ok: true, id: up[1], expires });
     }
 
+    // ── the key user's shares ("read" / "manage"; policy.noRead / noManage drop a scope) ──
+    if (u.pathname === '/api/private/shares') {
+      if (method !== 'GET') return err(405, 'method_not_allowed');
+      const denied = auth();
+      if (denied) return denied;
+      if (policy.noRead) return err(403, 'scope_denied', 'This API key does not have the "read" scope.');
+      const all = [...notes.entries(), ...[...files.entries()].filter(([, f]) => f.state === 'active' || f.state === 'revoked')]
+        .map(([id, r]) => ({ id, kind: id[0] === 'f' ? 'files' : 'text', label: r.label ?? '', created: 0, expires: r.paste?.meta.expires ?? 0,
+          views_total: r.views ?? null, left: r.revoked ? null : r.left ?? null, opens: 0, status: r.revoked ? 'revoked' : 'active', locked: r.locked ? 1 : 0 }))
+        .filter((r) => !u.searchParams.get('status') || r.status === u.searchParams.get('status'));
+      const off = Number(u.searchParams.get('offset')) || 0;
+      return json(200, { rows: all.slice(off, off + (policy.pageSize ?? 50)), total: all.length });
+    }
+    const sr = /^\/api\/private\/shares\/([^/]+)\/revoke$/.exec(u.pathname);
+    if (sr) {
+      if (method !== 'POST') return err(405, 'method_not_allowed');
+      const denied = auth();
+      if (denied) return denied;
+      if (policy.noManage) return err(403, 'scope_denied', 'This API key does not have the "manage" scope.');
+      if (h.get('x-secbin-intent') !== '1') return err(400, 'missing_intent', 'This request requires the "X-Secbin-Intent: 1" header.');
+      const rec = notes.get(sr[1]) ?? files.get(sr[1]);
+      if (!rec) return err(404, 'not_found', 'Share not found.');
+      if (rec.locked) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
+      rec.revoked = true;
+      if (notes.has(sr[1])) notes.delete(sr[1]);
+      return json(200, { ok: true });
+    }
+
     // ── public share API ────────────────────────────────────────────────────
     const m = /^\/api\/(paste|file)\/([^/]+)(?:\/(open|chunk|expire)(?:\/(\d+))?)?$/.exec(u.pathname);
     if (!m) return err(404, 'not_found', 'Not found.');

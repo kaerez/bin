@@ -57,7 +57,7 @@ export class Client {
   /**
    * @param {string} server   validated origin (url.js normalizeServer)
    * @param {Function} fetchImpl
-   * @param {{apiKey?: string}} opts  API key for the creation endpoints only
+   * @param {{apiKey?: string}} opts  API key for the account endpoints (creation, list, revoke) only
    */
   constructor(server, fetchImpl = globalThis.fetch, { apiKey } = {}) {
     this.server = server;
@@ -192,6 +192,26 @@ export class Client {
     const data = await readJson(res);
     if (!res.ok) throw toApiError(data, res.status, 'Upload failed.');
     return data;
+  }
+
+  // ── the key user's shares (API key: "read" to list, "manage" to revoke) ──
+
+  /** One page of the account's shares → { rows, total } (rows are untrusted server data). */
+  async listShares({ status = '', offset = 0 } = {}) {
+    const qs = new URLSearchParams();
+    if (status) qs.set('status', status);
+    if (offset) qs.set('offset', String(offset));
+    const q = qs.toString();
+    const d = await this.request(`/api/private/shares${q ? `?${q}` : ''}`, { auth: true, fallback: 'Could not list the shares.' });
+    if (!Array.isArray(d.rows) || !Number.isSafeInteger(d.total)) throw malformed();
+    return d;
+  }
+
+  /** Revoke one of the account's shares: its content is destroyed at once. */
+  revokeShare(id) {
+    return this.request(`/api/private/shares/${encodeURIComponent(id)}/revoke`, {
+      method: 'POST', auth: true, headers: { 'x-secbin-intent': '1' }, fallback: 'Revoke failed.',
+    });
   }
 
   /** Activate the upload with its encrypted manifest paste. */

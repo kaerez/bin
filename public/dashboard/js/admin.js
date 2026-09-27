@@ -421,7 +421,10 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-const KEY_SCOPES = [['notes', 'create notes'], ['files', 'upload files'], ['policy', 'read the policy']];
+// As API_SCOPES in src/lib/settings.js; a new key gets the creation scopes unless changed.
+const KEY_SCOPES = [['notes', 'create notes'], ['files', 'upload files'], ['policy', 'read the policy'],
+  ['read', 'list shares & receipts'], ['manage', 'label, extend & revoke shares']];
+const DEFAULT_KEY_SCOPES = ['notes', 'files', 'policy'];
 const KEY_LIFE = [['', 'never expires'], ['604800', '7 days'], ['2592000', '30 days'], ['31536000', '365 days']];
 const scopeBoxes = (checked) => KEY_SCOPES.map(([v, t]) => {
   const c = h('input', { type: 'checkbox', value: v, checked: checked.includes(v) });
@@ -432,7 +435,7 @@ const scopeBoxes = (checked) => KEY_SCOPES.map(([v, t]) => {
 function userKeysCard(id, list) {
   const name = h('input.input', { placeholder: 'Key name', maxlength: '100', 'aria-label': 'Key name' });
   const life = h('select.input', { 'aria-label': 'Key lifetime' }, ...KEY_LIFE.map(([v, t]) => h('option', { value: v, text: t })));
-  const boxes = scopeBoxes(KEY_SCOPES.map(([v]) => v));
+  const boxes = scopeBoxes(DEFAULT_KEY_SCOPES);
   const shown = h('div.linkrow', { hidden: true });
   const create = h('button.btn', { type: 'button', text: 'Create key' });
   create.onclick = async () => {

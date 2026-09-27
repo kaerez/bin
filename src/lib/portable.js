@@ -21,7 +21,7 @@
 //             ignored.
 // Never: the owner account, sessions, shares, usage counters or the activity log.
 
-import { checkSetting, checkLimit, checkQuota, checkViewerRule } from './settings.js';
+import { checkSetting, checkLimit, checkQuota, checkViewerRule, API_SCOPES } from './settings.js';
 import { upgradeUrlRules } from '../../public/js/sharetypes.js';
 import { normalizeRule } from './ip.js';
 import { ARGON2 } from '../../public/js/format.js';
@@ -166,7 +166,6 @@ function system(v) {
 // ── per-user API keys and passkeys ───────────────────────────────────────────
 const HEX64 = /^[0-9a-f]{64}$/;
 const B64URL = /^[A-Za-z0-9_-]+$/;
-const API_SCOPES = ['notes', 'files', 'policy'];
 const intOrNull = (x) => x === null || Number.isSafeInteger(x);
 function labelOf(v, where) {
   // eslint-disable-next-line no-control-regex

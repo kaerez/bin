@@ -47,6 +47,19 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **API key scopes `read` and `manage`** (#31): besides creating (`notes`, `files`, `policy`),
+  a key can list the user's shares, one share and its read receipts (`read`: `GET
+  /api/private/shares`, `GET …/shares/:id` — new — and `GET …/shares/:id/opens`) and label,
+  extend and revoke them (`manage`: `PATCH …/shares/:id`, `POST …/shares/:id/revoke`) — only
+  the key user's own shares, under the owner's share locks and, for extensions, the account's
+  API limits; changes made with a key are logged with its id. Both are opt-in: a key created
+  without a choice still gets the creation scopes only. Account → API keys and Admin → Users
+  offer and list the new scopes; exports and imports carry them. `docs/API.md` and the
+  Account page's "Using the API" help document every endpoint a key can use, with examples for
+  every use case in curl, Node.js and Python (new `examples/api/create-files.mjs` /
+  `create_files.py` for the file upload flow, `--encrypt-only` modes for curl; the Python
+  examples use `requests`). The CLI gains `secbin list` and `secbin revoke`.
+
 - **Export / import everything, part by part.**
   - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
     default) and the public account.

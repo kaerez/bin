@@ -70,15 +70,16 @@ export async function readSession(request, env) {
 
 /**
  * Authenticate a /api/private request. Sessions work everywhere; API keys only
- * where `allowApiKey` is set, and only when the key holds `scope`. Returns
- * { user, actor, channel: 'all'|'api', claims?, setCookie? } or throws HttpError.
+ * where `allowApiKey` is set, and only when the key holds `scope` (see
+ * API_SCOPES in settings.js). Returns { user, actor, channel: 'all'|'api',
+ * claims?, setCookie?, keyId? } or throws HttpError.
  */
 export async function authenticate(request, env, { allowApiKey = false, scope = null } = {}) {
   const authz = request.headers.get('authorization') || '';
   if (authz) {
     const m = /^Bearer (sbk_[A-Za-z0-9_-]{43})$/.exec(authz.trim());
     if (!m) throw new HttpError(401, 'invalid_api_key', 'Invalid API key.');
-    if (!allowApiKey) throw new HttpError(403, 'api_key_not_allowed', 'API keys can only be used to create shares.');
+    if (!allowApiKey) throw new HttpError(403, 'api_key_not_allowed', 'API keys cannot be used here (only to create shares, read the policy, and read or manage the key user’s own shares).');
     const res = await directory(env).authKey(await hashToken(m[1]));
     if (res?.disabled) throw accountDisabled();
     if (!res) throw new HttpError(401, 'invalid_api_key', 'Invalid, expired or disabled API key.');
@@ -86,7 +87,7 @@ export async function authenticate(request, env, { allowApiKey = false, scope = 
     if (scope && !(res.scopes || []).includes(scope)) {
       throw new HttpError(403, 'scope_denied', `This API key does not have the "${scope}" scope.`);
     }
-    return { user: res.user, actor: null, channel: 'api', scopes: res.scopes };
+    return { user: res.user, actor: null, channel: 'api', scopes: res.scopes, keyId: res.keyId };
   }
   const s = await readSession(request, env);
   if (!s.ok) {
