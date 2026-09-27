@@ -265,6 +265,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Changed
 
+- **Human check:** while the check is pending, "Waiting for the human check…" is shown under the
+  protected button (and linked to it for screen readers) instead of only in a tooltip.
 - **Everything an account may do is on its role** (migration 12):
   - the session timeouts, the file-share download window and the unfinished-upload deadline are
     role options; the owner's own are edited on the Owner role;
