@@ -83,6 +83,11 @@ const LIMIT_SECTIONS = [
     ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
     ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
   ]],
+  ['Drive', [
+    ['driveEnabled', 'Drive allowed', 'bool'],
+    ['driveMaxBytes', 'Drive capacity', 'bytes'],
+    ['driveMaxFileBytes', 'Drive: largest file', 'bytes'],
+  ]],
 ];
 const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
@@ -374,6 +379,9 @@ function rulesEditor(scope, list, { withPresets = true } = {}) {
 }
 
 // ── users ────────────────────────────────────────────────────────────────────
+/** A user's Drive usage for the list: used of capacity (the content itself is end-to-end encrypted). */
+const driveUsage = (d) => (!d ? '—' : !d.enabled && !d.used ? 'no Drive' : `${formatBytes(d.used)} of ${formatBytes(d.capacity)}${d.enabled ? '' : ' (Drive off)'}`);
+
 async function renderUsers() {
   const p = clear(panel('users'));
   await refreshOverview(); // the global password policy may have just changed
@@ -415,9 +423,10 @@ async function renderUsers() {
     pick.onchange = async () => { if (!(await guard(() => admin.setUserRole(u.id, pick.value), `${u.username} now has the role ${pick.selectedOptions[0].textContent}.`))) renderUsers(); };
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td', { dataset: { label: 'Role' } }, pick),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
+      h('td.mono', { dataset: { label: 'Drive' }, text: driveUsage(u.drive) }),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(u.created) }), h('td.cell-actions', {}, actions)));
   }
-  p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Role', 'Status', 'Created', ''].map((t) => h('th', { text: t })))), body)));
+  p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Role', 'Status', 'Drive', 'Created', ''].map((t) => h('th', { text: t })))), body)));
   p.appendChild(h('div', { id: 'user-detail' }));
 }
 
@@ -810,7 +819,8 @@ const PUBLIC_ID = 'public-user-0000';
 // Not for the public account (no API keys, receipts page, password, passkeys
 // or log of its own); the server refuses them too (PUBLIC_NA_LIMITS).
 const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs', 'receiptLanguages',
-  'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec'];
+  'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec',
+  'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],
   ['ip', 'Network address only', 'Counts per IP address (IPv6 per the tracking prefix), stored only as a keyed hash. Nothing is stored in the browser; people behind one address share the limits.'],

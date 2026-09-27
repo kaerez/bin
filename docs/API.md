@@ -78,6 +78,33 @@ SECBIN_NOTE_PASSWORD='…' python3 examples/api/create_note.py https://bin.examp
 Both print the link on stdout and the delete token on stderr. For files and folders use the CLI:
 `secbin send <path>`.
 
+## Not with API keys: the Drive
+
+The Drive (`/api/private/drive*`, [`docs/DRIVE.md`](./DRIVE.md) §6) is for signed-in sessions
+only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes, for reference:
+
+| Method & path | Body → result |
+| --- | --- |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowPriv? }` |
+| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPriv?, escrowPub? }` — key wraps (not while impersonating; the escrow keys owner only) |
+| `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
+| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta? }` — move / rename |
+| `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
+| `GET /api/private/drive/nodes/:id/shares` | → `{ shares }` — the active shares of the item |
+| `POST /api/private/drive/folders` | `{ id?, parent, name, meta? }` → `201 { id }` |
+| `POST /api/private/drive/files` | `{ id?, parent, name, meta?, size, fk }` → `201 { id, uploadToken, chunks }` |
+| `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
+| `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` |
+| `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
+| `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
+| `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (logged) |
+| `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (logged) |
+
+`name`, `meta` and `fk` are `{ iv, ct }` values encrypted in the browser; the server never sees
+names, types or keys. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
+then also returns `refs: [{ chunks, size }]`), and its chunks are read with
+`GET /api/file/:id/chunk/:ref/:i` and the download grant.
+
 ## Security notes
 
 - Treat a key like a password: it can create shares under your name until it expires or is

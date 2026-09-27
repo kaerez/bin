@@ -27,42 +27,72 @@ Never visible: names, file types, contents, file keys, the Drive key.
 - **DK** — the Drive key: 32 random bytes per user, created in the browser the first time the
   user opens the Drive. Never sent to the server in the clear.
 - Sub-keys, by HKDF-SHA-256 from DK (salt empty, info as given):
-  - `secbin-drive/v1 names` → AES-256-GCM key for node names (and file type/mtime metadata);
-  - `secbin-drive/v1 files` → AES-256-GCM key that wraps each file key.
+  - `secbin-drive/v1 names` → AES-256-GCM key for node names (field `name`) and file metadata
+    (field `meta`: JSON `{ type, mtime, size }`; `size` lets the client check the server's);
+  - `secbin-drive/v1 files` → AES-256-GCM key that wraps each file key (field `fk`).
 - **fk** — per file, 32 random bytes; content chunks are encrypted exactly like file-share chunks
-  (`encryptChunk(fk, i, n, plain)` from `public/js/files.js`, AAD `(i, n)`), with no padding.
+  (`encryptChunk(fk, i, n, plain)` from `public/js/files.js`, AAD `(i, n)`), with no padding:
+  `n = ceil(size / 8 MiB)` (an empty file has no chunks) and chunk `i` is exactly
+  `min(8 MiB, size − i · 8 MiB) + 16` bytes, where `size` is the file's plaintext size.
 - Encrypted fields use `{ iv, ct }` (base64url, 12-byte IV, AES-256-GCM). AAD is
   `secbin-drive/v1\n<field>\n<nodeId>\n` so a value cannot be moved to another node or field.
+  Because the AAD needs the node id before anything is sealed, **the browser chooses node ids**
+  (16 random bytes, base64url: 22 characters) and sends them when it creates a node (§6).
+- A wrap's `data` is an opaque string (≤ 1024 characters) of base64url segments joined by `.`:
+  `1.<iv>.<ct>`, or for `escrow` `1.<epk>.<kid>.<iv>.<ct>`. Its AAD is the field AAD above with
+  field `wrap:<kind>` and node id `ref` (for `escrow`: `escrow:<kid>`), so a wrap cannot be moved
+  to another kind or ref. `escrowPriv` is `1.<iv>.<ct>` under the `files` key, field
+  `escrowPriv`, node id `drive`. `driveSalt` is 16 bytes, base64url.
 - **Wraps of DK** (the server stores them, cannot open them). The browser unlocks DK with the
   first one that works:
   1. `pw` — password: `Argon2id(NFC(password), driveSalt, m = 64 MiB, t = 3, p = 1)` (a second
      derivation with a Drive-only 16-byte salt; the login proof is a different Argon2 output and
      never unlocks the Drive) → HKDF `secbin-drive/v1 kek-pw` → AES-GCM wrap of DK.
-  2. `recovery` — one per recovery code: HKDF over the code's normalised text,
-     `secbin-drive/v1 kek-recovery` → wrap; `ref` = the code's existing server-side hash.
-     Regenerating recovery codes replaces these wraps.
+  2. `recovery` — one per recovery code: HKDF over the code's normalised text (as the server
+     normalises it: upper case, no spaces or dashes, O → 0, I/L → 1),
+     `secbin-drive/v1 kek-recovery` → wrap; `ref` = the code's existing server-side hash
+     (hex `SHA-256("secbin-recovery/v1:" ‖ code)`). Regenerating recovery codes replaces these
+     wraps; a code spent at sign-in has its wrap removed; removing the last passkey (which drops
+     the codes) removes them all.
   3. `passkey` — one per passkey that supports the WebAuthn **PRF** extension: PRF output for the
      fixed salt `SHA-256("secbin-drive/v1 prf")` → HKDF `secbin-drive/v1 kek-prf` → wrap;
      `ref` = the credential id. Passkeys without PRF are simply not listed.
   4. `escrow` — **owner escrow**: ECDH P-256 between an ephemeral key and the owner's escrow
-     public key → HKDF `secbin-drive/v1 kek-escrow` → wrap; stored with the ephemeral public key.
+     public key → HKDF (salt = the ephemeral public key, raw) `secbin-drive/v1 kek-escrow` →
+     wrap; stored with the ephemeral public key and `kid` (the first 16 bytes of SHA-256 over
+     the owner's raw public key), `ref` = `escrow`. A wrap for an older owner key is replaced
+     on the next unlock.
      The owner's escrow private key (PKCS#8) is stored encrypted under the **owner's own DK**
      (`escrowPriv` field of the owner's drive). The owner can therefore open any user's Drive:
      every escrow unwrap is logged (`drive.escrow_used`, with the user and the reason).
 - **Unlock at sign-in:** after a successful password, passkey or recovery-code sign-in, the login
   page fetches the wraps and unlocks DK with what it has (password → `pw`; passkey with PRF →
   `passkey`; recovery code → `recovery`), then keeps DK in the tab's `sessionStorage`
-  (`secbin_dk`, base64url) until sign-out or the tab closes. If none works, the Drive page asks.
+  (`secbin_dk`, base64url, with the user id in `secbin_dk_uid` so another account's page — e.g.
+  while impersonating — never uses it) until sign-out or the tab closes. If none works, the
+  Drive page asks. The first time (no wraps yet) DK is created then, which needs the password;
+  a Drive whose root has content but no wraps is never given a new key.
 - **Keeping wraps current (always in the browser that has DK):**
   - password change by the user → new `pw` wrap (new driveSalt);
   - admin password reset by the owner → the owner's browser opens the user's `escrow` wrap
     (needs the owner's DK unlocked) and writes a fresh `pw` wrap for the new password; if the
     owner's Drive is locked, the reset still works and the user unlocks with a recovery code,
-    passkey or (later) escrow;
-  - new passkey with PRF → add its wrap; passkey removed → its wrap removed by the server;
-  - new recovery codes → replace `recovery` wraps;
-  - escrow public key present and no `escrow` wrap → add it on the next unlock.
+    passkey or (later) escrow; the new `pw` wrap is written with
+    `PUT /api/private/admin/drive/keys/<userId>` (§6);
+  - new passkey with PRF → add its wrap (PRF requested at registration; an authenticator that
+    only evaluates PRF on use gets its wrap at its next sign-in); passkey removed → its wrap
+    removed by the server (the browser also asks, idempotently);
+  - new recovery codes → replace `recovery` wraps (without DK in the tab, the old codes' wraps
+    are still removed);
+  - a sign-in whose password the server accepted but whose `pw` wrap did not open (after a reset
+    without escrow), when another wrap opened DK → a fresh `pw` wrap;
+  - escrow public key present and no `escrow` wrap (or one for an older owner key) → add it on
+    the next unlock.
 - The owner's escrow key pair is created the first time the owner opens their Drive.
+- **Client modules:** `public/js/drivekeys.js` (the keys and wraps above, the tab's copy),
+  `public/js/driveclient.js` (`openDrive`, `unlockDrive`, `unlockDriveWithPasskey`, the
+  `DriveClient` methods, `DriveLocked` / `DriveDisabled`, and the upkeep helpers used by the
+  login, Account and Admin pages), `public/js/refsmanifest.js` (manifest v3, §7).
 
 ## 4. Storage (server)
 
@@ -100,16 +130,17 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowPriv? }` (`escrowPriv` for the owner only) |
 | `PUT /api/private/drive/keys` | set wraps: `{ driveSalt?, set: [{kind, ref, data}], remove: [{kind, ref}], escrowPriv?, escrowPub? }` (the last two owner only) |
 | `GET /api/private/drive/nodes/<id>` | the node and its children: `{ node, children: [...], path: [...ancestors] }` (`root` for the top) |
-| `POST /api/private/drive/folders` | `{ parent, name }` → `{ id }` |
-| `POST /api/private/drive/files` | `{ parent, name, meta, size, fk }` → `{ id, uploadToken, chunks }` (capacity checked) |
+| `POST /api/private/drive/folders` | `{ id, parent, name }` → `{ id }` (`id` chosen by the browser, §3; 409 if taken) |
+| `POST /api/private/drive/files` | `{ id, parent, name, meta, size, fk }` → `{ id, uploadToken, chunks }` (`size` = plaintext bytes, `chunks = ceil(size / 8 MiB)`, §3; capacity checked) |
 | `PUT /api/private/drive/files/<id>/chunk/<i>` | `application/octet-stream`, header `X-Upload-Token`; exact size check |
 | `POST /api/private/drive/files/<id>/finalize` | header `X-Upload-Token` → `{ ok }` |
 | `GET /api/private/drive/files/<id>/chunk/<i>` | ciphertext chunk for the user |
 | `PATCH /api/private/drive/nodes/<id>` | `{ parent?, name? }` move / rename |
 | `DELETE /api/private/drive/nodes/<id>` | recursive; ends referencing shares; frees capacity |
-| `POST /api/private/drive/shares` | `{ nodes: [ids], views, expire, deletable?, label?, paste, acc }` → `{ id, deletetoken }` |
-| `GET /api/private/drive/nodes/<id>/shares` | shares referencing the node |
-| `POST /api/private/admin/drive/escrow/<userId>` | owner: `{ reason }` → the user's escrow wrap and wraps list, logged `drive.escrow_used` |
+| `POST /api/private/drive/shares` | `{ nodes: [file ids], views, expire, deletable?, label?, types?, depth?, paste, acc }` → `{ id, deletetoken }`: `nodes` lists **files** (the browser flattens folders), and `refs[i]` is `nodes[i]`; `types` / `depth` are the file-policy declaration, sent only when a policy applies (as for file shares); `paste` is the `encryptPaste` body (`acc` is also inside it) |
+| `GET /api/private/drive/nodes/<id>/shares` | shares referencing the node: `{ shares: [...] }` |
+| `POST /api/private/admin/drive/escrow/<userId>` | owner: `{ reason }` → `{ wrap, wraps }` (`wrap` = the user's `escrow` wrap or null), logged `drive.escrow_used` |
+| `PUT /api/private/admin/drive/keys/<userId>` | owner, after resetting the user's password: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (only a `pw` wrap, nothing removed), logged `drive.pw_rewrapped` |
 
 ## 7. Drive shares
 
@@ -118,8 +149,12 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
   touches `d/` objects. The Directory `shares` row has `kind = 'drive'`.
 - The share's encrypted paste (the manifest, sealed with the share's own link key and optional
   password, exactly as for file shares) is **manifest v3**:
-  `{ v: 3, kind: 'refs', entries: [{ path, size, type, mtime, ref, fk }], dirs: [...] }` where
-  `ref` indexes `refs` and `fk` is that file's key (base64url). Folders are flattened to paths.
+  `{ v: 3, kind: 'refs', entries: [{ path, size, type, mtime, ref, fk }], dirs: [...], view }` where
+  `ref` indexes `refs` and `fk` is that file's key (base64url). Folders are flattened to paths
+  (`dirs` lists every folder, so empty ones survive; duplicate names get " (2)"…). `view` is the
+  sender's viewer-policy snapshot as in v2 (`{ rules, maxBytes }` or null; optional on read).
+  `public/js/refsmanifest.js` builds and validates it. The share id starts with `f` and its paste
+  has `fmt: 'files'`, like a file share, so the viewer opens it the same way.
 - Recipients open it like a file share (`POST /api/file/<id>/open`); the response adds
   `refs: [{ chunks, size }]`. Chunks: `GET /api/file/<id>/chunk/<ref>/<i>` with the download
   grant. `public/js/downloads.js` and the viewer read v3 manifests (per-file keys and chunk
@@ -149,3 +184,44 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
   keep other script out, as for the rest of the app.
 - Capacity, sizes and chunk counts are enforced server-side; names and types are not (they are
   encrypted), so file-type rules for drive shares are enforced by the client, as for file shares.
+
+## 10. Server notes (as built)
+
+Details of the server side (`src/drive-do.js`, `src/routes/drive.js`) that the sections above
+leave open:
+
+- **Access.** Every `/api/private/drive*` route needs a session (an API key gets
+  `403 api_key_not_allowed`); the public account gets `403 drive_unavailable`. With the role's
+  Drive off, `GET /api/private/drive` answers `200 { enabled: false, wraps: [], … }` and every
+  other Drive route `403 drive_disabled`. `GET /api/private/drive` also returns `maxFile` (the
+  largest file allowed). While impersonating, `PUT …/drive/keys` is `403 impersonating`; the
+  admin routes are closed as usual.
+- **Nodes.** `id` may be omitted (the server then picks one, which cannot be bound into the
+  AAD). `PATCH` also accepts `meta`. `path` lists the ancestors as full nodes, root first.
+  Children include pending files (`state: 'pending'`, `done` = chunks received). `DELETE`
+  answers `{ ok, deleted, sharesEnded }`. Hard ceilings per Drive: 100 000 items, 10 000 per
+  folder, 64 folder levels, 64 wraps, 1 000 shares per item.
+- **Files.** Capacity counts every file's `size`, pending uploads included (reserved at
+  `POST …/files`). Chunks may arrive in any order; sending one again replaces it (internal table
+  `upchunks(node_id, i)`; `done` is their count). A pending upload with no chunk received for the
+  role's `filePendingSec` is purged by the alarm, with its chunks. A file is readable and
+  shareable only once finalized.
+- **Wraps.** `pw` and `escrow` have `ref` = their kind; a `passkey` wrap must name one of the
+  account's passkeys and a `recovery` wrap one of its current codes. The server drops the wraps
+  of passkeys and codes the account no longer has (a passkey removed, codes regenerated, the
+  owner's "remove all passkeys"). Setting `escrowPub` is logged (`drive.escrow_key_set`).
+- **Owner routes.** The escrow route needs a `reason` of 3–500 characters, logs every call
+  (`drive.escrow_used`, with the reason) and answers `wrap: null` when the user has none;
+  `PUT /api/private/admin/drive/keys/<userId>` refuses the owner's own id (use one's own Drive)
+  and logs `drive.pw_rewrapped`. Both are direct admin actions: in the audit, not in the user's
+  own log.
+- **Shares.** A folder id in `nodes` is refused (`400 not_a_file`); files must be finalized
+  (`409 not_ready`). `acc`, when sent both inside `paste` and next to it, must be the same. The
+  stream-size caps (`maxShareBytes`, `maxFileBytes`) do not apply (nothing is uploaded; the files
+  are within the Drive's own limits). The response also carries `expires`.
+  `GET …/nodes/<id>/shares` lists the active shares that reference the node, as My shares rows.
+  Deleting a node ends its shares (and those of every file below it) even when locked by the
+  admin: the data is gone.
+- **Accounts.** Deleting an account deletes its Drive (every R2 object, every share of it). The
+  Directory mirrors each Drive's usage (`drive_usage`); Admin → Users gets
+  `drive: { enabled, used, capacity }` per user (null for the public account).

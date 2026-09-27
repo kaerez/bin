@@ -27,6 +27,7 @@ export { BurnPaste } from './burn-do.js';
 export { FileShare } from './fileshare-do.js';
 export { Directory } from './directory-do.js';
 export { Guard } from './guard-do.js';
+export { Drive } from './drive-do.js';
 
 const DASH_PUBLIC = /^\/dashboard\/(login|setup)(\/|\/index\.html)?$/;
 const DASH_LOGIN = /^\/dashboard\/login(\/|\/index\.html)?$/;

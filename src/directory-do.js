@@ -20,7 +20,7 @@ import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn
 import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, PASSWORD_POLICY_KEYS,
-  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS,
+  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
@@ -82,6 +82,7 @@ CREATE INDEX IF NOT EXISTS recovery_user ON recovery_codes(user_id);
 CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL, challenge TEXT NOT NULL,
   exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -193,6 +194,13 @@ const MIGRATIONS = [
     for (const k of ['files.maxShareBytes', 'viewer.enabled', 'viewer.maxBytes']) m.sql.exec('DELETE FROM settings WHERE key = ?', k);
     materializeDefaultRole(m.sql);
   },
+  // 13: the Drive (docs/DRIVE.md): its role options join the Default role
+  // (driveEnabled off, 1 GiB, no per-file limit) and each user's Drive usage
+  // is mirrored here for Admin → Users (the Drive DO holds the truth).
+  (m) => {
+    m.sql.exec('CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL)');
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -251,7 +259,7 @@ export const PUBLIC_ID = 'public-user-0000';
  */
 export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
   'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax',
-  'sessionIdleSec', 'sessionAbsSec']);
+  'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes']);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -1316,13 +1324,16 @@ export class Directory extends DurableObject {
     if (L.maxExpireSec !== null && req.expireSec > L.maxExpireSec) {
       return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds${via}.`, { max: L.maxExpireSec });
     }
+    if (req.drive && (pub || ch === 'api')) return fail(403, 'drive_unavailable', 'Drive shares need a signed-in account.');
     if (req.kind === 'files') {
       const cap = this.#caps(u, L, s).maxShareBytes;
-      if (!(req.bytes <= cap)) return fail(413, 'share_too_large', `A file share may be at most ${cap} bytes${via}.`, { max: cap });
+      // A Drive share uploads nothing: its files are already stored within the
+      // Drive's own capacity and largest-file limits (docs/DRIVE.md §5).
+      if (!req.drive && !(req.bytes <= cap)) return fail(413, 'share_too_large', `A file share may be at most ${cap} bytes${via}.`, { max: cap });
       if (L.maxFilesPerShare !== null && !(Number.isSafeInteger(req.files) && req.files <= L.maxFilesPerShare)) {
         return fail(403, 'too_many_files', `At most ${L.maxFilesPerShare} files per share${via}.`, { max: L.maxFilesPerShare });
       }
-      if (L.maxFileBytes !== null && !(Number.isSafeInteger(req.maxFile) && req.maxFile <= L.maxFileBytes)) {
+      if (!req.drive && L.maxFileBytes !== null && !(Number.isSafeInteger(req.maxFile) && req.maxFile <= L.maxFileBytes)) {
         return fail(413, 'file_too_large', `Each file may be at most ${L.maxFileBytes} bytes${via}.`, { max: L.maxFileBytes });
       }
       // File policy: checked against what the client declares — and it only
@@ -1807,8 +1818,107 @@ export class Directory extends DurableObject {
   // ── admin: users ─────────────────────────────────────────────────────────
   async listUsers() {
     const ts = now();
-    return this.sql.exec('SELECT u.*, f.locked_until FROM users u LEFT JOIN failures f ON f.user_id = u.id ORDER BY u.role DESC, u.username').toArray()
-      .map((u) => ({ ...this.#publicUser(u), locked: !!(u.locked_until && u.locked_until > ts), lockedUntil: u.locked_until || 0 }));
+    return this.sql.exec(`SELECT u.*, f.locked_until, d.used AS drive_used FROM users u LEFT JOIN failures f ON f.user_id = u.id
+      LEFT JOIN drive_usage d ON d.user_id = u.id ORDER BY u.role DESC, u.username`).toArray()
+      .map((u) => ({ ...this.#publicUser(u), locked: !!(u.locked_until && u.locked_until > ts), lockedUntil: u.locked_until || 0, drive: this.#driveOf(u, u.drive_used ?? 0) }));
+  }
+
+  // ── Drive (docs/DRIVE.md; the content lives in each user's Drive DO) ──────
+  /** A user's Drive as the admin sees it: allowed?, bytes used, capacity. The public account has none. */
+  #driveOf(u, used) {
+    if (u.role === 'public') return null;
+    const L = this.#effective(u).all;
+    return { enabled: !!L.driveEnabled, used, capacity: Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxBytes ?? HARD_MAX_DRIVE_BYTES) };
+  }
+
+  /**
+   * What the Worker needs before any Drive call: may this account use its
+   * Drive now, its capacity and largest file, the upload deadline for pending
+   * files, and the owner's escrow public key (JWK text, or null).
+   */
+  async driveAccess(uid) {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
+    const L = this.#effective(u).all;
+    const s = this.#settings();
+    const used = this.sql.exec('SELECT used FROM drive_usage WHERE user_id = ?', uid).toArray()[0]?.used ?? 0;
+    return {
+      ok: true,
+      enabled: !!L.driveEnabled,
+      owner: u.role === 'owner',
+      capacity: Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxBytes ?? HARD_MAX_DRIVE_BYTES),
+      maxFile: Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxFileBytes ?? HARD_MAX_DRIVE_BYTES),
+      pendingSec: this.#caps(u, L, s).pendingSec,
+      used,
+      escrowPub: this.#meta('drive.escrowPub'),
+    };
+  }
+
+  /**
+   * The credentials a Drive key wrap may belong to: passkey ids and recovery
+   * code hashes, and whether the account may use a Drive at all.
+   */
+  async credentialRefs(uid) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return null;
+    return {
+      drive: !!this.#effective(u).all.driveEnabled,
+      passkeys: this.sql.exec('SELECT id FROM passkeys WHERE user_id = ?', uid).toArray().map((r) => r.id),
+      recovery: this.sql.exec('SELECT hash FROM recovery_codes WHERE user_id = ?', uid).toArray().map((r) => r.hash),
+    };
+  }
+
+  /** Mirror a Drive's usage (bytes) after a change; called by the Worker and the Drive DO. */
+  async setDriveUsed(uid, used) {
+    if (typeof uid !== 'string' || !Number.isSafeInteger(used) || used < 0) return;
+    if (!this.#user(uid)) return;
+    this.sql.exec('INSERT INTO drive_usage (user_id, used, updated) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET used = excluded.used, updated = excluded.updated',
+      uid, used, now());
+  }
+
+  /** The owner sets (or replaces) the escrow public key every Drive wraps its key to. */
+  async setEscrowPub(ownerId, jwkText) {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner can set the escrow key.');
+    const had = !!this.#meta('drive.escrowPub');
+    this.#setMeta('drive.escrowPub', jwkText);
+    this.#log(ownerId, ownerId, 'drive.escrow_key_set', had ? 'replaced' : 'created');
+    return { ok: true };
+  }
+
+  /**
+   * The owner acts on a user's Drive keys (opens the escrow wrap, writes a
+   * password wrap after a reset): allowed for an existing account (not the
+   * public one), always logged as a direct admin action.
+   */
+  async driveAdminAction(ownerId, userId, action, detail = '') {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
+    const u = this.#user(userId);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (!['drive.escrow_used', 'drive.pw_rewrapped'].includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    this.#log({ id: ownerId, adm: true }, userId, action, detail);
+    return { ok: true };
+  }
+
+  /** A Drive's shares that are still in the index (for "shares of this item"). */
+  async sharesByIds(uid, ids) {
+    const list = (Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string').slice(0, 1000);
+    if (!list.length) return [];
+    return this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND id IN (${list.map(() => '?').join(', ')}) ORDER BY created DESC`,
+      uid, ...list).toArray();
+  }
+
+  /** Drive items were deleted: the shares that referenced them end (revoked), locked or not. */
+  async endDriveShares(uid, ids, actorId = uid) {
+    const list = (Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string').slice(0, 10000);
+    let n = 0;
+    for (const id of list) {
+      n += this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, uid).rowsWritten;
+    }
+    if (n) this.#log(actorId, uid, 'share.revoked', `drive item deleted: ${n} share${n === 1 ? '' : 's'}`);
+    return { ok: true, ended: n };
   }
 
   async createUser({ username, salt, t, verifier }, actorId) {
@@ -1852,7 +1962,7 @@ export class Directory extends DurableObject {
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in and cannot be deleted.');
     const shares = this.sql.exec("SELECT id FROM shares WHERE user_id = ? AND status = 'active'", id).toArray().map((r) => r.id);
     this.ctx.storage.transactionSync(() => {
-      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
+      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges', 'drive_usage']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
       this.sql.exec('DELETE FROM users WHERE id = ?', id);
       this.#log(actorId, id, 'user.deleted', `username=${u.username}`);
     });

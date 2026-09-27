@@ -85,6 +85,10 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
 - Access-proof *hashes*, delete/upload/grant/API-key *hashes*, and password verifiers
   (`SHA-256("secbin-auth/v2" ‖ Argon2id(password))`).
 
+- **The Drive** (see the Drive section below): the shape of each user's folder tree (node
+  ids, parents, file or folder), each file's exact size and chunk count, times, and which shares
+  reference which items — never names, types, contents, file keys or the Drive key.
+
 Tokens (delete, upload, download grant) and proofs travel in request **headers**, never URLs,
 so they do not land in logged request URLs.
 
@@ -682,6 +686,52 @@ codes as safe as the password.
   counters). Conflicts and admin actions are audited.
 - File uploads by the public account (when the admin enables files) use the same upload-token
   capability as account uploads; the quota is charged when the upload starts.
+
+### Drive (server)
+
+Design and interface: [`docs/DRIVE.md`](./docs/DRIVE.md); the keys and wraps are described
+under "Drive keys" above.
+
+- **What the server sees.** One Durable Object per user holds the tree: node ids (chosen by the
+  browser, 128 random bits), parent links, file or folder, each file's exact plaintext size and
+  chunk count, timestamps, and which shares reference which items. Names, file metadata and each
+  file's key arrive as `{iv, ct}` values sealed in the browser; the wraps of the Drive key are
+  opaque strings. The server stores them and cannot open any of them. Unlike file shares,
+  **Drive files are not padded**: the server learns each file's exact size.
+- **Key material.** Wraps are checked for form only (kind, ref, length, base64url); a `passkey`
+  or `recovery` wrap must name a credential the account has now, and the server drops the wraps of
+  passkeys and codes the account no longer has. Key material cannot be changed with an API key
+  (the whole Drive refuses them) or while the owner impersonates the user.
+- **Owner escrow.** The escrow public key is in the Directory and can be set by the owner only
+  (logged `drive.escrow_key_set`). A user's escrow wrap is handed out only by
+  `POST /api/private/admin/drive/escrow/<userId>` (owner session, not impersonating), which needs
+  a reason and logs `drive.escrow_used` with the reason; after an admin password reset the owner's
+  browser writes the user's new password wrap with `PUT /api/private/admin/drive/keys/<userId>`
+  (a password wrap only; logged `drive.pw_rewrapped`). Both are admin actions: in the audit, not
+  in the user's own log. So **the owner can decrypt every user's Drive** — a deliberate choice by
+  the maintainer that **needs Legal / Compliance review before production** (employee monitoring,
+  confidentiality and data-protection rules differ by jurisdiction and contract); this document is
+  not legal or compliance advice.
+- **Access control.** Every route is session-only and scoped to the caller's own Drive object
+  (`idFromName('drive:' + userId)`; the object also refuses calls naming another user), so an id
+  from another user's Drive simply does not exist there (IDOR). The role must allow the Drive
+  (`driveEnabled`); the public account never has one.
+- **Uploads and limits.** Capacity (`driveMaxBytes`, at most 100 GiB) and the largest file
+  (`driveMaxFileBytes`) are checked atomically in the Drive object when an upload starts, pending
+  uploads included; chunk sizes are checked exactly; upload tokens are 256-bit and stored as
+  hashes; unfinished uploads are purged after the role's `filePendingSec` without progress. The
+  state-changing routes use the same CSRF guards as the rest of the API (JSON body or intent
+  header, `Sec-Fetch-Site`, the upload token header). R2 keys are built from the server's user id
+  and validated node ids only.
+- **Deletion.** Only the Drive object deletes Drive ciphertext in R2 (`d/<userId>/<nodeId>/<i>`):
+  a recursive delete removes the objects first, then the rows, and ends every share that
+  referenced the items (recipients get "gone"). Deleting an account deletes its Drive.
+- **Drive shares** reference the Drive's ciphertext (no copy): a FileShare record with `refs`,
+  authorized like a file share (limits, file-policy declarations, quotas), whose expiry,
+  revocation or deletion never touches the Drive's objects. Recipients get the share's own link
+  key; each file's key travels inside the share's encrypted manifest.
+- **Not exported.** Export / import carries the Drive role options (with the roles), never Drive
+  content or keys.
 
 ### API surface hardening
 

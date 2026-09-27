@@ -2,7 +2,7 @@
 
 secbin — by KSEC - Erez Kalman, based on [binthere](https://github.com/nxfu/binthere) — is a
 **single Cloudflare Worker** serving the static frontend, the share API, accounts and
-administration, backed by KV, R2 and four Durable Object classes. One deploy, one
+administration, backed by KV, R2 and five Durable Object classes. One deploy, one
 `wrangler.toml`.
 
 ## Request path
@@ -35,6 +35,8 @@ administration, backed by KV, R2 and four Durable Object classes. One deploy, on
 | `f…` | `FileShare` DO (per id) + R2 `FILES` (`f/<id>/<i>`) | Upload state, view counting, download grants, alarm purges R2 |
 | accounts & config | `Directory` DO (singleton, SQLite) | users (incl. the built-in public account), revoked sessions, API keys, limits, quotas + usage, settings, viewer rules, IP rules, share index, activity, public-access trackers (keyed hashes) |
 | brute-force state | `Guard` DOs (8 shards by IP hash) | per-scope failure counters and blocks with alarm cleanup |
+| a user's Drive | `Drive` DO (per user, SQLite) + R2 `FILES` (`d/<user>/<node>/<i>`) | encrypted folder tree, key wraps, which shares reference which items; pending-upload purge alarm ([docs/DRIVE.md](./docs/DRIVE.md)) |
+| `f…` Drive share | `FileShare` DO with `refs` | references Drive files instead of an upload; its purge never touches `d/` objects |
 
 The Directory's schema is versioned: `SCHEMA` always describes the latest shape, and an ordered
 list of idempotent `MIGRATIONS` upgrades instances created by older releases (the applied version is
@@ -57,7 +59,7 @@ need atomic, immediately consistent read-modify-write.
 | `src/lib/guard.js`, `ip.js` | Manual IP rules, Guard scopes, IPv4/IPv6/CIDR |
 | `src/lib/settings.js` | Settings/limits/quotas schema and resolution |
 | `src/lib/config.js` | Tolerant env-var readers (`AUTHN`, `SIG`, `ENC`, `DISABLE_BFP*`) |
-| `src/*-do.js` | The four Durable Object classes |
+| `src/*-do.js` | The five Durable Object classes |
 | `public/js/{bytes,format,crypto,kdf,files,zip,mime}.js` | Shared protocol modules (browser + CLI, vendored and drift-tested) |
 | `public/js/{view,viewer,pdfview,downloads}.js` | Public viewer, safe renderers, downloads |
 | `public/dashboard/js/*.js` | Composer, My shares, account, admin, chrome |
