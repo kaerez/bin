@@ -359,11 +359,12 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
     if (bad) return msg(bad, true);
     setBtn.disabled = true;
     const cred = await newCredential(npw.value);
-    await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out.');
+    await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out and their passkeys and recovery codes removed.');
     setBtn.disabled = false;
     npw.value = npw2.value = '';
   };
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }), h('div.toolbar', {}, npw, npw2, setBtn),
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }),
+    h('p.mono.muted', { text: 'This is account recovery: it also signs the user out everywhere and removes their passkeys and recovery codes.' }), h('div.toolbar', {}, npw, npw2, setBtn),
     h('p.mono.muted', { text: `This user's password policy: ${describePolicy(userPolicy)}` })));
   if (passwordOnly) return;
 

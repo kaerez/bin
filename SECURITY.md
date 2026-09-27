@@ -385,7 +385,7 @@ is never restricted by it:
 
 | `passkeys` | Passkey alone | Password, then passkey | Recovery code alone |
 |---|---|---|---|
-| `any` (default) | yes | if the user turns it on | yes |
+| `any` (default) | yes | if the user turns it on | yes, unless the user turned the second step on |
 | `second` | no | always, once the user has one | no (only as the second step) |
 | `off` | no | no (the password alone signs in) | no |
 
@@ -396,7 +396,8 @@ is never restricted by it:
     is two factors;
   - the signature (ES256, EdDSA or RS256 ≥ 2048 bits) with the key stored at registration;
   - a signature counter that must not go backwards (a cloned authenticator is refused);
-  - on usernameless sign-in, the user handle must match.
+  - on usernameless sign-in, a user handle returned by the authenticator must match the
+    account's (the credential id selects the account and its key either way).
 
   Attestation is not requested (`none`), so any authenticator is accepted.
 - **Adding or removing a passkey**, turning the second step on or off, and creating new recovery
@@ -410,10 +411,26 @@ is never restricted by it:
     per-IP login guard, like a wrong password.
   - The second step allows 5 tries per password entry.
   - Turnstile, when configured, also covers passkey and recovery-code logins.
-  - Pending sign-in challenges are capped and expire.
+  - The second step also stops while the account is locked out.
+- **Challenges.** Anyone may ask for a usernameless sign-in challenge, so it is not stored: it
+  carries its own expiry and an HMAC tag (a key derived from the Directory's secret). It is
+  recorded as spent only when it is used with a registered passkey, before verification, so it
+  works once. Registration and second-step challenges are stored, but only a signed-in user or
+  someone with the right password can create one, and each account keeps at most 3 per purpose.
+  A flood of requests therefore cannot push out anyone's pending sign-in.
+- **Step-up without Turnstile.** Passkey changes, new recovery codes, the second-step switch and
+  log clearing check the current password, but not Turnstile. They need a signed-in session,
+  wrong answers count toward the same limit as a password change (all sessions end after
+  `lockout.max`), and the IP login guard applies.
 - **Losing everything.**
   - The admin can remove a user's passkeys and codes (Users → Manage → Passkeys), after which
-    the password alone signs in; the admin can also set a new password.
+    the password alone signs in. The owner's own passkeys can be removed only from Account,
+    with the current password, so a stolen owner session alone cannot strip the second factor.
+  - **An admin password reset is account recovery.** It also removes the user's passkeys and
+    recovery codes, so whatever someone who took the account over added or replaced stops
+    working. An import that overwrites an account's credentials does the same.
+  - A user's own password change keeps them. Account then says how many still work and asks
+    the user to remove any passkey they do not recognise.
   - Owner recovery through `AUTHN` also removes the owner's passkeys.
 - Passkeys and recovery codes are never exported.
 

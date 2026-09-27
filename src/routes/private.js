@@ -113,7 +113,7 @@ export async function handlePrivate(request, env, url, ctx) {
     }
     // The session version moved on (all other sessions end); keep this device signed in.
     const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env) });
-    return json({ ok: true }, 200, { 'set-cookie': cookie });
+    return json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }, 200, { 'set-cookie': cookie });
   }
 
   if (p === '/api/private/me/activity') {
