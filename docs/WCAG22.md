@@ -24,13 +24,15 @@ covers how secbin presents it, not the content itself.
 - *The accessibility tree* that Chromium passes to screen readers: names, roles, states,
   landmarks, headings, live regions, dialogs, form errors, the Drive's tree (`a11y-tree` suite).
 - *The criteria automation cannot judge*, measured by `wcag22.mjs` (a scratch suite kept with
-  the audit, see "Tests" below) on 45 states at 1280×900, at 320×640 (320 CSS px) and at 320×256
-  (400 % zoom of 1280×1024):
+  the audit, see "Tests" below) on 45 states at 1280×900, at 320×640 (320 CSS px), at 320×256
+  and at 400 % zoom of 1280×1024 (320×256 CSS px at 4 device pixels each):
   - reflow (no horizontal page scroll, nothing cut off);
   - text spacing, with the WCAG 1.4.12 values injected as a user style sheet;
   - target sizes, by measuring every pointer target's box;
   - focus not obscured, by pressing Tab through every page with the fixed accessibility button,
-    the toast and the install banner present, and sampling what covers the focused element;
+    the toast and the install banner present, and, once the page has settled (two animation
+    frames), hit-testing a 3 px grid over every overlap of the focused element with a fixed or
+    sticky element: any covered point fails 2.4.12;
   - a visible focus ring on every Tab stop;
   - label in name, visible labels, autocomplete tokens and paste on every credential field;
   - duplicate ids in the DOM built at runtime, and balanced tags and unique ids in the HTML
@@ -126,7 +128,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 2.4.5 Multiple Ways | AA | Supports | The navigation on every dashboard page, the links between related pages, and (**added**) a site map on the accessibility statement, linked from every footer (`public/accessibility/index.html:104`). Share links are the result of a process. | All |
 | 2.4.6 Headings and Labels | AA | Supports | Headings name their sections; labels name their fields (see 3.3.2); duration fields in the role editor now say what they are for (see 1.3.1). | All |
 | 2.4.7 Focus Visible | AA | Supports | Every Tab stop draws a ring (`wcag22.mjs` "2.4.7 no focus ring": 0; the Drive tree draws it on its row). **Fixed:** in forced colours (Windows High Contrast) the box-shadow rings were dropped; a system-coloured outline replaces them (`public/css/styles.css:1186`). | All |
-| 2.4.11 Focus Not Obscured (Minimum) | 2.2 only | Supports | **Fixed:** the fixed accessibility button no longer covers what has focus: the page scrolls it clear, the toast moves to the top, the panel closes when focus leaves it, and the button sits below dialogs (`public/js/a11y.js:196`, `public/css/styles.css:986`, `public/js/a11y.js:172`). **Fixed** (found on the owner's view of a user with no Drive): the impersonation banner, sticky at the top, covered the focused theme button at 320×256; it no longer sticks on short viewports, and focus is scrolled clear of it elsewhere (`public/css/styles.css` `.imp-banner`, `public/js/a11y.js` `FIXED`). `wcag22.mjs` "2.4.11 focus obscured" (Tab through every page at 1280×900 and 320×256): 0. | All |
+| 2.4.11 Focus Not Obscured (Minimum) | 2.2 only | Supports | **Fixed:** the fixed accessibility button no longer covers what has focus: the page scrolls it clear, the toast moves to the top, the panel closes when focus leaves it, and the button sits below dialogs (`public/js/a11y.js:201`, `public/css/styles.css:986`, `public/js/a11y.js:172`). **Fixed** (found on the owner's view of a user with no Drive): the impersonation banner, sticky at the top, covered the focused theme button at 320×256; it no longer sticks on short viewports, and focus is scrolled clear of it elsewhere (`public/css/styles.css` `.imp-banner`, `public/js/a11y.js` `FIXED`). `wcag22.mjs` "2.4.11 focus obscured" (Tab through every page at 1280×900, 320×256 and 400 % zoom): 0. | All |
 | 2.5.7 Dragging Movements | 2.2 only | Supports | Nothing needs dragging: files dropped onto the composer or the Drive can also be chosen with "Add files" / "Upload"; items move with "Move" and a folder picker (`public/dashboard/js/drive-app.js:697`). | Comp, Land, Drive |
 | 2.5.8 Target Size (Minimum) | 2.2 only | Supports | `wcag22.mjs` "2.5.8 target size": every target ≥24×24 or spaced; 0 on every state. **Fixed:** the widget's statement link, and the Drive's selection boxes, whose `<label>` is now the target (24 px, 44 px on phones: `public/css/styles.css:1171`). | All |
 | 3.1.2 Language of Parts | AA | Supports | Hebrew in the widget and a second-language statement carry `lang` and `dir` (`public/js/a11y.js:116`). Shared notes are the sender's content. | Widget, Stmt |
@@ -160,7 +162,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 2.4.8 Location | AAA | Supports | Page titles, `aria-current` in the navigation (`public/dashboard/js/nav.js:44`), the Drive's folder path (`public/dashboard/js/drive-app.js:508`). | All |
 | 2.4.9 Link Purpose (Link Only) | AAA | Supports | **Fixed:** link texts that needed context now stand alone: "Source code", "Threat model", "Accessibility statement", "new share", "Create another share", "API documentation (docs/API.md)", and links opening a new tab say so (`public/index.html:711`). Links inside shared notes are the sender's text (they too say they open a new tab: `public/js/markdown.js:187`). | All |
 | 2.4.10 Section Headings | AAA | Supports | Sections have headings (account cards, admin panels, statement, glossary, site map, Drive panes, dialogs); views without a visible heading have a hidden one (`public/index.html:202`). | All |
-| 2.4.12 Focus Not Obscured (Enhanced) | 2.2 only | Supports | As 2.4.11, for any part of the focused control: `wcag22.mjs` "2.4.12 partly covered": 0 in the audit's run. **Fixed:** the note editor is shorter on short screens, so it fits between the edges (`public/css/styles.css:257`). **Open:** the runs after the Drive integration's merge each recorded one partial overlap at 320×256, in a different state each time (the role editor's file type list; the note editor with the Hebrew settings panel), under the accessibility button; it is intermittent and not yet explained. | All |
+| 2.4.12 Focus Not Obscured (Enhanced) | 2.2 only | Supports | As 2.4.11, for any part of the focused control. **Fixed:** the note editor is shorter on short screens, so it fits between the edges (`public/css/styles.css:257`). **Explained and closed** (the intermittent overlap recorded after the Drive integration's merge, once per run at 320×256 in a different state: the role editor's file type list, the note editor with the Hebrew settings panel): Chromium does not scroll a text field that is already inside the viewport when it gets focus (it ignores `scroll-padding`), so a textarea near the bottom stays, for the rest of that task, partly under the accessibility button; the page scrolls it clear in the next animation frame, before that frame is painted (`public/js/a11y.js:185`, `unobscure`). The old probe sampled five points synchronously after the key press and saw the uncorrected layout whenever it ran before that frame. The check is now strict and deterministic: it waits two frames and hit-tests a 3 px grid over every overlap with a fixed or sticky element (a layer painted below the focused element, or a rounded corner's outside, does not count); any covered point is a failure. `wcag22.mjs` "2.4.12 focus partly obscured": 0 in each of four complete `--aaa` runs (45 states, every Tab stop, at 1280×900, 320×256 and 400 % zoom). A negative control (`DBG_REGRESS=1`, the page without that correction) fails it with 8 findings (the note editor, the role editor's link and file type lists). Not covered by the Tab walk: the widget's text-size and large-target modes at 400 % zoom, and fields a person resizes taller than the space between the button and the top of the screen (the page cannot scroll those clear). | All |
 | 2.4.13 Focus Appearance | 2.2 only | Supports | The focus indicator is a 2 px ring with a 2 px gap (`public/css/styles.css:119`, `public/css/styles.css:308`): at least a 2 px perimeter, ≥3:1 against the unfocused state (the ring is ≥7:1 on every surface). | All |
 | 2.5.5 Target Size (Enhanced) | AAA | Supports | **Added:** the widget's "Large buttons and links" mode makes every target at least 44×44 (`public/css/styles.css:1194`; inline links in text are exempt). Measured: `wcag22.mjs --aaa` "2.5.5": 0 on 23 states. The accessibility button itself is 44×44 on every page. | All |
 | 2.5.6 Concurrent Input Mechanisms | AAA | Supports | Keyboard, mouse, touch and pen all work together; nothing is restricted to one input. | All |
@@ -268,6 +270,11 @@ Level A and AA failures (all fixed):
 - **2.4.11** (found on the owner's view of a user with no Drive) the sticky impersonation banner
   covered the focused control at 400 % zoom → it stays at the top of the page on short
   viewports, and focus is scrolled clear of it.
+- **2.4.12** (after the Drive integration's merge) an intermittent partial overlap under the
+  accessibility button at 320×256 → explained: Chromium leaves a text field that is already in
+  view where it is, and the page scrolls it clear in the next frame, before it is painted; the
+  probe had raced that frame. The check now waits for it and tests every point of each overlap
+  with a fixed or sticky element, and fails on any (0 in four runs; a negative control fails).
 - **1.3.1** (found by the accessibility-tree suite's new Drive states) the Drive page's footer was
   inside `<main>`, so the page had no contentinfo landmark → it follows `<main>`, as on every
   other page (checked for every page by `test-dom/wcag22.test.js`).
@@ -397,6 +404,15 @@ copy updated for the merged UI, with the new states), `run` 39/39, `drive-int` 1
 download-window check on timing (the suite's 300 s window equals the 5-minute warning, so an
 extension one second later is rightly warned about again); the check now waits past a second and
 asserts that the end moved.
+
+Results after closing 2.4.12 (the strict check, with 400 % zoom at 4 device pixels as a fourth
+viewport): `npm test` 393 + 116 + 246 + 261 passed, `npm run lint` and `sync-shared --check`
+clean; `wcag22 --aaa` 27/27 in each of four complete runs (180 state × viewport checks each; 0
+AAA, 0 A/AA findings, 0 "2.4.12 focus partly obscured"), and 8 findings with the negative
+control; `axe-audit` 0 violations (12/12 Drive-integration states reached), `a11y` 30/30, the
+accessibility-tree suite 220/220, `run` 39/39. Four other `wcag22` attempts lost their
+`wrangler dev` server part-way (the dev proxy exited with an error; the pages then refused the
+connection) and are not counted; none of them recorded a 2.4.12 finding before that.
 
 Results of the previous final run (2026-09-27, this branch after merging `main` 986d6cb and the
 Drive integration 87e2d74): `npm test` 383 + 116 + 237 + 261 passed, `npm run lint` and

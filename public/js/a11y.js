@@ -178,6 +178,10 @@ export function mount(root = document.body) {
   render();
   root.appendChild(btn);
   root.appendChild(panel);
+  // In the next animation frame: the browser's own focus scroll comes after focusin (and Chromium
+  // does not scroll a text field that is already inside the viewport, ignoring scroll-padding, so
+  // a textarea can stay under the button), and animation-frame callbacks run before that frame
+  // is painted, so the covered layout never shows.
   document.addEventListener('focusin', (e) => { if (!panel.contains(e.target) && e.target !== btn) requestAnimationFrame(() => unobscure(e.target)); });
   return { btn, panel, toggle, get settings() { return settings; } };
 }

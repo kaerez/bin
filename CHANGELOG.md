@@ -173,7 +173,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     Drive's automatic set-up or unlock) runs (4.1.3); the glossary's "Drive" and "Escrow key"
     say that the administrator can open every Drive with the escrow key (3.1.3);
   - the impersonation banner no longer covers the focused control at 400 % zoom (2.4.11); the
-    Drive page's footer is its contentinfo landmark, as on every other page (1.3.1).
+    Drive page's footer is its contentinfo landmark, as on every other page (1.3.1);
+  - the intermittent 2.4.12 overlap at 320×256 explained (a text field already in view is left
+    under the accessibility button by the browser and scrolled clear by the page in the next
+    frame, before it is painted); the audit's check now waits for that frame, tests every point
+    of each overlap with a fixed or sticky element, also at 400 % zoom, and fails on any (2.4.12).
 
 
 - **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the
