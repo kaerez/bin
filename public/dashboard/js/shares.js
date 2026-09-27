@@ -22,13 +22,14 @@ let rows = [];
   reload();
 })();
 
-function reload() {
+/** `focusKey`: the control to put focus back on after the re-render (see render). */
+function reload(focusKey = null) {
   offset = 0;
   rows = [];
-  load(true);
+  load(true, typeof focusKey === 'string' ? focusKey : null);
 }
 
-async function load(fresh) {
+async function load(fresh, focusKey = null) {
   const msg = $('#shares-msg');
   try {
     const qs = new URLSearchParams({ q: $('#shares-q').value.trim(), status: $('#shares-status').value, offset: String(offset) });
@@ -36,7 +37,7 @@ async function load(fresh) {
     rows = fresh ? r.rows : rows.concat(r.rows);
     offset = rows.length;
     $('#shares-more').hidden = r.rows.length < 50;
-    render();
+    render(focusKey);
     showMsg(msg, rows.length ? '' : 'Nothing here yet.', false);
   } catch (e) {
     showMsg(msg, friendlyError(e));
@@ -114,7 +115,8 @@ function openExtend(r, tr) {
     try {
       await updateShare(r.id, patch);
       toast('Share updated.');
-      reload();
+      // Apply was disabled while saving (so focus has already left it): back to this share's Extend.
+      reload(`share:${r.id}:extend`);
     } catch (e) {
       save.disabled = false;
       showMsg(msg, friendlyError(e));

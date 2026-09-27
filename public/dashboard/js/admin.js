@@ -7,7 +7,7 @@
 import '../../js/kdf-progress.js';
 import { admin } from '../../js/api.js';
 import { newCredential, checkOwnerPassword, describePolicy, loginProof } from '../../js/pwauth.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds, reducedMotion } from '../../js/common.js';
 import { toast, copyText, flashCopied, keepFocus, tablistKeys } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
@@ -502,7 +502,7 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
     h('p.mono.muted', { text: 'Removes every passkey and recovery code of this account (after a lost device or a takeover); the password alone then signs in. Passkeys can only be added by the user, on their own device.' }),
     h('div.btn-row', {}, pkReset)));
   if (scroll) {
-    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    box.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
     title.focus({ preventScroll: true }); // just opened: start reading at its heading
   } else refocus();
 }
@@ -745,7 +745,7 @@ async function publicRole(box, reopen) {
   box.appendChild(h('div.card.stack', {},
     h('h3.field-label', { text: `Anonymous browser ids (${t.total}, ${t.blocked} blocked)` }),
     h('p.mono.muted', { text: 'Ids are shown as a prefix of their keyed hash; the ids themselves are not stored. Forgetting one also resets its quota usage.' }),
-    t.rows.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Id', 'First seen', 'Last seen', 'Shares', 'Status', ''].map((x) => h('th', { text: x })))), body)) : h('p.mono.muted', { text: 'None yet.' })));
+    t.rows.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Id', 'First seen', 'Last seen', 'Shares', 'Status', ''].map(th))), body)) : h('p.mono.muted', { text: 'None yet.' })));
 }
 
 const uniqueName = (base, roles) => {
@@ -805,7 +805,7 @@ async function openRole(id, { scroll = true } = {}) {
     box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Viewer rules (used when "Use this role\'s own viewer rules" is yes)' }), rulesEditor(scope, d.viewerRules)));
   }
   if (scroll) {
-    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    box.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
     box.querySelector('h2')?.focus({ preventScroll: true }); // just opened: start reading at its heading
   } else refocus();
 }

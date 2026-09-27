@@ -154,8 +154,10 @@ export function wirePeek(...pairs) {
   for (const { btn } of fields) btn.onclick = () => paint(fields[0].input.type === 'password');
 }
 
+/** The system asks for reduced motion, or "Stop animations" is on in the accessibility widget. */
 export const reducedMotion = () =>
-  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  (typeof document !== 'undefined' && !!document.documentElement?.classList.contains('a11y-no-anim'))
+  || (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 export const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
