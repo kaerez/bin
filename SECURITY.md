@@ -547,20 +547,29 @@ codes as safe as the password.
 ### Activity log retention and clearing
 
 - The activity/audit log is kept for at most `log.maxAgeSec` (default 365 days) and
-  `log.maxEntries` (default 500 000, oldest deleted first); per-user limits
-  (`logMaxAgeSec`, `logMaxEntries`) can keep less about an account. Pruning runs hourly and
-  every 500 writes. Three kinds of entry are never pruned automatically, only removed by hand:
-  - entries about the owner (global settings never apply to the owner);
-  - entries the owner made, meaning admin actions including impersonation;
-  - server-wide entries with no subject: settings, global limits, IP rules, exports.
+  `log.maxEntries` (default 500 000, oldest deleted first); a role's limits
+  (`logMaxAgeSec`, `logMaxEntries`) can keep less about its users. Pruning runs hourly and
+  every 500 writes. Neither the global settings nor role limits ever touch:
+  - entries about the owner;
+  - entries the owner made, meaning admin actions including impersonation.
 
-  So a flood of anonymous activity cannot push the record of configuration changes out.
+  Those follow the owner's own limits instead, `log.ownerMaxAgeSec` and
+  `log.ownerMaxEntries` (Admin → Roles → Owner, "Your activity log"). Both default to
+  **keep forever** (null); when set (at least 1 day and 1 000 entries), older entries and the
+  oldest beyond the count are deleted automatically, counting only these entries.
+- **Server-wide configuration changes are never pruned automatically**, whatever any limit
+  says: entries with no subject (settings, the Default role, roles, IP rules and blocks, exports
+  and imports, Turnstile) and the owner's changes to the public account's configuration (its
+  limits, quotas, viewer rules and browser ids). So neither a flood of anonymous activity nor a
+  short owner limit can push the record of configuration changes out; only clearing by hand
+  removes them.
 - The owner can **clear** the log — everything, or one account's entries, optionally only those
   older than a date. It needs the owner's password again (like export), and, as configured, it
   **leaves no record**: after a clear, nothing in the system shows that entries existed or were
   removed. Audit trails can be subject to retention duties (for example SOX record-keeping for
-  systems in scope); decide the retention settings and who may clear with your Legal / Risk /
-  Compliance team — this document is not legal or compliance advice.
+  systems in scope, or PCI DSS audit-log retention); decide the retention settings — the
+  owner's own limits included, since they cover every admin action — and who may clear with
+  your Legal / Risk / Compliance team. This document is not legal or compliance advice.
 
 ### Admin export / import
 

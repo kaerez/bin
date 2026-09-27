@@ -541,8 +541,9 @@ async function renderRoles(openId = null) {
 
 /**
  * The Owner role: everything is allowed with no limits and that cannot
- * change; only the owner's own session timeouts and file-share windows can
- * (they are server settings, since the owner has no role options).
+ * change; only the owner's own session timeouts, file-share windows and
+ * activity-log retention can (they are server settings, since the owner has
+ * no role options).
  */
 async function ownerRole(box) {
   await refreshOverview();
@@ -555,18 +556,34 @@ async function ownerRole(box) {
     fields.push([key, label, () => c.read()]);
     return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono.muted', { text: `default: ${limitText('dur', defs[key])}` }));
   };
+  // A limit that may be off: "keep forever" (null) or "limit to" a value.
+  const keep = (key, label, type) => {
+    const mode = h('select.input', { 'aria-label': `${label}: mode` },
+      h('option', { value: 'null', text: 'keep forever', selected: s[key] === null }),
+      h('option', { value: 'value', text: 'limit to', selected: s[key] !== null }));
+    const c = type === 'dur' ? durationInput(s[key]) : numberInput(s[key], { label });
+    const sync = () => { c.hidden = mode.value !== 'value'; };
+    mode.onchange = sync;
+    sync();
+    fields.push([key, label, () => (mode.value === 'null' ? null : c.read())]);
+    return h('div.limit-row', {}, h('span.field-label', { text: label }), mode, c, h('span.mono.muted', { text: `default: ${defs[key] === null ? 'keep forever' : limitText(type, defs[key])}` }));
+  };
   const save = h('button.cta', { type: 'button', text: 'Save' });
   box.append(h('h2.section-title', { text: 'Owner role' }),
     h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
     h('div.card.stack', {},
       h('h3.field-label', { text: 'Your sessions' }), dur('session.idleSec', 'Sign out after being idle for'), dur('session.absSec', 'Sign out in any case after'),
       h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
+      h('h3.field-label', { text: 'Your activity log' }),
+      h('p.mono.muted', { text: 'Entries about you and entries you made (admin actions, including while logged in as a user) are never removed by the Settings or role limits. Keep them forever (the default), or delete the older ones, and the oldest beyond a number, automatically. Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically. You can always clear entries by hand under Activity log.' }),
+      h('p.type-hint.warn', { role: 'note', text: 'Audit trails can be subject to retention obligations (for example SOX record-keeping). Check with your Legal / Compliance team before shortening them; this is not legal advice.' }),
+      keep('log.ownerMaxAgeSec', 'Keep your entries for', 'dur'), keep('log.ownerMaxEntries', 'Keep at most this many of your entries', 'int'),
       h('div.btn-row', {}, save)));
   save.onclick = async () => {
     const patch = {};
     for (const [k, label, read] of fields) {
       const v = read();
-      if (!Number.isFinite(v)) return msg(`Enter a value for "${label}".`, true);
+      if (v !== null && !Number.isFinite(v)) return msg(`Enter a value for "${label}".`, true);
       patch[k] = v;
     }
     await guard(() => admin.settings(patch), 'Owner role saved.');
@@ -720,7 +737,7 @@ async function renderSettings() {
     scopeRule('invalid', 'Invalid fetches: links that never existed, a wrong #key or password, bad tokens. Not counted: opening a share that expired, was used up, revoked or deleted with its correct link (#key); a wrong #key for such a share still counts'),
     h('div.card.stack', {}, int('guard.v6Prefix', 'IPv6 tracking prefix (/n)'))));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Activity log' }),
-    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. Per-user limits (Defaults & quotas or a user) can keep less about an account. Entries about the owner, entries the owner made (admin actions, impersonation) and server-wide changes (settings, global limits, IP rules, exports) are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
+    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. A role\'s log limits (Roles) can keep less about its users. Entries about the owner and entries the owner made (admin actions, impersonation) follow the owner\'s own limits instead (Roles → Owner; kept forever by default). Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
     dur('log.maxAgeSec', 'Keep entries for at most'), int('log.maxEntries', 'Keep at most this many entries')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
