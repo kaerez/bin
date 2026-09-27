@@ -159,11 +159,27 @@ async function refreshOverview() {
   for (const w of warn) b.appendChild(h('p', { text: w }));
 }
 
+// One render per panel at a time. A render clears its panel, waits for the
+// server, then fills it: two at once (the first load and a quick click on the
+// tab, or a save while the tab loads) would both fill it, duplicating the
+// content and its ids (WCAG 4.1.1 / 4.1.2).
+const renders = new Map();
+function queued(name, fn) {
+  const run = (renders.get(name) || Promise.resolve()).then(fn, fn);
+  renders.set(name, run.catch(() => {}));
+  return run;
+}
+
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
   syncTabs();
-  ({ users: renderUsers, roles: renderRoles, shares: () => renderShares(panel('shares')), settings: renderSettings, security: renderSecurity, public: renderPublic, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
+  ({
+    users: () => renderUsers(), roles: () => renderRoles(),
+    shares: () => queued('shares', () => renderShares(panel('shares'))), settings: () => queued('settings', renderSettings),
+    security: () => queued('security', renderSecurity), public: () => queued('public', renderPublic),
+    portable: () => queued('portable', () => renderPortable(panel('portable'), profile)), audit: () => queued('audit', renderAudit),
+  })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────
@@ -422,7 +438,7 @@ const driveUsage = (d) => (!d ? '—' : !d.enabled && !d.used ? 'no Drive'
 /** `focusKey`: where focus goes if the re-render loses it (see keepFocus). */
 async function renderUsers(focusKey = null) {
   const refocus = keepFocus(panel('users'), { key: focusKey });
-  try { await renderUsersInto(); } finally { refocus(); }
+  try { await queued('users', renderUsersInto); } finally { refocus(); }
 }
 
 async function renderUsersInto() {
@@ -616,7 +632,7 @@ function userKeysCard(id, list) {
 // options on "same as Default" until set.
 async function renderRoles(openId = null) {
   const refocus = keepFocus(panel('roles'));
-  try { await renderRolesInto(openId); } finally { refocus(); }
+  try { await queued('roles', () => renderRolesInto(openId)); } finally { refocus(); }
 }
 
 async function renderRolesInto(openId) {

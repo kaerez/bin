@@ -1,22 +1,26 @@
 // a11y.js — the accessibility preferences widget (English / עברית): a fixed
 // button that opens a panel of switches — keyboard focus highlight, stop
 // animations, high contrast, text size, readable font, mark headings, mark
-// links — saved in localStorage and applied as classes on <html>
+// links, large targets, text spacing — saved in localStorage and applied as
+// classes on <html>
 // (public/js/a11y-init.js applies them before paint on the next load).
 //
-// A comfort tool, not a compliance measure: the pages themselves are built
-// to WCAG 2.2 AA (see /accessibility/). Built with DOM calls only (no markup
-// strings), so it runs under the site's CSP and Trusted Types.
+// The pages themselves are built to WCAG 2.2 AA (docs/WCAG22.md); some modes
+// are the mechanism for AAA criteria: high contrast (1.4.6), text spacing
+// (1.4.8) and large targets (2.5.5). The panel closes when focus moves to the
+// page, so it never covers the focused control (2.4.11). Built with DOM calls
+// only (no markup strings), so it runs under the site's CSP and Trusted Types.
 
 const KEY = 'secbin:a11y';
 export const FLAGS = {
   keyboardNav: 'a11y-keyboard', noAnimations: 'a11y-no-anim', highContrast: 'a11y-contrast',
   readableFont: 'a11y-readable', markHeadings: 'a11y-headings', markLinks: 'a11y-links',
+  largeTargets: 'a11y-targets', textSpacing: 'a11y-spacing',
 };
 const FONT = { sm: 'a11y-font-sm', md: '', lg: 'a11y-font-lg' };
 const DEFAULTS = Object.freeze({
   keyboardNav: false, noAnimations: false, highContrast: false, readableFont: false,
-  markHeadings: false, markLinks: false, fontScale: 'md', lang: null,
+  markHeadings: false, markLinks: false, largeTargets: false, textSpacing: false, fontScale: 'md', lang: null,
 });
 
 export const STRINGS = {
@@ -24,6 +28,7 @@ export const STRINGS = {
     open: 'Accessibility settings', title: 'Accessibility settings', close: 'Close',
     keyboardNav: 'Highlight keyboard focus', noAnimations: 'Stop animations', highContrast: 'High contrast',
     readableFont: 'Readable font', markHeadings: 'Mark headings', markLinks: 'Mark links and buttons',
+    largeTargets: 'Large buttons and links', textSpacing: 'Text spacing',
     text: 'Text size', sm: 'Smaller', md: 'Default', lg: 'Larger',
     reset: 'Reset all', statement: 'Accessibility statement', language: 'Language',
     note: 'These settings are saved in this browser only.',
@@ -32,6 +37,7 @@ export const STRINGS = {
     open: 'הגדרות נגישות', title: 'הגדרות נגישות', close: 'סגירה',
     keyboardNav: 'הדגשת פוקוס מקלדת', noAnimations: 'עצירת אנימציות', highContrast: 'ניגודיות גבוהה',
     readableFont: 'גופן קריא', markHeadings: 'סימון כותרות', markLinks: 'סימון קישורים וכפתורים',
+    largeTargets: 'כפתורים וקישורים גדולים', textSpacing: 'ריווח טקסט',
     text: 'גודל טקסט', sm: 'קטן', md: 'רגיל', lg: 'גדול',
     reset: 'איפוס הכול', statement: 'הצהרת נגישות', language: 'שפה',
     note: 'ההגדרות נשמרות בדפדפן זה בלבד.',
@@ -154,6 +160,11 @@ export function mount(root = document.body) {
   document.addEventListener('keydown', (e) => { if (open && e.key === 'Escape') { e.preventDefault(); toggle(false); } });
   document.addEventListener('mousedown', (e) => {
     if (open && !panel.contains(e.target) && !btn.contains(e.target)) toggle(false, { focusButton: panel.contains(document.activeElement) });
+  });
+  // Focus moved to the page (Tab past the panel, a skip link): close, so the
+  // panel never covers the focused control. Focus stays where it went.
+  document.addEventListener('focusin', (e) => {
+    if (open && !panel.contains(e.target) && !btn.contains(e.target)) toggle(false, { focusButton: false });
   });
 
   render();

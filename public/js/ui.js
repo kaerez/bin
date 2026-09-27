@@ -81,19 +81,38 @@ export function tablistKeys(list, { automatic = false } = {}) {
 }
 
 /**
- * Transient bottom toast (role="status", so it is announced). Every save
- * confirms with one. `{ error: true }` styles it as a failure and keeps it up
- * longer.
+ * Bottom toast (role="status", so it is announced). Every save confirms with
+ * one. `{ error: true }` styles it as a failure.
+ *
+ * No time limit (WCAG 2.2.1): it stays until the person's next key press or
+ * click anywhere (after a short grace, so the key that caused it does not
+ * dismiss it), or until the next toast. Clicks pass through it. Focus not
+ * obscured (2.4.11): when it would cover the focused control it shows at the
+ * top instead.
  */
-let toastTimer;
+const TOAST_GRACE_MS = 1500;
+let toastShownAt = 0;
+let toastWired = false;
 export function toast(message, { error = false } = {}) {
   const t = document.getElementById('toast');
   if (!t) return;
+  if (!toastWired) {
+    toastWired = true;
+    const dismiss = () => { if (t.classList.contains('show') && Date.now() - toastShownAt >= TOAST_GRACE_MS) t.classList.remove('show'); };
+    document.addEventListener('keydown', dismiss, true);
+    document.addEventListener('pointerdown', dismiss, true);
+  }
   t.textContent = message;
   t.classList.toggle('error', !!error);
+  t.classList.remove('toast-top');
   t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), error ? 6000 : 3500);
+  toastShownAt = Date.now();
+  const f = document.activeElement;
+  if (f && f !== document.body && typeof f.getBoundingClientRect === 'function') {
+    const a = t.getBoundingClientRect();
+    const r = f.getBoundingClientRect();
+    if (r.bottom > a.top - 8 && r.top < a.bottom + 8 && r.right > a.left && r.left < a.right) t.classList.add('toast-top');
+  }
 }
 
 /** Copy text to the clipboard, with a legacy fallback. Returns a boolean. */
