@@ -59,7 +59,8 @@ flowchart TD
 | "Delete now" | If the admin allows it and the sender opts in, whoever opens a share can delete it for everyone at once (it needs the full link and password, and spends no view). |
 | View limits & expiry | 1–100 000 views or unlimited; expiry from 1 minute to 365 days. View counting is atomic (Durable Objects). |
 | Optional password | Argon2id (64 MiB, t=3). Checked by the server via a proof before any view is spent. |
-| Recipient downloads | Tree view: download any file raw, any folder/sub-folder as a ZIP, or everything at once. |
+| Recipient downloads | Folder tree on the left (collapsed by default; **+** opens a folder's sub-folders), the selected folder's files and folders on the right: download any file raw, any folder/sub-folder as a ZIP, or everything at once. The composer's file list uses the same tree. |
+| Drive | If the role allows it: **Dashboard → Drive**, a private, end-to-end encrypted folder tree (collapsed by default, content in a right pane) within a role capacity — upload files and folders (pickers or drag and drop), new folder, rename, move, delete, download (files raw, folders as ZIP), and **Share…** any files or folders with the usual share options; each item lists its shares with revoke. Unlocked in the browser with the password, a passkey (WebAuthn PRF) or a recovery code. See [`docs/DRIVE.md`](./docs/DRIVE.md). |
 | Safe in-browser viewer | Optional, admin-governed: text, Markdown, code, images, PDF (hardened pdf.js, no PDF scripting), audio/video. Nothing executes. |
 | Accounts | Built-in login; one owner/admin; users with one role each (capabilities, limits, quotas, password policy, passkeys, sessions) and API keys. |
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, label shares, and see **read receipts** — every open with its time (and, if the admin allows, the opener's address, location, browser, system and languages). |

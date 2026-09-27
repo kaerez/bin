@@ -20,6 +20,7 @@ import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downl
 import { validateRefsManifest } from './refsmanifest.js';
 import { allowedRenderer, renderPreview } from './viewer.js';
 import { progressBar } from './progress.js';
+import { folderBrowser } from './tree.js';
 
 let timer = null;
 let totpTimer = null;
@@ -486,31 +487,29 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
 
   const size = (node) => node.files.reduce((n, f) => n + f.size, 0) + [...node.dirs.values()].reduce((n, d) => n + size(d), 0);
   const count = (node) => node.files.length + [...node.dirs.values()].reduce((n, d) => n + count(d), 0);
-  const renderNode = (node, depth) => {
-    const ul = h('ul.tree-list', { role: depth === 0 ? 'tree' : 'group' });
+  // One folder's content: its sub-folders (open, or download as a ZIP) and
+  // its files (view, download). With folders, a tree on the left picks the
+  // folder (public/js/tree.js — collapsed by default).
+  const renderPane = (node, { open } = {}) => {
+    const ul = h('ul.tree-list.pane-list');
     for (const d of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-      const children = renderNode(d, depth + 1);
-      const toggle = h('button.tree-toggle', { type: 'button', 'aria-expanded': 'true', 'aria-label': `Collapse ${d.name}`, text: '▾' });
-      toggle.onclick = () => {
-        const open = toggle.getAttribute('aria-expanded') !== 'true';
-        toggle.setAttribute('aria-expanded', String(open));
-        toggle.textContent = open ? '▾' : '▸';
-        toggle.setAttribute('aria-label', `${open ? 'Collapse' : 'Expand'} ${d.name}`);
-        children.hidden = !open;
-      };
-      ul.appendChild(h('li.tree-dir', { role: 'treeitem' },
-        h('div.tree-row', {}, toggle, h('span.tree-name', { text: `${d.name}/` }), h('span.tree-sub.mono', { text: `${count(d)} · ${formatBytes(size(d))}` }),
-          h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p)) } })),
-        children));
+      ul.appendChild(h('li.tree-dir', {},
+        h('div.tree-row', {},
+          h('button.tree-name.tree-open', { type: 'button', text: `${d.name}/`, title: `Open ${d.name}`, on: { click: () => open(d.path) } }),
+          h('span.tree-sub.mono', { text: `${count(d)} · ${formatBytes(size(d))}` }),
+          h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p)) } }))));
     }
     for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) {
-      ul.appendChild(h('li.tree-file', { role: 'treeitem' },
-        h('div.tree-row', {}, h('span.tree-spacer'), h('span.tree-name', { text: basename(f.path) }), h('span.tree-sub.mono', { text: formatBytes(f.size) }),
+      ul.appendChild(h('li.tree-file', {},
+        h('div.tree-row', {}, h('span.tree-name', { text: basename(f.path) }), h('span.tree-sub.mono', { text: formatBytes(f.size) }),
           h('span.tree-actions', {}, ...fileButtons(f).map((b) => { b.classList.add('tree-btn'); return b; })))));
     }
+    if (!ul.firstChild) return h('p.muted.pane-empty', { text: 'This folder is empty.' });
     return ul;
   };
-  tree.appendChild(renderNode(buildTree(manifest.entries), 0));
+  const root = buildTree(manifest.entries);
+  if (!hasDirs) { tree.appendChild(renderPane(root)); return; }
+  tree.appendChild(folderBrowser({ label: 'Folders', rootName: 'All files', root, renderPane, paneLabel: 'Folder contents' }).el);
 }
 
 // ── status + countdown ───────────────────────────────────────────────────────

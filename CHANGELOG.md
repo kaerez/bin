@@ -68,6 +68,23 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   passkeys; an owner's password reset re-keys the user's Drive through the escrow when the
   owner's Drive is unlocked; sign-out forgets the key. The viewer and downloads read manifest v3
   (Drive shares: per-file keys and chunk sequences) for preview, single-file download and ZIP.
+- **Drive UI** (`/dashboard/drive/`, docs/DRIVE.md §8): the folder tree (collapsed by default,
+  + / − per folder, lazy per-folder loading) beside the selected folder's content (name, size,
+  modified) with checkbox selection; toolbar: upload files, upload folder, drag and drop, new
+  folder, rename, move (a folder-tree picker), delete (confirmed; shares of it end), download
+  (file raw, folder as ZIP) and **Share…** (views / ∞, expiry, password, "Delete now", label;
+  the link with copy and QR); each item's shares with revoke; a capacity bar; upload and
+  download progress with cancel; an unlock prompt (password, passkey with PRF, recovery code);
+  "Drive is not enabled for your account" when the role has none; on phones the tree folds
+  into a "Folders" toggle. The nav shows **drive** only when the profile's
+  `caps.driveEnabled` is true.
+- **Folder tree component** (`public/js/tree.js`): a WAI-ARIA tree (roving tabindex, arrow
+  keys, Home/End, Enter/Space, `*`, type-ahead; `aria-expanded`/`aria-selected`/levels) with a
+  right-pane folder browser. The composer's file list and the recipient's file view now show
+  folders this way — collapsed by default, a folder's content on the right, breadcrumbs back
+  up — keeping remove, type, preview, per-file / per-folder download and download-all. The
+  composer's file list is no longer a live region (it re-renders on every change); its total
+  line announces changes instead, and removing an item keeps focus on the next row.
 - **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
   `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
   owner made (admin actions, impersonation). Both default to keep forever, as before. Server-wide

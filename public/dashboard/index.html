@@ -60,6 +60,7 @@
                 <nav class="dash-nav" id="dash-nav" aria-label="Dashboard" hidden>
                     <a class="back" href="/dashboard/" data-nav="new"><span>new</span></a>
                     <a class="back" href="/dashboard/shares/" data-nav="shares"><span>my shares</span></a>
+                    <a class="back" href="/dashboard/drive/" data-nav="drive" id="nav-drive" hidden><span>drive</span></a>
                     <a class="back" href="/dashboard/account/" data-nav="account"><span>account</span></a>
                     <a class="back" href="/dashboard/admin/" data-nav="admin" id="nav-admin" hidden><span>admin</span></a>
                     <button type="button" class="back" id="nav-logout"><span>log out</span></button>
@@ -162,8 +163,8 @@
                             <input type="file" id="file-input" multiple hidden />
                             <input type="file" id="folder-input" multiple webkitdirectory hidden />
                         </div>
-                        <div class="file-list" id="file-list" aria-live="polite"></div>
-                        <p class="mono file-total" id="file-total"></p>
+                        <div class="file-list" id="file-list"></div>
+                        <p class="mono file-total" id="file-total" aria-live="polite"></p>
                         <p class="mono file-policy" id="file-policy" role="note" hidden></p>
                         <label class="viewer-opt" id="viewer-opt" hidden>
                             <input type="checkbox" id="allow-view" /> Allow recipients to view files in the browser

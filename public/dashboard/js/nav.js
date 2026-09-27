@@ -1,5 +1,6 @@
 // nav.js — shared dashboard chrome: loads the signed-in profile (/api/private/me),
-// shows the nav (Admin only for the owner), the impersonation banner with
+// shows the nav (Drive only when the role allows it, Admin only for the owner),
+// the impersonation banner with
 // "Return to admin", and log-out. Every dashboard page awaits `ready`.
 
 import { me, logout, admin, ApiError } from '../../js/api.js';
@@ -23,6 +24,12 @@ export async function loadMe() {
   }
 }
 
+/** Whether the signed-in account's role has a Drive (docs/DRIVE.md §5, §8). */
+export function driveAllowed(profile) {
+  const caps = profile && profile.caps;
+  return !!caps && (caps.driveEnabled === true || caps.drive === true || (!!caps.drive && caps.drive.enabled === true));
+}
+
 export const ready = (async () => {
   const profile = await loadMe();
   const nav = $('#dash-nav');
@@ -32,6 +39,8 @@ export const ready = (async () => {
     for (const a of nav.querySelectorAll('a[data-nav]')) if (new URL(a.href).pathname === here) a.setAttribute('aria-current', 'page');
     const adminLink = $('#nav-admin');
     if (adminLink) adminLink.hidden = !(profile.user.role === 'owner' && !profile.impersonatedBy);
+    const driveLink = $('#nav-drive');
+    if (driveLink) driveLink.hidden = !driveAllowed(profile);
     $('#nav-logout').onclick = async () => {
       try { await logout(); } catch { /* the cookie is cleared regardless */ }
       toLogin();
