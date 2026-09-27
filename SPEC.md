@@ -233,7 +233,8 @@ The API sends **no CORS headers**. State-changing requests must be non-simple (J
 type, or a custom header), and `Sec-Fetch-Site` values `cross-site` and `same-site` are refused
 (`403 cross_site`). A state-changing request authenticated by the session cookie must also
 carry the session's CSRF token in `X-Secbin-CSRF` (the `__Host-secbin_csrf` cookie, or `csrf`
-in `GET /api/private/me`), else `403 csrf_mismatch`. API keys and the anonymous routes need
+in `GET /api/private/me`), else `403 csrf_mismatch`; the cross-site and shape checks
+(`415` / `400 missing_intent`) come first, and all three run before anything else. API keys and the anonymous routes need
 none; the owner can turn the check off (`csrfTokens`). See SECURITY.md §6.
 
 Common errors on any route:
@@ -309,7 +310,7 @@ blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|
 | `POST /api/auth/prelogin` | `{username}` | `{salt, t}` (a stable fake salt for unknown users; `t` is always the default, 3) |
 | `POST /api/auth/login` | `{username, proof}` (+ `X-Secbin-Turnstile` when on) | session cookie; 401, 423 locked, 403 disabled, 403 `turnstile_*`, 429, 503 not configured |
 | `POST /api/auth/logout` | `X-Secbin-Intent: 1`, `X-Secbin-CSRF` (a live session) | session revoked; the session and CSRF token cookies are cleared |
-| `POST /api/auth/passkey/options` | `{}` | `{challengeId, publicKey}`: WebAuthn request options (JSON form; any passkey of this site, user verification required). The challenge is not stored: `challengeId` equals `publicKey.challenge`, 48 base64url characters (16 random bytes, the expiry, an HMAC tag) |
+| `POST /api/auth/passkey/options` | `{}` (JSON; refused cross-site) | `{challengeId, publicKey}`: WebAuthn request options (JSON form; any passkey of this site, user verification required). The challenge is not stored: `challengeId` equals `publicKey.challenge`, 48 base64url characters (16 random bytes, the expiry, an HMAC tag) |
 | `POST /api/auth/passkey/login` | `{challengeId, credential}` (+ Turnstile) | session cookie; 401 `invalid_passkey`, 400 `challenge_expired`, 403 `password_first` (limit `second`), 403 `passkeys_disabled`, 403 disabled |
 | `POST /api/auth/recovery` | `{username, code}` (+ Turnstile) | session cookie + `recoveryLeft`, whatever the `passkeys` limit or the user's second step; 401 `invalid_login`, 423 locked, 403 disabled |
 | `POST /api/auth/second-factor` | `{challengeId, credential}` or `{challengeId, code}` | session cookie (+ `recoveryLeft` when a code was used); 401 `invalid_second_factor` (5 tries per challenge), 400 `challenge_expired` |

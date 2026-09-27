@@ -399,30 +399,63 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
       disable), impersonation start or end.
     - Delivered in a readable cookie `__Host-secbin_csrf` (Secure, SameSite=Strict, `Path=/`,
       not HttpOnly) whenever the session cookie is set or refreshed, on every signed-in
-      dashboard page load, and in `GET /api/private/me` (`csrf`, with the cookie re-set).
-      Sign-out and a disabled account clear it. It is never logged or put in an error message.
+      dashboard page load, and in `GET /api/private/me` (`csrf`, with the cookie re-set). Its
+      lifetime is always the session cookie's: when it is re-set on its own (a page load, `/me`),
+      its `Max-Age` is what the session cookie has left (the idle window from the last activity,
+      capped by the absolute expiry). Sign-out and a disabled account clear it. The Worker never
+      logs it or puts it in an error message.
     - Every cookie-authenticated `POST`, `PUT`, `PATCH` and `DELETE` (`/api/private/*`,
-      `POST /api/auth/logout`) must send it in `X-Secbin-CSRF`. The check comes after the
-      `Sec-Fetch-Site` check and the request-shape check, which keep their errors, and before
-      anything changes state or spends a single-use token (Turnstile). The comparison is
-      timing-safe (`crypto.subtle.timingSafeEqual`). A missing, wrong, other-session or
-      old-session-version token gets `403 csrf_mismatch`, and nothing changes. A request
-      without a live session gets the usual `401`.
-    - The browser client (`public/js/api.js`) reads the token from the cookie at the moment of
-      every state-changing request, never a copy from page load. Back and forward, restores
-      from the back-forward cache, reloads, several tabs and a sign-in in another tab therefore
-      all use the current token. On `403 csrf_mismatch` it fetches `/api/private/me` (which
-      re-sets the cookie and returns the token) and retries once. That is safe because the
-      refused request changed nothing. A second refusal shows "Your session changed in another
-      tab; reload the page." A dashboard page restored from the back-forward cache re-checks the
-      session and reloads if it now belongs to someone else.
+      `POST /api/auth/logout`) must send it in `X-Secbin-CSRF`. Right after the session is
+      resolved (`authenticate()`, and logout), before anything else runs, three checks are made
+      in this order:
+      1. `Sec-Fetch-Site` (`403 cross_site`);
+      2. the request shape: a JSON body, a file chunk (`application/octet-stream`) or
+         `X-Secbin-Intent: 1`, and the intent header on every `DELETE`. A body of any other type
+         gets `415 unsupported_media_type`; a request with neither a body type nor the header,
+         or a `DELETE` without the header, gets `400 missing_intent`;
+      3. the token (`403 csrf_mismatch`).
+
+      1 and 2 apply with the `csrfTokens` setting off too. So a refused request has changed
+      nothing, counted no failure (lockouts, network blocks) and spent no single-use token, and
+      it can be retried as it is. The comparison is timing-safe
+      (`crypto.subtle.timingSafeEqual`). A missing, wrong, other-session or old-session-version
+      token is refused. A request without a live session gets the usual `401`.
+    - Every route that takes a Turnstile token checks its request body before it verifies the
+      token, so a request of the wrong shape never spends one. The account changes (password,
+      username, API keys, passkeys, recovery codes, second step), sign-in, recovery and passkey
+      sign-in read and parse their JSON body first. Starting a public share checks the content
+      type and the declared size first; its body (up to 4 MiB, from anyone) is still read only
+      after the human check.
+    - The browser client (`public/js/api.js`) acts for the session its page was loaded for.
+      Each dashboard page records, from `GET /api/private/me` at load, the user id, the
+      impersonation state (`impersonatedBy`) and that session's token, and sends that token,
+      not whatever the shared cookie holds later. (A page that has recorded none records the
+      current session before its first change.) When another tab signs in as someone else, or
+      starts or ends impersonation, the page's token no longer matches and the server refuses
+      its next change. On `403 csrf_mismatch` the client fetches `/api/private/me` and compares
+      the user id and impersonation state with the page's own:
+      - the same: a new session of the same user (signed out and in again, a password change).
+        It takes the new token and retries once. That is safe because the refused request
+        changed nothing;
+      - different, or a second refusal: no retry. The page stops acting for any session (every
+        later change, sign-out included, is refused in the page without a request) and shows
+        "Your session changed in another tab; reload the page." with a Reload button. A page
+        loaded for one user never changes another user's account, and does not sign the other
+        session out.
+
+      A dashboard page restored from the back-forward cache also re-checks the session and
+      reloads if it now belongs to someone else. Sign-out goes through the same refresh and
+      retry; a failure for any other reason (such as the network) is shown, and the user can
+      try again.
     - **Exempt, with their reasons:**
       - API-key (`Authorization: Bearer sbk_…`) requests from the CLI and scripts: the key is
         sent explicitly and never attached by a browser on its own, and no cookie is involved.
       - The anonymous routes: opening, "delete now" and deleting a share by its capabilities,
-        public creation, login, passkey and recovery sign-in, prelogin and setup. There is no
-        session to bind a token to. They keep their own guards (the cross-site check, JSON
-        bodies or custom headers, access proofs and tokens, Turnstile, rate limits).
+        public creation, login, passkey and recovery sign-in (and `POST
+        /api/auth/passkey/options`, which stores nothing: its challenge is signed, not stored),
+        prelogin and setup. There is no session to bind a token to. They keep their own guards
+        (the cross-site check, JSON bodies or custom headers, access proofs and tokens,
+        Turnstile, rate limits).
     - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default,
       server-wide). Off, the server stops requiring `X-Secbin-CSRF` (the header is ignored); the
       cookie is still issued, and every other guard above stays enforced. The value is read
@@ -431,6 +464,20 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
       Each change is recorded in the owner-only admin audit as `settings.csrf` (old and new
       value). The setting travels in an export's settings part, and the import preview warns
       when an import would turn tokens off.
+    - **An import can be applied without a preview.** The dashboard always shows the preview
+      (with that warning) before it lets the owner apply an import. The API does not require
+      one: `POST /api/private/admin/import` with `dryRun: false` applies the import directly,
+      and the preview's warnings are then never shown. It still needs the owner's password (or
+      passkey) and a real owner session (not an API key, not while impersonating). The server
+      recomputes the plan itself, and the change is recorded in the admin audit
+      (`settings.csrf` `import: from=true to=false`, and in `settings.updated`).
+    - **Not verified: Cloudflare's production logs.** The Worker never logs the token or the
+      `Cookie` header, and locally neither the `wrangler dev` log nor its trace store records
+      request headers. With `[observability] enabled = true` (`wrangler.toml`), whether Workers
+      Logs, `wrangler tail` or a Logpush job capture request headers such as `Cookie` or
+      `X-Secbin-CSRF` in production has not been checked. The session cookie travels in the
+      `Cookie` header as well, so the token adds no new kind of exposure. Whoever runs the
+      deployment should confirm the fields those logs keep.
 - **API keys** (`sbk_…`, stored hashed) authenticate share creation, the policy read and the
   key user's own shares (list, receipts, label, extend, revoke) — never the account itself
   (profile, password, passkeys, keys, activity) or admin endpoints (`403 api_key_not_allowed`).

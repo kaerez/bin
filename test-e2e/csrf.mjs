@@ -1,17 +1,23 @@
 // csrf.mjs — end to end: CSRF tokens (src/lib/csrf.js, public/js/api.js) in
-// real Chromium against `wrangler dev`. The token belongs to the session and is
-// read from its cookie at every request, so none of these ever leaves the user
-// stuck:
+// real Chromium against `wrangler dev`. A page acts for the session it was
+// loaded for and sends that session's token; after a refusal it retries once
+// only when the browser is still signed in as the same user, in the same
+// impersonation state. So the user is never stuck, and a tab loaded for one
+// user never changes another user's account:
 //   • sign in and act;
 //   • back and forward, including a restore from the back-forward cache, then act;
-//   • two tabs: sign out and in again in one, act in the other (it succeeds,
-//     through the one retry when its token is stale); sign out only, and the
-//     other tab gets the normal "session ended" message; a token refused twice
-//     shows "Your session changed in another tab; reload the page.";
+//   • two tabs: sign out and in again as the same user in one, act in the other
+//     (it succeeds through the one retry); a token refused twice shows "Your
+//     session changed in another tab; reload the page." with a Reload button;
+//     sign out only, and the other tab gets the normal "session ended" message;
+//     sign in as another user in one, and the other tab's change is refused
+//     without a retry (the other user's account is untouched);
 //   • a reload in the middle of a flow;
-//   • impersonation start and end with another tab open;
+//   • impersonation start and end in another tab: a tab loaded before the
+//     change is refused the same way, and acts again after Reload;
 //   • Admin → Settings → CSRF tokens off and on again (the server really stops
-//     and starts requiring the header), with axe (WCAG 2.2 A/AA) on the page.
+//     and starts requiring the header), with axe (WCAG 2.2 A/AA) on the page
+//     and on the "session changed" banner.
 // Also: no CSP / Trusted Types violations and no page errors.
 //
 // A manual test, not run in CI. Needs a fresh `wrangler dev` (no owner yet),
@@ -115,6 +121,17 @@ async function createNote(p, text, { open = true } = {}) {
   await p.click('#create');
   return p.waitForSelector('#view-success:not([hidden])', { timeout: 60000 }).then(() => true, () => false);
 }
+/** Try to create a note that must be refused: true when the "session changed" banner (with its Reload button) comes up. */
+async function createNoteRefused(p, text) {
+  await p.fill('#editor', text);
+  await p.click('#create');
+  return p.waitForSelector('#session-changed:not([hidden]) #session-reload', { timeout: 30000 }).then(() => true, () => false);
+}
+/** The labels of the shares of whoever `p`'s browser is signed in as now. */
+const shareLabels = (p) => p.evaluate(async () => (await (await fetch('/api/private/shares')).json()).rows.map((x) => x.label ?? ''));
+/** The API calls of tab `tag` since `mark`, share ids shortened. */
+const seqOf = (tag, mark) => log.slice(mark).filter((x) => x.tag === tag).map((x) => `${x.method} ${x.path.replace(/[A-Za-z0-9_-]{23}$/, '<id>')} ${x.status}`).join(', ');
+const bannerUp = (p) => p.isVisible('#session-changed').catch(() => false);
 async function axe(p, label) {
   await p.evaluate(AXE);
   const v = await p.evaluate(async (tags) => {
@@ -201,7 +218,8 @@ try {
   });
   check('after the restore, an action succeeds', bf === 'ok', bf);
   const bfPatch = log.slice(mark).filter((x) => x.method === 'PATCH');
-  check('…on the first attempt, with the current token (nothing stale was kept)', bfPatch.length === 1 && bfPatch[0].status === 200 && bfPatch[0].csrf === newToken, JSON.stringify(bfPatch.map((x) => x.status)));
+  // (A page that recorded no session records the current one before its first change.)
+  check('…on the first attempt, with the current session’s token (nothing stale was kept)', bfPatch.length === 1 && bfPatch[0].status === 200 && bfPatch[0].csrf === newToken, JSON.stringify(bfPatch.map((x) => x.status)));
 
   // ── 3. two tabs ─────────────────────────────────────────────────────────
   await p.goto(`${BASE}/dashboard/`);
@@ -218,31 +236,64 @@ try {
   await signIn(p, 'owner2', PW);
   const after = (await csrfCookie(ctx)).value;
   check('a new sign-in has a new token', after && after !== before);
-  // Tab B was loaded with the old session and never reloaded: it reads the current cookie.
+  // Tab B was loaded for the same user's old session and never reloaded.
   mark = log.length;
-  check('tab B: acting after tab A signed out and in again succeeds', await relabel(q, 'from tab B'));
-  check('…with the new token', log.slice(mark).some((x) => x.tag === 'B' && x.method === 'PATCH' && x.status === 200 && x.csrf === after));
-  // Now make tab B's token stale for real (a cookie from before): the one retry recovers.
+  check('tab B: acting after tab A signed out and in again as the same user succeeds', await relabel(q, 'from tab B'));
+  check('…refused for the page’s old token, then /me (the same user), then retried once', seqOf('B', mark) === 'PATCH /api/private/shares/<id> 403, GET /api/private/me 200, PATCH /api/private/shares/<id> 200', seqOf('B', mark));
+  check('…the retry carries the new token', log.slice(mark).some((x) => x.tag === 'B' && x.method === 'PATCH' && x.status === 200 && x.csrf === after));
+  check('…and /me re-set the cookie to the current token', (await csrfCookie(ctx)).value === after);
+  // The page sends its own session's token, whatever the cookie holds.
   await setCsrfCookie(q, before);
   check('…the cookie now holds the old token', (await csrfCookie(ctx))?.value === before);
   mark = log.length;
-  check('tab B: a stale token recovers through one refresh and one retry', await relabel(q, 'stale token'));
-  const seq = log.slice(mark).filter((x) => x.tag === 'B').map((x) => `${x.method} ${x.path.replace(/[A-Za-z0-9_-]{23}$/, '<id>')} ${x.status}`);
-  check('…exactly: refused, /me, retried', seq.join(', ') === 'PATCH /api/private/shares/<id> 403, GET /api/private/me 200, PATCH /api/private/shares/<id> 200', seq.join(', '));
-  check('…and /me re-set the cookie to the current token', (await csrfCookie(ctx)).value === after);
-  // A token refused twice (a session that keeps changing): the reload message.
+  check('tab B: a different value in the cookie changes nothing', await relabel(q, 'own token'));
+  check('…first attempt, with the page’s session’s token', seqOf('B', mark) === 'PATCH /api/private/shares/<id> 200' && log.slice(mark).some((x) => x.tag === 'B' && x.csrf === after), seqOf('B', mark));
+  // A token refused twice (a session that keeps changing): the reload message, with a Reload button.
   await q.route('**/api/private/shares/*', (route) => (route.request().method() === 'PATCH'
     ? route.continue({ headers: { ...route.request().headers(), 'x-secbin-csrf': 'Z'.repeat(43) } })
     : route.continue()));
   check('tab B: refused twice → “Your session changed in another tab; reload the page.”', await relabel(q, 'refused twice', SESSION_CHANGED), await toastText(q));
   await q.unroute('**/api/private/shares/*');
+  check('…and the banner says so, with a Reload button', await bannerUp(q) && (await q.textContent('#session-changed')).includes(SESSION_CHANGED) && (await q.textContent('#session-reload')) === 'Reload');
+  await axe(q, 'My shares with the “session changed” banner');
+  await q.click('#session-reload');
+  await q.locator('input.label-in').first().waitFor();
+  check('Reload: the page acts again (the banner is gone)', !(await bannerUp(q)) && await relabel(q, 'after Reload'));
   // Tab A signs out only: in tab B the session really ended → the normal message, not a CSRF error.
   await p.click('#nav-logout');
   await p.waitForURL(/\/dashboard\/login\//);
   const ended = await relabel(q, 'signed out', 'Your session has ended');
   check('tab B after sign-out elsewhere: the normal “session has ended” message', ended, await toastText(q));
   check('…not a CSRF error', !(await toastText(q)).includes('reload the page'));
+  // Another user: tab B is loaded for owner2, then tab A signs out and signs in as dana.
+  await signIn(p, 'owner2', PW);
+  await q.reload();
+  await q.locator('input.label-in').first().waitFor();
+  await p.click('#nav-logout');
+  await p.waitForURL(/\/dashboard\/login\//);
+  await signIn(p, 'dana', DANA_PW);
+  const danaBefore = await shareLabels(p);
+  mark = log.length;
+  check('tab B (loaded for owner2) after tab A signed in as dana: the change is refused with “session changed”', await relabel(q, 'written on owner2’s page', SESSION_CHANGED), await toastText(q));
+  check('…not retried: one refused change and one /me, nothing else', seqOf('B', mark) === 'PATCH /api/private/shares/<id> 403, GET /api/private/me 200', seqOf('B', mark));
+  check('…dana’s account is unchanged', JSON.stringify(await shareLabels(p)) === JSON.stringify(danaBefore));
+  check('…the banner with Reload is up', await bannerUp(q));
+  // The page now acts for no one: a further change is not even sent.
+  mark = log.length;
+  await relabel(q, 'second try', SESSION_CHANGED);
+  check('…a further change from that page is not sent at all', seqOf('B', mark) === '', seqOf('B', mark));
+  // Its log-out does not end dana's session either.
+  await q.click('#nav-logout');
+  await q.waitForTimeout(1000);
+  check('…and its log-out leaves dana signed in', (await p.evaluate(async () => (await (await fetch('/api/private/me')).json()).user?.username)) === 'dana');
+  await q.click('#session-reload');
+  await q.waitForSelector('#nav-logout');
+  check('Reload: the page is now dana’s', (await q.evaluate(async () => (await (await fetch('/api/private/me')).json()).user?.username)) === 'dana' && !(await bannerUp(q)));
   await q.close();
+  await p.goto(`${BASE}/dashboard/`);
+  await p.waitForSelector('#nav-logout');
+  await p.click('#nav-logout');
+  await p.waitForURL(/\/dashboard\/login\//);
 
   // ── 4. a reload in the middle of a flow ─────────────────────────────────
   await signIn(p, 'owner2', PW);
@@ -270,20 +321,33 @@ try {
   await p.waitForSelector('#imp-banner:not([hidden])');
   const impToken = (await csrfCookie(ctx)).value;
   check('impersonation start changes the token', impToken && impToken !== ownerToken);
-  // Tab C still shows the owner's page. It acts with the current token (the change happens as dana, as the cookie now says).
-  check('tab C (open before impersonation): an action succeeds', await createNote(r, 'from tab C while impersonating'));
-  // The same with a stale token: through the retry.
-  await openComposer(r);
-  await setCsrfCookie(r, ownerToken);
+  // Tab C still shows the owner's page: it must not create a share in dana's account.
+  const danaShares = await shareLabels(p);
   mark = log.length;
-  check('tab C with the owner’s old token: succeeds through the retry', await createNote(r, 'stale, while impersonating', { open: false }));
-  check('…one 403, then success', log.slice(mark).filter((x) => x.tag === 'C' && x.path === '/api/private/paste').map((x) => x.status).join() === '403,201');
-  // Return to admin: the token changes again; tab C keeps working.
+  check('tab C (loaded for the owner, impersonation started in another tab): its change is refused with “session changed”', await createNoteRefused(r, 'from tab C while impersonating'));
+  check('…not retried', seqOf('C', mark) === 'POST /api/private/paste 403, GET /api/private/me 200', seqOf('C', mark));
+  check('…dana’s account is unchanged', (await shareLabels(p)).length === danaShares.length);
+  // Tab D is loaded while acting as dana; then impersonation ends in tab A.
+  const d = await ctx.newPage();
+  watch(d, 'D');
+  await d.goto(`${BASE}/dashboard/`);
+  await d.waitForSelector('#imp-banner:not([hidden])');
   await p.click('#imp-return');
   await p.waitForURL(`${BASE}/dashboard/admin/`);
   const endToken = (await csrfCookie(ctx)).value;
   check('impersonation end changes the token', endToken !== impToken && endToken !== ownerToken);
-  check('tab C after impersonation ended: an action succeeds', await createNote(r, 'from tab C after returning'));
+  const ownerShares = await shareLabels(p);
+  mark = log.length;
+  check('tab D (loaded while acting as dana, impersonation ended in another tab): its change is refused with “session changed”', await createNoteRefused(d, 'from tab D after impersonation ended'));
+  check('…not retried', seqOf('D', mark) === 'POST /api/private/paste 403, GET /api/private/me 200', seqOf('D', mark));
+  check('…the owner’s account is unchanged', (await shareLabels(p)).length === ownerShares.length);
+  check('…the stale impersonation banner is hidden', !(await d.isVisible('#imp-banner')));
+  await d.close();
+  // Tab C, loaded for the owner: after Reload it acts for the owner again.
+  await r.click('#session-reload');
+  await r.waitForSelector('#view-create:not([hidden])');
+  check('tab C after Reload: an action succeeds', await createNote(r, 'from tab C after returning'));
+  check('…in the owner’s account', (await shareLabels(p)).length === ownerShares.length + 1);
   await r.close();
 
   // ── 6. Admin → Settings → CSRF tokens ───────────────────────────────────

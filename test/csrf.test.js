@@ -7,8 +7,8 @@
 // the session (the same for every request of it) and changes with it. The
 // owner can turn the check off (Admin → Settings, `csrfTokens`); the other
 // guards stay.
-import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { env, SELF, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker from '../src/index.js';
 import { csrfTokensMatch, CSRF_COOKIE } from '../src/lib/csrf.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
@@ -195,15 +195,13 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
       expect(`${r.method} ${r.path} → ${res.status} ${await errorOf(res)}`).toBe(`${r.method} ${r.path} → 403 csrf_mismatch`);
     }
     expect((await fetchJson('/api/private/me', { cookie: oc })).status).toBe(200); // the logout above was refused too
-    // A simple request (a form-style text/plain body, no custom header) skips the
-    // token check and is refused by each route's own guard, with its usual error.
+    // A simple request (a form-style text/plain body, no custom header) is
+    // refused for its shape before anything else, on every route: 415 (a
+    // DELETE, and logout, for the missing intent header).
     for (const r of routes) {
       const res = await fetchJson(r.path, { method: r.method, cookie: oc, csrf: false, ip: freshIp(), headers: { 'content-type': 'text/plain' } });
-      const code = await errorOf(res);
-      expect(`${r.method} ${r.path} → ${res.status >= 400 && res.status < 500 && code !== 'csrf_mismatch'}`).toBe(`${r.method} ${r.path} → true`);
-      // The shape guards; finalize checks its X-Upload-Token (itself a custom
-      // header) first, and a few admin routes look up the (made-up) id first.
-      expect(['unsupported_media_type', 'missing_intent', 'bad_token', 'not_found']).toContain(code);
+      const want = r.method === 'DELETE' || r.path === '/api/auth/logout' ? '400 missing_intent' : '415 unsupported_media_type';
+      expect(`${r.method} ${r.path} → ${res.status} ${await errorOf(res)}`).toBe(`${r.method} ${r.path} → ${want}`);
     }
     expect((await fetchJson('/api/private/me', { cookie: oc })).status).toBe(200);
   });
@@ -412,5 +410,122 @@ describe('the csrfTokens setting (Admin → Settings)', () => {
     expect(back.plan.warnings.some((w) => /csrfTokens/.test(w))).toBe(false);
     expect((await imp(onDoc, false)).status).toBe(200);
     expect((await (await fetchJson('/api/private/admin/overview', { cookie: oc })).json()).settings.csrfTokens).toBe(true);
+  });
+});
+
+// Regressions for the security audit of this change (kaerez/bin#63): each
+// fails on the code before the fixes.
+describe('audit L1: no request of the wrong shape gets past the CSRF check or spends a human-check token', () => {
+  const TS_ENV = { ...env, TURNSTILE_SITEKEY: '0x4AAAAAAAtestsitekey', TURNSTILE_SECRET: '0x4AAAAAAAtestsecretvalue' };
+  const KEY = 'AAAAAAAAAAAAAAAA';
+  // The Turnstile-gated routes. `human`: the change carries a human-check token.
+  const ACCOUNT = [
+    ['POST', '/api/private/me/password'], ['POST', '/api/private/me/username'],
+    ['POST', '/api/private/me/keys'], ['PATCH', `/api/private/me/keys/${KEY}`], ['DELETE', `/api/private/me/keys/${KEY}`],
+    ['POST', '/api/private/me/passkeys'], ['POST', `/api/private/me/passkeys/${KEY}/remove`],
+    ['POST', '/api/private/me/recovery-codes'], ['POST', '/api/private/me/second-factor'],
+  ];
+  let spent;
+  let restore;
+  beforeAll(() => {
+    // Any token is refused, and every siteverify call is counted: a call means a token was spent.
+    restore = setSiteverify(async () => { spent += 1; return Response.json({ success: false, 'error-codes': ['invalid-input-response'] }); });
+  });
+  afterAll(() => setSiteverify(restore));
+  beforeEach(() => { spent = 0; });
+  const human = (method, path, { cookie, headers = {}, body } = {}) => {
+    const ctx = createExecutionContext();
+    const h = { 'cf-connecting-ip': freshIp(), 'x-secbin-turnstile': 'synthetic-turnstile-token', ...(cookie ? { cookie } : {}), ...headers };
+    return worker.fetch(new Request(`${ORIGIN}${path}`, { method, headers: h, body }), TS_ENV, ctx).then(async (res) => { await waitOnExecutionContext(ctx); return res; });
+  };
+  const outcome = async (res) => `${res.status} ${await errorOf(res)}`;
+
+  it('without the token, the JSON type or the intent header (poc3): 415 / missing_intent, and siteverify is never called', async () => {
+    const u = await makeUser('csrf-l1-shape');
+    for (const [method, path] of ACCOUNT) {
+      const plain = await human(method, path, { cookie: u.cookie, headers: { 'content-type': 'text/plain' }, body: '{}' });
+      expect(`${method} ${path} → ${await outcome(plain)}`).toBe(`${method} ${path} → ${method === 'DELETE' ? '400 missing_intent' : '415 unsupported_media_type'}`);
+      const bare = await human(method, path, { cookie: u.cookie });
+      expect(`${method} ${path} → ${await outcome(bare)}`).toBe(`${method} ${path} → 400 missing_intent`);
+    }
+    expect(spent).toBe(0);
+    // Cross-site is still refused first.
+    expect(await outcome(await human('POST', '/api/private/me/password', { cookie: u.cookie, headers: { 'content-type': 'text/plain', 'sec-fetch-site': 'cross-site' }, body: '{}' }))).toBe('403 cross_site');
+    // …and a correctly shaped request without the token is csrf_mismatch, still before the human check.
+    expect(await outcome(await human('POST', '/api/private/me/username', { cookie: u.cookie, headers: { 'content-type': 'application/json' }, body: '{}' }))).toBe('403 csrf_mismatch');
+    expect(spent).toBe(0);
+  });
+
+  it('with the token and the intent header but a body that is not JSON: 415 before the human check', async () => {
+    const u = await makeUser('csrf-l1-body');
+    const token = await csrfFor(u.cookie);
+    for (const [method, path] of ACCOUNT) {
+      const res = await human(method, path, { cookie: u.cookie, headers: { ...intent, 'x-secbin-csrf': token, 'content-type': 'text/plain' }, body: '{}' });
+      expect(`${method} ${path} → ${await outcome(res)}`).toBe(`${method} ${path} → 415 unsupported_media_type`);
+    }
+    expect(spent).toBe(0);
+    // The body checks come first; a well-formed request still meets the human check.
+    expect(await outcome(await human('POST', '/api/private/me/username', { cookie: u.cookie, headers: { 'x-secbin-csrf': token, 'content-type': 'application/json' }, body: '{}' }))).toBe('403 turnstile_failed');
+    expect(spent).toBe(1);
+  });
+
+  it('with the csrfTokens setting off too', async () => {
+    const u = await makeUser('csrf-l1-off');
+    expect((await settings({ csrfTokens: false })).status).toBe(200);
+    try {
+      for (const [method, path] of ACCOUNT) {
+        const res = await human(method, path, { cookie: u.cookie, headers: { 'content-type': 'text/plain' }, body: '{}' });
+        expect(`${method} ${path} → ${await outcome(res)}`).toBe(`${method} ${path} → ${method === 'DELETE' ? '400 missing_intent' : '415 unsupported_media_type'}`);
+      }
+      expect(spent).toBe(0);
+    } finally {
+      expect((await settings({ csrfTokens: true })).status).toBe(200);
+    }
+  });
+
+  it('the anonymous routes with a human check read their body first too (sign-in, recovery, passkey sign-in, public shares)', async () => {
+    for (const path of ['/api/auth/login', '/api/auth/recovery', '/api/auth/passkey/login']) {
+      expect(`${path} → ${await outcome(await human('POST', path, { headers: { 'content-type': 'text/plain' }, body: '{}' }))}`).toBe(`${path} → 415 unsupported_media_type`);
+    }
+    expect((await settings({ 'public.enabled': true, 'public.tracking': 'ip' })).status).toBe(200);
+    try {
+      for (const path of ['/api/public/paste', '/api/public/file']) {
+        expect(`${path} → ${await outcome(await human('POST', path, { headers: { 'content-type': 'text/plain' }, body: '{}' }))}`).toBe(`${path} → 415 unsupported_media_type`);
+      }
+    } finally {
+      await settings({ 'public.enabled': false, 'public.tracking': 'tracker' });
+    }
+    expect(spent).toBe(0);
+  });
+});
+
+describe('audit I3: the token cookie never outlives the session cookie', () => {
+  const maxAge = (c) => Number(/Max-Age=(\d+)/.exec(c ?? '')?.[1]);
+  it('on a dashboard load and on /api/private/me, its lifetime is what the session cookie has left (the idle window), not the absolute expiry', async () => {
+    await makeUser('csrf-i3');
+    const r = await loginRes('csrf-i3', USER_PW);
+    const sess = maxAge(setCookies(r).find((c) => c.startsWith('__Host-secbin_sess=')));
+    const idle = (await (await fetchJson('/api/private/admin/overview', { cookie: oc })).json()).settings['session.idleSec'];
+    expect(sess).toBe(idle); // 12 hours by default; the absolute expiry is 7 days
+    const cookie = cookieOf(r);
+    for (const path of ['/dashboard/', '/api/private/me']) {
+      const t = maxAge(csrfCookieOf(await fetchJson(path, { cookie })));
+      expect(`${path}: ${t <= sess && t >= sess - 5}`).toBe(`${path}: true`);
+    }
+  });
+});
+
+describe('audit I5: POST /api/auth/passkey/options has the same guards as the other auth routes', () => {
+  const options = (headers, body) => SELF.fetch(`${ORIGIN}/api/auth/passkey/options`, { method: 'POST', headers: { 'cf-connecting-ip': freshIp(), ...headers }, body });
+  it('refuses a simple cross-site POST and a body that is not JSON; a same-origin JSON request gets its challenge', async () => {
+    const cross = await options({ 'content-type': 'text/plain', 'sec-fetch-site': 'cross-site' }, 'x');
+    expect(`${cross.status} ${await errorOf(cross)}`).toBe('403 cross_site');
+    const sameSite = await options({ 'content-type': 'application/json', 'sec-fetch-site': 'same-site' }, '{}');
+    expect(`${sameSite.status} ${await errorOf(sameSite)}`).toBe('403 cross_site');
+    const plain = await options({ 'content-type': 'text/plain' }, 'x');
+    expect(`${plain.status} ${await errorOf(plain)}`).toBe('415 unsupported_media_type');
+    const ok = await options({ 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' }, '{}');
+    expect(ok.status).toBe(200);
+    expect(typeof (await ok.json()).challengeId).toBe('string');
   });
 });

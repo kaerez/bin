@@ -58,10 +58,14 @@ export function csrfCookie(token, maxAgeSec) {
 
 export const clearCsrfCookie = () => `${CSRF_COOKIE}=; Path=/; Secure; SameSite=Strict; Max-Age=0`;
 
-/** The cookie for a session's claims (lifetime: the session's absolute expiry), or null. */
-export async function csrfCookieFor(env, claims, now = Math.floor(Date.now() / 1000)) {
+/**
+ * The cookie for a session's claims, or null. `maxAgeSec`: what the session
+ * cookie has left (readSession's `maxAgeSec`), so that the token cookie never
+ * outlives it.
+ */
+export async function csrfCookieFor(env, claims, maxAgeSec) {
   const token = await csrfTokenFor(env, claims);
-  return token ? csrfCookie(token, Number.isInteger(claims.exp) ? claims.exp - now : 0) : null;
+  return token ? csrfCookie(token, Number.isFinite(maxAgeSec) ? maxAgeSec : 0) : null;
 }
 
 /**

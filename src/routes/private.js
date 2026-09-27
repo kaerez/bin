@@ -106,14 +106,14 @@ export async function handlePrivate(request, env, url, ctx) {
     // page recovers after its token was refused (public/js/api.js).
     const csrf = await csrfTokenFor(env, a.claims);
     const res = json({ ...me, impersonatedBy: a.actor ? a.actor.username : null, csrf });
-    return appendCookies(res, a.setCookie ?? (csrf && csrfCookie(csrf, a.claims.exp - now())));
+    return appendCookies(res, a.setCookie ?? (csrf && csrfCookie(csrf, a.maxAgeSec)));
   }
 
   if (p === '/api/private/me/password') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
+    const body = await readJsonBody(request); // before the human check: a malformed request spends no token
     await requireTurnstile(env, request, TURNSTILE_ACTIONS.password);
     const g = await ipContext(env, request);
-    const body = await readJsonBody(request);
     const step = await confirmation(body); // the current password or a passkey (none while impersonating)
     const next = await verifierFrom(body.proof);
     if (!next) return err(400, 'invalid_credential', 'Invalid password proof.');
@@ -136,15 +136,16 @@ export async function handlePrivate(request, env, url, ctx) {
   // Every change below (like the password above) is a browser session's own:
   // these routes never accept an API key. With Turnstile on, each change also
   // needs a fresh human-check token for "account", checked before the step-up
-  // so that guessing the password costs a token per attempt.
+  // so that guessing the password costs a token per attempt, and after the
+  // body is read, so that a request refused for its shape spends no token.
   const human = () => requireTurnstile(env, request, TURNSTILE_ACTIONS.account);
 
   // API keys: every change needs the password or a passkey (not while impersonating).
   if (p === '/api/private/me/keys') {
     if (request.method === 'GET') return withAuth(a, json({ keys: await dir.listKeys(a.user.id) }));
     if (request.method === 'POST') {
-      await human();
       const body = await readJsonBody(request);
+      await human();
       const g = await ipContext(env, request);
       const step = await confirmation(body);
       const r = await createApiKey(dir, a.user.id, body, { ...step, lockoutOff: g.off.all });
@@ -156,8 +157,8 @@ export async function handlePrivate(request, env, url, ctx) {
   if (km) {
     if (request.method !== 'DELETE' && request.method !== 'PATCH') return methodNotAllowed('PATCH, DELETE');
     if (request.method === 'DELETE') assertIntent(request);
-    await human();
     const body = await readJsonBody(request);
+    await human();
     const g = await ipContext(env, request);
     const { actorId: by = a.user.id, ...step } = { ...(await confirmation(body)), lockoutOff: g.off.all };
     const r = request.method === 'DELETE'
@@ -179,8 +180,8 @@ export async function handlePrivate(request, env, url, ctx) {
 
   if (p === '/api/private/me/username') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    await human();
     const body = await readJsonBody(request);
+    await human();
     const g = await ipContext(env, request);
     const step = await confirmation(body);
     const r = await dir.changeUsername(a.user.id, { username: body.username, ...step, lockoutOff: g.off.all });
@@ -203,9 +204,9 @@ export async function handlePrivate(request, env, url, ctx) {
     }
     // The human check sits here, on the step that changes something (adding
     // the passkey, not asking for its challenge): no change skips it.
+    const body = await readJsonBody(request);
     await human();
     const g = await ipContext(env, request);
-    const body = await readJsonBody(request);
     const step = { ...(await confirmation(body)), origin: url.origin, rpId: url.hostname, lockoutOff: g.off.all };
     const rm = p.match(/^\/api\/private\/me\/passkeys\/([A-Za-z0-9_-]{16,1400})\/remove$/);
     let r;

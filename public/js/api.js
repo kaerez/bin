@@ -23,21 +23,32 @@ async function readJson(res) {
   try { return await res.json(); } catch { return null; }
 }
 
-// ── CSRF token ────────────────────────────────────────────────────────────────
-// Every state-changing request of a signed-in page carries the session's CSRF
-// token in X-Secbin-CSRF (src/lib/csrf.js). It is read from its cookie at the
-// moment of each request, never kept from page load: the token belongs to the
-// session, not to the page, so back/forward, a restore from the back-forward
-// cache, a reload, several tabs and a sign-in elsewhere always use the current
-// one. The header goes only where the server checks it (/api/private and
-// logout); anonymous routes have no session and ignore it.
+// ── CSRF token and the page's session ────────────────────────────────────────
+// Every state-changing request of a signed-in page carries a CSRF token in
+// X-Secbin-CSRF (src/lib/csrf.js), and the token a page sends is the one of
+// the session the page was loaded for, not whatever the (shared) cookie holds
+// now. The dashboard chrome records that session when the page loads
+// (bindSession, from /api/private/me: the user id, the impersonation state and
+// the token); a page that has not recorded one records the current session
+// before its first change. So when another tab signs in as someone else, or
+// starts or ends impersonation, this page's token no longer matches and the
+// server refuses the change (403 csrf_mismatch, before changing anything).
+// The page then asks /api/private/me who the browser is signed in as now:
+//   • the same user, in the same impersonation state (e.g. signed out and in
+//     again, or a password change): it takes the new token and retries once;
+//   • anyone else: it does not retry. It stops acting for any session
+//     (every later change is refused here, without a request) and shows
+//     SESSION_CHANGED with a Reload button (onSessionChanged). A page loaded
+//     for one user never changes another user's account.
+// The header goes only where the server checks it (/api/private and logout);
+// anonymous routes have no session and ignore it.
 export const CSRF_COOKIE = '__Host-secbin_csrf';
 const CSRF_HEADER = 'x-secbin-csrf';
 const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 export const SESSION_CHANGED = 'Your session changed in another tab; reload the page.';
 
-/** The current token from its cookie ('' when there is none). */
+/** The token in the browser's cookie ('' when there is none): the current session's, not necessarily the page's. */
 export function csrfToken() {
   let jar;
   try { jar = document.cookie || ''; } catch { return ''; }
@@ -51,27 +62,64 @@ export function csrfToken() {
   return '';
 }
 
+/** null (none recorded yet), { userId, impersonatedBy, token }, or { ended: true }. */
+let page = null;
+let sessionChangedHandler = () => {};
+const who = (profile) => ({
+  userId: isPlainObject(profile) && isPlainObject(profile.user) && typeof profile.user.id === 'string' ? profile.user.id : null,
+  impersonatedBy: isPlainObject(profile) && typeof profile.impersonatedBy === 'string' ? profile.impersonatedBy : null,
+});
+const tokenFrom = (profile) => (isPlainObject(profile) && typeof profile.csrf === 'string' && TOKEN_RE.test(profile.csrf) ? profile.csrf : '');
+
+/** Record the session this page is for, from a /api/private/me profile. */
+export function bindSession(profile) {
+  const w = who(profile);
+  page = w.userId ? { ...w, token: tokenFrom(profile) } : { ended: true };
+}
+
+/** Stop acting for any session: every later change from this page is refused here, without a request. */
+export function forgetSession() { page = { ended: true }; }
+
+/** `fn()` runs when the page finds that the browser is now signed in as someone else. */
+export function onSessionChanged(fn) { sessionChangedHandler = typeof fn === 'function' ? fn : () => {}; }
+
+/** The error for a page whose session is gone (the message pages show, with a Reload button). */
+export const isSessionChanged = (e) => e instanceof ApiError && e.extra.sessionChanged === true;
+function sessionChanged() {
+  const first = !page?.ended;
+  forgetSession();
+  if (first) { try { sessionChangedHandler(); } catch { /* the error below still reaches the page */ } }
+  return new ApiError(SESSION_CHANGED, 403, 'csrf_mismatch', { sessionChanged: true });
+}
+
 const needsCsrf = (path, method) => STATE_CHANGING.has(method) && (path.startsWith('/api/private/') || path === '/api/auth/logout');
 
 /**
- * Send `init` to `path`; a signed-in state-changing request gets the current
- * token. If the server refuses it (403 csrf_mismatch, which it answers before
- * changing anything), fetch /api/private/me (which re-sets the cookie and
- * returns the token) and retry exactly once. A signed-out session gets the
- * usual 401 from /me instead; a second refusal becomes SESSION_CHANGED.
+ * Send `init` to `path`. A signed-in state-changing request carries the
+ * page's token; if the server refuses it (403 csrf_mismatch, which it answers
+ * before changing anything), /api/private/me says who is signed in now (a 401
+ * there is the normal signed-out flow): the page's own user and impersonation
+ * state → one retry with the new token; anyone else, or a second refusal →
+ * SESSION_CHANGED, and no retry.
  */
 async function send(path, init) {
   if (!needsCsrf(path, init.method)) return fetch(path, init);
+  if (!page) bindSession(await request('/api/private/me'));
+  if (page.ended) throw sessionChanged();
   const withToken = (token) => {
     const headers = { ...init.headers };
     if (token) headers[CSRF_HEADER] = token; else delete headers[CSRF_HEADER];
     return fetch(path, { ...init, headers });
   };
-  const res = await withToken(csrfToken());
+  const res = await withToken(page.token);
   if (!(await isCsrfMismatch(res))) return res;
-  const fresh = await refreshCsrf();
-  const again = await withToken(fresh);
-  if (await isCsrfMismatch(again)) throw new ApiError(SESSION_CHANGED, 403, 'csrf_mismatch');
+  const bound = page;
+  const now = await request('/api/private/me');
+  const w = who(now);
+  if (page !== bound || page.ended || w.userId !== bound.userId || w.impersonatedBy !== bound.impersonatedBy) throw sessionChanged();
+  bound.token = tokenFrom(now);
+  const again = await withToken(bound.token);
+  if (await isCsrfMismatch(again)) throw sessionChanged();
   return again;
 }
 
@@ -83,12 +131,6 @@ async function isCsrfMismatch(res) {
   } catch {
     return false;
   }
-}
-
-/** The session's token from /api/private/me (a 401 here is the normal signed-out flow). */
-async function refreshCsrf() {
-  const d = await request('/api/private/me');
-  return typeof d.csrf === 'string' && TOKEN_RE.test(d.csrf) ? d.csrf : csrfToken();
 }
 
 async function request(path, { method = 'GET', body, headers = {}, raw = false } = {}) {

@@ -23,20 +23,30 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     with it (sign-in, sign-out, a session-version bump, impersonation start or end).
   - **Delivery:** in a readable `__Host-secbin_csrf` cookie (Secure, SameSite=Strict, `Path=/`)
     whenever the session cookie is set or refreshed and on every signed-in page load, and in
-    `GET /api/private/me` (`csrf`).
+    `GET /api/private/me` (`csrf`). The cookie never outlives the session cookie.
   - **The check:** every cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` (and sign-out) must
-    send it in `X-Secbin-CSRF`. It is compared timing-safely, after the existing checks and
-    before any change or Turnstile verification. A mismatch gets `403 csrf_mismatch`.
+    send it in `X-Secbin-CSRF`. It is compared timing-safely. A mismatch gets
+    `403 csrf_mismatch`.
+  - **Order:** before anything else runs, the cross-site check, then the request shape (a JSON
+    body, a chunk or `X-Secbin-Intent`; `415` / `400 missing_intent` as before), then the token.
+    A refused request has changed nothing, counted no failure and spent no Turnstile token.
+    Every route with a human check also checks its request body before verifying the Turnstile
+    token (for a public share, the content type and declared size).
   - **Exempt:** API keys (the CLI) and the anonymous routes.
-  - **The client** (`public/js/api.js`) reads the token from the cookie at every request. On a
-    mismatch it refreshes through `/api/private/me` and retries once, then shows "Your session
-    changed in another tab; reload the page." A dashboard page restored from the back-forward
-    cache re-checks its session.
+  - **The client** (`public/js/api.js`) acts for the session its page was loaded for: it sends
+    that session's token, recorded from `/api/private/me` at load. On a mismatch it asks
+    `/api/private/me` who is signed in now and retries once only for the same user in the same
+    impersonation state. Otherwise (another user signed in, impersonation started or ended in
+    another tab) it does not retry and shows "Your session changed in another tab; reload the
+    page." with a Reload button, so a stale tab never changes another user's account. Sign-out
+    uses the same path and no longer hides a failure. A dashboard page restored from the
+    back-forward cache re-checks its session.
   - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default). Changes are
     audited as `settings.csrf`; the setting is exported and imported with the settings, and the
     import preview warns when it would be turned off.
   - **Tighter guards:** `POST /api/private/me/reauth` and `POST /api/private/me/passkeys/options`
-    now need a JSON body (`{}`), like every other change.
+    now need a JSON body (`{}`), like every other change. `POST /api/auth/passkey/options` now
+    has the cross-site check and needs a JSON body (`{}`), like the other auth routes.
   - **Tests:** workerd, DOM and end-to-end suites (`test/csrf.test.js`, `test-dom/csrf.test.js`,
     `test-e2e/csrf.mjs`).
 - **The user's own activity no longer lists the start and end of an impersonation**

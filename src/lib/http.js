@@ -192,11 +192,7 @@ export class HttpError extends Error {
  * not be cross-site, and the body is read under `max` bytes.
  */
 export async function readJsonBody(request, max = 64 * 1024) {
-  const ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  if (ct !== 'application/json') throw new HttpError(415, 'unsupported_media_type', 'Content-Type must be application/json.');
-  assertNotCrossSite(request);
-  const cl = Number(request.headers.get('content-length'));
-  if (Number.isFinite(cl) && cl > max) throw new HttpError(413, 'too_large', 'Request body is too large.');
+  assertJsonRequest(request, max);
   const bytes = await readCappedBody(request.body, max);
   if (bytes === null) throw new HttpError(413, 'too_large', 'Request body is too large.');
   try {
@@ -206,6 +202,20 @@ export async function readJsonBody(request, max = 64 * 1024) {
   } catch {
     throw new HttpError(400, 'invalid_json', 'Invalid JSON body.');
   }
+}
+
+/**
+ * readJsonBody's checks that need no body: the JSON media type, Sec-Fetch-Site
+ * and the declared length. For a route that must check the shape of a request
+ * before it reads the body (the anonymous public-share start, before the human
+ * check).
+ */
+export function assertJsonRequest(request, max = 64 * 1024) {
+  const ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/json') throw new HttpError(415, 'unsupported_media_type', 'Content-Type must be application/json.');
+  assertNotCrossSite(request);
+  const cl = Number(request.headers.get('content-length'));
+  if (Number.isFinite(cl) && cl > max) throw new HttpError(413, 'too_large', 'Request body is too large.');
 }
 
 /**
@@ -235,18 +245,26 @@ export function assertIntent(request) {
 }
 
 /**
- * Does a state-changing request have the shape the routes' own guards demand
- * (readJsonBody, assertIntent, the chunk upload)? A JSON body, an
- * application/octet-stream chunk, or X-Secbin-Intent: 1; a DELETE always
- * needs the intent header. A request that fails this is refused by the
- * route's guard with its usual error; authenticate() checks the CSRF token
- * only after it (src/lib/csrf.js).
+ * Refuse a state-changing request that does not have the shape every route's
+ * own guard demands (readJsonBody, assertIntent, the chunk upload): a JSON
+ * body, an application/octet-stream chunk, or X-Secbin-Intent: 1; a DELETE
+ * always needs the intent header. authenticate() runs it for every
+ * cookie-authenticated change before anything else happens (src/lib/auth.js
+ * checkCsrf), so no request of another shape gets as far as the CSRF token,
+ * the human check or the step-up. The errors are the routes' own: a DELETE
+ * without the header, or a request with neither a body type nor the header,
+ * is 400 missing_intent; a body of any other type is 415.
  */
-export function hasStateChangeShape(request) {
+export function assertStateChangeShape(request) {
   const intent = (request.headers.get('x-secbin-intent') || '') === '1';
-  if (request.method === 'DELETE') return intent;
+  if (request.method === 'DELETE') {
+    if (!intent) throw new HttpError(400, 'missing_intent', 'This request requires the "X-Secbin-Intent: 1" header.');
+    return;
+  }
   const ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  return intent || ct === 'application/json' || ct === 'application/octet-stream';
+  if (intent || ct === 'application/json' || ct === 'application/octet-stream') return;
+  if (ct) throw new HttpError(415, 'unsupported_media_type', 'Content-Type must be application/json.');
+  throw new HttpError(400, 'missing_intent', 'This request needs a JSON body or the "X-Secbin-Intent: 1" header.');
 }
 
 // ── cookies ──────────────────────────────────────────────────────────────────

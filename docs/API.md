@@ -65,8 +65,12 @@ X-Secbin-CSRF: <token>
   `GET /api/private/me`.
 - **Lifetime:** it belongs to the session and changes only when the session does (sign-in,
   sign-out, a password change, impersonation start or end).
+- **Shape first:** such a request also needs a JSON body or `X-Secbin-Intent: 1` (and the
+  intent header on a `DELETE`). Without it the request is refused before the token is looked
+  at: `415 unsupported_media_type` for a body of another type, else `400 missing_intent`.
 - **Refusal:** a missing or stale token gets `403 csrf_mismatch` and nothing changes. Fetch
-  `/api/private/me` for the current token and send the request again.
+  `/api/private/me` for the current token and send the request again, after checking that
+  `/me` still names the account (and impersonation state) the script meant to act for.
 - **Other routes:** reads (`GET`) and the anonymous routes (share open and delete, public
   creation, login, setup) never need it.
 - **Owner switch:** the owner can turn the requirement off in Admin → Settings → CSRF tokens.

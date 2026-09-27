@@ -92,8 +92,9 @@ async function handleDashboard(request, env, url) {
   if (/^\/dashboard\/admin(\/|$)/.test(url.pathname) && (s.user.role !== 'owner' || s.actor)) return redirect('/dashboard/');
   const res = await serveAsset(env, request, url);
   // Every signed-in page load (re)sets the session's CSRF token cookie, so a
-  // reload always leaves the page with the current token (src/lib/csrf.js).
-  return appendCookies(res, s.setCookie ?? await csrfCookieFor(env, s.claims));
+  // reload always leaves the page with the current token (src/lib/csrf.js),
+  // with the lifetime the session cookie has left.
+  return appendCookies(res, s.setCookie ?? await csrfCookieFor(env, s.claims, s.maxAgeSec));
 }
 
 async function route(request, env, url, ctx) {
