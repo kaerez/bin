@@ -32,13 +32,13 @@ const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
 /**
  * Characters a file or folder name must not carry, beyond the C0 controls and
- * DEL: C1 controls (U+0085 included), bidi controls (U+061C, U+200E-U+200F,
- * U+202A-U+202E, U+2066-U+2069), zero-width characters (U+200B-U+200D, U+2060,
- * U+FEFF) and the line / paragraph separators (U+2028, U+2029). They can make a
- * name display as something else ("invoice\u202efdp.exe" shows as
- * "invoiceexe.pdf") or split it across lines.
+ * DEL: bidi controls (U+061C, U+200E-U+200F, U+202A-U+202E, U+2066-U+2069),
+ * zero-width characters (U+200B-U+200D, U+2060, U+FEFF) and the line breaks
+ * U+0085, U+2028 and U+2029. They can make a name display as something else
+ * ("invoice\u202efdp.exe" shows as "invoiceexe.pdf") or split it across
+ * lines. (Other C1 controls are escaped wherever a terminal shows a name.)
  */
-export const INVISIBLE_RE = /[\u0080-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/;
+export const INVISIBLE_RE = /[\u0085\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/;
 
 /**
  * Validate a relative POSIX path and return it unchanged, or throw. Rejects
