@@ -1,5 +1,5 @@
 // turnstile.js — the Cloudflare Turnstile widget (a human check) on login, the
-// account password form and the public composer, shown only when the server
+// account page (one widget per card) and the public composer, shown only when the server
 // has it configured (/api/config → `turnstile`, the public site key). Each
 // token works once: take() hands out the current one, and the next take()
 // starts a fresh challenge. The server side is src/lib/turnstile.js.
@@ -41,10 +41,18 @@ export async function turnstileSiteKey() {
   }
 }
 
-const OFF = Object.freeze({ active: false, take: async () => null });
+const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {} });
 const WAITING = 'Waiting for the human check…';
 let noteSeq = 0;
-const BUTTON_DISABLED = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'disabled');
+
+/** The native `disabled` accessor of a button, input, select or fieldset. */
+function disabledOf(el) {
+  for (let p = Object.getPrototypeOf(el); p; p = Object.getPrototypeOf(p)) {
+    const d = Object.getOwnPropertyDescriptor(p, 'disabled');
+    if (d && d.get && d.set) return d;
+  }
+  throw new TypeError('humanCheck can only gate form controls');
+}
 
 /**
  * Keep `btn` disabled while `waiting()` is true, whatever the page does: the
@@ -53,11 +61,12 @@ const BUTTON_DISABLED = Object.getOwnPropertyDescriptor(HTMLButtonElement.protot
  * Returns the function that re-applies the state.
  */
 function gate(btn, waiting) {
-  let want = BUTTON_DISABLED.get.call(btn);
-  const apply = () => BUTTON_DISABLED.set.call(btn, want || waiting());
+  const native = disabledOf(btn);
+  let want = native.get.call(btn);
+  const apply = () => native.set.call(btn, want || waiting());
   Object.defineProperty(btn, 'disabled', {
     configurable: true,
-    get: () => BUTTON_DISABLED.get.call(btn),
+    get: () => native.get.call(btn),
     set: (v) => { want = !!v; apply(); },
   });
   apply();
@@ -66,14 +75,18 @@ function gate(btn, waiting) {
 
 /**
  * Mount the widget in `container` (a hidden element) for the form `action`.
- * Returns { active, take() } — take() resolves to a token, or to null when
- * the server has no human check; it throws with a readable message if the
- * check cannot be completed. The `gate` buttons stay disabled until the check
- * has a fresh token (again after each use), so nothing is sent before the
- * human check has passed; with no human check on the server they are left
- * alone.
+ * Returns { active, take(), gate(btn) } — take() resolves to a token, or to
+ * null when the server has no human check; it throws with a readable message
+ * if the check cannot be completed. The `gate` buttons (any form control) stay
+ * disabled until the check has a fresh token (again after each use), so
+ * nothing is sent before the human check has passed; with no human check on
+ * the server they are left alone. gate(btn) adds a control created later (a
+ * table row's button) to the same gate; it is also on the returned promise,
+ * so a page can gate new buttons at once, before the widget has loaded. One
+ * widget can serve several buttons: each take() uses up the token and starts
+ * a fresh check.
  */
-export async function humanCheck(container, action, { gate: buttons = [] } = {}) {
+export function humanCheck(container, action, { gate: buttons = [] } = {}) {
   let token = null;
   let state = 'pending'; // pending (site key unknown) | on | off
   let broken = null;
@@ -98,54 +111,65 @@ export async function humanCheck(container, action, { gate: buttons = [] } = {})
     for (const g of gates) g();
     if (note) note.hidden = !(state === 'on' && !token && !broken);
   };
-  const sitekey = container ? await turnstileSiteKey() : null;
-  if (!sitekey) { state = 'off'; update(); return OFF; }
-  state = 'on';
-  update();
-  container.hidden = false;
-  let waiters = [];
-  const settle = (fn) => { const w = waiters; waiters = []; for (const x of w) fn(x); };
-  let ts;
-  let id;
-  try {
-    ts = await loadScript();
-    id = ts.render(container, {
-      sitekey,
-      action,
-      theme: 'auto',
-      size: 'flexible',
-      appearance: 'always',
-      'refresh-expired': 'auto',
-      language: 'auto',
-      callback: (t) => { token = t; update(); settle((x) => x.resolve(t)); },
-      'expired-callback': () => { token = null; update(); },
-      'error-callback': () => { token = null; update(); },
-    });
-  } catch (e) {
-    broken = e instanceof Error ? e : new Error(LOAD_FAILED);
-    update();
-    // The buttons stay disabled: say why, where the widget would be.
-    const note = document.createElement('p');
-    note.className = 'msg error';
-    note.setAttribute('role', 'alert');
-    note.textContent = broken.message;
-    container.replaceChildren(note);
-  }
-  return {
-    active: true,
-    async take() {
-      if (broken) throw broken;
-      const t = token || await new Promise((resolve, reject) => {
-        const w = { resolve, reject: () => reject(new Error(NOT_DONE)) };
-        waiters.push(w);
-        setTimeout(() => { if (waiters.includes(w)) { waiters = waiters.filter((x) => x !== w); w.reject(); } }, WAIT_MS);
-      });
-      // A token works once: start the next check now (an issued token stays
-      // valid), and keep the buttons disabled until it passes.
-      token = null;
-      update();
-      ts.reset(id);
-      return t;
-    },
+  const addGate = (b) => {
+    if (!b) return;
+    gates.push(gate(b, waiting));
+    if (note) b.setAttribute('aria-describedby', [b.getAttribute('aria-describedby'), note.id].filter(Boolean).join(' '));
   };
+  const mounted = mount();
+  return Object.assign(mounted, { gate: addGate });
+
+  async function mount() {
+    const sitekey = container ? await turnstileSiteKey() : null;
+    if (!sitekey) { state = 'off'; update(); return OFF; }
+    state = 'on';
+    update();
+    container.hidden = false;
+    let waiters = [];
+    const settle = (fn) => { const w = waiters; waiters = []; for (const x of w) fn(x); };
+    let ts;
+    let id;
+    try {
+      ts = await loadScript();
+      id = ts.render(container, {
+        sitekey,
+        action,
+        theme: 'auto',
+        size: 'flexible',
+        appearance: 'always',
+        'refresh-expired': 'auto',
+        language: 'auto',
+        callback: (t) => { token = t; update(); settle((x) => x.resolve(t)); },
+        'expired-callback': () => { token = null; update(); },
+        'error-callback': () => { token = null; update(); },
+      });
+    } catch (e) {
+      broken = e instanceof Error ? e : new Error(LOAD_FAILED);
+      update();
+      // The buttons stay disabled: say why, where the widget would be.
+      const note = document.createElement('p');
+      note.className = 'msg error';
+      note.setAttribute('role', 'alert');
+      note.textContent = broken.message;
+      container.replaceChildren(note);
+    }
+    return {
+      active: true,
+      gate: addGate,
+      async take() {
+        if (broken) throw broken;
+        const t = token || await new Promise((resolve, reject) => {
+          const w = { resolve, reject: () => reject(new Error(NOT_DONE)) };
+          waiters.push(w);
+          setTimeout(() => { if (waiters.includes(w)) { waiters = waiters.filter((x) => x !== w); w.reject(); } }, WAIT_MS);
+        });
+        // A token works once: start the next check now (an issued token stays
+        // valid), and keep the buttons disabled until it passes.
+        token = null;
+        update();
+        ts.reset(id);
+        return t;
+      },
+    };
+  }
 }

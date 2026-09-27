@@ -181,11 +181,15 @@ working.
   accessibility statement. Everything an account may do is on its role.
 - **Security** — current blocks and tracked IPs per scope, manual allow/block rules for IPv4/IPv6
   addresses, CIDR blocks and ranges such as `10.0.0.5-10.0.0.20` (allow beats block).
-- **Import / export** — the owner exports the system configuration and/or some or all users
-  (credentials and/or configuration; never the owner, sessions, API keys or shares) to a file
-  **encrypted in the browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a
-  file after decrypting it locally: a preview (dry run) first, per-user skip/create/overwrite
-  or rename, then an all-or-nothing import. Both need the owner's password again.
+- **Import / export** — the owner exports the system configuration and/or some or all users,
+  part by part (a table of users × parts with Select all / Deselect all: credentials, role, API
+  keys, passkeys, recovery codes; the owner is a row too, with only its passkeys and recovery
+  codes; never the owner's password, sessions or shares) to a file **encrypted in the
+  browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a file after
+  decrypting it locally: the parts chosen again per user, a preview (dry run), per-user
+  skip/create/update or rename, then an all-or-nothing import. An import never removes or
+  overwrites an existing account's credentials: an existing account (the owner included) only
+  gets its role set and the imported passkeys added. Both need the owner's password again.
 - **Public access** (off by default) — a built-in `(public)` account that cannot sign in,
   be deleted or hold API keys. When enabled, the home page shows a composer limited to that
   account's limits and quotas (seeded conservatively: notes only, ≤ 10 views, ≤ 7 days, 10 per
@@ -204,8 +208,9 @@ working.
   password, or require one after the password; 20 one-time recovery codes stand in for a lost
   passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
   none. The admin can remove a user's passkeys if they lose them all.
-- **Human check (optional):** Cloudflare Turnstile on login, password changes and anonymous
-  share creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
+- **Human check (optional):** Cloudflare Turnstile on login, every change on the Account page
+  (password, username, passkeys, recovery codes, sign-in steps, API keys) and anonymous share
+  creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
   disabled until the check has passed, and again after each use until the next one passes.
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup

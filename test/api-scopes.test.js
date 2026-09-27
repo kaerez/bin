@@ -328,7 +328,7 @@ describe('export / import of the new scopes', () => {
   const CURRENT = proofFor('owner-password');
   it('keeps "read" and "manage" across a round trip; the key keeps working', async () => {
     const u = await apiUser('scopes-portable', { rm: ['read', 'manage'] });
-    const exp = await fetchJson('/api/private/admin/export', { method: 'POST', cookie: oc, body: { current: CURRENT, users: [u.id], credentials: true, apiKeys: true } });
+    const exp = await fetchJson('/api/private/admin/export', { method: 'POST', cookie: oc, body: { current: CURRENT, users: [u.id], parts: ['credentials', 'apiKeys'] } });
     expect(exp.status).toBe(200);
     const { document } = await exp.json();
     expect(document.users[0].apiKeys[0].scopes).toEqual(['read', 'manage']);

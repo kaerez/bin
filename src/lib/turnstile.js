@@ -1,9 +1,11 @@
 // turnstile.js — Cloudflare Turnstile (a privacy-preserving human check) on
-// the forms bots attack: login, a signed-in password change and anonymous
-// share creation. Off unless a site key and a secret key are both configured:
+// the forms bots attack: login, anonymous share creation and every change a
+// signed-in browser session makes to its own account (password, username,
+// passkeys, recovery codes, sign-in steps and API keys). Off unless a site key and a secret key are both configured:
 // as the deployment's TURNSTILE_SITEKEY and TURNSTILE_SECRET (preferred: a
 // Worker secret), or else in the admin panel (Security → Human check), where
-// the owner enters them. Admin password resets and owner setup never need it.
+// the owner enters them. Admin password resets, the owner's changes to other
+// accounts, owner setup and API-key calls never need it.
 //
 // The browser sends the widget's token in X-Secbin-Turnstile. The server
 // redeems it with Cloudflare's siteverify and accepts it only when it
@@ -25,8 +27,12 @@ const ADMIN_CACHE_MS = 30 * 1000;
 const TOKEN_MAX = 2048; // Cloudflare's documented maximum
 const VERIFY_TIMEOUT_MS = 10000;
 
-/** The form each token is issued for (the widget's `action`). */
-export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', public: 'public-share' });
+/**
+ * The form each token is issued for (the widget's `action`): `account` covers
+ * every other change on the account page (username, passkeys, recovery codes,
+ * sign-in steps, API keys).
+ */
+export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', account: 'account', public: 'public-share' });
 
 /** { sitekey, secret } when both are set and well-formed, else null (Turnstile off). */
 let warned = false;

@@ -240,10 +240,15 @@ Common errors on any route:
   cleared.
 - **Human check (Cloudflare Turnstile)**, only when a site key and a secret key are configured
   (`TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or else the keys set with
-  `PUT /api/private/admin/turnstile`): `POST /api/auth/login`, `POST /api/private/me/password` and
+  `PUT /api/private/admin/turnstile`): `POST /api/auth/login`, `POST /api/private/me/password`,
+  every other change to one's own account (`POST /api/private/me/username`,
+  `POST /api/private/me/passkeys`, `POST /api/private/me/passkeys/:id/remove`,
+  `POST /api/private/me/recovery-codes`, `POST /api/private/me/second-factor`,
+  `POST /api/private/me/keys`, `PATCH` / `DELETE /api/private/me/keys/:id`) and
   `POST /api/public/paste` / `POST /api/public/file` need `X-Secbin-Turnstile: <token>`, issued
-  for the action `login`, `password` or `public-share` respectively on this hostname. Each token
-  is accepted once. Errors: `403 turnstile_required` (no token), `403 turnstile_failed` (rejected,
+  for the action `login`, `password`, `account` or `public-share` respectively on this hostname.
+  Each token is accepted once; the challenge requests (`…/passkeys/options`, `…/me/reauth`) need
+  none. Errors: `403 turnstile_required` (no token), `403 turnstile_failed` (rejected,
   expired, reused, or for another action or hostname), `503 turnstile_unavailable` (siteverify
   unreachable; fails closed). Setup, admin resets, file chunks/finalize and API keys are exempt.
 - `403 scope_denied`: an API key without the scope the route needs (`notes` for
@@ -362,9 +367,9 @@ of the account.
 | `POST /api/private/admin/logs/clear` `{current, scope: "all"\|"user", user?, before?}` | owner | delete activity entries (all, or about `user`; only `ts < before` when given) → `{deleted}`; `current` is the owner's password proof (403 `wrong_password`); leaves no record |
 | `GET /api/private/admin/shares` `?users=id,id&kind=&status=&q=&locked=true\|false&createdFrom=&createdTo=&expiresFrom=&expiresTo=&limit=&offset=` | owner | every user's shares, filtered (times in unix seconds, each bound optional) → `{rows, total}` |
 | `GET/PATCH /api/private/admin/shares/:id`, `POST …/:id/revoke`, `POST …/:id/lock` `{locked}` | owner | inspect, change (increase-only, protocol maxima), revoke, lock/unlock — logged as admin actions |
-| `POST /api/private/admin/export` `{current, system?: true\|{settings?, roles?, ipRules?, turnstile?, public?}, users?: "all"\|[id…], credentials?, config?, apiKeys?, passkeys?}` | owner | the plaintext `secbin-export/v1` document for the browser to encrypt (never the owner). Only the chosen parts are included: `system.settings`, `system.limits/quotas/viewerRules/roles` (the roles), `system.ipRules`, `system.turnstile` (`{sitekey, secret}` or `null`), `system.public`; per user `credentials`, `config: {role}`, `apiKeys: [{hash, name, created, expires, lastUsed, scopes}]`, `passkeys: {mfa, handle, keys: [...], recoveryCodes: [hash]}` |
-| `POST /api/private/admin/import` decisions | owner | `{system: true\|false\|{part: bool}, users: {name: {as?, overwrite?, parts?: ["credentials","config","apiKeys","passkeys"]}}}`: every part applied only when chosen; a part the file lacks → 400 |
-| `POST /api/private/admin/import` `{current, document, decisions: {system, users: {name: {as?, overwrite?}}}, dryRun}` | owner | `dryRun` (default) → `{plan}`; otherwise applied atomically → `{applied: true, plan}`; `409 import_conflicts` with the plan when anything would conflict |
+| `POST /api/private/admin/export` `{current, system?: true\|{settings?, roles?, ipRules?, turnstile?, public?}, users?: "all"\|[id…]\|[{id, parts}], parts?: [part…], owner?: ["passkeys", "recoveryCodes"]}` | owner | the plaintext `secbin-export/v1` document for the browser to encrypt. User parts are `credentials`, `role`, `apiKeys`, `passkeys`, `recoveryCodes`, chosen per user (`[{id, parts}]`) or for all listed users (`parts`); only plain users are exported as users. Only the chosen parts are included: `system.settings`, `system.limits/quotas/viewerRules/roles` (the roles), `system.ipRules`, `system.turnstile` (`{sitekey, secret}` or `null`), `system.public`; per user `credentials: {salt, t, verifier, disabled}`, `role` (name), `apiKeys: [{hash, name, created, expires, lastUsed, scopes}]`, `passkeys: {mfa, keys: [{id, handle, name, publicKey, alg, signCount, transports, backupEligible, backedUp, created, lastUsed}]}`, `recoveryCodes: [hash]`; the owner's row `owner: {passkeys?: {keys}, recoveryCodes?}` (never its password, role or API keys) |
+| `POST /api/private/admin/import` decisions | owner | `{system: true\|false\|{part: bool}, owner?: true\|false\|{passkeys?, recoveryCodes?}, users: {name: {as?, action?: "create"\|"update", parts?: [part…]}}}`: every part applied only when chosen; a part the file lacks → 400. `create` (default) needs a name that does not exist here and the `credentials` part, and creates the account from the chosen parts. `update` needs an existing account (the owner included) and only sets its role (if chosen; never the owner's) and adds the file's passkeys (if chosen): its password, recovery codes, API keys, passkeys and "Password and passkey" choice are never changed; other chosen parts are listed as skipped. `owner` applies the file's owner row to this server's owner the same way (passkeys added, recovery codes skipped). Passkeys already registered here, or beyond the role's passkey limit, are skipped |
+| `POST /api/private/admin/import` `{current, document, decisions, dryRun}` | owner | `dryRun` (default) → `{plan: {system, owner, users: [{username, as, action, changes, skipped}], errors, warnings}}`; otherwise applied atomically → `{applied: true, plan}`; `409 import_conflicts` with the plan when anything would conflict |
 
 `current` is the owner's password proof (as for a password change); a wrong one is `403
 wrong_password`. The export file format is described in `src/lib/portable.js` (document) and

@@ -2,7 +2,8 @@
 // of the Worker and would store any response without Cache-Control
 // heuristically, cookie-authenticated GETs included. Every response the Worker
 // returns — success and error, anonymous and signed in, 404 / 405 / thrown
-// errors — must carry an explicit Cache-Control and
+// errors, API-key calls (no cookie at all) and the Account page's changes
+// with Turnstile on — must carry an explicit Cache-Control and
 // `Cloudflare-CDN-Cache-Control: no-store` (nothing is stored at the edge),
 // and every private, session or secret-bearing response must be `no-store`.
 // The only exceptions are the public home page (the asset server's own
@@ -13,10 +14,12 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src/index.js';
 import { withCachePolicy, EDGE_CACHE_CONTROL } from '../src/lib/http.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
+import { setSiteverify } from '../src/lib/turnstile.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk } from '../public/js/files.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { utf8 } from '../public/js/bytes.js';
-import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW } from './helpers.js';
+import { SoftAuthenticator } from './soft-authenticator.js';
 
 let oc, user;
 beforeAll(async () => {
@@ -40,6 +43,28 @@ async function direct(path, envPatch, init = {}) {
   const res = await worker.fetch(new Request(`${ORIGIN}${path}`, init), { ...env, ...envPatch }, ctx);
   await waitOnExecutionContext(ctx);
   return res;
+}
+
+// The Worker with Turnstile on (SELF runs without it), for the Account page's
+// human checks; a fake siteverify accepts each "ok:<action>#n" token once.
+const TS_ENV = { TURNSTILE_SITEKEY: '0x4AAAAAAAtestsitekey', TURNSTILE_SECRET: '0x4AAAAAAAtestsecretvalue' };
+function tsFetch(path, { method = 'GET', body, cookie, headers = {}, token } = {}) {
+  const h = { 'cf-connecting-ip': freshIp(), ...headers };
+  if (body !== undefined) h['content-type'] = 'application/json';
+  if (cookie) h.cookie = cookie;
+  if (token) h['x-secbin-turnstile'] = token;
+  return direct(path, TS_ENV, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
+}
+function fakeSiteverify({ down = false } = {}) {
+  const used = new Set();
+  return setSiteverify(async (form) => {
+    if (down) throw new Error('network');
+    const t = form.get('response');
+    const m = /^ok:([^#]+)/.exec(t);
+    if (!m || used.has(t)) return Response.json({ success: false, 'error-codes': ['invalid-input-response'] });
+    used.add(t);
+    return Response.json({ success: true, hostname: new URL(ORIGIN).hostname, action: m[1] });
+  });
 }
 
 async function uploadFile(cookie) {
@@ -174,6 +199,99 @@ describe('cache policy (Workers Caching)', () => {
     await get('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'public.enabled': false } });
     invalidateGuardCaches();
 
+    // ── API keys (scopes): creation, "read" and "manage" on My shares ───
+    // A key-authenticated GET carries no cookie, so nothing in the request
+    // would stop a shared cache from keying it by URL alone.
+    const api = await makeUser('cache-api');
+    const bearer = (k) => ({ authorization: `Bearer ${k}` });
+    expect((await get('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: api.id, channel: 'all', patch: { apiEnabled: true } } })).status).toBe(200);
+    const mkKey = (name, scopes) => get('/api/private/me/keys', { method: 'POST', cookie: api.cookie, body: { name, scopes, current: proofFor(USER_PW) } });
+    const full = record('POST /api/private/me/keys (session, 201)', await mkKey('all', ['notes', 'files', 'policy', 'read', 'manage']));
+    const all = (await full.json()).key;
+    const notesKey = (await (await mkKey('notes', ['notes'])).json()).key;
+    const listed = record('GET /api/private/me/keys (with keys, 200)', await get('/api/private/me/keys', { cookie: api.cookie }));
+    const notesId = (await listed.json()).keys.find((k) => k.name === 'notes').id;
+    record('PATCH /api/private/me/keys/<id> (scopes, 200)', await get(`/api/private/me/keys/${notesId}`, { method: 'PATCH', cookie: api.cookie, body: { scopes: ['notes', 'read'], current: proofFor(USER_PW) } }));
+    record('PATCH /api/private/admin/users/<id>/keys/<id> (owner, 200)', await get(`/api/private/admin/users/${api.id}/keys/${notesId}`, { method: 'PATCH', cookie: oc, body: { scopes: ['notes'] } }));
+    record('POST /api/private/admin/users/<id>/keys (owner, 201)', await get(`/api/private/admin/users/${api.id}/keys`, { method: 'POST', cookie: oc, body: { name: 'by-owner', scopes: ['read'] } }));
+    record('GET /api/private/admin/users/<id>/keys (owner, 405)', await get(`/api/private/admin/users/${api.id}/keys`, { cookie: oc }));
+    const { body: pasteBody } = await encryptPaste({ text: 'by key', expire: '1h' });
+    const byKey = record('POST /api/private/paste (key, 201)', await get('/api/private/paste', { method: 'POST', headers: bearer(all), body: { paste: pasteBody } }));
+    const kid = (await byKey.json()).id;
+    record('POST /api/private/paste (notes-only key, 201)', await get('/api/private/paste', { method: 'POST', headers: bearer(notesKey), body: { paste: pasteBody } }));
+    record('POST /api/private/file (key, 201)', await get('/api/private/file', { method: 'POST', headers: bearer(all), body: { views: 1, expire: '1h', padded: 65536, files: 1, maxFile: 10 } }));
+    record('GET /api/private/policy (key, 200)', await get('/api/private/policy', { headers: bearer(all) }));
+    record('GET /api/private/policy (key without "policy", 403)', await get('/api/private/policy', { headers: bearer(notesKey) }));
+    record('GET /api/private/shares (key: read, 200)', await get('/api/private/shares', { headers: bearer(all) }));
+    record('GET /api/private/shares?status=active (key: read, 200)', await get('/api/private/shares?status=active', { headers: bearer(all) }));
+    record('GET /api/private/shares (key without "read", 403)', await get('/api/private/shares', { headers: bearer(notesKey) }));
+    record('GET /api/private/shares/<id> (key: read, 200)', await get(`/api/private/shares/${kid}`, { headers: bearer(all) }));
+    record('GET /api/private/shares/<id> (session, 200)', await get(`/api/private/shares/${kid}`, { cookie: api.cookie }));
+    record('GET /api/private/shares/<id> (key without "read", 403)', await get(`/api/private/shares/${kid}`, { headers: bearer(notesKey) }));
+    record('GET /api/private/shares/<unknown> (key, 404)', await get('/api/private/shares/kAAAAAAAAAAAAAAAAAAAAAA', { headers: bearer(all) }));
+    record('GET /api/private/shares/<bad id> (key, 404)', await get('/api/private/shares/nope', { headers: bearer(all) }));
+    record('GET /api/private/shares/<other user\'s> (key, 404)', await get(`/api/private/shares/${burn.id}`, { headers: bearer(all) }));
+    record('GET /api/private/shares/<id>/opens (key: read, 200)', await get(`/api/private/shares/${kid}/opens`, { headers: bearer(all) }));
+    record('GET /api/private/shares/<id>/opens (session, 200)', await get(`/api/private/shares/${kid}/opens`, { cookie: api.cookie }));
+    record('POST /api/private/shares/<id>/opens (key, 403)', await get(`/api/private/shares/${kid}/opens`, { method: 'POST', headers: { ...bearer(notesKey), ...intent } }));
+    record('PATCH /api/private/shares/<id> (key: manage, 200)', await get(`/api/private/shares/${kid}`, { method: 'PATCH', headers: bearer(all), body: { label: 'by key' } }));
+    record('PATCH /api/private/shares/<id> (session, 200)', await get(`/api/private/shares/${kid}`, { method: 'PATCH', cookie: api.cookie, body: { label: 'by session' } }));
+    record('PATCH /api/private/shares/<id> (key without "manage", 403)', await get(`/api/private/shares/${kid}`, { method: 'PATCH', headers: bearer(notesKey), body: { label: 'x' } }));
+    record('PUT /api/private/shares/<id> (key: manage, 405)', await get(`/api/private/shares/${kid}`, { method: 'PUT', headers: bearer(all), body: {} }));
+    record('GET /api/private/shares/<id>/revoke (key: read, 405)', await get(`/api/private/shares/${kid}/revoke`, { headers: bearer(all) }));
+    record('POST /api/private/shares/<id>/revoke (key, no intent, 400)', await get(`/api/private/shares/${kid}/revoke`, { method: 'POST', headers: bearer(all) }));
+    record('POST /api/private/shares/<id>/revoke (key: manage, 200)', await get(`/api/private/shares/${kid}/revoke`, { method: 'POST', headers: { ...bearer(all), ...intent } }));
+    record('GET /api/private/shares/<revoked> (key: read, 200)', await get(`/api/private/shares/${kid}`, { headers: bearer(all) }));
+    record('PATCH /api/private/shares/<revoked> (key: manage, label, 200)', await get(`/api/private/shares/${kid}`, { method: 'PATCH', headers: bearer(all), body: { label: 'late' } }));
+    record('PATCH /api/private/shares/<revoked> (key: manage, extend, 409)', await get(`/api/private/shares/${kid}`, { method: 'PATCH', headers: bearer(all), body: { expires: Math.floor(Date.now() / 1000) + 7200 } }));
+    const sessNote = await createNote(api.cookie, {}, {});
+    record('POST /api/private/shares/<id>/revoke (session, 200)', await get(`/api/private/shares/${sessNote.id}/revoke`, { method: 'POST', cookie: api.cookie, headers: intent }));
+    record('GET /api/private/me (key, 403)', await get('/api/private/me', { headers: bearer(all) }));
+    record('GET /api/private/me/keys (key, 403)', await get('/api/private/me/keys', { headers: bearer(all) }));
+
+    // ── the Account page's human checks (Turnstile on) ───────────────────
+    const acct = await makeUser('cache-account');
+    let n = 0;
+    const once = (action) => `ok:${action}#${++n}`;
+    const pw = { current: proofFor(USER_PW) };
+    const restore = fakeSiteverify();
+    try {
+      const ts = (method, path, body, token) => tsFetch(path, { method, body, cookie: acct.cookie, token, headers: method === 'DELETE' ? intent : {} });
+      record('GET /api/config (Turnstile on, 200)', await tsFetch('/api/config'));
+      record('GET /dashboard/account/ (Turnstile on, 200)', await tsFetch('/dashboard/account/', { cookie: acct.cookie }));
+      record('GET /dashboard/login/ (Turnstile on, 200)', await tsFetch('/dashboard/login/'));
+      record('POST /api/private/me/username (no token, 403)', await ts('POST', '/api/private/me/username', { username: 'cache-account-2', ...pw }));
+      record('POST /api/private/me/username (password token, 403)', await ts('POST', '/api/private/me/username', { username: 'cache-account-2', ...pw }, once('password')));
+      record('POST /api/private/me/username (account token, 200)', await ts('POST', '/api/private/me/username', { username: 'cache-account-2', ...pw }, once('account')));
+      record('POST /api/private/me/username (wrong password, 403)', await ts('POST', '/api/private/me/username', { username: 'cache-account-3', current: proofFor('wrong-password-000') }, once('account')));
+      await get('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: acct.id, channel: 'all', patch: { apiEnabled: true } } });
+      record('POST /api/private/me/keys (no token, 403)', await ts('POST', '/api/private/me/keys', { name: 'k', ...pw }));
+      const made = record('POST /api/private/me/keys (account token, 201)', await ts('POST', '/api/private/me/keys', { name: 'k', ...pw }, once('account')));
+      const { id: keyId } = await made.json();
+      record('PATCH /api/private/me/keys/<id> (account token, 200)', await ts('PATCH', `/api/private/me/keys/${keyId}`, { name: 'k2', scopes: ['notes'], ...pw }, once('account')));
+      record('DELETE /api/private/me/keys/<id> (no token, 403)', await ts('DELETE', `/api/private/me/keys/${keyId}`, pw));
+      record('DELETE /api/private/me/keys/<id> (account token, 200)', await ts('DELETE', `/api/private/me/keys/${keyId}`, pw, once('account')));
+      const auth = new SoftAuthenticator();
+      const o = record('POST /api/private/me/passkeys/options (Turnstile on, 200)', await ts('POST', '/api/private/me/passkeys/options', {}));
+      const { challengeId, publicKey } = await o.json();
+      const credential = await auth.create(publicKey, ORIGIN);
+      record('POST /api/private/me/passkeys (no token, 403)', await ts('POST', '/api/private/me/passkeys', { challengeId, credential, name: 'Laptop', ...pw }));
+      record('POST /api/private/me/passkeys (account token, 201)', await ts('POST', '/api/private/me/passkeys', { challengeId, credential, name: 'Laptop', ...pw }, once('account')));
+      record('POST /api/private/me/second-factor (account token, 200)', await ts('POST', '/api/private/me/second-factor', { on: true, ...pw }, once('account')));
+      record('POST /api/private/me/second-factor (off, account token, 200)', await ts('POST', '/api/private/me/second-factor', { on: false, ...pw }, once('account')));
+      record('POST /api/private/me/recovery-codes (no token, 403)', await ts('POST', '/api/private/me/recovery-codes', pw));
+      record('POST /api/private/me/recovery-codes (account token, 200)', await ts('POST', '/api/private/me/recovery-codes', pw, once('account')));
+      record('POST /api/private/me/reauth (Turnstile on, 200)', await ts('POST', '/api/private/me/reauth', {}));
+      record('POST /api/private/me/passkeys/<id>/remove (account token, 200)', await ts('POST', `/api/private/me/passkeys/${auth.id}/remove`, pw, once('account')));
+      record('GET /api/private/me/passkeys (Turnstile on, 200)', await ts('GET', '/api/private/me/passkeys'));
+      record('GET /api/private/me/keys (Turnstile on, 200)', await ts('GET', '/api/private/me/keys'));
+      record('POST /api/private/me/password (account token, 403)', await ts('POST', '/api/private/me/password', { ...pw }, once('account')));
+      fakeSiteverify({ down: true });
+      record('POST /api/private/me/username (siteverify down, 503)', await ts('POST', '/api/private/me/username', { username: 'cache-account-4', ...pw }, once('account')));
+    } finally {
+      setSiteverify(restore);
+    }
+
     // ── a blocked network, errors and exceptions ─────────────────────────
     record('POST /api/auth/logout (user)', await get('/api/auth/logout', { method: 'POST', cookie: user.cookie, headers: intent }));
     const boom = () => { throw new Error('boom'); };
@@ -197,7 +315,7 @@ describe('cache policy (Workers Caching)', () => {
     record('GET / (no ASSETS binding, 404)', noAssets);
 
     // ── the verdict ──────────────────────────────────────────────────────
-    expect(seen.length).toBeGreaterThan(80);
+    expect(seen.length).toBeGreaterThan(140);
     for (const r of seen) {
       const at = `${r.label} → ${r.status}`;
       // A label naming a status ("… (405)", "… 500)") walked what it says.

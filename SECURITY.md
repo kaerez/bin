@@ -208,25 +208,49 @@ deployment's `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or by the owner in Admi
   because it needs the Directory.
 
 When on, it protects the
-forms automated attacks target: login, a signed-in password change (Account) and starting an
-anonymous share. Setup, admin password resets, recipients opening links, file chunks and
-API keys are never challenged.
+forms automated attacks target: login, starting an anonymous share and every change a
+signed-in browser session makes to its own account on the Account page:
+
+| Account page action | Route | Action name |
+|---|---|---|
+| Change password | `POST /api/private/me/password` | `password` |
+| Change username | `POST /api/private/me/username` | `account` |
+| Add a passkey | `POST /api/private/me/passkeys` (the step that stores it) | `account` |
+| Remove a passkey | `POST /api/private/me/passkeys/:id/remove` | `account` |
+| "Password and passkey" / "Password or passkey" | `POST /api/private/me/second-factor` | `account` |
+| New recovery codes | `POST /api/private/me/recovery-codes` | `account` |
+| Create an API key | `POST /api/private/me/keys` | `account` |
+| Change an API key (name, scopes) | `PATCH /api/private/me/keys/:id` | `account` |
+| Revoke an API key | `DELETE /api/private/me/keys/:id` | `account` |
+
+Asking for a challenge changes nothing and needs no token: the passkey registration options
+(`POST /api/private/me/passkeys/options`) and the passkey "confirm it's you" challenge
+(`POST /api/private/me/reauth`). The step each of them leads to is protected, and a challenge is
+not used up by a request that the human check refuses, so the check cannot be skipped by
+calling the steps in another order. Setup, admin password resets, the owner's changes in the
+admin panel (to other accounts or their own), recipients opening links, file chunks and API
+keys are never challenged; API keys cannot reach the account routes at all (`403
+api_key_not_allowed`).
 
 - **Client side** (`public/js/turnstile.js`). The protected buttons (log in, sign in with a
-  passkey, change password, create an anonymous share) stay disabled until the widget has issued
-  a token, and again after each token is used (one token per call) until the next one arrives; if
-  the widget cannot load they stay disabled and the page says why. This is a usability guard:
-  the server-side check below is what enforces it.
+  passkey, create an anonymous share, and every button in the table above) stay disabled until
+  the widget has issued a token, and again after each token is used (one token per call) until
+  the next one arrives; if the widget cannot load they stay disabled and the page says why. On
+  the Account page each card that changes something (username, password, passkeys and recovery
+  codes, API keys) has its own always-visible widget; one widget serves every button of its card,
+  including the Remove and Revoke buttons of each table row. This is a usability guard: the
+  server-side check below is what enforces it.
 - **Server-side verification** (`src/lib/turnstile.js`). Each protected call must carry
   `X-Secbin-Turnstile`, which is redeemed with Cloudflare's siteverify. The call passes only
   when the token:
   - succeeded;
   - was issued for the request's own hostname;
-  - was issued for that form's action (`login`, `password`, `public-share`), so a token from one
-    form cannot be replayed on another;
+  - was issued for that form's action (`login`, `password`, `account`, `public-share`), so a
+    token from one form cannot be replayed on another;
   - has not been used before (siteverify refuses a reused token).
 
-  The login token is checked before the password, so a bot learns nothing about the password.
+  The token is checked before the password (at login, and before the "confirm it's you" step of
+  an account change), so a bot learns nothing about the password and every guess costs a token.
   If siteverify cannot be reached the request is refused (`503`, fail closed). Cloudflare's
   published testing keys return no hostname or action, so their results are accepted as they
   come; never deploy with testing keys.
@@ -516,24 +540,27 @@ codes as safe as the password.
   works once. Registration and second-step challenges are stored, but only a signed-in user or
   someone with the right password can create one, and each account keeps at most 3 per purpose.
   A flood of requests therefore cannot push out anyone's pending sign-in.
-- **Step-up without Turnstile.** The confirmations above (except a password change) and log
-  clearing check the password or a passkey, but not Turnstile. They need a signed-in session,
-  wrong answers count toward the same limit as a password change (all sessions end after
-  `lockout.max`), and the IP login guard applies.
+- **Step-up and Turnstile.** When Turnstile is on, every confirmation above made from the
+  Account page also needs a fresh human-check token (see *Cloudflare Turnstile*). The owner's
+  confirmations in the admin panel (for example log clearing and the owner's own keys and
+  passkeys there) check the password or a passkey, but not Turnstile. All of them need a
+  signed-in session, wrong answers count toward the same limit as a password change (all
+  sessions end after `lockout.max`), and the IP login guard applies.
 - **Losing everything.**
   - The admin can remove any account's passkeys and codes, the owner's included (Users →
     Manage → Passkeys), after which the password alone signs in. This needs the acting
     admin's own current password, so a stolen admin session alone cannot strip anyone's
     second factor; wrong passwords count as for a password change.
-  - Passwords and passkeys are separate. An admin password reset, an import that overwrites an
-    account's credentials, and a user's own password change all keep the passkeys and
-    recovery codes. After a takeover, remove them as well. After a user's own change, Account
+  - Passwords and passkeys are separate. An admin password reset and a user's own password
+    change keep the passkeys and recovery codes, and an import never changes an existing
+    account's password, recovery codes or passkeys (it can only add passkeys). After a takeover, remove them as well. After a user's own change, Account
     says how many still work and asks the user to remove any passkey they do not recognise.
   - Owner recovery through `AUTHN` also removes the owner's passkeys.
-- Passkeys and recovery codes leave the server only in an export where the owner chose
-  "Passkeys and recovery codes". The file carries the public keys (useless without the
-  authenticator) and the recovery-code hashes. Passkeys work only under the same hostname
-  (WebAuthn binds them to it); recovery codes work anywhere.
+- Passkeys and recovery codes leave the server only in an export where the owner ticked
+  "Passkeys" or "Recovery codes" (separate parts) for that account, the owner's own row
+  included. The file carries the public keys (useless without the authenticator), each with the
+  WebAuthn user handle it was registered under, and the recovery-code hashes. Passkeys work only
+  under the same hostname (WebAuthn binds them to it); recovery codes work anywhere.
 
 ### Read receipts
 
@@ -601,12 +628,24 @@ codes as safe as the password.
   server) and again when importing (only what is ticked is applied).
   - System parts: settings; roles; IP rules; Turnstile keys, off by default because they
     include the secret; the public account.
-  - User parts: credentials; role; API keys; passkeys and recovery codes.
+  - User parts, per user (a table of users × parts, with Select all / Deselect all): credentials;
+    role; API keys; passkeys; recovery codes. The owner's row holds only its passkeys and
+    recovery codes.
 - **API keys** travel as their stored hashes, so the same keys keep working on the target, and
   revoking a key on one server does not revoke it on the other. The import preview says so,
-  and refuses a key or passkey that already belongs to another account on the target.
-- Never exported: the owner account, sessions, shares, usage counters and the activity log. An
-  import can never create or replace an owner; the accounts it creates are plain users.
+  and refuses a key that already belongs to another account on the target; a passkey (credential
+  id) or recovery code that already belongs to an account there is skipped, never moved.
+- **Imports never remove or overwrite an existing account's credentials** (a maintainer rule).
+  An account that already exists, the owner included, only gets its role set (if chosen; never
+  the owner's, which is always Owner) and the file's passkeys added (if chosen, within the role's
+  passkey limit). Its password verifier, disabled flag, recovery codes, API keys, existing
+  passkeys, "Password and passkey" choice and sessions are left untouched, so a crafted or stale
+  file cannot lock anyone out or replace a credential; the worst it can do to an existing
+  account is add a passkey, which the owner sees in the preview (by name) and which is logged.
+  New accounts are created from the chosen parts.
+- Never exported: the owner's password, role and API keys, sessions, shares, usage counters and
+  the activity log. An import can never create or replace an owner; the accounts it creates are
+  plain users.
 - **Treat an export as a credential store.** One that holds verifiers, API key hashes and the
   Turnstile secret is as sensitive as the database. Keep the file and its passphrase apart,
   export only the parts you need, and delete files you no longer need (recommendation).

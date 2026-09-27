@@ -142,8 +142,8 @@ describe('roles in export and import', () => {
     const id = await newRole('Exported role');
     await assign(u.id, id);
     await limits(`role:${id}`, { maxViews: 13 });
-    const doc = (await (await raw('/api/private/admin/export', { method: 'POST', body: { current: CURRENT, system: true, users: [u.id], credentials: true, config: true } })).json()).document;
-    expect(doc.users[0].config).toEqual({ role: 'Exported role' });
+    const doc = (await (await raw('/api/private/admin/export', { method: 'POST', body: { current: CURRENT, system: true, users: [u.id], parts: ['credentials', 'role'] } })).json()).document;
+    expect(doc.users[0].role).toBe('Exported role');
     expect(doc.system.roles.find((r) => r.name === 'Exported role').limits.all).toEqual({ maxViews: 13 });
     await raw(`/api/private/admin/users/${u.id}`, { method: 'DELETE' });
     await raw(`/api/private/admin/roles/${id}`, { method: 'DELETE' });
@@ -156,11 +156,14 @@ describe('roles in export and import', () => {
     expect((await me(cookie)).limits.maxViews).toBe(13);
   });
 
-  it('a file from before roles: per-user settings are checked, then ignored with a warning', async () => {
+  it('older export files (per-user `config`) are refused: no backward compatibility', async () => {
     const CURRENT = proofFor('owner-password');
-    const doc = { format: 'secbin-export/v1', created: 1, users: [{ username: 'ro-legacy', credentials: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3, verifier: 'a'.repeat(64), disabled: false }, config: { limits: { all: { maxViews: 2 }, api: {} }, quotas: [], viewerRules: [] } }] };
-    const r = await (await raw('/api/private/admin/import', { method: 'POST', body: { current: CURRENT, document: doc, decisions: { system: false, users: { 'ro-legacy': {} } }, dryRun: true } })).json();
-    expect(r.plan.warnings.join(' ')).toMatch(/per-user settings in the file are ignored/);
-    expect(r.plan.users[0].parts).toEqual(['credentials']);
+    const cred = { salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3, verifier: 'a'.repeat(64), disabled: false };
+    for (const config of [{ limits: { all: { maxViews: 2 }, api: {} }, quotas: [], viewerRules: [] }, { role: 'Default' }]) {
+      const doc = { format: 'secbin-export/v1', created: 1, users: [{ username: 'ro-legacy', credentials: cred, config }] };
+      const r = await raw('/api/private/admin/import', { method: 'POST', body: { current: CURRENT, document: doc, decisions: { system: false, users: { 'ro-legacy': {} } }, dryRun: true } });
+      expect(r.status).toBe(400);
+      expect((await r.json()).message).toMatch(/unexpected field "config"/);
+    }
   });
 });
