@@ -38,7 +38,7 @@ export const ready = (async () => {
   const banner = $('#imp-banner');
   if (banner && profile.impersonatedBy) {
     banner.hidden = false;
-    $('#imp-text').textContent = `You (${profile.impersonatedBy}) are acting as ${profile.user.username}. Everything you do here is recorded in the audit log.`;
+    $('#imp-text').textContent = `You (${profile.impersonatedBy}) are acting as ${profile.user.username}.`;
     $('#imp-return').onclick = async () => {
       try {
         await admin.unimpersonate();

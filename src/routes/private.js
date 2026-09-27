@@ -3,8 +3,8 @@
 // "My shares" and admin surfaces are session-only.
 
 import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
-import { authenticate, issueSession, actorId, logoutCookie } from '../lib/auth.js';
-import { directory, cachedSettings, ipContext, recordFailure } from '../lib/guard.js';
+import { authenticate, issueSession, actorId } from '../lib/auth.js';
+import { directory, cachedSettings, ipContext } from '../lib/guard.js';
 import { genId, parseId, genDeleteToken, genToken, genApiKey, hashToken } from '../lib/ids.js';
 import { ttlSeconds, MAX_BODY, MAX_BURN_RECORD, kvExists, kvPut, kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
 import { validateCreate, FormatError, MAX_CT_B64, expireSeconds, MAX_VIEWS, MAX_TTL } from '../../public/js/format.js';
@@ -14,7 +14,8 @@ import { verifierFrom } from './auth.js';
 import { handleAdmin } from './admin.js';
 import { binding } from '../lib/config.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
-import { creationOptions } from '../lib/webauthn.js';
+import { creationOptions, requestOptions } from '../lib/webauthn.js';
+import { stepUpFrom, afterRefusal } from './stepup.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const EXTRA_KEYS = ['max', 'quota', 'until', 'policy', 'refused'];
@@ -99,18 +100,11 @@ export async function handlePrivate(request, env, url, ctx) {
     await requireTurnstile(env, request, TURNSTILE_ACTIONS.password);
     const g = await ipContext(env, request);
     const body = await readJsonBody(request);
-    const current = await verifierFrom(body.current);
+    const step = await stepUpFrom(body, url); // the current password, or a passkey
     const next = await verifierFrom(body.proof);
-    if (!current || !next) return err(400, 'invalid_credential', 'Invalid password proof.');
-    const r = await dir.changePassword(a.user.id, { current, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
-    if (!r.ok) {
-      // Wrong current passwords also count against the caller's network, so a
-      // thief's IP gets blocked from logging in again.
-      if (r.error === 'wrong_password' || r.error === 'session_revoked') await recordFailure(env, g, 'login');
-      const res = fromDir(r);
-      if (r.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
-      return res;
-    }
+    if (!next) return err(400, 'invalid_credential', 'Invalid password proof.');
+    const r = await dir.changePassword(a.user.id, { ...step, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
+    if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
     // The session version moved on (all other sessions end); keep this device signed in.
     const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env) });
     return json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }, 200, { 'set-cookie': cookie });
@@ -122,31 +116,52 @@ export async function handlePrivate(request, env, url, ctx) {
     return withAuth(a, json({ rows: await dir.activity(a.user.id, { before, limit: 50 }) }));
   }
 
+  // API keys: every change needs the password or a passkey.
   if (p === '/api/private/me/keys') {
     if (request.method === 'GET') return withAuth(a, json({ keys: await dir.listKeys(a.user.id) }));
     if (request.method === 'POST') {
       if (a.actor) return err(403, 'impersonating', 'API keys cannot be created while impersonating.');
       const body = await readJsonBody(request);
-      const key = genApiKey();
-      const expires = body.expiresInSec === undefined || body.expiresInSec === null
-        ? null
-        : Number.isSafeInteger(body.expiresInSec) && body.expiresInSec >= 3600 && body.expiresInSec <= MAX_TTL ? now() + body.expiresInSec : -1;
-      if (expires === -1) return err(400, 'invalid_expiry', 'Key lifetime must be between 1 hour and 365 days.');
-      const r = await dir.createKey(a.user.id, { name: body.name, hash: await hashToken(key), expires, scopes: body.scopes });
-      if (!r.ok) return fromDir(r);
-      return json({ ok: true, id: r.id, key }, 201);
+      const g = await ipContext(env, request);
+      const step = await stepUpFrom(body, url);
+      const r = await createApiKey(dir, a.user.id, body, { ...step, lockoutOff: g.off.all });
+      return r.ok ? json({ ok: true, id: r.id, key: r.key }, 201) : afterRefusal(env, g, r, fromDir(r));
     }
     return methodNotAllowed('GET, POST');
   }
   const km = p.match(/^\/api\/private\/me\/keys\/([A-Za-z0-9_-]{16})$/);
   if (km) {
-    if (request.method !== 'DELETE') return methodNotAllowed('DELETE');
-    assertIntent(request);
-    const r = await dir.revokeKey(a.user.id, km[1], actorId(a));
-    return r.ok ? json({ ok: true }) : fromDir(r);
+    if (request.method !== 'DELETE' && request.method !== 'PATCH') return methodNotAllowed('PATCH, DELETE');
+    if (a.actor) return err(403, 'impersonating', 'API keys cannot be changed while impersonating (use Admin → Users).');
+    if (request.method === 'DELETE') assertIntent(request);
+    const body = await readJsonBody(request);
+    const g = await ipContext(env, request);
+    const step = { ...(await stepUpFrom(body, url)), lockoutOff: g.off.all };
+    const r = request.method === 'DELETE'
+      ? await dir.revokeKey(a.user.id, km[1], a.user.id, step)
+      : await dir.updateKey(a.user.id, km[1], { name: body.name, scopes: body.scopes, ...step });
+    return r.ok ? json({ ok: true }) : afterRefusal(env, g, r, fromDir(r));
   }
 
-  // ── passkeys and recovery codes (every change needs the current password) ──
+  // A challenge for confirming a change with a passkey instead of the password.
+  if (p === '/api/private/me/reauth') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    if (a.actor) return err(403, 'impersonating', 'Not available while impersonating.');
+    const r = await dir.reauthOptions(a.user.id);
+    return r.ok ? json({ challengeId: r.challengeId, publicKey: requestOptions(r, url.hostname) }) : fromDir(r);
+  }
+
+  if (p === '/api/private/me/username') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    if (a.actor) return err(403, 'impersonating', 'The username cannot be changed while impersonating.');
+    const body = await readJsonBody(request);
+    const g = await ipContext(env, request);
+    const step = await stepUpFrom(body, url);
+    const r = await dir.changeUsername(a.user.id, { username: body.username, ...step, lockoutOff: g.off.all });
+    return r.ok ? json(r) : afterRefusal(env, g, r, fromDir(r));
+  }
+
+  // ── passkeys and recovery codes (every change needs the password or a passkey) ──
   if (p === '/api/private/me/passkeys' || p.startsWith('/api/private/me/passkeys/') || p === '/api/private/me/recovery-codes' || p === '/api/private/me/second-factor') {
     if (p === '/api/private/me/passkeys' && request.method === 'GET') {
       const st = await dir.passkeyStatus(a.user.id);
@@ -160,29 +175,21 @@ export async function handlePrivate(request, env, url, ctx) {
     }
     const g = await ipContext(env, request);
     const body = await readJsonBody(request);
-    const current = await verifierFrom(body.current);
-    if (!current) return err(400, 'invalid_credential', 'Enter your current password.');
-    const lockoutOff = g.off.all;
+    const step = { ...(await stepUpFrom(body, url)), lockoutOff: g.off.all };
     const rm = p.match(/^\/api\/private\/me\/passkeys\/([A-Za-z0-9_-]{16,1400})\/remove$/);
     let r;
     if (p === '/api/private/me/passkeys') {
-      r = await dir.addPasskey(a.user.id, { challengeId: body.challengeId, credential: body.credential, name: body.name, current, origin: url.origin, rpId: url.hostname, lockoutOff });
+      r = await dir.addPasskey(a.user.id, { challengeId: body.challengeId, credential: body.credential, name: body.name, ...step });
     } else if (rm) {
-      r = await dir.removePasskey(a.user.id, rm[1], { current, lockoutOff });
+      r = await dir.removePasskey(a.user.id, rm[1], step);
     } else if (p === '/api/private/me/recovery-codes') {
-      r = await dir.regenerateRecoveryCodes(a.user.id, { current, lockoutOff });
+      r = await dir.regenerateRecoveryCodes(a.user.id, step);
     } else if (p === '/api/private/me/second-factor') {
-      r = await dir.setSecondFactor(a.user.id, { on: body.on, current, lockoutOff });
+      r = await dir.setSecondFactor(a.user.id, { on: body.on, ...step });
     } else {
       return err(404, 'not_found', 'Not found.');
     }
-    if (!r.ok) {
-      // As for a password change: wrong current passwords count against the network.
-      if (r.error === 'wrong_password' || r.error === 'session_revoked') await recordFailure(env, g, 'login');
-      const res = fromDir(r);
-      if (r.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
-      return res;
-    }
+    if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
     return json(r, p === '/api/private/me/passkeys' ? 201 : 200);
   }
 
@@ -469,4 +476,19 @@ export async function purgeShare(env, id, info = parseId(id)) {
   if (info.file) await fileStub(env, id).revoke();
   else if (info.burn) await burnStub(env, id).revoke();
   else await kvDelete(env, id);
+}
+
+/**
+ * Create an API key for `uid` from a request body ({name, expiresInSec,
+ * scopes}); `opts` carries the confirmation (own account) or `actorId` (the
+ * owner, for another user). The key is returned once and stored as a hash.
+ */
+export async function createApiKey(dir, uid, body, opts) {
+  const expires = body.expiresInSec === undefined || body.expiresInSec === null
+    ? null
+    : Number.isSafeInteger(body.expiresInSec) && body.expiresInSec >= 3600 && body.expiresInSec <= MAX_TTL ? now() + body.expiresInSec : -1;
+  if (expires === -1) return { ok: false, status: 400, error: 'invalid_expiry', message: 'Key lifetime must be between 1 hour and 365 days.' };
+  const key = genApiKey();
+  const r = await dir.createKey(uid, { name: body.name, hash: await hashToken(key), expires, scopes: body.scopes, ...opts });
+  return r.ok ? { ok: true, id: r.id, key } : r;
 }

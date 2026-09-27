@@ -4,7 +4,7 @@
 // previewed (dry run) and applied all-or-nothing; imported credentials log in
 // with the original password; every field is re-validated server-side.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson, login, proofFor, freshIp } from './helpers.js';
+import { owner, makeUser, fetchJson, login, proofFor, USER_PW, freshIp } from './helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -33,7 +33,7 @@ describe('admin export', () => {
   it('exports the chosen parts, never the owner, sessions or API keys', async () => {
     const u = await makeUser('ie-export');
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { maxViews: 7, apiEnabled: true } } });
-    await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'k' } });
+    await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'k' } });
     const doc = await exportDoc({ system: true, users: 'all', credentials: true, config: true });
     expect(doc.format).toBe('secbin-export/v1');
     expect(doc.users.some((x) => x.username === 'owner')).toBe(false);
@@ -159,7 +159,7 @@ describe('admin import', () => {
   it('review hardening: API keys revoked on credential overwrite, no self-block, full audit, clean notes', async () => {
     const a = await makeUser('ie-keys-a', 'keys-password-123');
     await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: a.id, channel: 'all', patch: { apiEnabled: true } } });
-    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: a.cookie, body: { name: 'k' } })).json()).key;
+    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: a.cookie, body: { current: proofFor('keys-password-123'), name: 'k' } })).json()).key;
     const doc = await exportDoc({ users: [a.id], credentials: true });
     const pre = await (await importDoc(doc, { system: false, users: { 'ie-keys-a': { overwrite: true } } })).json();
     expect(pre.plan.users[0].note).toMatch(/revokes its API keys/);

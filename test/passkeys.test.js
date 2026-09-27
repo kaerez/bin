@@ -226,16 +226,17 @@ describe('passkey as a second factor', () => {
     expect(codes[5]).toBe('challenge_expired');
   });
 
-  it('mode "second": no passkey-only or code-only sign-in, and the second factor is always on', async () => {
+  it('mode "second": no passkey-only sign-in, the second factor is always on, a recovery code still signs in alone', async () => {
     const u = await makeUser('pk-mode2');
     const { auth, body } = await register(u.cookie);
     expect((await limits(u.id, { passkeys: 'second' })).status).toBe(200);
     expect(await errorOf(await passkeyLogin(auth))).toBe('password_first');
-    expect(await errorOf(await post('/api/auth/recovery', { username: 'pk-mode2', code: body.codes[0] }))).toBe('password_first');
+    const alone = await post('/api/auth/recovery', { username: 'pk-mode2', code: body.codes[0] });
+    expect(alone.status).toBe(200);
+    expect(cookieOf(alone)).toBeTruthy();
     const { secondFactor } = await (await passwordLogin('pk-mode2')).json();
     expect(secondFactor).toBeTruthy();
-    // The code refused above was not spent.
-    expect((await post('/api/auth/second-factor', { challengeId: secondFactor.challengeId, code: body.codes[0] })).status).toBe(200);
+    expect((await post('/api/auth/second-factor', { challengeId: secondFactor.challengeId, code: body.codes[1] })).status).toBe(200);
     const off = await post('/api/private/me/second-factor', { on: false, current: proofFor(PW) }, u.cookie);
     expect(await errorOf(off)).toBe('second_factor_required');
   });
@@ -258,7 +259,8 @@ describe('administration', () => {
     const { auth } = await register(u.cookie);
     const d = await (await fetchJson(`/api/private/admin/users/${u.id}`, { cookie: oc })).json();
     expect(d.passkeys).toMatchObject({ count: 1, recoveryLeft: 20 });
-    const r = await fetchJson(`/api/private/admin/users/${u.id}/passkeys`, { method: 'POST', cookie: oc, headers: intent });
+    // Another user's: no confirmation needed (as for setting their password).
+    const r = await fetchJson(`/api/private/admin/users/${u.id}/passkeys`, { method: 'POST', cookie: oc, headers: intent, body: {} });
     expect((await r.json()).removed).toBe(1);
     expect(await errorOf(await passkeyLogin(auth))).toBe('invalid_passkey');
   });
@@ -332,25 +334,27 @@ describe('hardening', () => {
     expect(await errorOf(await post('/api/auth/second-factor', { challengeId: o.challengeId, code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ' }))).toBe('challenge_expired');
   });
 
-  it("the owner cannot strip their own passkeys from the admin panel", async () => {
+  it("the owner's own passkeys can be removed from the admin panel, with the owner's password", async () => {
     const o = await register(oc, { password: 'owner-password' });
     expect(o.res.status).toBe(201);
     const { users } = await (await fetchJson('/api/private/admin/users', { cookie: oc })).json();
     const me = users.find((x) => x.role === 'owner');
-    const r = await fetchJson(`/api/private/admin/users/${me.id}/passkeys`, { method: 'POST', cookie: oc, headers: intent });
-    expect(r.status).toBe(403);
-    expect(await errorOf(r)).toBe('use_account_page');
+    const reset = (body) => fetchJson(`/api/private/admin/users/${me.id}/passkeys`, { method: 'POST', cookie: oc, headers: intent, body });
+    expect(await errorOf(await reset({}))).toBe('reauth_required');
+    expect(await errorOf(await reset({ current: proofFor('not-the-owner-password') }))).toBe('wrong_password');
     expect((await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json()).passkeys.length).toBeGreaterThan(0);
-    await post(`/api/private/me/passkeys/${o.auth.id}/remove`, { current: proofFor('owner-password') }, oc);
+    const r = await reset({ current: proofFor('owner-password') });
+    expect(r.status).toBe(200);
+    expect((await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json()).passkeys).toEqual([]);
   });
 
-  it('an admin password reset removes passkeys and recovery codes', async () => {
+  it('an admin password reset keeps passkeys and recovery codes', async () => {
     const u = await makeUser('pk-reset');
     const { auth, body } = await register(u.cookie);
     const r = await fetchJson(`/api/private/admin/users/${u.id}/password`, { method: 'POST', cookie: oc, body: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3, proof: proofFor('new-password-456') } });
     expect(r.status).toBe(200);
-    expect(await errorOf(await passkeyLogin(auth))).toBe('invalid_passkey');
-    expect(await errorOf(await post('/api/auth/recovery', { username: 'pk-reset', code: body.codes[0] }))).toBe('invalid_login');
+    expect((await passkeyLogin(auth)).status).toBe(200);
+    expect((await post('/api/auth/recovery', { username: 'pk-reset', code: body.codes[0] })).status).toBe(200);
   });
 
   it('a password change reports the passkeys and codes that still work', async () => {
@@ -361,13 +365,14 @@ describe('hardening', () => {
     expect(await r.json()).toMatchObject({ ok: true, passkeys: 1, recoveryLeft: 20 });
   });
 
-  it('with "passkey after password" on, a recovery code alone does not sign in (and is not spent)', async () => {
+  it('with "passkey after password" on, a recovery code alone still signs in (and is spent)', async () => {
     const u = await makeUser('pk-mfa-code');
     const { body } = await register(u.cookie);
     await post('/api/private/me/second-factor', { on: true, current: proofFor(PW) }, u.cookie);
-    expect(await errorOf(await post('/api/auth/recovery', { username: 'pk-mfa-code', code: body.codes[0] }))).toBe('password_first');
-    const { secondFactor } = await (await passwordLogin('pk-mfa-code')).json();
-    expect((await post('/api/auth/second-factor', { challengeId: secondFactor.challengeId, code: body.codes[0] })).status).toBe(200);
+    const r = await post('/api/auth/recovery', { username: 'pk-mfa-code', code: body.codes[0] });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ recoveryLeft: 19 });
+    expect(await errorOf(await post('/api/auth/recovery', { username: 'pk-mfa-code', code: body.codes[0] }))).toBe('invalid_login');
   });
 
   it('the second step respects the account lockout', async () => {

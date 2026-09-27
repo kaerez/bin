@@ -302,7 +302,10 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   lower-case, digit, symbol) is **enforced only in the browser** — the server receives an
   Argon2id proof, never the password, so it cannot verify the policy. A modified client can set
   a weaker password for its own account; the policy protects honest users from weak choices, not
-  the server from a hostile client. The owner always has the built-in policy (12 characters).
+  the server from a hostile client. It applies only when a user changes their **own** password.
+  Passwords the owner sets are exempt: at setup, on the owner's own Account, for a new user, and
+  when resetting a user's password. The length counts every character as typed (one per Unicode
+  code point, so spaces, emoji and combining marks all count).
 - **Passwords** never reach the server: the client sends `Argon2id(password, salt)`; the server
   stores `SHA-256("secbin-auth/v2" ‖ that)`. Prelogin returns a stable, secret-keyed fake salt
   for unknown usernames, and every account uses the same Argon2id time cost, so the response
@@ -385,9 +388,15 @@ is never restricted by it:
 
 | `passkeys` | Passkey alone | Password, then passkey | Recovery code alone |
 |---|---|---|---|
-| `any` (default) | yes | if the user turns it on | yes, unless the user turned the second step on |
-| `second` | no | always, once the user has one | no (only as the second step) |
-| `off` | no | no (the password alone signs in) | no |
+| `any` (default) | yes | if the user turns it on | yes |
+| `second` | no | always, once the user has one | yes |
+| `off` | no | no (the password alone signs in) | yes (codes left from before) |
+
+A recovery code is the way back in when everything else is lost, so it always signs in on its
+own: whatever the mode, and even when the user turned on "passkey after password". Only the
+guards against guessing still apply (Turnstile, the per-IP login guard and the account lockout),
+and a disabled account stays disabled. Anyone holding a code therefore holds the account: keep the
+codes as safe as the password.
 
 - **What the server verifies** (`src/lib/webauthn.js`, Web Crypto only, no dependency):
   - the one-time challenge (5 minutes; single use), the ceremony type and the exact origin;
@@ -395,17 +404,40 @@ is never restricted by it:
   - **user presence and user verification** (a PIN or biometric on the device), so a passkey
     is two factors;
   - the signature (ES256, EdDSA or RS256 ≥ 2048 bits) with the key stored at registration;
-  - a signature counter that must not go backwards (a cloned authenticator is refused);
+  - the signature counter (see *Counters* below);
   - on usernameless sign-in, a user handle returned by the authenticator must match the
     account's (the credential id selects the account and its key either way).
 
   Attestation is not requested (`none`), so any authenticator is accepted.
-- **Adding or removing a passkey**, turning the second step on or off, and creating new recovery
-  codes all need the **current password**. Wrong passwords count as for a password change. None
-  of these actions is possible while impersonating.
+- **Confirming changes to one's own account.** Every change to the signed-in account needs the
+  current password or, for an account with a passkey, a fresh passkey check. That covers the
+  owner's own account too. The changes are:
+  - a password or username change;
+  - adding or removing a passkey, the second-step switch and new recovery codes;
+  - creating, changing (name, scopes) or revoking an API key.
+
+  The Account page asks again for every change: the field is cleared as soon as it is used. A
+  passkey check answers a one-time `reauth` challenge (5 minutes, at most 3 pending per
+  account), for that account only, with one of its own passkeys. Failed checks, by password or
+  by passkey, count toward the same limit (every session ends after `lockout.max` within the
+  window) and against the IP login guard. None of these actions is possible while impersonating.
+- **The owner, for other users.** As with setting a user's password, the owner changes another
+  user's API keys (create, change, revoke) and removes their passkeys without a confirmation.
+  On the owner's own account the admin routes ask for it, as Account does. A passkey can only be
+  added by its user, on their own device (WebAuthn creates the key there).
 - **Recovery codes.** The first passkey comes with 20 codes. Each is 80 random bits, shown once,
   stored as SHA-256 only, and works once, wherever a passkey would. New codes revoke the old set,
   and removing the last passkey removes the codes and the second-step requirement.
+- **Counters.** An authenticator that keeps a signature counter (most security keys) adds at
+  least 1 to it with every signature and sends it with the assertion. The server stores the last
+  value and refuses an assertion whose counter is not higher. The server never *knows* that a key
+  was cloned; a counter that did not move forward is the WebAuthn specification's signal that two
+  devices may hold the same private key (a copied key, not a synced passkey). Replaying an old
+  assertion is already refused by the single-use challenge, so the counter matters only when a
+  copy signs a fresh challenge. The counter is updated with a conditional `UPDATE … WHERE counter
+  < new RETURNING`, so of two simultaneous sign-ins with the same counter value only one
+  succeeds. Synced passkeys (iCloud Keychain, Google Password Manager and similar) always report
+  0; for them there is nothing to compare, and the check is skipped.
 - **Brute-force protection.**
   - A wrong recovery code, or a failed second step, counts toward the account lockout and the
     per-IP login guard, like a wrong password.
@@ -418,19 +450,19 @@ is never restricted by it:
   works once. Registration and second-step challenges are stored, but only a signed-in user or
   someone with the right password can create one, and each account keeps at most 3 per purpose.
   A flood of requests therefore cannot push out anyone's pending sign-in.
-- **Step-up without Turnstile.** Passkey changes, new recovery codes, the second-step switch and
-  log clearing check the current password, but not Turnstile. They need a signed-in session,
+- **Step-up without Turnstile.** The confirmations above (except a password change) and log
+  clearing check the password or a passkey, but not Turnstile. They need a signed-in session,
   wrong answers count toward the same limit as a password change (all sessions end after
   `lockout.max`), and the IP login guard applies.
 - **Losing everything.**
-  - The admin can remove a user's passkeys and codes (Users → Manage → Passkeys), after which
-    the password alone signs in. The owner's own passkeys can be removed only from Account,
-    with the current password, so a stolen owner session alone cannot strip the second factor.
-  - **An admin password reset is account recovery.** It also removes the user's passkeys and
-    recovery codes, so whatever someone who took the account over added or replaced stops
-    working. An import that overwrites an account's credentials does the same.
-  - A user's own password change keeps them. Account then says how many still work and asks
-    the user to remove any passkey they do not recognise.
+  - The admin can remove any account's passkeys and codes, the owner's included (Users →
+    Manage → Passkeys), after which the password alone signs in. This needs the acting
+    admin's own current password, so a stolen admin session alone cannot strip anyone's
+    second factor; wrong passwords count as for a password change.
+  - Passwords and passkeys are separate. An admin password reset, an import that overwrites an
+    account's credentials, and a user's own password change all keep the passkeys and
+    recovery codes. After a takeover, remove them as well. After a user's own change, Account
+    says how many still work and asks the user to remove any passkey they do not recognise.
   - Owner recovery through `AUTHN` also removes the owner's passkeys.
 - Passkeys and recovery codes are never exported.
 

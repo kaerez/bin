@@ -56,7 +56,8 @@ export async function login(username, password, ip) {
 }
 
 /** Owner creates a user; returns { id, cookie }. */
-export async function makeUser(username, password = 'user-password-123') {
+export const USER_PW = 'user-password-123';
+export async function makeUser(username, password = USER_PW) {
   const oc = await owner();
   const r = await fetchJson('/api/private/admin/users', { method: 'POST', cookie: oc, body: { username, salt: salt16(), t: 3, proof: proofFor(password) } });
   if (r.status !== 201) throw new Error(`create user failed ${r.status} ${await r.text()}`);

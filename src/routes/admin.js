@@ -8,7 +8,8 @@ import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSet
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
 import { GUARD_SCOPES } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
-import { purgeShare, changeShare, withLiveStatus } from './private.js';
+import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private.js';
+import { stepUpFrom, afterRefusal } from './stepup.js';
 import { parseId } from '../lib/ids.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS } from '../lib/portable.js';
 
@@ -199,9 +200,10 @@ export async function handleAdmin(request, env, url) {
     return methodNotAllowed('GET, POST');
   }
 
-  const um = p.match(/^\/api\/private\/admin\/users\/([A-Za-z0-9_-]{16})(?:\/(password|unlock|impersonate|passkeys|keys\/([A-Za-z0-9_-]{16})))?$/);
+  const um = p.match(/^\/api\/private\/admin\/users\/([A-Za-z0-9_-]{16})(?:\/(password|unlock|impersonate|passkeys|keys)(?:\/([A-Za-z0-9_-]{16}))?)?$/);
   if (um) {
     const [, uid, action, keyId] = um;
+    if (keyId && action !== 'keys') return err(404, 'not_found', 'Not found.');
     if (!action) {
       if (request.method === 'GET') {
         const d = await dir.userDetail(uid);
@@ -244,11 +246,16 @@ export async function handleAdmin(request, env, url) {
       return json(await dir.unlockUser(uid, me));
     }
     if (action === 'passkeys') {
-      // A user who lost their passkeys and recovery codes: remove them all.
+      // Remove an account's passkeys and recovery codes. Another user's: no
+      // confirmation (as for setting their password); the owner's own: the
+      // password or a passkey, as on Account.
       if (request.method !== 'POST') return methodNotAllowed('POST');
       assertIntent(request);
-      const r = await dir.adminResetPasskeys(uid, me);
-      return r.ok ? json(r) : fromDir(r);
+      const g = await ipContext(env, request);
+      const body = await readJsonBody(request);
+      const step = uid === me ? await stepUpFrom(body, url) : {};
+      const r = await dir.adminResetPasskeys(uid, me, { ...step, lockoutOff: g.off.all });
+      return r.ok ? json(r) : afterRefusal(env, g, r, fromDir(r));
     }
     if (action === 'impersonate') {
       if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -258,11 +265,26 @@ export async function handleAdmin(request, env, url) {
       const { cookie } = await issueSession(env, { uid: r.target.id, act: me, ver: r.ver, settings: r.settings });
       return json({ ok: true, user: r.target }, 200, { 'set-cookie': cookie });
     }
+    // API keys of a user: the owner creates, changes and revokes them for
+    // other users freely; on the owner's own account the confirmation applies.
+    if (action === 'keys' && !keyId) {
+      if (request.method !== 'POST') return methodNotAllowed('POST');
+      const body = await readJsonBody(request);
+      const g = await ipContext(env, request);
+      const step = uid === me ? await stepUpFrom(body, url) : {};
+      const r = await createApiKey(dir, uid, body, { ...step, actorId: me, lockoutOff: g.off.all });
+      return r.ok ? json({ ok: true, id: r.id, key: r.key }, 201) : afterRefusal(env, g, r, fromDir(r));
+    }
     if (keyId) {
-      if (request.method !== 'DELETE') return methodNotAllowed('DELETE');
-      assertIntent(request);
-      const r = await dir.revokeKey(uid, keyId, me);
-      return r.ok ? json(r) : fromDir(r);
+      if (request.method !== 'DELETE' && request.method !== 'PATCH') return methodNotAllowed('PATCH, DELETE');
+      if (request.method === 'DELETE') assertIntent(request);
+      const body = request.method === 'PATCH' || uid === me ? await readJsonBody(request) : {};
+      const g = await ipContext(env, request);
+      const step = { ...(uid === me ? await stepUpFrom(body, url) : {}), lockoutOff: g.off.all };
+      const r = request.method === 'DELETE'
+        ? await dir.revokeKey(uid, keyId, me, step)
+        : await dir.updateKey(uid, keyId, { name: body.name, scopes: body.scopes, actorId: me, ...step });
+      return r.ok ? json({ ok: true }) : afterRefusal(env, g, r, fromDir(r));
     }
   }
 

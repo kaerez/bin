@@ -4,7 +4,7 @@
 
 import './kdf-progress.js';
 import { setupStatus, setup } from './api.js';
-import { newCredential, checkNewPassword, randomHex } from './pwauth.js';
+import { newCredential, checkOwnerPassword, randomHex } from './pwauth.js';
 import { showMsg, wirePeek, friendlyError } from './common.js';
 import { copyText, flashCopied } from './ui.js';
 
@@ -40,7 +40,7 @@ $('#setup-form').addEventListener('submit', async (e) => {
   const token = $('#setup-token').value.trim();
   const username = $('#setup-user').value.trim();
   const pw = $('#setup-pass').value;
-  const bad = checkNewPassword(pw, $('#setup-pass2').value);
+  const bad = checkOwnerPassword(pw, $('#setup-pass2').value); // the owner chooses freely
   if (!token) return showMsg(msg, 'Enter the setup token.');
   if (!username) return showMsg(msg, 'Choose an owner username.');
   if (bad) return showMsg(msg, bad);

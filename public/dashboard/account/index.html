@@ -115,9 +115,19 @@
                     <div id="acct-quotas"></div>
                 </div>
 
+                <form class="card stack reveal d2 form" id="name-form">
+                    <h2 class="section-title">Username</h2>
+                    <label class="field-label" for="name-new">New username</label>
+                    <input class="input" id="name-new" maxlength="64" autocomplete="username" spellcheck="false" autocapitalize="none" />
+                    <label class="field-label" for="name-current" id="name-current-label">Your password</label>
+                    <input type="password" class="input" id="name-current" autocomplete="current-password" />
+                    <button type="submit" class="btn" id="name-btn">Change username</button>
+                    <p class="msg" id="name-msg" role="alert" hidden></p>
+                </form>
+
                 <form class="card stack reveal d2 form" id="pw-form">
                     <h2 class="section-title">Change password</h2>
-                    <label class="field-label" for="pw-current">Current password</label>
+                    <label class="field-label" for="pw-current" id="pw-current-label">Current password</label>
                     <div class="pw pw-wide">
                         <input type="password" id="pw-current" class="input" placeholder="Current password" autocomplete="current-password" aria-label="Current password" />
                         <button type="button" class="peek" id="pw-current-peek" aria-label="Show password" aria-pressed="false">
@@ -235,17 +245,21 @@
 
                 <div class="card stack reveal d3" id="passkeys-card">
                     <h2 class="section-title">Passkeys</h2>
+                    <fieldset class="range" id="mfa-row" hidden>
+                        <legend>Password logins</legend>
+                        <label class="radio-opt"><input type="radio" name="mfa" id="mfa-off" value="off" checked /><span>Password alone (default)</span></label>
+                        <label class="radio-opt"><input type="radio" name="mfa" id="mfa-on" value="on" /><span>Also require a passkey (or a recovery code) after my password</span></label>
+                    </fieldset>
                     <p class="subtitle" id="passkeys-sub">Sign in with this device's fingerprint, face or screen lock instead of your password, or add it as a second step after the password. You can have several (one per device).</p>
                     <p class="msg" id="recovery-used" role="status" hidden></p>
                     <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Added</th><th>Last used</th><th>Synced</th><th></th></tr></thead><tbody id="passkeys-body"></tbody></table></div>
                     <div class="stack" id="passkeys-actions">
-                        <label class="field-label" for="passkey-current">Current password (confirms every change here)</label>
-                        <input type="password" class="input" id="passkey-current" autocomplete="current-password" aria-label="Current password, to confirm passkey changes" />
+                        <label class="field-label" for="passkey-current" id="passkey-current-label">Your password (asked again for every change)</label>
+                        <input type="password" class="input" id="passkey-current" autocomplete="current-password" />
                         <form class="toolbar" id="passkey-form">
                             <input class="input" id="passkey-name" placeholder="Passkey name, e.g. work laptop" maxlength="100" aria-label="Passkey name" />
                             <button type="submit" class="btn" id="passkey-add">Add a passkey</button>
                         </form>
-                        <label class="inline" id="mfa-row"><input type="checkbox" id="mfa-toggle" /> Also require a passkey (or a recovery code) after my password</label>
                         <p class="mono muted" id="recovery-status"></p>
                         <div class="btn-row"><button type="button" class="btn" id="recovery-regen">New recovery codes</button></div>
                     </div>
@@ -260,6 +274,10 @@
                 <div class="card stack reveal d3" id="keys-card">
                     <h2 class="section-title">API keys</h2>
                     <p class="subtitle" id="keys-sub">Keys let the <code class="mono">secbin</code> CLI create shares for you (and nothing else). Use them via <code class="mono">SECBIN_API_KEY</code> or <code class="mono">--api-key-file</code>.</p>
+                    <div class="stack" id="key-confirm">
+                        <label class="field-label" for="key-current" id="key-current-label">Your password (asked again for every change)</label>
+                        <input type="password" class="input" id="key-current" autocomplete="current-password" />
+                    </div>
                     <form class="toolbar" id="key-form">
                         <input class="input" id="key-name" placeholder="Key name, e.g. laptop" maxlength="100" aria-label="Key name" />
                         <select class="input" id="key-life" aria-label="Key lifetime">

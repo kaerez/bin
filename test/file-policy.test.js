@@ -4,7 +4,7 @@
 // the policy attached, refused types are named, the owner is exempt, and the
 // API channel can only tighten the depth.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson } from './helpers.js';
+import { owner, makeUser, fetchJson, proofFor, USER_PW } from './helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -57,7 +57,7 @@ describe('file policy', () => {
     expect((await deep.json()).error).toBe('folder_too_deep');
     // API channel: tightened to 1 for API keys; the web UI keeps 2.
     expect((await limits(u.id, 'api', { maxFolderDepth: 1 })).status).toBe(200);
-    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: 'k' } })).json()).key;
+    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'k' } })).json()).key;
     const viaApi = await init(undefined, { depth: 2 }, { authorization: `Bearer ${key}` });
     expect(viaApi.status).toBe(403);
     expect((await init(undefined, { depth: 1 }, { authorization: `Bearer ${key}` })).status).toBe(201);
