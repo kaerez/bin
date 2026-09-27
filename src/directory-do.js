@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS recovery_codes (hash TEXT PRIMARY KEY, user_id TEXT N
 CREATE INDEX IF NOT EXISTS recovery_user ON recovery_codes(user_id);
 CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL, challenge TEXT NOT NULL,
   exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -125,6 +126,12 @@ const MIGRATIONS = [
     m.sql.exec(`CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL, challenge TEXT NOT NULL,
       exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0)`);
   },
+  // 7: usernameless login challenges are no longer stored (HMAC-signed); only
+  // spent ones are remembered until they expire
+  (m) => {
+    m.sql.exec('CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL)');
+    m.sql.exec("DELETE FROM webauthn_challenges WHERE purpose = 'login'");
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -167,6 +174,8 @@ const MAX_PASSKEYS = 10;
 const RECOVERY_CODES = 20;
 const CHALLENGE_SEC = 300;
 const MAX_CHALLENGES = 5000;
+// Pending (stored) challenges per account and purpose: a new one retires the oldest.
+const MAX_CHALLENGES_PER_USER = 3;
 const SECOND_FACTOR_TRIES = 5;
 // Recovery codes: 16 Crockford base32 characters (80 random bits), shown as
 // XXXX-XXXX-XXXX-XXXX; stored as SHA-256 only. Typing is forgiving: case,
@@ -567,7 +576,9 @@ export class Directory extends DurableObject {
     if (bad) return fail(400, 'invalid_credential', bad);
     this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), uid);
     this.#log(uid, uid, 'password.changed');
-    return { ok: true, ver: u.sess_ver + 1 };
+    // Passkeys and recovery codes are not tied to the password: tell the user
+    // they still work (Account asks them to review them).
+    return { ok: true, ver: u.sess_ver + 1, passkeys: this.#passkeyCount(uid), recoveryLeft: this.#recoveryLeft(uid) };
   }
 
   /**
@@ -691,17 +702,61 @@ export class Directory extends DurableObject {
     this.sql.exec('UPDATE users SET webauthn_handle = ? WHERE id = ?', h, u.id);
     return h;
   }
-  #newChallenge(purpose, uid = null) {
+  /**
+   * A stored challenge for an account: "register" (signed in) or "second"
+   * (right password). Only those callers can create one, and each account
+   * keeps at most MAX_CHALLENGES_PER_USER per purpose, so nobody can flood the
+   * table or push out someone else's pending sign-in. Usernameless "login"
+   * challenges are never stored (see #loginChallenge).
+   */
+  #newChallenge(purpose, uid) {
     const ts = now();
     this.sql.exec('DELETE FROM webauthn_challenges WHERE exp <= ?', ts);
-    // Unauthenticated callers can create login challenges: keep the table bounded.
+    this.sql.exec(`DELETE FROM webauthn_challenges WHERE id IN (SELECT id FROM webauthn_challenges WHERE user_id = ? AND purpose = ?
+      ORDER BY exp DESC, rowid DESC LIMIT -1 OFFSET ?)`, uid, purpose, MAX_CHALLENGES_PER_USER - 1);
+    // A backstop only: reaching it needs thousands of accounts mid-sign-in.
     if (this.sql.exec('SELECT COUNT(*) AS c FROM webauthn_challenges').one().c >= MAX_CHALLENGES) {
-      this.sql.exec('DELETE FROM webauthn_challenges WHERE id IN (SELECT id FROM webauthn_challenges ORDER BY exp LIMIT ?)', MAX_CHALLENGES / 10);
+      this.sql.exec('DELETE FROM webauthn_challenges WHERE id IN (SELECT id FROM webauthn_challenges ORDER BY exp, rowid LIMIT ?)', MAX_CHALLENGES / 10);
     }
     const id = newId();
     const challenge = b64urlFromBytes(randomBytes(32));
     this.sql.exec('INSERT INTO webauthn_challenges (id, user_id, purpose, challenge, exp) VALUES (?, ?, ?, ?, ?)', id, uid, purpose, challenge, ts + CHALLENGE_SEC);
     return { challengeId: id, challenge, timeoutMs: CHALLENGE_SEC * 1000 };
+  }
+  async #loginKey() {
+    if (!this.loginKey) {
+      this.loginKey = await crypto.subtle.importKey('raw', utf8(`secbin-webauthn-login/v1:${this.#meta('secret')}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    }
+    return this.loginKey;
+  }
+  /**
+   * A usernameless sign-in challenge that is not stored: 16 random bytes, the
+   * expiry and an HMAC tag, all in the challenge itself (it is also its id).
+   * Anyone may ask for one, so asking writes nothing; the challenge is marked
+   * spent only when it is used with a registered passkey.
+   */
+  async #loginChallenge() {
+    const body = new Uint8Array(20);
+    body.set(randomBytes(16));
+    new DataView(body.buffer).setUint32(16, now() + CHALLENGE_SEC);
+    const tag = new Uint8Array(await crypto.subtle.sign('HMAC', await this.#loginKey(), body)).subarray(0, 16);
+    const out = new Uint8Array(36);
+    out.set(body);
+    out.set(tag, 20);
+    const challenge = b64urlFromBytes(out);
+    return { challengeId: challenge, challenge, timeoutMs: CHALLENGE_SEC * 1000 };
+  }
+  /** → its expiry when `token` is a genuine, unexpired login challenge, else 0. */
+  async #checkLoginChallenge(token) {
+    if (typeof token !== 'string' || token.length !== 48) return 0;
+    let b;
+    try { b = bytesFromB64url(token); } catch { return 0; }
+    if (b.length !== 36) return 0;
+    const tag = new Uint8Array(await crypto.subtle.sign('HMAC', await this.#loginKey(), b.subarray(0, 20))).subarray(0, 16);
+    let diff = 0;
+    for (let i = 0; i < 16; i++) diff |= tag[i] ^ b[20 + i];
+    const exp = new DataView(b.buffer, b.byteOffset).getUint32(16);
+    return diff === 0 && exp > now() ? exp : 0;
   }
   /** One-time use: the challenge is deleted as it is read. */
   #takeChallenge(id, purpose) {
@@ -721,7 +776,8 @@ export class Directory extends DurableObject {
     const norm = normalizeRecoveryCode(code);
     return norm ? sha256Hex(utf8(`secbin-recovery/v1:${norm}`)) : null;
   }
-  async #issueCodes(uid) {
+  /** A new set of codes and their hashes (hashing awaits, so do it before any decision). */
+  async #prepareCodes() {
     const codes = [];
     const hashes = [];
     for (let i = 0; i < RECOVERY_CODES; i++) {
@@ -729,12 +785,15 @@ export class Directory extends DurableObject {
       codes.push(c);
       hashes.push(await this.#codeHash(c));
     }
+    return { codes, hashes };
+  }
+  /** Replace an account's codes with a prepared set (synchronous). */
+  #storeCodes(uid, { hashes }) {
     const ts = now();
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ?', uid);
       for (const h of hashes) this.sql.exec('INSERT INTO recovery_codes (hash, user_id, created) VALUES (?, ?, ?)', h, uid, ts);
     });
-    return codes;
   }
   #dropPasskeys(uid) {
     this.sql.exec('DELETE FROM passkeys WHERE user_id = ?', uid);
@@ -780,6 +839,9 @@ export class Directory extends DurableObject {
     if (wrong) return wrong;
     const r = await verifyRegistration(credential, { challenge: c.challenge, origin, rpId });
     if (!r.ok) return fail(400, 'invalid_passkey', `The passkey could not be verified (${r.reason}).`);
+    // Every await is behind us from here: the checks, the insert and the
+    // decision to issue codes happen in one uninterrupted step.
+    const prepared = await this.#prepareCodes();
     if (this.sql.exec('SELECT 1 FROM passkeys WHERE id = ?', r.credentialId).toArray().length) {
       return fail(409, 'passkey_exists', 'That passkey is already registered.');
     }
@@ -789,8 +851,12 @@ export class Directory extends DurableObject {
       r.credentialId, uid, label, r.publicKey, r.alg, r.signCount, r.transports.join(','), r.backupEligible ? 1 : 0, r.backedUp ? 1 : 0, now());
     this.#log(uid, uid, 'passkey.added', `name=${label}`);
     // The first passkey comes with a fresh set of recovery codes, shown once.
-    const codes = first || this.#recoveryLeft(uid) === 0 ? await this.#issueCodes(uid) : null;
-    if (codes) this.#log(uid, uid, 'recovery.issued', `count=${codes.length}`);
+    let codes = null;
+    if (first || this.#recoveryLeft(uid) === 0) {
+      this.#storeCodes(uid, prepared);
+      codes = prepared.codes;
+      this.#log(uid, uid, 'recovery.issued', `count=${codes.length}`);
+    }
     return { ok: true, id: r.credentialId, codes };
   }
 
@@ -812,14 +878,15 @@ export class Directory extends DurableObject {
   }
 
   async regenerateRecoveryCodes(uid, { current, lockoutOff = false }) {
+    const prepared = await this.#prepareCodes(); // before any check: nothing can change in between
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     const wrong = this.#checkCurrent(u, current, lockoutOff);
     if (wrong) return wrong;
     if (!this.#passkeyCount(uid)) return fail(409, 'no_passkeys', 'Add a passkey first: recovery codes stand in for a passkey.');
-    const codes = await this.#issueCodes(uid);
-    this.#log(uid, uid, 'recovery.issued', `count=${codes.length} (old codes revoked)`);
-    return { ok: true, codes };
+    this.#storeCodes(uid, prepared);
+    this.#log(uid, uid, 'recovery.issued', `count=${prepared.codes.length} (old codes revoked)`);
+    return { ok: true, codes: prepared.codes };
   }
 
   /** The user's choice (mode "any"): should a password login also need a passkey? */
@@ -840,27 +907,34 @@ export class Directory extends DurableObject {
 
   /** Usernameless sign-in: a challenge any of the site's passkeys can answer. */
   async passkeyLoginOptions() {
-    return { ok: true, ...this.#newChallenge('login') };
+    return { ok: true, ...(await this.#loginChallenge()) };
   }
 
   async #checkAssertion(p, credential, challenge, origin, rpId) {
     const r = await verifyAssertion(credential, { challenge, origin, rpId, publicKey: p.public_key, signCount: p.sign_count });
     if (!r.ok) return r;
-    // Written only if no concurrent assertion moved the counter past this one.
-    this.sql.exec('UPDATE passkeys SET sign_count = ?, backed_up = ?, last_used = ? WHERE id = ? AND (sign_count < ? OR ? = 0)',
-      r.signCount, r.backedUp ? 1 : 0, now(), p.id, r.signCount, r.signCount);
+    // Written only if no concurrent assertion moved the counter past this one;
+    // when counters are in use, losing that race means a cloned authenticator.
+    const moved = this.sql.exec('UPDATE passkeys SET sign_count = ?, backed_up = ?, last_used = ? WHERE id = ? AND (sign_count < ? OR ? = 0) RETURNING id',
+      r.signCount, r.backedUp ? 1 : 0, now(), p.id, r.signCount, r.signCount).toArray().length;
+    if (!moved) return { ok: false, reason: 'signature counter went backwards (cloned authenticator?)' };
     return r;
   }
 
   /** Sign in with a passkey alone (mode "any" only). */
   async passkeyLogin({ challengeId, credential, origin, rpId }) {
-    const c = this.#takeChallenge(challengeId, 'login');
-    if (!c) return fail(400, 'challenge_expired', 'That sign-in request expired. Try again.');
+    const exp = await this.#checkLoginChallenge(challengeId);
+    if (!exp) return fail(400, 'challenge_expired', 'That sign-in request expired. Try again.');
     const id = assertionId(credential);
     const p = id && this.sql.exec('SELECT * FROM passkeys WHERE id = ?', id).toArray()[0];
     const u = p && this.#user(p.user_id);
-    if (!u || (u.role !== 'owner' && u.role !== 'user')) return fail(401, 'invalid_passkey', 'This passkey is not registered here.');
-    const r = await this.#checkAssertion(p, credential, c.challenge, origin, rpId);
+    if (!u || (u.role !== 'owner' && u.role !== 'user')) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
+    // Spend the challenge before verifying (single use, even if this attempt fails).
+    const ts = now();
+    this.sql.exec('DELETE FROM webauthn_spent WHERE exp <= ?', ts);
+    const fresh = this.sql.exec('INSERT INTO webauthn_spent (challenge, exp) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING challenge', challengeId, exp).toArray().length;
+    if (!fresh) return fail(400, 'challenge_expired', 'That sign-in request was already used. Try again.');
+    const r = await this.#checkAssertion(p, credential, challengeId, origin, rpId);
     if (!r.ok) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
     if (r.userHandle && u.webauthn_handle && r.userHandle !== u.webauthn_handle) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
     const mode = this.#passkeyMode(u);
@@ -881,13 +955,17 @@ export class Directory extends DurableObject {
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     const mode = this.#passkeyMode(u);
-    const valid = hash && mode !== 'off' && this.sql.exec('SELECT 1 FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash).toArray().length;
+    // Codes stand in for a passkey: without one they mean nothing.
+    const valid = hash && mode !== 'off' && this.#passkeyCount(u.id) > 0
+      && this.sql.exec('SELECT 1 FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash).toArray().length;
     if (!valid) {
       this.#passwordFailure(u, ts, s, lockoutOff);
       return fail(401, 'invalid_login', 'Wrong username or recovery code.');
     }
-    // A valid code is not spent when it cannot sign in on its own here.
-    if (mode === 'second') return fail(403, 'password_first', 'This account signs in with its password first, then a passkey or recovery code.');
+    // A valid code is not spent when it cannot sign in on its own here: the
+    // administrator's "second" mode, or the user's own "passkey after
+    // password" (a code alone would then be weaker than what they chose).
+    if (mode === 'second' || u.mfa) return fail(403, 'password_first', 'This account signs in with its password first, then a passkey or recovery code.');
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
     this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash);
     this.#log(u.id, u.id, 'login', `recovery code (${this.#recoveryLeft(u.id)} left)`);
@@ -906,6 +984,8 @@ export class Directory extends DurableObject {
     if (!c || c.exp <= ts) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
     const u = this.#user(c.user_id);
     if (!u) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
+    const locked = this.#lockedUntil(u, ts, lockoutOff);
+    if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     this.sql.exec('UPDATE webauthn_challenges SET tries = tries + 1 WHERE id = ?', c.id);
     if (c.tries + 1 > SECOND_FACTOR_TRIES) {
       this.sql.exec('DELETE FROM webauthn_challenges WHERE id = ?', c.id);
@@ -941,6 +1021,9 @@ export class Directory extends DurableObject {
   async adminResetPasskeys(id, actorId) {
     const u = this.#user(id);
     if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    // The owner removes their own passkeys from Account, with the current
+    // password; from here a stolen session alone could strip the second factor.
+    if (u.role === 'owner') return fail(403, 'use_account_page', 'Manage the owner\'s passkeys from Account, with the current password.');
     const n = this.#passkeyCount(id);
     this.#dropPasskeys(id);
     this.#log(actorId, id, 'passkeys.reset_by_admin', `removed=${n}`);
@@ -1509,9 +1592,13 @@ export class Directory extends DurableObject {
     if (u.role === 'owner') return fail(403, 'use_account_page', 'Change the owner password from Account, with the current password.');
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
+    const n = this.#passkeyCount(id);
     this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), id);
     this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
-    this.#log(actorId, id, 'password.reset_by_admin');
+    // An admin reset is account recovery: whoever took the account over may
+    // have added a passkey or replaced the recovery codes, so they go too.
+    this.#dropPasskeys(id);
+    this.#log(actorId, id, 'password.reset_by_admin', n ? `passkeys removed=${n}` : '');
     return { ok: true, ver: u.sess_ver + 1 };
   }
 
@@ -1781,7 +1868,7 @@ export class Directory extends DurableObject {
         plan.errors.push(`"${d.as}" does not exist here and the export has no credentials for it — it cannot be created`);
       } else {
         entry.action = existing ? 'overwrite' : 'create';
-        if (existing && u.credentials) entry.note = 'ends its sessions and revokes its API keys; its shares stay';
+        if (existing && u.credentials) entry.note = 'ends its sessions and revokes its API keys and passkeys; its shares stay';
       }
       plan.users.push(entry);
     }
@@ -1839,6 +1926,7 @@ export class Directory extends DurableObject {
             this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
             this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', id);
             this.sql.exec('DELETE FROM api_keys WHERE user_id = ?', id);
+            this.#dropPasskeys(id);
           }
         }
         if (u.config) {
@@ -1934,6 +2022,7 @@ export class Directory extends DurableObject {
     this.#pruneLogs();
     this.sql.exec('DELETE FROM revoked_sessions WHERE exp < ?', ts);
     this.sql.exec('DELETE FROM webauthn_challenges WHERE exp <= ?', ts);
+    this.sql.exec('DELETE FROM webauthn_spent WHERE exp <= ?', ts);
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
     // Anonymous trackers expire after being idle, with their usage counters.
     const idleBefore = ts - this.#settings()['public.trackerIdleSec'];

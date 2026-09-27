@@ -25,10 +25,18 @@ const VERIFY_TIMEOUT_MS = 10000;
 export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', public: 'public-share' });
 
 /** { sitekey, secret } when both are set and well-formed, else null (Turnstile off). */
+let warned = false;
 export function turnstileConfig(env) {
   const sitekey = typeof env?.TURNSTILE_SITEKEY === 'string' ? env.TURNSTILE_SITEKEY.trim() : '';
   const secret = typeof env?.TURNSTILE_SECRET === 'string' ? env.TURNSTILE_SECRET.trim() : '';
-  if (!KEY_RE.test(sitekey) || !KEY_RE.test(secret)) return null;
+  if (!KEY_RE.test(sitekey) || !KEY_RE.test(secret)) {
+    // Half a configuration is a mistake, not a choice: say so (never the values).
+    if ((sitekey || secret) && !warned) {
+      warned = true;
+      console.warn('Turnstile is OFF: TURNSTILE_SITEKEY and TURNSTILE_SECRET must both be set and well-formed');
+    }
+    return null;
+  }
   return { sitekey, secret };
 }
 

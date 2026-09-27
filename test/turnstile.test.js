@@ -115,6 +115,19 @@ describe('login', () => {
   });
 });
 
+describe('passkey and recovery-code logins', () => {
+  it('need a "login" token too (the second step rides on the password step\'s)', async () => {
+    withFake();
+    const o = await (await tsFetch('/api/auth/passkey/options', { method: 'POST', body: {}, ip: freshIp() })).json();
+    const pk = await tsFetch('/api/auth/passkey/login', { method: 'POST', body: { challengeId: o.challengeId, credential: {} }, ip: freshIp() });
+    expect(await errorOf(pk)).toBe('turnstile_required');
+    const rc = await tsFetch('/api/auth/recovery', { method: 'POST', body: { username: 'owner', code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ' }, ip: freshIp() });
+    expect(await errorOf(rc)).toBe('turnstile_required');
+    const sf = await tsFetch('/api/auth/second-factor', { method: 'POST', body: { challengeId: 'nope', code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ' }, ip: freshIp() });
+    expect(await errorOf(sf)).toBe('challenge_expired');
+  });
+});
+
 describe('password changes', () => {
   it('a signed-in change needs a "password" token; an admin reset does not', async () => {
     withFake();

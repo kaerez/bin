@@ -80,9 +80,11 @@ function wirePassword() {
       const { salt, t } = await prelogin(profile.user.username);
       const current = await stretch($('#pw-current').value, salt, t);
       const cred = await newCredential($('#pw-new').value);
-      await changePassword({ current, ...cred }, token);
+      const r = await changePassword({ current, ...cred }, token);
       form.reset();
-      showMsg(msg, 'Password changed. Your other sessions were signed out.', false);
+      // Passkeys and recovery codes are not tied to the password.
+      const still = r.passkeys ? ` Your ${r.passkeys} passkey${r.passkeys === 1 ? '' : 's'} and ${r.recoveryLeft} recovery code${r.recoveryLeft === 1 ? '' : 's'} still work: if someone else may have had access, remove any passkey you do not recognise and create new recovery codes below.` : '';
+      showMsg(msg, `Password changed. Your other sessions were signed out.${still}`, false);
       toast('Password changed. Your other sessions were signed out.');
     } catch (err) {
       const text = err instanceof ApiError && err.code === 'wrong_password' ? 'The current password is incorrect.' : friendlyError(err);

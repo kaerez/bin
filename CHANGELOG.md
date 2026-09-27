@@ -13,6 +13,21 @@ secbin entries.
 **Breaking:** protocol v2. Links created by earlier versions (v1, `binthere/v1` labels) can no
 longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`410`).
 
+### Security
+
+- **Passkey and sign-in hardening** (from a review of the new features):
+  - usernameless sign-in challenges are no longer stored, so a flood of requests cannot push out
+    other people's pending sign-ins;
+  - stored challenges are capped per account;
+  - the owner's passkeys can no longer be removed from the admin panel without the password;
+  - an admin password reset (or an import that overwrites credentials) now also removes the
+    account's passkeys and recovery codes;
+  - a recovery code alone no longer signs in once the user turned on "passkey after password";
+  - the second step respects the account lockout;
+  - concurrent sign-ins with a cloned passkey fail;
+  - Account lists the passkeys and codes that still work after a password change;
+  - a warning is logged when only one Turnstile key is set.
+
 ### Added
 
 - **Progress bars for previews and downloads:** viewing a file opens the preview at once, with a
