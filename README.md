@@ -225,8 +225,8 @@ Cloudflare Access is no longer needed. You may still layer it in front of `/dash
 
 ## Accessibility
 
-The pages are built to **WCAG 2.2 level AA**, which covers the WCAG 2.0 AA base of the Israeli
-standard IS 5568. They have skip links, landmarks, full keyboard operation with visible focus,
+The pages are built to **WCAG 2.2 level AA as a minimum, and AAA wherever possible**; AA also covers WCAG 2.1
+AA and 2.0 AA. They have skip links, landmarks, full keyboard operation with visible focus,
 labelled fields, AA contrast in both themes, reduced-motion support, reflow down to 320 px and
 24 px touch targets. Every page and state is checked with axe-core.
 

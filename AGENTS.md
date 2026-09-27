@@ -88,6 +88,9 @@ never committed) and `node_modules`.
   existing passkeys are left untouched. New accounts are created from the selected parts.
 - **Export passphrase:** optional, no minimum length; the UI warns when it is empty.
 - **Human check (Turnstile):** protected buttons stay disabled until the check has passed.
+- **Accessibility:** WCAG 2.2 level AA is the minimum for every page and state; meet level AAA
+  wherever possible. Default accessibility texts (statement, admin help, docs) name no country,
+  region or national standard.
 - **Reverse shares:** an optional password gates the anonymous uploader only; uploads land in the
   user's chosen drive folder; the user never needs that password.
 - **Impersonation:** the owner can do everything the user can, the Drive included; it is
