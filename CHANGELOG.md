@@ -47,6 +47,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **The owner's own activity-log retention** (Admin → Roles → Owner → "Your activity log"):
+  `log.ownerMaxAgeSec` and `log.ownerMaxEntries` limit the entries about the owner and those the
+  owner made (admin actions, impersonation). Both default to keep forever, as before. Server-wide
+  configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile,
+  the public account's configuration) are still never deleted automatically; clearing by hand is
+  unchanged. The settings travel in the settings part of an export and are validated on import.
+  Check audit-trail retention duties (e.g. SOX) with Legal / Compliance before setting them.
 - **Export / import everything, part by part.**
   - System parts: settings, roles, IP rules, the panel's Turnstile keys (with the secret; off by
     default) and the public account.

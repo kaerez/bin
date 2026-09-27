@@ -2559,24 +2559,46 @@ export class Directory extends DurableObject {
   }
 
   /**
-   * Activity-log retention: the global age and size (log.* settings) and each
+   * Activity-log retention: the global age and size (log.* settings), each
    * account's own limits (logMaxAgeSec / logMaxEntries, for entries about that
-   * account). Entries about the owner are exempt: global settings never apply
-   * to the owner, who can clear them by hand.
+   * account) and the owner's own (log.ownerMaxAgeSec / log.ownerMaxEntries,
+   * for entries about the owner and entries the owner made). Global settings
+   * and role limits never apply to the owner's entries; server-wide
+   * configuration changes are never pruned automatically at all. The owner
+   * can clear any of them by hand.
    */
   #pruneLogs() {
     const s = this.#settings();
     const ts = now();
     const owner = this.#owner();
     const oid = owner ? owner.id : '';
-    // Never removed automatically: entries about the owner, entries the owner
-    // made (admin actions, impersonation) and server-wide entries with no
-    // subject (settings, global limits, IP rules, exports). Only the owner can
-    // clear those, by hand.
+    // Not removed by the global or per-account limits: entries about the
+    // owner, entries the owner made (admin actions, impersonation) and
+    // server-wide entries with no subject (settings, the Default role, roles,
+    // IP rules and blocks, exports and imports, Turnstile).
     const PRUNABLE = 'subject_id IS NOT NULL AND subject_id != ? AND (actor_id IS NULL OR actor_id != ?)';
     this.sql.exec(`DELETE FROM activity WHERE ts < ? AND ${PRUNABLE}`, ts - s['log.maxAgeSec'], oid, oid);
     // Read receipts live as long as the log does.
     this.sql.exec('DELETE FROM opens WHERE ts < ? AND user_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
+    // The owner's own limits (null: kept until cleared). They cover entries
+    // about the owner and those the owner made, never a configuration change:
+    // one with no subject, or the owner configuring the public account (its
+    // limits, quotas, viewer rules and browser ids).
+    if (owner) {
+      const PUBLIC_CONFIG = "subject_id = ? AND actor_id IS ? AND (action IN ('limits.updated', 'quotas.updated', 'viewer_rules.updated') OR action LIKE 'tracker.%')";
+      const OWNED = `subject_id IS NOT NULL AND (subject_id = ? OR actor_id IS ?) AND NOT (${PUBLIC_CONFIG})`;
+      const args = [oid, oid, PUBLIC_ID, oid];
+      if (s['log.ownerMaxAgeSec'] !== null) {
+        this.sql.exec(`DELETE FROM activity WHERE ts < ? AND ${OWNED}`, ts - s['log.ownerMaxAgeSec'], ...args);
+        this.sql.exec('DELETE FROM opens WHERE user_id = ? AND ts < ?', oid, ts - s['log.ownerMaxAgeSec']);
+      }
+      if (s['log.ownerMaxEntries'] !== null) {
+        const n = this.sql.exec(`SELECT COUNT(*) AS c FROM activity WHERE ${OWNED}`, ...args).one().c;
+        if (n > s['log.ownerMaxEntries']) {
+          this.sql.exec(`DELETE FROM activity WHERE id IN (SELECT id FROM activity WHERE ${OWNED} ORDER BY id ASC LIMIT ?)`, ...args, n - s['log.ownerMaxEntries']);
+        }
+      }
+    }
     // Per-account limits: visit only the accounts they apply to (every account
     // when a global value is set, otherwise those with their own value).
     // (A row holding null means "no per-account limit".)
