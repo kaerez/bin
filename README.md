@@ -61,7 +61,7 @@ flowchart TD
 | Optional password | Argon2id (64 MiB, t=3). Checked by the server via a proof before any view is spent. |
 | Recipient downloads | Tree view: download any file raw, any folder/sub-folder as a ZIP, or everything at once. |
 | Safe in-browser viewer | Optional, admin-governed: text, Markdown, code, images, PDF (hardened pdf.js, no PDF scripting), audio/video. Nothing executes. |
-| Accounts | Built-in login; one owner/admin; users with per-user capabilities, limits, quotas and API keys. |
+| Accounts | Built-in login; one owner/admin; users with one role each (capabilities, limits, quotas, password policy, passkeys, sessions) and API keys. |
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, label shares, and see **read receipts** — every open with its time (and, if the admin allows, the opener's address, location, browser, system and languages). |
 | Admin | Users, impersonation ("log in as"), password resets, limits, quotas, session timeouts, file-size caps, viewer policy, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
@@ -153,11 +153,14 @@ working.
   with the current password), unlock, and **log in as** a user — every action taken
   while impersonating is recorded with the real actor in the audit log, while the user's own
   activity shows it as theirs.
-- **Capabilities & limits** — defaults for everyone plus per-user overrides: notes/files on or
-  off, max views, unlimited views allowed, max expiry, max share size, max single-file size, max
-  files per share, in-browser viewer, API keys (on/off, max count or no limit). Every setting shows
-  its built-in default. Global settings never restrict the owner (session timeouts and per-IP
-  protection still apply).
+- **Roles** (Admin → Roles) — every user has one: Default unless given another. A role sets
+  notes/files on or off, max views, unlimited views allowed, max expiry, max share size, max
+  single-file size, max files per share, the in-browser viewer and its largest file, API keys
+  (on/off, max count or no limit), link rules, file types, read-receipt details, log retention,
+  the password policy, passkeys (mode and how many), session timeouts, quotas and viewer rules.
+  The Default role holds a value for everything; other roles follow it for whatever they leave
+  unset. The locked Owner role never restricts the owner (the owner's session timeouts and
+  per-IP protection still apply).
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
   *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).

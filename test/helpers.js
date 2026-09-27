@@ -20,7 +20,28 @@ let ipCounter = 1;
 /** A fresh client IP per test file/area so Guard state never bleeds between tests. */
 export const freshIp = () => `198.51.100.${(ipCounter++ % 250) + 1}`;
 
-export function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip } = {}) {
+// Accounts have no settings of their own: roles replace them. Tests that set a
+// limit, quota or viewer rule "for a user" give that user a role of their own
+// ("user <id>") and set it there, which is what an admin would do.
+const ROLE_SCOPED = /^\/api\/private\/admin\/(limits|quotas|viewer-rules)$/;
+const userRoles = new Map();
+async function roleForUser(uid, cookie) {
+  if (userRoles.has(uid)) return userRoles.get(uid);
+  const name = `user ${uid}`;
+  const call = (p, init) => SELF.fetch(`${ORIGIN}${p}`, { ...init, headers: { 'content-type': 'application/json', cookie, 'x-secbin-intent': '1' }, redirect: 'manual' });
+  let r = await call('/api/private/admin/roles', { method: 'POST', body: JSON.stringify({ name }) });
+  let id = r.status === 201 ? (await r.json()).id : null;
+  if (!id) id = (await (await call('/api/private/admin/roles', { method: 'GET' })).json()).roles.find((x) => x.name === name)?.id;
+  r = await call(`/api/private/admin/users/${uid}/role`, { method: 'PUT', body: JSON.stringify({ roleId: id }) });
+  if (r.status !== 200) throw new Error(`role for ${uid}: ${r.status} ${await r.text()}`);
+  userRoles.set(uid, id);
+  return id;
+}
+
+export async function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip } = {}) {
+  if (ROLE_SCOPED.test(path) && body && typeof body.scope === 'string' && /^[A-Za-z0-9_-]{16}$/.test(body.scope) && body.scope !== 'public-user-0000') {
+    body = { ...body, scope: `role:${await roleForUser(body.scope, cookie)}` };
+  }
   const h = { ...headers };
   if (body !== undefined) h['content-type'] = 'application/json';
   if (cookie) h.cookie = cookie;

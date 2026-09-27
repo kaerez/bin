@@ -47,6 +47,22 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Roles** (Admin → Roles, next to Users). Every user has exactly one role, Default unless
+  given another.
+  - **Owner** is built in and locked (everything allowed, no limits; the owner's only).
+  - **Default** is built in, cannot be deleted, and holds a value for every option.
+  - **Custom roles** can be created, renamed, duplicated (Default too) and deleted. Their users
+    return to Default when a role is deleted. Options a role leaves on "same as Default" follow
+    Default.
+  - A role covers every limit, the API restrictions, quotas (Default's or its own list), viewer
+    rules and the largest previewable file, the password policy, passkeys (mode and how many)
+    and user session timeouts.
+  - The role is chosen per user in Users. The Defaults & quotas tab is gone (its options are
+    the Default role's), and so are all per-user settings.
+  - **Upgrade note:** existing per-user overrides are removed (one audit entry says how many).
+  - Export and import carry roles: `system.roles`, and each user's `config: { role }`. Older
+    files' per-user settings are accepted and ignored, with a warning.
+
 - **Account:** change your username; edit an API key's name and scopes; confirm changes with a
   passkey instead of the password; how you sign in is a choice under Passkeys: "Password or
   Passkey" (default) or "Password and passkey". A recovery code always signs in on its own.

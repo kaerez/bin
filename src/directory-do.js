@@ -20,7 +20,7 @@ import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn
 import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, PASSWORD_POLICY_KEYS,
-  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES,
+  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS } from './lib/portable.js';
@@ -31,7 +31,9 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
   pw_salt TEXT NOT NULL, pw_t INTEGER NOT NULL, pw_verifier TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0,
   sess_ver INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL, updated INTEGER NOT NULL,
-  webauthn_handle TEXT, mfa INTEGER NOT NULL DEFAULT 0);
+  webauthn_handle TEXT, mfa INTEGER NOT NULL DEFAULT 0, role_id TEXT);
+CREATE TABLE IF NOT EXISTS roles (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, own_quotas INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS limits (user_id TEXT NOT NULL, channel TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
   PRIMARY KEY (user_id, channel, key));
 CREATE TABLE IF NOT EXISTS quotas (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, channel TEXT NOT NULL, kind TEXT NOT NULL,
@@ -147,6 +149,31 @@ const MIGRATIONS = [
   (m) => {
     m.addColumn('shares', 'lh', 'TEXT');
   },
+  // 10: roles. Each account has one (users.role_id; none = the Default role,
+  // i.e. the global rows); a role's limits, quotas and viewer rules live under
+  // the scope "r:<id>". Per-user overrides are dropped (the public account
+  // keeps its own); how many is recorded and logged once the migration is done.
+  (m) => {
+    m.sql.exec(`CREATE TABLE IF NOT EXISTS roles (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, own_quotas INTEGER NOT NULL DEFAULT 0,
+      created INTEGER NOT NULL, updated INTEGER NOT NULL)`);
+    m.addColumn('users', 'role_id', 'TEXT');
+    const own = "user_id != '' AND user_id != 'public-user-0000' AND user_id NOT LIKE 'r:%'";
+    const counts = [
+      m.sql.exec(`SELECT COUNT(*) AS c FROM limits WHERE ${own}`).one().c,
+      m.sql.exec(`SELECT COUNT(*) AS c FROM quotas WHERE ${own}`).one().c,
+      m.sql.exec(`SELECT COUNT(*) AS c FROM viewer_rules WHERE ${own}`).one().c,
+      m.sql.exec(`SELECT COUNT(DISTINCT user_id) AS c FROM (SELECT user_id FROM limits WHERE ${own} UNION SELECT user_id FROM quotas WHERE ${own} UNION SELECT user_id FROM viewer_rules WHERE ${own})`).one().c,
+    ];
+    m.sql.exec(`DELETE FROM usage WHERE quota_id IN (SELECT id FROM quotas WHERE ${own})`);
+    m.sql.exec(`DELETE FROM limits WHERE ${own}`);
+    m.sql.exec(`DELETE FROM quotas WHERE ${own}`);
+    m.sql.exec(`DELETE FROM viewer_rules WHERE ${own}`);
+    if (counts.some((c) => c > 0)) {
+      m.sql.exec("INSERT INTO meta (k, v) VALUES ('roles_migration', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        `accounts=${counts[3]} limits=${counts[0]} quotas=${counts[1]} viewer_rules=${counts[2]}`);
+    }
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -161,6 +188,32 @@ function migrator(sql) {
 }
 
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{2,63}$/;
+/**
+ * The Default role holds an explicit value for every role option (the global
+ * rows): whatever is missing gets its built-in default, and the per-role
+ * values of server-wide settings (user session timeouts, the largest
+ * previewable file) start from the current settings. Idempotent.
+ */
+function materializeDefaultRole(sql) {
+  const rows = {};
+  for (const r of sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all'").toArray()) rows[r.key] = r.value;
+  const st = {};
+  for (const r of sql.exec('SELECT key, value FROM settings').toArray()) { try { st[r.key] = JSON.parse(r.value); } catch { /* default applies */ } }
+  const settings = settingsWithDefaults(st);
+  const start = { sessionIdleSec: settings['session.idleSec'], sessionAbsSec: settings['session.absSec'], viewerMaxBytes: settings['viewer.maxBytes'] };
+  // The file-type mode and list go together: set both or neither.
+  if (!('fileTypeMode' in rows) || !('fileTypeRules' in rows)) { delete rows.fileTypeMode; delete rows.fileTypeRules; }
+  for (const [k, spec] of Object.entries(LIMITS)) {
+    if (k in rows) continue;
+    const v = k in start ? start[k] : spec.def;
+    sql.exec("INSERT INTO limits (user_id, channel, key, value) VALUES ('', 'all', ?, ?) ON CONFLICT(user_id, channel, key) DO UPDATE SET value = excluded.value", k, JSON.stringify(v));
+  }
+}
+
+/** The storage scope of a role's limits, quotas and viewer rules. */
+const roleScope = (id) => `r:${id}`;
+const ROLE_ID_RE = /^[A-Za-z0-9_-]{16}$/;
+const RESERVED_ROLE_NAMES = ['owner', 'default'];
 const TURNSTILE_KEY_RE = /^[A-Za-z0-9_-]{10,100}$/; // as src/lib/turnstile.js
 /** A key's scopes in canonical order, or null unless a non-empty list of known scopes. */
 const keyScopes = (list) => (Array.isArray(list) && list.length && list.every((x) => API_SCOPES.includes(x)) ? API_SCOPES.filter((x) => list.includes(x)) : null);
@@ -177,7 +230,8 @@ export const PUBLIC_ID = 'public-user-0000';
  * entries are the server's. They cannot be set for it (inheriting is fine).
  */
 export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
-  'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys']);
+  'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax',
+  'sessionIdleSec', 'sessionAbsSec']);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -204,7 +258,7 @@ const OPENS_DEDUPE_SEC = 60;
 const OPENS_PER_MINUTE = 30;
 const OPENS_KEEP_FIRST = 100;
 // Passkeys (see the passkeys section and src/lib/webauthn.js).
-const MAX_PASSKEYS = 10;
+
 const RECOVERY_CODES = 20;
 const CHALLENGE_SEC = 300;
 const MAX_CHALLENGES = 5000;
@@ -267,6 +321,11 @@ export class Directory extends DurableObject {
       this.#migrate();
       if (!this.#meta('secret')) this.#setMeta('secret', b64urlFromBytes(randomBytes(32)));
       this.#seedPublic();
+      const dropped = this.#meta('roles_migration');
+      if (dropped) {
+        this.#log(null, null, 'roles.migrated', `per-user settings removed (roles replace them): ${dropped}`);
+        this.sql.exec("DELETE FROM meta WHERE k = 'roles_migration'");
+      }
       if (!this.#meta('viewer_seeded')) {
         for (const r of DEFAULT_VIEWER_RULES) {
           this.sql.exec('INSERT INTO viewer_rules (user_id, match, value, renderer) VALUES (?, ?, ?, ?)', '', r.match, r.value, r.renderer);
@@ -332,7 +391,8 @@ export class Directory extends DurableObject {
     return this.sql.exec("SELECT * FROM users WHERE role = 'owner'").toArray()[0] || null;
   }
   #publicUser(u) {
-    return u && { id: u.id, username: u.username, role: u.role, disabled: !!u.disabled, created: u.created, updated: u.updated };
+    return u && { id: u.id, username: u.username, role: u.role, disabled: !!u.disabled, created: u.created, updated: u.updated,
+      roleId: u.role === 'owner' ? 'owner' : u.role === 'user' && this.#role(u.role_id) ? u.role_id : u.role === 'user' ? 'default' : null };
   }
   /**
    * `actor` is a user id, or { id, imp: true } when the owner acted while
@@ -365,11 +425,25 @@ export class Directory extends DurableObject {
     }
     return out;
   }
+  #role(id) {
+    return typeof id === 'string' && id ? this.sql.exec('SELECT * FROM roles WHERE id = ?', id).toArray()[0] || null : null;
+  }
+  /**
+   * Where an account's limits, quotas and viewer rules live: its role's
+   * scope ("r:<id>"), the Default role's (the global rows, ''), or — for the
+   * public account — its own.
+   */
+  #scopeOf(u) {
+    if (u.role === 'public') return u.id;
+    if (u.role === 'user' && this.#role(u.role_id)) return roleScope(u.role_id);
+    return '';
+  }
   #effective(u) {
-    // Global (and per-user) limits never apply to the owner.
+    // The owner's role is locked: everything allowed, no limits.
     if (u.role === 'owner') return { all: { ...UNLIMITED }, api: { ...UNLIMITED } };
-    const all = resolveLimits(this.#limitRows('', 'all'), this.#limitRows(u.id, 'all'));
-    const api = restrictForApi(all, this.#limitRows('', 'api'), this.#limitRows(u.id, 'api'));
+    const scope = this.#scopeOf(u);
+    const all = resolveLimits(this.#limitRows('', 'all'), scope ? this.#limitRows(scope, 'all') : {});
+    const api = restrictForApi(all, this.#limitRows('', 'api'), scope ? this.#limitRows(scope, 'api') : {});
     return { all, api };
   }
   /**
@@ -382,12 +456,12 @@ export class Directory extends DurableObject {
     return {
       maxShareBytes: owner ? HARD_MAX_SHARE_BYTES : Math.min(s['files.maxShareBytes'], L.maxShareBytes ?? Infinity),
       viewerEnabled: owner ? true : s['viewer.enabled'] && L.viewer,
-      viewerMaxBytes: owner ? SETTINGS['viewer.maxBytes'].max : s['viewer.maxBytes'],
+      viewerMaxBytes: owner ? SETTINGS['viewer.maxBytes'].max : (L.viewerMaxBytes ?? s['viewer.maxBytes']),
     };
   }
 
   #viewerRules(u, limits) {
-    const scope = u.role !== 'owner' && limits.viewerCustomRules ? u.id : '';
+    const scope = u.role !== 'owner' && limits.viewerCustomRules ? this.#scopeOf(u) : '';
     return this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', scope).toArray()
       .map((r) => ({ match: r.match, value: r.value, renderer: r.renderer }));
   }
@@ -498,8 +572,16 @@ export class Directory extends DurableObject {
     if (lockedUntil) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`);
   }
 
-  #sessionSettings(s = this.#settings()) {
-    return { idleSec: s['session.idleSec'], absSec: s['session.absSec'] };
+  /** Session timeouts: the server-wide ones, or the account's role's (never for the owner). */
+  #sessionSettings(s = this.#settings(), u = null) {
+    let idleSec = s['session.idleSec'];
+    let absSec = s['session.absSec'];
+    if (u && u.role === 'user') {
+      const L = this.#effective(u).all;
+      absSec = L.sessionAbsSec ?? absSec;
+      idleSec = Math.min(L.sessionIdleSec ?? idleSec, absSec);
+    }
+    return { idleSec, absSec };
   }
 
   /**
@@ -524,7 +606,8 @@ export class Directory extends DurableObject {
     } else if (u.sess_ver !== ver) {
       return null;
     }
-    return { user: this.#publicUser(u), actor: this.#publicUser(actor), settings: this.#sessionSettings() };
+    // Impersonating, the owner's own (server-wide) timeouts apply.
+    return { user: this.#publicUser(u), actor: this.#publicUser(actor), settings: this.#sessionSettings(undefined, actor ? null : u) };
   }
 
   async revokeSession(sid, exp, actorId, subjectId) {
@@ -580,8 +663,18 @@ export class Directory extends DurableObject {
     };
   }
 
+  /**
+   * The quotas counted for an account: its role's own list when the role has
+   * one, else the Default role's (the global list). The public account has
+   * the global list plus its own.
+   */
   #applicableQuotas(uid) {
-    return this.sql.exec("SELECT * FROM quotas WHERE user_id = '' OR user_id = ?", uid).toArray();
+    const u = this.#user(uid);
+    if (!u) return [];
+    if (u.role === 'public') return this.sql.exec("SELECT * FROM quotas WHERE user_id = '' OR user_id = ?", uid).toArray();
+    const scope = this.#scopeOf(u);
+    const own = scope && this.#role(u.role_id).own_quotas;
+    return this.sql.exec('SELECT * FROM quotas WHERE user_id = ?', own ? scope : '').toArray();
   }
 
   #quotaStatus(uid) {
@@ -804,6 +897,7 @@ export class Directory extends DurableObject {
   // writes after it re-check what they depend on.
 
   #passkeyMode(u) { return this.#effective(u).all.passkeys; }
+  #passkeyMax(u) { return Math.min(MAX_PASSKEYS, this.#effective(u).all.passkeysMax ?? MAX_PASSKEYS); }
   #passkeyCount(uid) { return this.sql.exec('SELECT COUNT(*) AS c FROM passkeys WHERE user_id = ?', uid).one().c; }
   #recoveryLeft(uid) { return this.sql.exec('SELECT COUNT(*) AS c FROM recovery_codes WHERE user_id = ?', uid).one().c; }
   /** Does a password login of `u` also need a passkey (or recovery code)? */
@@ -886,7 +980,7 @@ export class Directory extends DurableObject {
   }
   #sessionFor(u, s = this.#settings()) {
     this.sql.exec('DELETE FROM failures WHERE user_id = ?', u.id);
-    return { ok: true, user: { id: u.id, username: u.username, role: u.role, ver: u.sess_ver }, settings: this.#sessionSettings(s) };
+    return { ok: true, user: { id: u.id, username: u.username, role: u.role, ver: u.sess_ver }, settings: this.#sessionSettings(s, u) };
   }
   async #codeHash(code) {
     const norm = normalizeRecoveryCode(code);
@@ -927,7 +1021,7 @@ export class Directory extends DurableObject {
       mode,
       mfa: mode === 'second' || !!u.mfa,
       required: this.#needsSecondFactor(u),
-      max: MAX_PASSKEYS,
+      max: this.#passkeyMax(u),
       recoveryLeft: this.#recoveryLeft(uid),
       passkeys: this.sql.exec('SELECT id, name, created, last_used, backed_up FROM passkeys WHERE user_id = ? ORDER BY created', uid).toArray()
         .map((p) => ({ id: p.id, name: p.name, created: p.created, lastUsed: p.last_used, synced: !!p.backed_up })),
@@ -939,7 +1033,8 @@ export class Directory extends DurableObject {
     const u = this.#user(uid);
     if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
     if (this.#passkeyMode(u) === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for your account.');
-    if (this.#passkeyCount(uid) >= MAX_PASSKEYS) return fail(409, 'too_many_passkeys', `An account can have up to ${MAX_PASSKEYS} passkeys. Remove one first.`);
+    const max = this.#passkeyMax(u);
+    if (this.#passkeyCount(uid) >= max) return fail(409, 'too_many_passkeys', `This account can have up to ${max} passkeys. Remove one first.`);
     return { ok: true, ...this.#newChallenge('register', uid), user: { handle: this.#webauthnHandle(u), name: u.username }, exclude: this.#allowList(uid) };
   }
 
@@ -961,7 +1056,7 @@ export class Directory extends DurableObject {
     if (this.sql.exec('SELECT 1 FROM passkeys WHERE id = ?', r.credentialId).toArray().length) {
       return fail(409, 'passkey_exists', 'That passkey is already registered.');
     }
-    if (this.#passkeyCount(uid) >= MAX_PASSKEYS) return fail(409, 'too_many_passkeys', `An account can have up to ${MAX_PASSKEYS} passkeys.`);
+    if (this.#passkeyCount(uid) >= this.#passkeyMax(u)) return fail(409, 'too_many_passkeys', `This account can have up to ${this.#passkeyMax(u)} passkeys.`);
     const first = this.#passkeyCount(uid) === 0;
     this.sql.exec('INSERT INTO passkeys (id, user_id, name, public_key, alg, sign_count, transports, backup_eligible, backed_up, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       r.credentialId, uid, label, r.publicKey, r.alg, r.signCount, r.transports.join(','), r.backupEligible ? 1 : 0, r.backedUp ? 1 : 0, now());
@@ -1754,10 +1849,12 @@ export class Directory extends DurableObject {
     if (!u) return null;
     return {
       user: this.#publicUser(u),
-      limits: { all: this.#limitRows(id, 'all'), api: this.#limitRows(id, 'api') },
+      // Only the public account has settings of its own; users have their role's.
+      limits: u.role === 'public' ? { all: this.#limitRows(id, 'all'), api: this.#limitRows(id, 'api') } : { all: {}, api: {} },
       effective: this.#effective(u),
-      quotas: this.sql.exec('SELECT id, channel, kind, n, unit, max FROM quotas WHERE user_id = ?', id).toArray(),
-      viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', id).toArray(),
+      quotas: u.role === 'public' ? this.sql.exec('SELECT id, channel, kind, n, unit, max FROM quotas WHERE user_id = ?', id).toArray() : [],
+      viewerRules: u.role === 'public' ? this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', id).toArray() : [],
+      role: u.role === 'user' ? (this.#role(u.role_id) ? { id: u.role_id, name: this.#role(u.role_id).name } : { id: 'default', name: 'Default' }) : null,
       keys: await this.listKeys(id),
       passkeys: { count: this.#passkeyCount(id), recoveryLeft: this.#recoveryLeft(id), mfa: this.#needsSecondFactor(u) },
     };
@@ -1805,8 +1902,26 @@ export class Directory extends DurableObject {
   }
 
   // ── admin: limits / quotas / viewer rules / settings ─────────────────────
-  async setLimits(scopeUserId, channel, patch, actorId) {
-    if (scopeUserId && !this.#user(scopeUserId)) return fail(404, 'not_found', 'User not found.');
+  /**
+   * An admin scope: '' (the Default role), "role:<id>" (a custom role) or the
+   * public account's id. Users have no settings of their own: their role's
+   * apply. → { key, label } or a failure.
+   */
+  #adminScope(scope) {
+    if (scope === '' || scope === 'global' || scope === 'role:default') return { key: '', label: 'Default role' };
+    if (scope === PUBLIC_ID) return { key: PUBLIC_ID, label: 'public account' };
+    if (typeof scope === 'string' && scope.startsWith('role:')) {
+      const r = this.#role(scope.slice(5));
+      return r ? { key: roleScope(r.id), label: `role ${r.name}` } : fail(404, 'not_found', 'Role not found.');
+    }
+    if (this.#user(scope)) return fail(400, 'use_a_role', 'Accounts have no settings of their own: give the user a role (Admin → Roles).');
+    return fail(404, 'not_found', 'Not found.');
+  }
+
+  async setLimits(scopeIn, channel, patch, actorId) {
+    const sc = this.#adminScope(scopeIn);
+    if (sc.ok === false) return sc;
+    const scopeUserId = sc.key;
     if (channel !== 'all' && channel !== 'api') return fail(400, 'invalid', 'channel must be all or api');
     if (!patch || typeof patch !== 'object') return fail(400, 'invalid', 'patch must be an object');
     const ops = [];
@@ -1814,6 +1929,7 @@ export class Directory extends DurableObject {
       for (const [k, v] of Object.entries(patch)) {
         if (!Object.prototype.hasOwnProperty.call(LIMITS, k)) throw new Error(`unknown limit "${k}"`);
         if (scopeUserId === PUBLIC_ID && v !== 'inherit' && PUBLIC_NA_LIMITS.includes(k)) throw new Error(`"${k}" does not apply to the public account`);
+        if (scopeUserId === '' && channel === 'all' && v === 'inherit') throw new Error(`the Default role has a value for every option ("${k}" cannot inherit)`);
         // `undefined`-like sentinel "inherit" removes the override.
         ops.push(v === 'inherit' ? [k, undefined] : [k, checkLimit(k, v, channel)]);
       }
@@ -1827,12 +1943,14 @@ export class Directory extends DurableObject {
           scopeUserId, channel, k, JSON.stringify(v));
       }
     });
-    this.#log(actorId, scopeUserId || null, 'limits.updated', `${scopeUserId ? 'user' : 'global'} ${channel}: ${ops.map(([k, v]) => `${k}=${v === undefined ? 'inherit' : JSON.stringify(v)}`).join(', ')}`);
+    this.#log(actorId, scopeUserId === PUBLIC_ID ? PUBLIC_ID : null, 'limits.updated', `${sc.label} ${channel}: ${ops.map(([k, v]) => `${k}=${v === undefined ? 'inherit' : JSON.stringify(v)}`).join(', ')}`);
     return { ok: true };
   }
 
-  async setQuotas(scopeUserId, list, actorId) {
-    if (scopeUserId && !this.#user(scopeUserId)) return fail(404, 'not_found', 'User not found.');
+  async setQuotas(scopeIn, list, actorId) {
+    const sc = this.#adminScope(scopeIn);
+    if (sc.ok === false) return sc;
+    const scopeUserId = sc.key;
     if (!Array.isArray(list) || list.length > 50) return fail(400, 'invalid', 'quotas must be a list (max 50)');
     let clean;
     try { clean = list.map(checkQuota); } catch (e) { return fail(400, 'invalid_quota', e.message); }
@@ -1843,13 +1961,17 @@ export class Directory extends DurableObject {
       for (const q of clean) {
         this.sql.exec('INSERT INTO quotas (id, user_id, channel, kind, n, unit, max) VALUES (?, ?, ?, ?, ?, ?, ?)', newId(), scopeUserId, q.channel, q.kind, q.n, q.unit, q.max);
       }
+      // Saving a role's list means the role uses it (instead of Default's).
+      if (scopeUserId.startsWith('r:')) this.sql.exec('UPDATE roles SET own_quotas = 1, updated = ? WHERE id = ?', now(), scopeUserId.slice(2));
     });
-    this.#log(actorId, scopeUserId || null, 'quotas.updated', `${scopeUserId ? 'user' : 'global'}: ${clean.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`).join('; ') || 'none'}`);
+    this.#log(actorId, scopeUserId === PUBLIC_ID ? PUBLIC_ID : null, 'quotas.updated', `${sc.label}: ${clean.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`).join('; ') || 'none'}`);
     return { ok: true };
   }
 
-  async setViewerRules(scopeUserId, list, actorId) {
-    if (scopeUserId && !this.#user(scopeUserId)) return fail(404, 'not_found', 'User not found.');
+  async setViewerRules(scopeIn, list, actorId) {
+    const sc = this.#adminScope(scopeIn);
+    if (sc.ok === false) return sc;
+    const scopeUserId = sc.key;
     if (!Array.isArray(list) || list.length > 200) return fail(400, 'invalid', 'rules must be a list (max 200)');
     let clean;
     try { clean = list.map(checkViewerRule); } catch (e) { return fail(400, 'invalid_rule', e.message); }
@@ -1857,8 +1979,152 @@ export class Directory extends DurableObject {
       this.sql.exec('DELETE FROM viewer_rules WHERE user_id = ?', scopeUserId);
       for (const r of clean) this.sql.exec('INSERT INTO viewer_rules (user_id, match, value, renderer) VALUES (?, ?, ?, ?)', scopeUserId, r.match, r.value, r.renderer);
     });
-    this.#log(actorId, scopeUserId || null, 'viewer_rules.updated', `${scopeUserId ? 'user' : 'global'}: ${clean.length} rules`);
+    this.#log(actorId, scopeUserId === PUBLIC_ID ? PUBLIC_ID : null, 'viewer_rules.updated', `${sc.label}: ${clean.length} rules`);
     return { ok: true };
+  }
+
+  // ── roles ────────────────────────────────────────────────────────────────
+  // Two built-in roles are not stored: "owner" (locked: everything allowed,
+  // no limits; the owner's only, never assignable) and "default" (the global
+  // rows: Defaults & quotas). Custom roles are rows in `roles`; each user has
+  // exactly one role (users.role_id; empty = Default).
+
+  #roleName(name) {
+    const n = cleanLabel(name);
+    if (!n || n.length > 64) return fail(400, 'invalid_name', 'Give the role a name (1–64 characters).');
+    if (RESERVED_ROLE_NAMES.includes(n.toLowerCase())) return fail(409, 'name_taken', `"${n}" is a built-in role.`);
+    return { ok: true, name: n };
+  }
+
+  async listRoles() {
+    const counts = Object.fromEntries(this.sql.exec("SELECT role_id, COUNT(*) AS c FROM users WHERE role = 'user' AND role_id IN (SELECT id FROM roles) GROUP BY role_id").toArray().map((r) => [r.role_id, r.c]));
+    const custom = this.sql.exec('SELECT * FROM roles ORDER BY name COLLATE NOCASE').toArray();
+    const assigned = Object.values(counts).reduce((a, b) => a + b, 0);
+    const users = this.sql.exec("SELECT COUNT(*) AS c FROM users WHERE role = 'user'").one().c;
+    return {
+      roles: [
+        { id: 'owner', name: 'Owner', builtin: true, locked: true, users: this.#owner() ? 1 : 0 },
+        { id: 'default', name: 'Default', builtin: true, users: users - assigned },
+        ...custom.map((r) => ({ id: r.id, name: r.name, builtin: false, ownQuotas: !!r.own_quotas, users: counts[r.id] || 0, created: r.created, updated: r.updated })),
+      ],
+    };
+  }
+
+  /** One custom role, with what it sets, what it inherits from Default, and its lists. */
+  async roleDetail(id) {
+    const r = this.#role(id);
+    if (!r) return fail(404, 'not_found', 'Role not found.');
+    const sc = roleScope(r.id);
+    const all = this.#limitRows(sc, 'all');
+    const globalAll = this.#limitRows('', 'all');
+    const effAll = resolveLimits(globalAll, all);
+    return {
+      ok: true,
+      role: { id: r.id, name: r.name, ownQuotas: !!r.own_quotas },
+      limits: { all, api: this.#limitRows(sc, 'api') },
+      effective: { all: effAll, api: restrictForApi(effAll, this.#limitRows('', 'api'), this.#limitRows(sc, 'api')) },
+      inherited: resolveLimits(globalAll, {}),
+      quotas: this.sql.exec('SELECT id, channel, kind, n, unit, max FROM quotas WHERE user_id = ?', sc).toArray(),
+      viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', sc).toArray(),
+      users: this.sql.exec("SELECT id, username FROM users WHERE role = 'user' AND role_id = ? ORDER BY username", r.id).toArray(),
+    };
+  }
+
+  async createRole(name, actorId) {
+    const n = this.#roleName(name);
+    if (!n.ok) return n;
+    if (this.sql.exec('SELECT 1 FROM roles WHERE name = ?', n.name).toArray().length) return fail(409, 'name_taken', 'A role with that name exists.');
+    const id = newId();
+    const ts = now();
+    this.sql.exec('INSERT INTO roles (id, name, own_quotas, created, updated) VALUES (?, ?, 0, ?, ?)', id, n.name, ts, ts);
+    this.#log(actorId, null, 'role.created', `name=${n.name}`);
+    return { ok: true, id };
+  }
+
+  /** Rename a role, or choose whether it has its own quota list (instead of Default's). */
+  async updateRole(id, { name, ownQuotas }, actorId) {
+    const r = this.#role(id);
+    if (!r) return fail(404, 'not_found', 'Role not found.');
+    let label = r.name;
+    if (name !== undefined) {
+      const n = this.#roleName(name);
+      if (!n.ok) return n;
+      const clash = this.sql.exec('SELECT id FROM roles WHERE name = ?', n.name).toArray()[0];
+      if (clash && clash.id !== id) return fail(409, 'name_taken', 'A role with that name exists.');
+      label = n.name;
+    }
+    if (ownQuotas !== undefined && typeof ownQuotas !== 'boolean') return fail(400, 'invalid', 'ownQuotas must be true or false');
+    const own = ownQuotas === undefined ? r.own_quotas : ownQuotas ? 1 : 0;
+    this.sql.exec('UPDATE roles SET name = ?, own_quotas = ?, updated = ? WHERE id = ?', label, own, now(), id);
+    this.#log(actorId, null, 'role.updated', `name=${label}${label !== r.name ? ` (was ${r.name})` : ''} ownQuotas=${!!own}`);
+    return { ok: true };
+  }
+
+  /**
+   * A new role with everything `fromId` sets ("default": the Default role's
+   * values, copied as explicit settings so later changes to Default do not
+   * change the copy).
+   */
+  async duplicateRole(fromId, name, actorId) {
+    const src = fromId === 'default' ? { key: '', name: 'Default', own_quotas: 1 } : (() => { const r = this.#role(fromId); return r && { key: roleScope(r.id), name: r.name, own_quotas: r.own_quotas }; })();
+    if (!src) return fail(404, 'not_found', 'Role not found.');
+    const n = this.#roleName(name);
+    if (!n.ok) return n;
+    if (this.sql.exec('SELECT 1 FROM roles WHERE name = ?', n.name).toArray().length) return fail(409, 'name_taken', 'A role with that name exists.');
+    const id = newId();
+    const to = roleScope(id);
+    const ts = now();
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('INSERT INTO roles (id, name, own_quotas, created, updated) VALUES (?, ?, ?, ?, ?)', id, n.name, src.own_quotas ? 1 : 0, ts, ts);
+      for (const l of this.sql.exec('SELECT channel, key, value FROM limits WHERE user_id = ?', src.key).toArray()) {
+        this.sql.exec('INSERT INTO limits (user_id, channel, key, value) VALUES (?, ?, ?, ?)', to, l.channel, l.key, l.value);
+      }
+      for (const q of this.sql.exec('SELECT channel, kind, n, unit, max FROM quotas WHERE user_id = ?', src.key).toArray()) {
+        this.sql.exec('INSERT INTO quotas (id, user_id, channel, kind, n, unit, max) VALUES (?, ?, ?, ?, ?, ?, ?)', newId(), to, q.channel, q.kind, q.n, q.unit, q.max);
+      }
+      for (const v of this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', src.key).toArray()) {
+        this.sql.exec('INSERT INTO viewer_rules (user_id, match, value, renderer) VALUES (?, ?, ?, ?)', to, v.match, v.value, v.renderer);
+      }
+    });
+    this.#log(actorId, null, 'role.created', `name=${n.name} (copy of ${src.name})`);
+    return { ok: true, id };
+  }
+
+  /** Delete a custom role; its users move to the Default role. */
+  async deleteRole(id, actorId) {
+    const r = this.#role(id);
+    if (!r) return fail(404, 'not_found', 'Role not found.');
+    const sc = roleScope(r.id);
+    let moved = 0;
+    this.ctx.storage.transactionSync(() => {
+      moved = this.sql.exec("SELECT COUNT(*) AS c FROM users WHERE role = 'user' AND role_id = ?", id).one().c;
+      this.sql.exec('UPDATE users SET role_id = NULL, updated = ? WHERE role_id = ?', now(), id);
+      this.sql.exec('DELETE FROM usage WHERE quota_id IN (SELECT id FROM quotas WHERE user_id = ?)', sc);
+      for (const t of ['limits', 'quotas', 'viewer_rules']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, sc);
+      this.sql.exec('DELETE FROM roles WHERE id = ?', id);
+    });
+    this.#log(actorId, null, 'role.deleted', `name=${r.name} users moved to Default=${moved}`);
+    return { ok: true, moved };
+  }
+
+  /** Give a user a role ("default" or a custom role id). The owner's role cannot change. */
+  async setUserRole(uid, roleId, actorId) {
+    const u = this.#user(uid);
+    if (!u) return fail(404, 'not_found', 'User not found.');
+    if (u.role === 'owner') return fail(403, 'owner_role', 'The owner always has the Owner role.');
+    if (u.role !== 'user') return fail(403, 'forbidden', 'The public account has no role: set it under Public access.');
+    if (roleId === 'owner') return fail(403, 'owner_role', 'The Owner role belongs to the owner only.');
+    let next = null;
+    let label = 'Default';
+    if (roleId !== 'default' && roleId !== null && roleId !== '') {
+      const r = typeof roleId === 'string' && ROLE_ID_RE.test(roleId) ? this.#role(roleId) : null;
+      if (!r) return fail(404, 'not_found', 'Role not found.');
+      next = r.id;
+      label = r.name;
+    }
+    this.sql.exec('UPDATE users SET role_id = ?, updated = ? WHERE id = ?', next, now(), uid);
+    this.#log(actorId, uid, 'role.assigned', `role=${label}`);
+    return { ok: true, roleId: next ?? 'default' };
   }
 
   async adminGlobal() {
@@ -1950,6 +2216,16 @@ export class Directory extends DurableObject {
         quotas: this.#quotaRows(''),
         viewerRules: this.sql.exec("SELECT match, value, renderer FROM viewer_rules WHERE user_id = '' ORDER BY id").toArray(),
         ipRules: (await this.ipRules()).map((r) => ({ cidr: r.cidr, action: r.action, expires: r.expires ?? null, note: r.note || '' })),
+        roles: this.sql.exec('SELECT * FROM roles ORDER BY name COLLATE NOCASE').toArray().map((r) => {
+          const sc = roleScope(r.id);
+          return {
+            name: r.name,
+            ownQuotas: !!r.own_quotas,
+            limits: { all: this.#limitRows(sc, 'all'), api: this.#limitRows(sc, 'api') },
+            quotas: this.#quotaRows(sc),
+            viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', sc).toArray(),
+          };
+        }),
       };
     }
     const rows = users === 'all'
@@ -1963,13 +2239,8 @@ export class Directory extends DurableObject {
       for (const u of rows) {
         const e = { username: u.username };
         if (credentials) e.credentials = { salt: u.pw_salt, t: u.pw_t, verifier: u.pw_verifier, disabled: !!u.disabled };
-        if (config) {
-          e.config = {
-            limits: { all: this.#limitRows(u.id, 'all'), api: this.#limitRows(u.id, 'api') },
-            quotas: this.#quotaRows(u.id),
-            viewerRules: this.sql.exec('SELECT match, value, renderer FROM viewer_rules WHERE user_id = ? ORDER BY id', u.id).toArray(),
-          };
-        }
+        // A user's configuration is their role (by name; the role itself travels in `system`).
+        if (config) e.config = { role: this.#role(u.role_id)?.name ?? 'Default' };
         doc.users.push(e);
       }
     }
@@ -2025,6 +2296,7 @@ export class Directory extends DurableObject {
       }
       for (const r of ipAdd) if (r.action === 'allow') plan.warnings.push(`adds an allow rule (exempts ${r.cidr} from brute-force protection and blocks)`);
       plan.system = {
+        roles: doc.system.roles.map((r) => ({ name: r.name, action: this.sql.exec('SELECT 1 FROM roles WHERE name = ?', r.name).toArray().length ? 'replace' : 'create' })),
         settings: Object.entries(doc.system.settings).filter(([k, v]) => cur[k] !== v).map(([key, to]) => ({ key, from: cur[key], to })),
         limits: { all: Object.keys(doc.system.limits.all).length, api: Object.keys(doc.system.limits.api).length },
         quotas: doc.system.quotas.length,
@@ -2038,8 +2310,15 @@ export class Directory extends DurableObject {
       const d = decisions.users.get(u.username);
       if (!d) { plan.users.push({ username: u.username, action: 'skip' }); continue; }
       const existing = this.#userByName(d.as);
-      const parts = [u.credentials ? 'credentials' : null, u.config ? 'config' : null].filter(Boolean);
+      const parts = [u.credentials ? 'credentials' : null, u.config && !u.config.legacy ? 'config' : null].filter(Boolean);
       const entry = { username: u.username, as: d.as, parts };
+      if (u.config?.legacy) plan.warnings.push(`"${u.username}": per-user settings in the file are ignored (roles replace them)`);
+      if (u.config?.role && u.config.role.toLowerCase() !== 'default') {
+        const here = this.sql.exec('SELECT 1 FROM roles WHERE name = ?', u.config.role).toArray().length;
+        const coming = decisions.system && doc.system.roles.some((r) => r.name.toLowerCase() === u.config.role.toLowerCase());
+        if (!here && !coming) plan.errors.push(`"${u.username}": the role "${u.config.role}" does not exist here — import the system part too, or create the role first`);
+        entry.role = u.config.role;
+      }
       if (existing && existing.role !== 'user') {
         entry.action = 'refused';
         plan.errors.push(`"${d.as}" is the owner account and cannot be imported over — import it under another name`);
@@ -2079,6 +2358,18 @@ export class Directory extends DurableObject {
         const s = doc.system;
         for (const [k, v] of Object.entries(s.settings)) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
         replaceScope('', s.limits, s.quotas, s.viewerRules);
+        materializeDefaultRole(this.sql); // the Default role keeps a value for every option
+        for (const r of s.roles) {
+          let row = this.sql.exec('SELECT * FROM roles WHERE name = ?', r.name).toArray()[0];
+          if (!row) {
+            this.sql.exec('INSERT INTO roles (id, name, own_quotas, created, updated) VALUES (?, ?, ?, ?, ?)', newId(), r.name, r.ownQuotas ? 1 : 0, ts, ts);
+            row = this.sql.exec('SELECT * FROM roles WHERE name = ?', r.name).toArray()[0];
+          } else {
+            this.sql.exec('UPDATE roles SET own_quotas = ?, updated = ? WHERE id = ?', r.ownQuotas ? 1 : 0, ts, row.id);
+          }
+          replaceScope(roleScope(row.id), r.limits, r.quotas, r.viewerRules);
+          this.#log(actorId, null, row.created === ts ? 'role.created' : 'role.updated', `import: name=${r.name}`);
+        }
         for (const r of plan.system._ipAdd) this.sql.exec('INSERT INTO ip_rules (id, cidr, action, expires, note, created) VALUES (?, ?, ?, ?, ?, ?)', newId(), r.cidr, r.action, r.expires, r.note, ts);
         // The same entries the admin API writes, so an import is as visible as
         // the equivalent manual changes.
@@ -2111,10 +2402,10 @@ export class Directory extends DurableObject {
             this.sql.exec('DELETE FROM api_keys WHERE user_id = ?', id);
           }
         }
-        if (u.config) {
-          replaceScope(id, u.config.limits, u.config.quotas, u.config.viewerRules);
-          const L = u.config.limits;
-          for (const ch of ['all', 'api']) this.#logChunks(actorId, id, 'limits.updated', `import ${ch}: `, Object.keys(L[ch]).length ? Object.entries(L[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`) : ['none']);
+        if (u.config?.role) {
+          const r = u.config.role.toLowerCase() === 'default' ? null : this.sql.exec('SELECT id, name FROM roles WHERE name = ?', u.config.role).toArray()[0];
+          this.sql.exec('UPDATE users SET role_id = ?, updated = ? WHERE id = ?', r ? r.id : null, ts, id);
+          this.#log(actorId, id, 'role.assigned', `import: role=${r ? r.name : 'Default'}`);
         }
         this.#log(actorId, id, 'user.imported', `${e.action}${e.as !== u.username ? ` from=${u.username}` : ''} parts=${e.parts.join('+')}`);
       }
@@ -2143,11 +2434,13 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM opens WHERE ts < ? AND user_id IS NOT ?', ts - s['log.maxAgeSec'], oid);
     // Per-account limits: visit only the accounts they apply to (every account
     // when a global value is set, otherwise those with their own value).
-    const LOG_KEYS = "('logMaxAgeSec', 'logMaxEntries')";
-    const global = this.sql.exec(`SELECT 1 FROM limits WHERE user_id = '' AND channel = 'all' AND key IN ${LOG_KEYS} LIMIT 1`).toArray().length;
+    // (A row holding null means "no per-account limit".)
+    const LOG_SET = "channel = 'all' AND key IN ('logMaxAgeSec', 'logMaxEntries') AND value != 'null'";
+    const global = this.sql.exec(`SELECT 1 FROM limits WHERE user_id = '' AND ${LOG_SET} LIMIT 1`).toArray().length;
     const users = global
       ? this.sql.exec("SELECT * FROM users WHERE role IN ('user', 'public')").toArray()
-      : this.sql.exec(`SELECT * FROM users WHERE role IN ('user', 'public') AND id IN (SELECT user_id FROM limits WHERE channel = 'all' AND key IN ${LOG_KEYS})`).toArray();
+      : this.sql.exec(`SELECT * FROM users WHERE role IN ('user', 'public') AND (id IN (SELECT user_id FROM limits WHERE ${LOG_SET})
+          OR role_id IN (SELECT substr(user_id, 3) FROM limits WHERE user_id LIKE 'r:%' AND ${LOG_SET}))`).toArray();
     for (const u of users) {
       const L = this.#effective(u).all;
       if (L.logMaxAgeSec !== null) {

@@ -16,6 +16,10 @@ import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX
 
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
+// Where limits, quotas and viewer rules are set: "global" (the Default role),
+// "role:<id>" (a custom role) or the public account's id.
+const SCOPE_RE = /^(global|role:default|role:[A-Za-z0-9_-]{16}|[A-Za-z0-9_-]{16})$/;
+const SCOPE_MSG = 'scope must be "global", "role:<id>" or the public account';
 const now = () => Math.floor(Date.now() / 1000);
 const SHARE_KINDS = ['text', 'files', 'url', 'secret'];
 const SHARE_STATUSES = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'];
@@ -189,19 +193,43 @@ export async function handleAdmin(request, env, url) {
   if (p === '/api/private/admin/limits') {
     if (request.method !== 'PATCH') return methodNotAllowed('PATCH');
     const body = await readJsonBody(request);
-    const scope = body.scope === 'global' ? '' : body.scope;
-    if (scope !== '' && !ID_RE.test(String(scope))) return err(400, 'invalid_scope', 'scope must be "global" or a user id');
-    const r = await dir.setLimits(scope, body.channel, body.patch, me);
+    if (!SCOPE_RE.test(String(body.scope))) return err(400, 'invalid_scope', SCOPE_MSG);
+    const r = await dir.setLimits(body.scope === 'global' ? '' : body.scope, body.channel, body.patch, me);
     return r.ok ? json(r) : fromDir(r);
   }
 
   if (p === '/api/private/admin/quotas' || p === '/api/private/admin/viewer-rules') {
     if (request.method !== 'PUT') return methodNotAllowed('PUT');
     const body = await readJsonBody(request);
+    if (!SCOPE_RE.test(String(body.scope))) return err(400, 'invalid_scope', SCOPE_MSG);
     const scope = body.scope === 'global' ? '' : body.scope;
-    if (scope !== '' && !ID_RE.test(String(scope))) return err(400, 'invalid_scope', 'scope must be "global" or a user id');
     const r = p.endsWith('quotas') ? await dir.setQuotas(scope, body.list, me) : await dir.setViewerRules(scope, body.list, me);
     return r.ok ? json(r) : fromDir(r);
+  }
+
+  // Roles: list and create (or duplicate with `from`); one role's detail,
+  // rename / own-quotas switch, delete.
+  if (p === '/api/private/admin/roles') {
+    if (request.method === 'GET') return json(await dir.listRoles());
+    if (request.method !== 'POST') return methodNotAllowed('GET, POST');
+    const body = await readJsonBody(request);
+    const r = body.from !== undefined ? await dir.duplicateRole(String(body.from), body.name, me) : await dir.createRole(body.name, me);
+    return r.ok ? json(r, 201) : fromDir(r);
+  }
+  const roleM = p.match(/^\/api\/private\/admin\/roles\/([A-Za-z0-9_-]{16})$/);
+  if (roleM) {
+    if (request.method === 'GET') { const r = await dir.roleDetail(roleM[1]); return r.ok ? json(r) : fromDir(r); }
+    if (request.method === 'PATCH') {
+      const body = await readJsonBody(request);
+      const r = await dir.updateRole(roleM[1], { name: body.name, ownQuotas: body.ownQuotas }, me);
+      return r.ok ? json(r) : fromDir(r);
+    }
+    if (request.method === 'DELETE') {
+      assertIntent(request);
+      const r = await dir.deleteRole(roleM[1], me);
+      return r.ok ? json(r) : fromDir(r);
+    }
+    return methodNotAllowed('GET, PATCH, DELETE');
   }
 
   if (p === '/api/private/admin/users') {
@@ -216,7 +244,7 @@ export async function handleAdmin(request, env, url) {
     return methodNotAllowed('GET, POST');
   }
 
-  const um = p.match(/^\/api\/private\/admin\/users\/([A-Za-z0-9_-]{16})(?:\/(password|unlock|impersonate|passkeys|keys)(?:\/([A-Za-z0-9_-]{16}))?)?$/);
+  const um = p.match(/^\/api\/private\/admin\/users\/([A-Za-z0-9_-]{16})(?:\/(password|unlock|impersonate|passkeys|keys|role)(?:\/([A-Za-z0-9_-]{16}))?)?$/);
   if (um) {
     const [, uid, action, keyId] = um;
     if (keyId && action !== 'keys') return err(404, 'not_found', 'Not found.');
@@ -272,6 +300,12 @@ export async function handleAdmin(request, env, url) {
       const step = uid === me ? await stepUpFrom(body, url) : {};
       const r = await dir.adminResetPasskeys(uid, me, { ...step, lockoutOff: g.off.all });
       return r.ok ? json(r) : afterRefusal(env, g, r, fromDir(r));
+    }
+    if (action === 'role') {
+      if (request.method !== 'PUT') return methodNotAllowed('PUT');
+      const body = await readJsonBody(request);
+      const r = await dir.setUserRole(uid, body.roleId, me);
+      return r.ok ? json(r) : fromDir(r);
     }
     if (action === 'impersonate') {
       if (request.method !== 'POST') return methodNotAllowed('POST');

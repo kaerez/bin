@@ -28,14 +28,14 @@ export async function renderPortable(panel, profile) {
 
 // ── export ───────────────────────────────────────────────────────────────────
 function exportCard(users, profile) {
-  const sys = check('System configuration — settings, default limits and quotas, viewer rules, IP rules', true);
+  const sys = check('System configuration — settings, the roles (Default and custom: limits, quotas, viewer rules), IP rules', true);
   const scope = h('select.input', { 'aria-label': 'Users to export' },
     h('option', { value: 'none', text: 'no users' }), h('option', { value: 'all', text: `all users (${users.length})` }), h('option', { value: 'some', text: 'selected users' }));
   const pick = h('select.input.multi', { multiple: true, size: String(Math.min(8, Math.max(3, users.length))), 'aria-label': 'Selected users', hidden: true },
     ...users.map((u) => h('option', { value: u.id, text: u.username })));
   scope.onchange = () => { pick.hidden = scope.value !== 'some'; };
   const creds = check('Credentials — user name, password verifier, disabled flag');
-  const conf = check('Configuration — the user’s limits, quotas and viewer rules', true);
+  const conf = check('Configuration — the user’s role (by name; the role itself is in the system configuration)', true);
   const pass1 = pw('Export passphrase', 'new-password');
   const pass2 = pw('Repeat export passphrase', 'new-password');
   const mine = pw('Your password', 'current-password');
@@ -129,11 +129,11 @@ function renderReview(box, doc, users, profile) {
   clear(box);
   const existing = new Map(users.map((u) => [u.username.toLowerCase(), u]));
   const ownerName = profile.user.username.toLowerCase();
-  const sys = doc.system ? check('Apply the system configuration (settings, default limits and quotas, viewer rules; IP rules are added, never removed)') : null;
+  const sys = doc.system ? check('Apply the system configuration (settings; the Default role; custom roles are created or replaced by name, never deleted; IP rules are added, never removed)') : null;
   const rows = [];
   const body = h('tbody');
   for (const u of doc.users) {
-    const parts = [u.credentials ? 'credentials' : null, u.config ? 'configuration' : null].filter(Boolean).join(' + ');
+    const parts = [u.credentials ? 'credentials' : null, u.config?.role ? `role ${u.config.role}` : u.config ? 'old per-user settings (ignored)' : null].filter(Boolean).join(' + ');
     const action = h('select.input', { 'aria-label': `Action for ${u.username}` });
     const as = h('input.input', { value: u.username, maxlength: '64', 'aria-label': `Import ${u.username} as`, spellcheck: 'false' });
     const status = h('span.mono.muted');
@@ -222,7 +222,8 @@ function renderPlan(box, plan) {
   const items = [];
   if (plan.system) {
     const s = plan.system;
-    items.push(`System: ${s.settings.length} setting${s.settings.length === 1 ? '' : 's'} change${s.settings.length === 1 ? 's' : ''}; default limits, quotas (${s.quotas}) and viewer rules (${s.viewerRules}) replaced; ${s.ipRulesAdded.length} IP rule${s.ipRulesAdded.length === 1 ? '' : 's'} added${s.ipRulesSkipped ? `, ${s.ipRulesSkipped} already present or expired` : ''}.`);
+    const roleNote = s.roles?.length ? ` roles: ${s.roles.map((r) => `${r.name} (${r.action})`).join(', ')};` : '';
+    items.push(`System: ${s.settings.length} setting${s.settings.length === 1 ? '' : 's'} change${s.settings.length === 1 ? 's' : ''}; the Default role's limits, quotas (${s.quotas}) and viewer rules (${s.viewerRules}) replaced;${roleNote} ${s.ipRulesAdded.length} IP rule${s.ipRulesAdded.length === 1 ? '' : 's'} added${s.ipRulesSkipped ? `, ${s.ipRulesSkipped} already present or expired` : ''}.`);
     for (const c of s.settings) items.push(`  ${c.key}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`);
     for (const r of s.ipRulesAdded) items.push(`  + ${r}`);
   }

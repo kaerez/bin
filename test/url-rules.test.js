@@ -25,6 +25,6 @@ describe('URL rules', () => {
     expect((await policy()).urlRules).toEqual(['re:^https://([a-z0-9-]+\\.)*example\\.com/']);
     const mine = await (await fetchJson('/api/private/policy', { cookie: oc })).json();
     expect(mine.urlRules).toEqual(['scheme:*']); // global settings never apply to the owner
-    expect((await limits('global', { urlRules: 'inherit' })).status).toBe(200);
+    expect((await limits('global', { urlRules: ['scheme:http', 'scheme:https'] })).status).toBe(200);
   });
 });

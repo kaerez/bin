@@ -40,9 +40,14 @@ describe('admin export', () => {
     const e = doc.users.find((x) => x.username === 'ie-export');
     expect(Object.keys(e).sort()).toEqual(['config', 'credentials', 'username']);
     expect(Object.keys(e.credentials).sort()).toEqual(['disabled', 'salt', 't', 'verifier']);
-    expect(e.config.limits.all).toMatchObject({ maxViews: 7, apiEnabled: true });
+    // A user's configuration is their role, by name; the role travels in `system`.
+    expect(e.config).toEqual({ role: `user ${u.id}` });
+    const role = doc.system.roles.find((r) => r.name === `user ${u.id}`);
+    expect(role.limits.all).toMatchObject({ maxViews: 7, apiEnabled: true });
     expect(JSON.stringify(doc)).not.toMatch(/sbk_|"sid"|sess_ver|key_hash|"hash"|"keys"/);
-    expect(Object.keys(doc.system).sort()).toEqual(['ipRules', 'limits', 'quotas', 'settings', 'viewerRules']);
+    expect(Object.keys(doc.system).sort()).toEqual(['ipRules', 'limits', 'quotas', 'roles', 'settings', 'viewerRules']);
+    // The Default role (system.limits.all) holds a value for every option.
+    expect(Object.keys(doc.system.limits.all)).toContain('pwMinLength');
     // Parts are optional.
     const onlyConfig = await exportDoc({ users: [u.id], config: true });
     expect(onlyConfig.system).toBeUndefined();
@@ -66,7 +71,7 @@ describe('admin import', () => {
     expect(preview.status).toBe(200);
     const p = await preview.json();
     expect(p.applied).toBe(false);
-    expect(p.plan.users).toEqual([{ username: 'ie-roundtrip', as: 'ie-roundtrip', parts: ['credentials', 'config'], action: 'create' }]);
+    expect(p.plan.users).toEqual([{ username: 'ie-roundtrip', as: 'ie-roundtrip', parts: ['credentials', 'config'], action: 'create', role: `user ${u.id}` }]);
     expect(await userId('ie-roundtrip')).toBeUndefined(); // a preview changes nothing
 
     const applied = await importDoc(doc, { system: false, users: { 'ie-roundtrip': {} } }, false);
@@ -135,8 +140,11 @@ describe('admin import', () => {
       (d) => { d.extra = 1; },
       (d) => { d.users[0].credentials.t = 1; },
       (d) => { d.users[0].credentials.verifier = 'zz'; },
-      (d) => { d.users[0].config.limits.all.maxViews = -1; },
-      (d) => { d.users[0].config.limits.api.fileTypeMode = 'allow'; },
+      (d) => { d.users[0].config = { limits: { all: { maxViews: -1 }, api: {} }, quotas: [], viewerRules: [] }; }, // pre-roles form, still checked
+      (d) => { d.users[0].config = { limits: { all: {}, api: { fileTypeMode: 'allow' } }, quotas: [], viewerRules: [] }; },
+      (d) => { d.users[0].config = { role: '' }; },
+      (d) => { d.users[0].config = { role: 'x', extra: 1 }; },
+      (d) => { d.system = { ...(d.system || {}), roles: [{ name: 'Owner', ownQuotas: false, limits: { all: {}, api: {} }, quotas: [], viewerRules: [] }] }; },
       (d) => { d.users[0].username = '../x'; },
       (d) => { d.system.settings['guard.login.max'] = 0; },
       (d) => { d.system.ipRules.push({ cidr: 'not-an-ip', action: 'block' }); },
