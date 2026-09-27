@@ -15,6 +15,16 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Link, receipt and log hardening** (from a review of the new features):
+  - recipients can open only web, mail, phone and SMS links; any other app link a sender's rules
+    allow (`vscode:`, `ssh:`, `smb:`…) is shown in full with Copy only;
+  - the full link is always shown;
+  - read receipts are throttled (one stored per address per minute, 30 per share per minute), keep the
+    first 100 for good, are deleted with their share, and are announced on every view;
+  - log pruning never removes the owner's own actions or server-wide configuration changes,
+    and it is cheaper (time indexes; only accounts with their own limits are visited);
+  - a second preview can no longer render under the first one's title;
+  - a corrupt saved accessibility setting can no longer stop the widget from saving.
 - **Passkey and sign-in hardening** (from a review of the new features):
   - usernameless sign-in challenges are no longer stored, so a flood of requests cannot push out
     other people's pending sign-ins;

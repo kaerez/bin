@@ -18,7 +18,7 @@ describe('url shares', () => {
     }
   });
   it('spell out the real host, flagging IDN look-alikes and plain http', () => {
-    expect(describeHost(parseShareUrl('https://xn--mnchen-3ya.de/'))).toEqual({ ascii: 'xn--mnchen-3ya.de', unicode: 'münchen.de', idn: true, insecure: false, scheme: 'https', external: false });
+    expect(describeHost(parseShareUrl('https://xn--mnchen-3ya.de/'))).toEqual({ ascii: 'xn--mnchen-3ya.de', unicode: 'münchen.de', idn: true, insecure: false, scheme: 'https', external: false, openable: true });
     expect(describeHost(parseShareUrl('https://münchen.de/')).ascii).toBe('xn--mnchen-3ya.de');
     expect(describeHost(parseShareUrl('http://example.com/'))).toMatchObject({ idn: false, insecure: true });
   });
@@ -120,5 +120,16 @@ describe('URL rules (the admin\'s "links that may be shared")', () => {
     const u = parseShareUrl('sms:+15551234', { recipient: true });
     expect(describeHost(u)).toMatchObject({ external: true, scheme: 'sms', ascii: 'sms:+15551234' });
     expect(describeHost(new URL('https://example.com/'))).toMatchObject({ external: false, scheme: 'https' });
+  });
+});
+
+describe('what a recipient may open', () => {
+  it('only web, mail, phone and SMS links; every other allowed app link is copy-only', () => {
+    for (const l of ['https://example.com/x', 'http://example.com/', 'mailto:a@example.com', 'tel:+15551234', 'sms:+15551234']) {
+      expect(describeHost(parseShareUrl(l, { recipient: true })).openable, l).toBe(true);
+    }
+    for (const l of ['vscode://vscode.git/clone?url=https://evil.example/x', 'search-ms:query=x&crumb=location:%5C%5Cattacker%5Cshare', 'ms-officecmd:x', 'smb://host/share', 'ssh://host', 'its:x', 'ms-msdt:%20x']) {
+      expect(describeHost(parseShareUrl(l, { recipient: true })).openable, l).toBe(false);
+    }
   });
 });

@@ -428,7 +428,7 @@ async function renderSettings() {
     scopeRule('invalid', 'Invalid fetches (links that never existed, wrong #key, wrong password, bad tokens; shares that expired, were used up, revoked or deleted are not counted)'),
     h('div.card.stack', {}, int('guard.v6Prefix', 'IPv6 tracking prefix (/n)'))));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Activity log' }),
-    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. Per-user limits (Defaults & quotas or a user) can keep less about an account. Entries about the owner are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
+    h('p.mono.muted', { text: 'Older entries, and the oldest beyond the size limit, are deleted automatically. Per-user limits (Defaults & quotas or a user) can keep less about an account. Entries about the owner, entries the owner made (admin actions, impersonation) and server-wide changes (settings, global limits, IP rules, exports) are never deleted automatically. Check your retention obligations (e.g. audit trails) with Legal / Compliance.' }),
     dur('log.maxAgeSec', 'Keep entries for at most'), int('log.maxEntries', 'Keep at most this many entries')));
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),

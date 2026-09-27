@@ -47,6 +47,14 @@ export const FORBIDDEN_SCHEMES = Object.freeze(new Set([
   'resource', 'intent', 'wyciwyg', 'livescript', 'mocha', 'res', 'ms-appx', 'ms-appx-web',
 ]));
 
+/**
+ * What a recipient may open straight from the page. Every other allowed
+ * scheme (vscode:, ssh:, smb:, search-ms:…) is shown in full with Copy only:
+ * the sender's URL rules are checked by the sender's own browser or CLI, so a
+ * modified client could otherwise hand recipients an app link on this origin.
+ */
+export const RECIPIENT_OPEN_SCHEMES = Object.freeze(new Set(['http', 'https', 'mailto', 'tel', 'sms']));
+
 const SCHEME_RE = /^[a-z][a-z0-9+.-]{0,31}$/;
 
 /** Validate and canonicalize a rule list (throws Error with a readable message). */
@@ -137,11 +145,12 @@ export function describeHost(u) {
   const scheme = schemeOf(u);
   // Links without a host (tel:, mailto:, sms:, geo:, …) open another app: show
   // the whole address instead of a host.
-  if (!u.hostname) return { ascii: u.href, unicode: u.href, idn: false, insecure: false, scheme, external: true };
+  const openable = RECIPIENT_OPEN_SCHEMES.has(scheme);
+  if (!u.hostname) return { ascii: u.href, unicode: u.href, idn: false, insecure: false, scheme, external: true, openable };
   const ascii = u.hostname;
   let unicode;
   try { unicode = ascii.split('.').map((l) => (l.startsWith('xn--') ? decodePunycode(l.slice(4)) : l)).join('.'); } catch { unicode = ascii; }
-  return { ascii, unicode, idn: unicode !== ascii, insecure: u.protocol === 'http:', scheme, external: scheme !== 'http' && scheme !== 'https' };
+  return { ascii, unicode, idn: unicode !== ascii, insecure: u.protocol === 'http:', scheme, external: scheme !== 'http' && scheme !== 'https', openable };
 }
 
 // RFC 3492 punycode decoder (display only).

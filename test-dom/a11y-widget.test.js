@@ -29,6 +29,8 @@ describe('settings', () => {
     expect(s).toMatchObject({ highContrast: true, fontScale: 'md', lang: null, markLinks: false });
     expect(s).not.toHaveProperty('evil');
     expect(readSaved({ getItem: () => { throw new Error('blocked'); } }).fontScale).toBe('md');
+    // Inherited keys are not text sizes (they used to break apply()).
+    for (const f of ['constructor', 'toString', '__proto__']) expect(readSaved(store(JSON.stringify({ fontScale: f }))).fontScale).toBe('md');
   });
 
   it('applies classes, one text size at a time', () => {
