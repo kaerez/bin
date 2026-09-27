@@ -62,11 +62,16 @@ export class Drive extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    ctx.blockConcurrencyWhile(async () => {
-      this.sql.exec(SCHEMA);
-      const t = nowSec();
-      this.sql.exec("INSERT OR IGNORE INTO nodes (id, parent, kind, name, state, created, updated) VALUES (?, NULL, 'dir', 'null', 'ready', ?, ?)", ROOT, t, t);
-    });
+    /** Chunk writes in flight per node id (finalize waits for them: they may be retries of a chunk already stored). */
+    this.inflight = new Map();
+    ctx.blockConcurrencyWhile(async () => this.#init());
+  }
+
+  /** The tables and the root (again after destroy(), so a late call finds an empty Drive, not missing tables). */
+  #init() {
+    this.sql.exec(SCHEMA);
+    const t = nowSec();
+    this.sql.exec("INSERT OR IGNORE INTO nodes (id, parent, kind, name, state, created, updated) VALUES (?, NULL, 'dir', 'null', 'ready', ?, ?)", ROOT, t, t);
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -85,6 +90,7 @@ export class Drive extends DurableObject {
    */
   #bind(uid) {
     if (typeof uid !== 'string' || !uid) throw new Error('drive: missing user');
+    if (this.destroyed) { this.destroyed = false; this.#init(); } // a call after destroy(): an empty Drive again
     const have = this.#meta('uid');
     if (have === null) this.#setMeta('uid', uid);
     else if (have !== uid) throw new Error('drive: wrong user');
@@ -92,8 +98,20 @@ export class Drive extends DurableObject {
   #node(id) {
     return this.sql.exec('SELECT * FROM nodes WHERE id = ?', id).toArray()[0] || null;
   }
+  /**
+   * Bytes charged to the Drive's capacity: every file's size plus the sealed
+   * names, metadata and file keys of every item (docs/DRIVE.md §10), so the
+   * encrypted fields cannot store data outside the capacity.
+   */
   #used() {
-    return this.sql.exec("SELECT COALESCE(SUM(size), 0) AS s FROM nodes WHERE kind = 'file'").one().s;
+    return this.sql.exec(`SELECT COALESCE(SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END), 0)
+      + COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0) AS s FROM nodes WHERE id != ?`, ROOT).one().s;
+  }
+  /** Refused when `extra` more bytes would not fit in `capacity` (null: no check). */
+  #fits(extra, capacity) {
+    if (capacity === null || capacity === undefined) return null;
+    const used = this.#used();
+    return used + extra > capacity ? fail(413, 'drive_full', 'Not enough space left in your Drive.', { max: capacity, used }) : null;
   }
   #count() {
     return this.sql.exec('SELECT COUNT(*) AS c FROM nodes').one().c;
@@ -179,30 +197,84 @@ export class Drive extends DurableObject {
   async summary(uid) {
     this.#bind(uid);
     const wraps = this.sql.exec('SELECT kind, ref, data FROM wraps ORDER BY kind, ref').toArray().map((w) => ({ kind: w.kind, ref: w.ref, data: w.data }));
-    return { used: this.#used(), items: this.#count() - 1, driveSalt: this.#meta('driveSalt'), wraps, escrowPriv: this.#meta('escrowPriv') };
+    return {
+      used: this.#used(),
+      items: this.#count() - 1,
+      driveSalt: this.#meta('driveSalt'),
+      wraps,
+      escrowPriv: this.#meta('escrowPriv'),
+      escrowPin: this.#meta('escrowPin'),
+      handoffKey: this.#meta('handoffKey'),
+      pwStale: this.#meta('pwStale') === '1',
+      content: this.#hasContent(),
+    };
+  }
+
+  #hasContent() {
+    return this.sql.exec('SELECT 1 FROM nodes WHERE parent = ? LIMIT 1', ROOT).toArray().length > 0;
   }
 
   /**
-   * Change the key material: `set` / `remove` wraps, the Drive salt and (the
-   * owner's Drive only — the Worker checks) the encrypted escrow private key.
-   * Values arrive validated; `data` and `escrowPriv` are opaque strings.
+   * Change the key material: `set` / `remove` wraps, the Drive salt, the
+   * sealed escrow pin (the escrow key this Drive trusts), the one-time
+   * hand-over key and (the owner's Drive only — the Worker checks) the
+   * encrypted escrow private key. Values arrive validated; `data`,
+   * `escrowPriv` and `escrowPin` are opaque. Writing a `pw` wrap ends a
+   * pending hand-over and the "stale password wrap" mark. A change that would
+   * leave a Drive with content and no wrap at all is refused: nothing could
+   * open it again.
    */
-  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv } = {}) {
+  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv, escrowPin, handoffKey } = {}) {
     this.#bind(uid);
     const has = (k, r) => this.sql.exec('SELECT 1 FROM wraps WHERE kind = ? AND ref = ?', k, r).toArray().length > 0;
+    const newPw = set.some((w) => w.kind === 'pw');
+    const dropHandoff = newPw && has('handoff', 'handoff') && !set.some((w) => w.kind === 'handoff');
+    const rm = dropHandoff ? [...remove, { kind: 'handoff', ref: 'handoff' }] : remove;
     const total = this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c;
-    const removed = remove.filter((w) => has(w.kind, w.ref)).length;
-    const added = set.filter((w) => !has(w.kind, w.ref) && !remove.some((x) => x.kind === w.kind && x.ref === w.ref)).length;
-    if (total - removed + added > MAX_WRAPS) return fail(409, 'too_many_wraps', `At most ${MAX_WRAPS} key wraps.`);
+    const removed = rm.filter((w) => has(w.kind, w.ref) && !set.some((x) => x.kind === w.kind && x.ref === w.ref)).length;
+    const added = set.filter((w) => !has(w.kind, w.ref)).length;
+    const after = total - removed + added;
+    if (after > MAX_WRAPS) return fail(409, 'too_many_wraps', `At most ${MAX_WRAPS} key wraps.`);
+    if (after === 0 && total > 0 && this.#hasContent()) return fail(409, 'last_wrap', 'This would leave your Drive with no way to open it.');
     this.ctx.storage.transactionSync(() => {
-      for (const w of remove) this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref);
+      for (const w of rm) this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref);
       for (const w of set) {
         this.sql.exec('INSERT INTO wraps (kind, ref, data) VALUES (?, ?, ?) ON CONFLICT(kind, ref) DO UPDATE SET data = excluded.data', w.kind, w.ref, w.data);
       }
       if (driveSalt !== undefined) this.#setMeta('driveSalt', driveSalt);
       if (escrowPriv !== undefined) this.#setMeta('escrowPriv', escrowPriv);
+      if (escrowPin !== undefined) this.#setMeta('escrowPin', escrowPin);
+      if (handoffKey !== undefined) this.#setMeta('handoffKey', handoffKey);
+      if (newPw) this.#setMeta('pwStale', null);
+      if (dropHandoff) this.#setMeta('handoffKey', null);
     });
     return { ok: true };
+  }
+
+  /**
+   * The account's password changed (`reset`: set by the owner). The `pw` wrap
+   * still opens with the old password, which may be the compromised one: after
+   * a reset it goes at once when another wrap remains that can open the Drive
+   * (a passkey or a recovery code; with `escrow`, the owner acting as the
+   * user, whose browser adds the new wrap through the escrow, also the escrow
+   * wrap), else it is marked stale; after the user's own change it is marked
+   * stale (their browser writes the new one right away). A stale wrap may be
+   * replaced without the step-up, and goes when it is.
+   */
+  async passwordChanged(uid, { reset = false, escrow = false } = {}) {
+    this.#bind(uid);
+    if (!this.sql.exec("SELECT 1 FROM wraps WHERE kind = 'pw'").toArray().length) return { ok: true, pw: 'none' };
+    const kinds = escrow ? "('passkey', 'recovery', 'escrow')" : "('passkey', 'recovery')";
+    const other = this.sql.exec(`SELECT COUNT(*) AS c FROM wraps WHERE kind IN ${kinds}`).one().c > 0;
+    if (reset && other) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec("DELETE FROM wraps WHERE kind = 'pw'");
+        this.#setMeta('pwStale', '1'); // no pw wrap: the next one is written without a step-up
+      });
+      return { ok: true, pw: 'removed' };
+    }
+    this.#setMeta('pwStale', '1');
+    return { ok: true, pw: 'stale' };
   }
 
   /** Remove wraps by kind (and optionally one ref) — the server's side of passkey / code removal. */
@@ -213,15 +285,15 @@ export class Drive extends DurableObject {
     return { ok: true };
   }
 
-  /** Keep only the passkey / recovery wraps whose credential the account still has. */
+  /** Keep only the passkey / recovery wraps whose credential the account still has; → the wraps removed. */
   async pruneWraps(uid, { passkey = [], recovery = [] } = {}) {
     this.#bind(uid);
     const keep = { passkey: new Set(passkey), recovery: new Set(recovery) };
-    let n = 0;
-    for (const w of this.sql.exec("SELECT kind, ref FROM wraps WHERE kind IN ('passkey', 'recovery')").toArray()) {
-      if (!keep[w.kind].has(w.ref)) { this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref); n++; }
+    const gone = [];
+    for (const w of this.sql.exec("SELECT kind, ref, data FROM wraps WHERE kind IN ('passkey', 'recovery')").toArray()) {
+      if (!keep[w.kind].has(w.ref)) { this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref); gone.push({ kind: w.kind, ref: w.ref, data: w.data }); }
     }
-    return { ok: true, removed: n };
+    return { ok: true, removed: gone.length, wraps: gone };
   }
 
   /** The escrow wrap and the list of wraps, for the owner's escrow route. */
@@ -243,19 +315,21 @@ export class Drive extends DurableObject {
     return { ok: true, node: this.#out(n), children, path };
   }
 
-  async createFolder(uid, { id, parent, name, meta = null }) {
+  /** A folder; its sealed name (and meta) count towards the capacity. */
+  async createFolder(uid, { id, parent, name, meta = null, capacity = null }) {
     this.#bind(uid);
-    const bad = this.#checkNew(id) || this.#checkParent(parent);
+    const bad = this.#checkNew(id) || this.#checkParent(parent) || this.#fits(name.length + (meta ? meta.length : 0), capacity);
     if (bad) return bad;
     if (this.#depth(parent) + 1 > MAX_DEPTH) return fail(409, 'too_deep', `Folders nest at most ${MAX_DEPTH} levels.`);
     const t = nowSec();
     this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, state, created, updated) VALUES (?, ?, 'dir', ?, ?, 'ready', ?, ?)", id, parent, name, meta, t, t);
-    return { ok: true, id };
+    return { ok: true, id, used: this.#used() };
   }
 
   /**
    * Reserve a file: capacity and the largest-file limit are checked here, at
-   * once, against every file already stored or being uploaded.
+   * once, against every file already stored or being uploaded (and the
+   * sealed fields of every item, this one's included).
    */
   async createFile(uid, { id, parent, name, meta = null, size, fk, uploadHash, capacity, maxFile, pendingSec }) {
     this.#bind(uid);
@@ -263,14 +337,15 @@ export class Drive extends DurableObject {
     if (bad) return bad;
     if (size > maxFile) return fail(413, 'file_too_large', `A Drive file may be at most ${maxFile} bytes.`, { max: maxFile });
     const used = this.#used();
-    if (used + size > capacity) return fail(413, 'drive_full', 'Not enough space left in your Drive.', { max: capacity, used });
+    const extra = size + name.length + (meta ? meta.length : 0) + fk.length;
+    if (used + extra > capacity) return fail(413, 'drive_full', 'Not enough space left in your Drive.', { max: capacity, used });
     const chunks = driveChunks(size);
     const t = nowSec();
     this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
       id, parent, name, meta, size, chunks, fk, uploadHash, t, t);
     this.#setMeta('pendingSec', String(pendingSec));
     await this.#schedulePurge();
-    return { ok: true, id, chunks, used: used + size };
+    return { ok: true, id, chunks, used: used + extra };
   }
 
   #pending(id, uploadHash) {
@@ -280,7 +355,12 @@ export class Drive extends DurableObject {
     return { status: 'ok', n };
   }
 
-  /** Store chunk i of a pending file (exact size), then record it — or undo the write if the upload ended meanwhile. */
+  /**
+   * Store chunk i of a pending file (exact size), then record it — or undo the
+   * write if the upload ended meanwhile (deleted, purged, the Drive
+   * destroyed). While the write is in flight the file cannot be finalized
+   * (finalize answers "busy"), so a late retry never lands on a complete file.
+   */
   async putChunk(uid, id, uploadHash, i, bytes) {
     this.#bind(uid);
     const c = this.#pending(id, uploadHash);
@@ -289,15 +369,25 @@ export class Drive extends DurableObject {
     const expected = driveChunkSize(c.n.size, i);
     if (!bytes || bytes.byteLength !== expected) return { status: 'bad_size', expected };
     const key = driveChunkKey(uid, id, i);
-    await this.env.FILES.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
-    const again = this.#pending(id, uploadHash);
-    if (again.status !== 'ok') {
-      // Deleted or purged while the write was in flight: leave nothing behind.
-      await this.env.FILES.delete(key);
-      return { status: 'gone' };
+    this.inflight.set(id, (this.inflight.get(id) || 0) + 1);
+    try {
+      await this.env.FILES.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
+      let again;
+      try { again = this.destroyed ? { status: 'gone' } : this.#pending(id, uploadHash); } catch { again = { status: 'gone' }; } // tables dropped by destroy()
+      if (again.status !== 'ok') {
+        // The upload ended while the write was in flight: leave nothing behind
+        // (a file that is complete keeps its chunks — it cannot be, see finalize).
+        let ready = false;
+        try { const n = this.destroyed ? null : this.#node(id); ready = !!n && n.state === 'ready'; } catch { /* the Drive is gone */ }
+        if (!ready) await this.env.FILES.delete(key);
+        return { status: 'gone' };
+      }
+      this.sql.exec('INSERT OR IGNORE INTO upchunks (node_id, i) VALUES (?, ?)', id, i);
+      this.sql.exec('UPDATE nodes SET done = (SELECT COUNT(*) FROM upchunks WHERE node_id = ?), updated = ? WHERE id = ?', id, nowSec(), id);
+    } finally {
+      const left = (this.inflight.get(id) || 1) - 1;
+      if (left > 0) this.inflight.set(id, left); else this.inflight.delete(id);
     }
-    this.sql.exec('INSERT OR IGNORE INTO upchunks (node_id, i) VALUES (?, ?)', id, i);
-    this.sql.exec('UPDATE nodes SET done = (SELECT COUNT(*) FROM upchunks WHERE node_id = ?), updated = ? WHERE id = ?', id, nowSec(), id);
     await this.#schedulePurge();
     return { status: 'ok' };
   }
@@ -306,6 +396,8 @@ export class Drive extends DurableObject {
     this.#bind(uid);
     const c = this.#pending(id, uploadHash);
     if (c.status !== 'ok') return c;
+    // A chunk still being written (e.g. the first attempt of a chunk the client retried): not yet.
+    if (this.inflight.get(id)) return { status: 'busy' };
     const have = new Set(this.sql.exec('SELECT i FROM upchunks WHERE node_id = ?', id).toArray().map((r) => r.i));
     for (let i = 0; i < c.n.chunks; i++) if (!have.has(i)) return { status: 'incomplete', missing: i };
     this.ctx.storage.transactionSync(() => {
@@ -325,11 +417,17 @@ export class Drive extends DurableObject {
   }
 
   /** Move (`parent`) and / or rename (`name`, `meta`) an item. The root can do neither. */
-  async patchNode(uid, id, { parent, name, meta }) {
+  async patchNode(uid, id, { parent, name, meta, capacity = null }) {
     this.#bind(uid);
     if (id === ROOT) return fail(400, 'root', 'The top folder cannot be moved or renamed.');
     const n = this.#node(id);
     if (!n) return fail(404, 'not_found', 'No such item.');
+    // Longer sealed fields take more of the capacity.
+    const grow = (name !== undefined ? name.length - n.name.length : 0) + (meta !== undefined ? (meta ? meta.length : 0) - (n.meta ? n.meta.length : 0) : 0);
+    if (grow > 0) {
+      const full = this.#fits(grow, capacity);
+      if (full) return full;
+    }
     if (parent !== undefined && parent !== n.parent) {
       const bad = this.#checkParent(parent);
       if (bad) return bad;
@@ -343,7 +441,7 @@ export class Drive extends DurableObject {
       if (name !== undefined) this.sql.exec('UPDATE nodes SET name = ?, updated = ? WHERE id = ?', name, t, id);
       if (meta !== undefined) this.sql.exec('UPDATE nodes SET meta = ?, updated = ? WHERE id = ?', meta, t, id);
     });
-    return { ok: true };
+    return { ok: true, used: this.#used() };
   }
 
   /**
@@ -432,7 +530,18 @@ export class Drive extends DurableObject {
     return { used: this.#used(), items: this.#count() - 1 };
   }
 
-  /** The account is deleted: remove every R2 object and all state. Returns the shares that referenced it. */
+  /** Every share that references this Drive (the account is being deleted: they end first). */
+  async allShares(uid) {
+    this.#bind(uid);
+    return { ok: true, shares: this.sql.exec('SELECT DISTINCT share_id FROM refs').toArray().map((r) => r.share_id) };
+  }
+
+  /**
+   * The account is deleted: remove every R2 object and all state. Returns the
+   * shares that referenced it. Safe to repeat: a failure part-way leaves the
+   * rows (a retry deletes the objects again), and a call after it finds an
+   * empty Drive.
+   */
   async destroy(uid) {
     this.#bind(uid);
     return this.ctx.blockConcurrencyWhile(async () => {
@@ -440,6 +549,8 @@ export class Drive extends DurableObject {
       const shares = this.sql.exec('SELECT DISTINCT share_id FROM refs').toArray().map((r) => r.share_id);
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
+      this.destroyed = true;
+      this.inflight.clear();
       return { ok: true, shares };
     });
   }
@@ -447,6 +558,7 @@ export class Drive extends DurableObject {
   // ── pending-upload purge ──────────────────────────────────────────────────
   /** Uploads with no progress for the role's filePendingSec are deleted, with their chunks. */
   async alarm() {
+    if (this.destroyed) return;
     const uid = this.#meta('uid');
     if (!uid) return;
     const sec = Number(this.#meta('pendingSec')) || 3600;

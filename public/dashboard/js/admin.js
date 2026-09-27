@@ -494,7 +494,7 @@ async function renderUsersInto() {
 
 /**
  * After a password reset: re-key the user's Drive for the new password
- * through the owner escrow (docs/DRIVE.md §3; the server logs the escrow use).
+ * through the owner escrow (docs/DRIVE.md §3; the admin audit records the escrow use).
  * Needs the owner's own Drive unlocked in this tab; otherwise the user unlocks
  * their Drive with a recovery code or passkey. The reset never depends on it.
  */
@@ -509,6 +509,7 @@ async function driveAfterReset(userId, newPassword) {
     ok: 'Their Drive now opens with the new password.',
     locked: 'Their Drive was not re-keyed (your own Drive is locked in this tab): they open it with a recovery code or a passkey.',
     failed: 'Their Drive could not be re-keyed: they open it with a recovery code or a passkey.',
+    mismatch: 'Their Drive was not re-keyed: the escrow public key on the server is not yours (it may have been replaced). Open your own Drive to review it.',
   }[r];
   if (note) toast(note, r === 'ok' ? {} : { error: true });
 }

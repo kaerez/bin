@@ -7,7 +7,7 @@
 import { me, logout, admin, ApiError } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError } from '../../js/common.js';
-import { clearSessionKey } from '../../js/drivekeys.js';
+import { clearSessionKey, clearImpersonationKey } from '../../js/drivekeys.js';
 import { watchSession } from './session-timeout.js';
 
 const $ = (s) => document.querySelector(s);
@@ -35,6 +35,8 @@ export const ready = (async () => {
   const profile = await loadMe();
   // A warning before the session times out, with the option to stay signed in (WCAG 2.2.1).
   watchSession(profile.session);
+  // The Drive key of a user the owner acted as lives only while acting as them.
+  if (!profile.impersonatedBy) clearImpersonationKey();
   const nav = $('#dash-nav');
   if (nav) {
     nav.hidden = false;
@@ -56,6 +58,7 @@ export const ready = (async () => {
     $('#imp-return').onclick = async () => {
       try {
         await admin.unimpersonate();
+        clearImpersonationKey();
         location.href = '/dashboard/admin/';
       } catch (e) {
         toast(friendlyError(e), { error: true });

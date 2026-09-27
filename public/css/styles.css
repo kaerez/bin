@@ -689,6 +689,8 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 .tree-icon { flex: none; width: 13px; height: 10px; margin-right: .1rem; border: 1.5px solid var(--ink-3); border-radius: 1px 2px 2px 2px; position: relative; }
 .tree-icon::before { content: ''; position: absolute; left: -1.5px; top: -4px; width: 6px; height: 3px; border: 1.5px solid var(--ink-3); border-bottom: 0; border-radius: 2px 2px 0 0; }
 .tree-text { overflow-wrap: anywhere; min-width: 0; }
+/* A file name (common.js nameEl): isolated from the text around it; the extension its own LTR isolate. */
+.fname, .fext { unicode-bidi: isolate; }
 
 /* Tree on the left, the selected folder's content on the right; stacked on phones. */
 .browser { display: grid; grid-template-columns: minmax(9rem, 32%) minmax(0, 1fr); gap: 1rem; align-items: start; }

@@ -40,7 +40,8 @@ vi.mock('../public/js/api.js', () => {
   };
 });
 vi.mock('../public/js/kdf-progress.js', () => ({}));
-vi.mock('../public/js/passkeys.js', () => ({ passkeysSupported: () => true, createPasskey: async () => ({ id: 'new' }) }));
+// createPasskeyPrf: the Drive's account page asks for the PRF output at registration (no PRF here).
+vi.mock('../public/js/passkeys.js', () => ({ passkeysSupported: () => true, createPasskey: async () => ({ id: 'new' }), createPasskeyPrf: async () => ({ credential: { id: 'new' }, prf: null }) }));
 vi.mock('../public/js/pwauth.js', () => ({
   newCredential: async () => ({ salt: 's', t: 3, proof: 'p' }),
   checkNewPassword: () => { policyChecks.user += 1; return 'too short'; },

@@ -188,8 +188,10 @@ working.
   Drive's ciphertext (nothing is copied): same options, limits and quotas, kind "drive" in My
   shares; deleting a Drive item ends its shares. Admin → Users shows each user's usage; there is
   no admin file browser. Drive content is not exported. Owner escrow lets the owner open any
-  user's Drive: each use needs a reason and is logged (`drive.escrow_used`; see
-  [SECURITY.md](./SECURITY.md)).
+  user's Drive: from Admin after a password reset (with a reason), and while logged in as the
+  user, where the owner has the user's whole Drive (the owner's own Drive unlocked in the tab);
+  both are recorded in the owner-only admin audit (`drive.escrow_used`) and never in the user's
+  own activity (see [SECURITY.md](./SECURITY.md) and [docs/DRIVE.md](./docs/DRIVE.md) §9).
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
   *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).

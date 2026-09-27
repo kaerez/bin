@@ -38,3 +38,18 @@ WT=$PWD BASE=http://localhost:8787 node test-e2e/drive-int.mjs
 
 It prints one `PASS` / `FAIL` line per check and `N/M passed`, and exits non-zero on any
 failure. It takes a few minutes: Argon2id runs for every password unlock.
+
+## `drive-impersonate.mjs` — the owner in a user's Drive ("Log in as")
+
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3, §9): the owner, logged in as a user, opens
+the user's Drive through the owner escrow (the owner's own Drive unlocked in the tab), reads and
+downloads the user's file, uploads one and shares it (a recipient opens the link); the user's key
+sits in its own tab slot and goes when the impersonation ends; removing the user's password wrap
+is refused; a user with no Drive yet gets one that their next sign-in finishes; the notice when
+the owner's Drive is locked; Hebrew and spoofing names in the Drive page; and nothing new in the
+user's own activity while the admin audit names the owner. Same set-up as `drive-int.mjs` (a
+fresh server with no owner yet):
+
+```sh
+WT=$PWD BASE=http://127.0.0.1:8787 node test-e2e/drive-impersonate.mjs
+```

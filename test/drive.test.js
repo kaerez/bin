@@ -7,7 +7,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { owner, makeUser, fetchJson, intent, cookieOf, proofFor, salt16, USER_PW } from './helpers.js';
-import { someBytes, enc, newNodeId, driveLimits, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, node, drive } from './drive-helpers.js';
+import { someBytes, enc, newNodeId, driveLimits, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, node, drive, DIR_BYTES, FILE_BYTES } from './drive-helpers.js';
 import { driveChunkSize, driveChunks } from '../src/drive-do.js';
 import { SCHEMA_VERSION, PUBLIC_ID } from '../src/directory-do.js';
 import { CHUNK } from '../public/js/files.js';
@@ -177,7 +177,8 @@ describe('Drive tree', () => {
     const f1 = await uploadFile(u.cookie, a.id, 1000);
     const f2 = await uploadFile(u.cookie, b.id, 2000);
     const pend = await createFile(u.cookie, b.id, 3000); // an unfinished upload goes too
-    expect((await drive(u.cookie)).used).toBe(before + 6000);
+    // Content, plus the sealed fields of 2 folders and 3 files.
+    expect((await drive(u.cookie)).used).toBe(before + 6000 + 2 * DIR_BYTES + 3 * FILE_BYTES);
     const r = await del(u.cookie, a.id);
     expect(r.status).toBe(200);
     expect(await r.json()).toMatchObject({ ok: true, deleted: 5 });
@@ -196,22 +197,24 @@ describe('Drive tree', () => {
 describe('Drive limits', () => {
   it('capacity and the largest file are enforced when the file is created', async () => {
     const u = await makeUser('drv-cap');
-    await enableDrive(u.id, { driveMaxBytes: 1000, driveMaxFileBytes: 700 });
-    expect(await drive(u.cookie)).toMatchObject({ capacity: 1000, maxFile: 700, used: 0 });
+    // Each file also takes its sealed fields (FILE_BYTES) of the capacity.
+    const cap = 1000 + 2 * FILE_BYTES;
+    await enableDrive(u.id, { driveMaxBytes: cap, driveMaxFileBytes: 700 });
+    expect(await drive(u.cookie)).toMatchObject({ capacity: cap, maxFile: 700, used: 0 });
     const big = await createFile(u.cookie, 'root', 701);
     expect(big.res.status).toBe(413);
     expect((await big.res.json()).error).toBe('file_too_large');
     await uploadFile(u.cookie, 'root', 600);
     const over = await createFile(u.cookie, 'root', 401);
     expect(over.res.status).toBe(413);
-    expect(await over.res.json()).toMatchObject({ error: 'drive_full', max: 1000, used: 600 });
+    expect(await over.res.json()).toMatchObject({ error: 'drive_full', max: cap, used: 600 + FILE_BYTES });
     expect((await createFile(u.cookie, 'root', 400)).res.status).toBe(201); // exactly full (pending counts)
     expect((await createFile(u.cookie, 'root', 1)).res.status).toBe(413);
     // No limit (null) = the hard 100 GiB.
     await driveLimits(u.id, { driveMaxBytes: null, driveMaxFileBytes: null });
     expect(await drive(u.cookie)).toMatchObject({ capacity: null, maxFile: null });
     expect((await createFile(u.cookie, 'root', 100 * 1024 ** 3 + 1)).res.status).toBe(400);
-    expect((await createFile(u.cookie, 'root', 100 * 1024 ** 3 - 1000)).res.status).toBe(201); // 1000 bytes used: exactly full
+    expect((await createFile(u.cookie, 'root', 100 * 1024 ** 3 - cap - FILE_BYTES)).res.status).toBe(201); // exactly full
     const full = await createFile(u.cookie, 'root', 1);
     expect(full.res.status).toBe(413);
     expect((await full.res.json()).max).toBe(100 * 1024 ** 3);
@@ -225,17 +228,17 @@ describe('Drive limits', () => {
     const f = await createFile(u.cookie, 'root', 50);
     expect((await putChunk(u.cookie, f.id, 0, randomBytes(66), f.uploadToken)).status).toBe(200);
     const keep = await uploadFile(u.cookie, 'root', 20);
-    expect((await drive(u.cookie)).used).toBe(70);
+    expect((await drive(u.cookie)).used).toBe(70 + 2 * FILE_BYTES);
     vi.useFakeTimers({ now: Date.now() + 601 * 1000, toFake: ['Date'] });
     await runDurableObjectAlarm(driveOf(u.id));
     vi.useRealTimers();
     expect((await node(u.cookie, f.id)).status).toBe(404);
     expect(await env.FILES.get(`d/${u.id}/${f.id}/0`)).toBeNull();
     expect((await node(u.cookie, keep.id)).status).toBe(200); // complete files stay
-    expect((await drive(u.cookie)).used).toBe(20);
+    expect((await drive(u.cookie)).used).toBe(20 + FILE_BYTES);
     // The mirror the admin sees was updated by the alarm itself.
     const users = (await (await fetchJson('/api/private/admin/users', { cookie: oc })).json()).users;
-    expect(users.find((x) => x.id === u.id).drive.used).toBe(20);
+    expect(users.find((x) => x.id === u.id).drive.used).toBe(20 + FILE_BYTES);
   });
 });
 
@@ -253,9 +256,15 @@ describe('Drive keys', () => {
     expect(s.driveSalt).toBe(salt);
     expect(s.wraps).toEqual([{ kind: 'escrow', ref: 'escrow', data: ESC }, { kind: 'pw', ref: 'pw', data: W() }]);
     expect(s.escrowPriv).toBeUndefined();
-    expect((await keys(u.cookie, { set: [{ kind: 'pw', ref: 'pw', data: W(2) }] })).status).toBe(200); // replaced
+    // Replacing the pw wrap or removing a wrap needs the password (or a passkey), as on Account.
+    const noStep = await keys(u.cookie, { set: [{ kind: 'pw', ref: 'pw', data: W(2) }] });
+    expect(noStep.status).toBe(400);
+    expect((await noStep.json()).error).toBe('reauth_required');
+    expect((await keys(u.cookie, { set: [{ kind: 'pw', ref: 'pw', data: W(2) }], current: proofFor(USER_PW) })).status).toBe(200); // replaced
     expect((await drive(u.cookie)).wraps.find((w) => w.kind === 'pw').data).toBe(W(2));
-    expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }] })).status).toBe(200);
+    expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }] })).status).toBe(400);
+    expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }], current: proofFor('not-the-password') })).status).toBe(403);
+    expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }], current: proofFor(USER_PW) })).status).toBe(200);
     s = await drive(u.cookie);
     expect(s.wraps.map((w) => w.kind)).toEqual(['escrow']);
     const bad = [

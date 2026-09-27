@@ -209,7 +209,9 @@ export const drive = {
   remove: (id) => request(`${D}/nodes/${enc(id)}`, { method: 'DELETE', headers: INTENT }),
   share: (body) => request(`${D}/shares`, { method: 'POST', headers: INTENT, body }),
   shares: (id) => request(`${D}/nodes/${enc(id)}/shares`),
-  // The owner, for a user: open their escrow wrap (logged) / write their `pw` wrap after a reset.
+  // The owner acting as this user: their escrow wrap and the owner's sealed escrow key (admin audit).
+  impersonationEscrow: () => request(`${D}/escrow`, { method: 'POST', headers: INTENT, body: {} }),
+  // The owner, for a user: open their escrow wrap (admin audit) / write their `pw` wrap after a reset.
   escrow: (userId, reason) => request(`${A}/drive/escrow/${enc(userId)}`, { method: 'POST', headers: INTENT, body: { reason } }),
   setUserKeys: (userId, body) => request(`${A}/drive/keys/${enc(userId)}`, { method: 'PUT', headers: INTENT, body }),
 };

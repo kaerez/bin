@@ -18,7 +18,7 @@ import { binding } from '../lib/config.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { creationOptions, requestOptions } from '../lib/webauthn.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
-import { handleDrive, syncCredentialWraps } from './drive.js';
+import { handleDrive, syncCredentialWraps, drivePasswordChanged } from './drive.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const EXTRA_KEYS = ['max', 'quota', 'until', 'policy', 'refused'];
@@ -118,6 +118,10 @@ export async function handlePrivate(request, env, url, ctx) {
     if (!next) return err(400, 'invalid_credential', 'Invalid password proof.');
     const r = await dir.changePassword(a.user.id, { ...step, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
     if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
+    // The Drive's password wrap opens only with the old password now: stale
+    // (the user's browser writes the new one next), or — set by the owner
+    // acting as the user — handled like an admin reset (docs/DRIVE.md §3).
+    await drivePasswordChanged(env, a.user.id, { reset: !!a.actor, escrow: !!a.actor });
     // Impersonating: the user's sessions end, the owner's session (bound to
     // the owner's own session version) carries on unchanged.
     if (a.actor) return withAuth(a, json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }));

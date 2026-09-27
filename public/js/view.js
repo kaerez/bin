@@ -7,14 +7,15 @@
 import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
-import { validateManifest, buildTree, basename } from './files.js';
+import { validateManifest, buildTree, basename, cleanName } from './files.js';
 import { fetchHead, openShare, expireShare, extendDownloads, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
 import { humanCheck } from './turnstile.js';
+import { clearSessionKey } from './drivekeys.js';
 import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill, countdownSwitch } from './ui.js';
-import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
+import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError, nameEl } from './common.js';
 import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
 import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
 import { validateRefsManifest } from './refsmanifest.js';
@@ -79,6 +80,8 @@ async function initPublicComposer() {
   const n = $('#public-notice');
   if (prof.notice) { n.textContent = prof.notice; n.hidden = false; }
   // Loads alongside the composer; a share waits for the token only when created.
+  // Its script (third-party) must never find a Drive key left in this tab.
+  clearSessionKey();
   const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')] });
   setPublicHumanCheck(async () => (await check).take());
   const { startComposer } = await import('./composer.js');
@@ -158,6 +161,9 @@ async function doOpen({ id, kind, head, fragment, password }) {
       manifest = validateManifest(m);
     }
   } catch { throw new DecryptError('malformed manifest'); }
+  const cleaned = cleanManifest(manifest);
+  if (cleaned !== manifest && reader) reader = RefsReader.forShare({ id, grant: res.grant, refs: res.refs, manifest: cleaned });
+  manifest = cleaned;
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
   if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
@@ -399,7 +405,26 @@ function secretCard(text) {
 }
 
 // ── file rendering ───────────────────────────────────────────────────────────
+/**
+ * Received names without spoofing characters (files.js cleanName): each entry
+ * whose path loses any is kept under the cleaned path, marked `renamed`
+ * (shown on the item). Saving and zipping use the cleaned paths.
+ */
+function cleanManifest(manifest) {
+  let changed = false;
+  const entries = manifest.entries.map((e) => {
+    const p = cleanName(e.path);
+    if (p === e.path) return e;
+    changed = true;
+    return { ...e, path: p, renamed: true };
+  });
+  return changed ? { ...manifest, entries } : manifest;
+}
+
+const renamedNote = (e) => (e.renamed ? h('span.tree-sub.mono.renamed-note', { text: 'renamed: hidden characters removed' }) : null);
+
 function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, grant } = {}) {
+
   showView('files');
   const pills = clear($('#files-pills'));
   lifetimePills(pills, paste.meta, paste.adata.bar);
@@ -511,7 +536,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
             // decrypt) as a percentage, then a busy bar while it renders.
             closePreview();
             previewOpener = viewBtn;
-            $('#preview-title').textContent = entry.path;
+            $('#preview-title').replaceChildren(nameEl(entry.path));
             clear(previewBody);
             preview.hidden = false;
             preview.scrollIntoView({ block: 'nearest' });
@@ -540,7 +565,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
     all.hidden = true;
     const f = files[0];
     tree.appendChild(h('div.file-card', {},
-      h('div.file-meta', {}, h('span.file-name', { text: f.path }), h('span.file-sub.mono', { text: `${formatBytes(f.size)} · ${f.type}` })),
+      h('div.file-meta', {}, h('span.file-name', {}, nameEl(f.path)), h('span.file-sub.mono', { text: `${formatBytes(f.size)} · ${f.type}` }), renamedNote(f)),
       h('div.btn-row', {}, ...fileButtons(f))));
     return;
   }
@@ -557,13 +582,13 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
     for (const d of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       ul.appendChild(h('li.tree-dir', {},
         h('div.tree-row', {},
-          h('button.tree-name.tree-open', { type: 'button', text: `${d.name}/`, title: `Open ${d.name}`, on: { click: () => open(d.path) } }),
+          h('button.tree-name.tree-open', { type: 'button', title: `Open ${d.name}`, on: { click: () => open(d.path) } }, nameEl(d.name, { suffix: '/' })),
           h('span.tree-sub.mono', { text: `${count(d)} · ${formatBytes(size(d))}` }),
           h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p)) } }))));
     }
     for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) {
       ul.appendChild(h('li.tree-file', {},
-        h('div.tree-row', {}, h('span.tree-name', { text: basename(f.path) }), h('span.tree-sub.mono', { text: formatBytes(f.size) }),
+        h('div.tree-row', {}, h('span.tree-name', {}, nameEl(basename(f.path))), h('span.tree-sub.mono', { text: formatBytes(f.size) }), renamedNote(f),
           h('span.tree-actions', {}, ...fileButtons(f).map((b) => { b.classList.add('tree-btn'); return b; })))));
     }
     if (!ul.firstChild) return h('p.muted.pane-empty', { text: 'This folder is empty.' });
