@@ -26,6 +26,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - The Drive opens right after sign-in: no set-up, unlock or recovery screens, and passwords,
     passkeys and recovery codes play no part in it. The owner acting as a user gets the user's
     keys (`drive.keys_used`, admin audit only).
+  - The KEKs are asked for at every page load (`POST /api/private/drive/keys`, with the CSRF
+    token) and kept in the page's memory only: never written to or read from browser storage, so
+    a key planted there is ignored; the slots of the release before are removed. The old Drive
+    key of the release before (only while a Drive waits for its upgrade) is used only once its
+    check value is the server's.
   - Removed: the Drive key wraps (password, recovery code, passkey, escrow, hand-over), the key
     check value, the Drive salt, the owner's escrow and signing keys with their pins, rotation,
     "Trust the new key", owner resets and the automatic re-wrap, the owner recovery kit,
