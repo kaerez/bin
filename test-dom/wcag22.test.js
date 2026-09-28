@@ -14,8 +14,15 @@ import { join } from 'node:path';
 
 const ROOT = join(import.meta.dirname, '..');
 const pub = (p) => readFileSync(join(ROOT, 'public', p), 'utf8');
-// A page's markup without its <link>s and <script>s (parsing must not fetch them).
-const page = (p) => new DOMParser().parseFromString(pub(p).replace(/<link\b[^>]*>/g, '').replace(/<script\b[\s\S]*?<\/script>/g, ''), 'text/html');
+// A page's body, parsed, with its scripts and links removed (the head's stylesheet
+// and scripts are not needed; the checks here read the body only).
+const page = (p) => {
+  const html = pub(p);
+  const body = html.slice(html.indexOf('<body'), html.indexOf('</body>') + '</body>'.length);
+  const doc = new DOMParser().parseFromString(`<!doctype html><html>${body}</html>`, 'text/html');
+  for (const el of doc.querySelectorAll('script, link')) el.remove();
+  return doc;
+};
 
 // ── api.js stand-in: me() / logout() and the activity hook ──────────────────
 const api = vi.hoisted(() => ({ me: null, activity: new Set(), logouts: 0, config: { turnstile: null } }));
