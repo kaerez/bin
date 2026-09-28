@@ -454,6 +454,29 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Quota kinds for every share, the Drive and Receive** (Admin → Roles → Quotas; README
+  "Quotas", docs/API.md). The kind select is grouped: *Outgoing shares* — All outgoing shares
+  (`all`, unchanged), Notes, links and credentials (`text`, unchanged), Notes (`note`: plain
+  text, Markdown or code), Links (`url`), Credentials (`secret`), File and Drive shares (`files`,
+  unchanged), File shares (`file`), Drive shares (`drive`); *Drive* — Files uploaded
+  (`drive-upload`: each file uploaded, a folder upload counting every file, not files taken in
+  from Receive links; given back when the Drive refuses the file or the upload never completes,
+  deleted unfinished or purged); *Receive* — All receive (`receive`), New links
+  (`receive-link`) and Uploads received (`receive-upload`: each upload session that sends files
+  through one of the user's links, counted for the user when it starts and given back when it
+  does not start or ends having sent no file). `all` never counts Drive uploads or Receive.
+  - Existing quotas keep their reach: `all`, `text` (notes, links and credentials) and `files`
+    (file shares and Drive shares) count exactly what they counted before; the new kinds narrow.
+  - At a `receive-upload` or `receive` quota the uploader gets `429 not_accepting` ("This link
+    can’t accept more uploads right now. Try again later."), with nothing of the quota.
+  - The Public role's editor offers, and the server accepts for the public account (the API and
+    imports), only the outgoing kinds it can use (notes, links, credentials, file shares). Drive
+    shares, Drive uploads and Receive are web-app only: their quotas take no "API only" channel
+    (the editor disables it; the server refuses it).
+  - `quota_exceeded` messages name each kind ("Quota reached: 3 uploads received per 1d."), the
+    Account page lists them the same way, and `quotas.updated` in the audit spells every quota
+    out ("10 notes per 1d via the API [note]"), in several entries when the list is long.
+
 - **WCAG 2.2 conformance audit** ([docs/WCAG22.md](docs/WCAG22.md)): every success criterion at
   A, AA and AAA with a verdict, evidence and the pages it concerns. On that evidence (Chromium,
   automated and manual checks; screen-reader testing by people still to come) the pages meet
