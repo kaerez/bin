@@ -1,16 +1,25 @@
 // guard.js — Worker-side brute-force protection: manual allow/block IP rules
 // (cached per isolate), per-scope failure tracking in sharded Guard DOs, and
 // the DISABLE_BFP / DISABLE_BFP_SETUP kill switches.
+//
+// The Guard never sees an address at rest: its rows are keyed by a keyed hash
+// of the network (guardTag) and hold the address only sealed under the
+// Guard's record key (or in the clear before there is a keyring), both keys
+// handed out by the Directory and cached here like the settings
+// (src/lib/records.js, SECURITY.md, "Records at rest").
 
 import { bfpDisabled, binding } from './config.js';
 import { parseIp, parseRule, ruleContains, trackingKey } from './ip.js';
 import { clientIp } from './http.js';
-import { GUARD_SHARDS } from '../guard-do.js';
+import { GUARD_SHARDS, guardShardIndex } from '../guard-do.js';
+import { guardTag, guardRowId, importTagKey, importTableKey, sealRecord } from './records.js';
+import { bytesFromB64url } from '../../public/js/bytes.js';
 
 const CACHE_MS = 30 * 1000;
 let rulesCache = { at: 0, rules: [] };
 let settingsCache = { at: 0, settings: null };
 let publicConfigCache = { at: 0, config: null };
+let guardKeysCache = { at: 0, keys: null };
 
 export const directory = (env) => {
   const ns = binding(env, 'DIRECTORY');
@@ -22,6 +31,43 @@ export function invalidateGuardCaches() {
   rulesCache = { at: 0, rules: [] };
   settingsCache = { at: 0, settings: null };
   publicConfigCache = { at: 0, config: null };
+  guardKeysCache = { at: 0, keys: null };
+}
+
+/**
+ * The Guard's keys (Directory.guardKeys): the tag key (HMAC) and, once there
+ * is a keyring, the Guard's record key with its id → { tag, kid, seal | null }
+ * (CryptoKeys, never extractable here). Cached per isolate like the settings:
+ * after a root change, addresses may be sealed under the previous root's key
+ * for up to CACHE_MS (they stay readable; the Directory's pass re-seals them).
+ */
+async function guardKeys(env) {
+  if (!guardKeysCache.keys || Date.now() - guardKeysCache.at > CACHE_MS) {
+    const r = await directory(env).guardKeys();
+    guardKeysCache = {
+      at: Date.now(),
+      keys: { tag: await importTagKey(bytesFromB64url(r.tag)), kid: r.kid ?? null, seal: r.key ? await importTableKey(bytesFromB64url(r.key)) : null },
+    };
+  }
+  return guardKeysCache.keys;
+}
+
+/** The Guard key of a tracking key the owner typed (an address or a prefix, as the Guard's rows showed it before the tags). */
+export async function guardKeyFor(env, trackingKeyText) {
+  return guardTag((await guardKeys(env)).tag, trackingKeyText);
+}
+
+/** The caller's Guard key (a tag of its tracking key), once per request. */
+async function tagOf(env, g) {
+  g.tag ??= (async () => guardTag((await guardKeys(env)).tag, g.key))();
+  return g.tag;
+}
+
+/** The caller's address as a `scope` row keeps it ({ addr, rk }): sealed, or in the clear before there is a keyring. */
+async function sealedAddr(env, g, scope, tag) {
+  const k = await guardKeys(env);
+  if (!k.seal) return { addr: g.key, rk: null };
+  return { addr: await sealRecord(k.seal, { table: 'guard', col: 'addr', id: guardRowId(scope, tag) }, g.key), rk: k.kid };
 }
 
 /**
@@ -53,10 +99,8 @@ async function manualRules(env) {
 }
 
 function shard(env, key) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
   const ns = binding(env, 'GUARD');
-  return ns.get(ns.idFromName(`shard-${h % GUARD_SHARDS}`));
+  return ns.get(ns.idFromName(`shard-${guardShardIndex(key)}`));
 }
 
 export function guardShards(env) {
@@ -66,7 +110,9 @@ export function guardShards(env) {
 
 /**
  * Resolve the caller's IP context once per request:
- * { ip, key, manual: 'allow'|'block'|null, off: {all, setup} }.
+ * { ip, key, manual: 'allow'|'block'|null, off: {all, setup} }. `key` (the
+ * tracking key: the address, or its IPv6 prefix) stays in this request's
+ * memory; the Guard gets its tag (tagOf).
  */
 export async function ipContext(env, request) {
   const off = bfpDisabled(env);
@@ -90,7 +136,8 @@ const scopeOff = (g, scope) => (scope === 'setup' ? g.off.setup : g.off.all);
 export async function isBlocked(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   if (g.manual === 'block') return { blocked: true, manual: true };
-  return shard(env, g.key).check(scope, g.key);
+  const tag = await tagOf(env, g);
+  return shard(env, tag).check(scope, tag);
 }
 
 /** Record one failure for `scope`; returns the block state after it. */
@@ -98,7 +145,8 @@ export async function recordFailure(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   const s = g.settings;
   const rule = { max: s[`guard.${scope}.max`], windowSec: s[`guard.${scope}.windowSec`], blockSec: s[`guard.${scope}.blockSec`] };
-  return shard(env, g.key).fail(scope, g.key, rule);
+  const tag = await tagOf(env, g);
+  return shard(env, tag).fail(scope, tag, rule, await sealedAddr(env, g, scope, tag));
 }
 
 /**
@@ -111,7 +159,8 @@ export async function recordFailure(env, g, scope) {
 export async function rateLimit(env, g, scope, rule) {
   if (g.off.all || g.manual === 'allow') return { ok: true };
   if (g.manual === 'block') return { ok: false, until: null };
-  const r = await shard(env, g.key).fail(scope, g.key, rule);
+  const tag = await tagOf(env, g);
+  const r = await shard(env, tag).fail(scope, tag, rule, await sealedAddr(env, g, scope, tag));
   return r.blocked ? { ok: false, until: r.until ?? null } : { ok: true };
 }
 

@@ -62,8 +62,8 @@ admin change.
 | `k…` | KV `PASTES` | Unlimited-view notes, native TTL; `{paste, dth, acc}` |
 | `b…` | `BurnPaste` DO (per id) | View-limited notes; proof check + view spend in one critical section; alarm expiry |
 | `f…` | `FileShare` DO (per id) + R2 `FILES` (`f/<id>/<i>`) | Upload state, view counting, download grants, alarm purges R2 |
-| accounts & config | `Directory` DO (singleton, SQLite) | users (incl. the built-in public account), revoked sessions, API keys, limits, quotas + usage, settings, viewer rules, IP rules, share index, activity, public-access trackers (keyed hashes) |
-| brute-force state | `Guard` DOs (8 shards by IP hash) | per-scope failure counters and blocks with alarm cleanup |
+| accounts & config | `Directory` DO (singleton, SQLite) | users (incl. the built-in public account), revoked sessions, API keys, limits, quotas + usage, settings, viewer rules, IP rules, share index, activity, read receipts (sign-in and viewer records sealed at rest), public-access trackers (keyed hashes) |
+| brute-force state | `Guard` DOs (8 shards by hash of the key) | per-scope failure counters and blocks with alarm cleanup, keyed by a keyed hash of the network, the address sealed (SECURITY.md, "Records at rest") |
 | a user's Drive | `Drive` DO (per user, SQLite) + R2 `FILES` (`d/<user>/<node>/<i>`) | encrypted folder tree, key wraps, which shares reference which items; pending-upload purge alarm ([docs/DRIVE.md](./docs/DRIVE.md)) |
 | `f…` Drive share | `FileShare` DO with `refs` | references Drive files instead of an upload; its purge never touches `d/` objects |
 
@@ -86,6 +86,7 @@ need atomic, immediately consistent read-modify-write.
 | `src/routes/publicapi.js` | Anonymous creation as the public account (off by default), tracker resolution |
 | `src/lib/auth.js`, `jwt.js` | Sessions (JWS-in-JWE cookie), API-key auth |
 | `src/lib/guard.js`, `ip.js` | Manual IP rules, Guard scopes, IPv4/IPv6/CIDR |
+| `src/lib/records.js` | Sign-in and viewer records sealed at rest: record, table and wrap keys, sealed values, the Guard's tags (SECURITY.md, "Records at rest") |
 | `src/lib/settings.js` | Settings/limits/quotas schema and resolution |
 | `src/lib/config.js` | Tolerant env-var readers (`AUTHN`, `SIG`, `ENC`, `DISABLE_BFP*`) |
 | `src/*-do.js` | The five Durable Object classes |

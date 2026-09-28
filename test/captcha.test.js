@@ -143,7 +143,7 @@ async function apiKeyFor(u) {
 // ── the role options ───────────────────────────────────────────────────────
 describe('role options', () => {
   it('resolve for the owner (locked: allow), the Default role (holds values), a custom role (inherits) and the public account (none)', async () => {
-    expect(SCHEMA_VERSION).toBe(17); // 15: CAPTCHA on shares; 16: the Drive key model v2; 17: reverse-share options
+    expect(SCHEMA_VERSION).toBe(18); // 15: CAPTCHA on shares; 16: the Drive key model v2; 17: reverse-share options; 18: sign-in records sealed
     const rows = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key LIKE '%Captcha%' ORDER BY key").toArray());
     expect(rows).toEqual([
       { key: 'reverseCaptcha', value: '"require"' }, { key: 'reverseCaptchaDefault', value: '"on"' },
@@ -576,7 +576,7 @@ describe('reverse shares: the uploader\'s session start', () => {
 describe('the CAPTCHA checks are metered per network (F2)', () => {
   const invalidCount = async (ip) => {
     const g = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
-    return g.tracking.find((t) => t.scope === 'invalid' && t.key === `${ip}/32`)?.count ?? 0;
+    return g.tracking.find((t) => t.scope === 'invalid' && t.addr === `${ip}/32`)?.count ?? 0;
   };
   const human = (path, ip, headers) => ts(path, { method: 'POST', ip, headers: { ...intent, ...headers } });
 
@@ -670,7 +670,7 @@ describe('a missing or ended share answers exactly as a protected one without a 
 
   it('unknown ids are still counted as invalid requests (the Guard sees guessing as before)', async () => {
     const ip = freshIp();
-    const invalid = async () => (await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json()).tracking.find((t) => t.scope === 'invalid' && t.key === `${ip}/32`)?.count ?? 0;
+    const invalid = async () => (await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json()).tracking.find((t) => t.scope === 'invalid' && t.addr === `${ip}/32`)?.count ?? 0;
     for (let i = 0; i < 3; i++) {
       const res = await ts(`/api/paste/k${b64urlFromBytes(randomBytes(16))}`, { ip });
       expect(await errorOf(res)).toBe('captcha_required');

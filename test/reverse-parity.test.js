@@ -675,8 +675,8 @@ describe('migration 17 from the Directory the release before left', () => {
         defaults: Object.fromEntries(sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all'").toArray().map((x) => [x.key, JSON.parse(x.value)])),
       };
     });
-    expect(SCHEMA_VERSION).toBe(17);
-    expect(after.version).toBe('17');
+    expect(SCHEMA_VERSION).toBe(18); // 18: sign-in records sealed (records.test.js)
+    expect(after.version).toBe('18');
     expect(after.cols).toContain('ended');
     expect(after.rows).toEqual(expect.arrayContaining([
       { user_id: '', channel: 'all', value: '86400' },

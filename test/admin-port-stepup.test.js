@@ -104,7 +104,7 @@ describe('clearing logs', () => {
     const ip = freshIp();
     expect(await errorOf(await clearLogs(await passkeyProof({ tamper: true }), undefined, { ip }))).toBe('reauth_failed');
     const { tracking } = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
-    expect(tracking.find((t) => t.key === `${ip}/32` && t.scope === 'login')).toMatchObject({ count: 1 });
+    expect(tracking.find((t) => t.addr === `${ip}/32` && t.scope === 'login')).toMatchObject({ count: 1 });
     expect((await exportSettings(await passkeyProof())).status).toBe(200); // a good confirmation clears the account's count
     const u = await makeUser('port-logs-imp');
     const imp = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
@@ -121,7 +121,7 @@ describe('failed confirmations', () => {
     expect(await errorOf(await exportSettings(await passkeyProof({ tamper: true }), { ip }))).toBe('reauth_failed');
     // The network's login failures (as a wrong password at login).
     const { tracking } = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
-    expect(tracking.find((t) => t.key === `${ip}/32` && t.scope === 'login')).toMatchObject({ count: 2 });
+    expect(tracking.find((t) => t.addr === `${ip}/32` && t.scope === 'login')).toMatchObject({ count: 2 });
     // A good confirmation clears the account's count; then only failed passkeys, up to the lockout.
     expect((await exportSettings(await passkeyProof())).status).toBe(200);
     let last;

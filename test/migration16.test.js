@@ -16,8 +16,8 @@ let oc;
 beforeAll(async () => { oc = await owner(); });
 
 describe('migration 16 from the Directory the release before left', () => {
-  it('comes after #65\'s CAPTCHA (15); 17 (reverse-share options, reverse-parity.test.js) follows it', () => {
-    expect(SCHEMA_VERSION).toBe(17);
+  it('comes after #65\'s CAPTCHA (15); 17 (reverse-share options, reverse-parity.test.js) and 18 (sign-in records, records.test.js) follow it', () => {
+    expect(SCHEMA_VERSION).toBe(18);
   });
 
   it('every account gets a salt; the Drives that may hold anything of the release before wait; every Drive opens', async () => {

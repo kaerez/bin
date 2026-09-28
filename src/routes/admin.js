@@ -4,7 +4,8 @@
 
 import { json, err, readJsonBody, assertIntent, methodNotAllowed } from '../lib/http.js';
 import { authenticate, issueSession } from '../lib/auth.js';
-import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSettings, ipContext, RATE_LIMIT_SCOPES } from '../lib/guard.js';
+import { directory, guardShards, guardShardFor, guardKeyFor, invalidateGuardCaches, cachedSettings, ipContext, RATE_LIMIT_SCOPES } from '../lib/guard.js';
+import { isGuardTag } from '../lib/records.js';
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
 import { GUARD_SCOPES, apiExpiry } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
@@ -429,25 +430,33 @@ export async function handleAdmin(request, env, url) {
   if (p === '/api/private/admin/guard') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const lists = await Promise.all(guardShards(env).map((s) => s.list()));
-    return json({
-      blocks: lists.flatMap((l) => l.blocks).sort((x, y) => y.since - x.since),
-      tracking: lists.flatMap((l) => l.tracking).sort((x, y) => y.count - x.count),
-    });
+    const blocks = lists.flatMap((l) => l.blocks).sort((x, y) => y.since - x.since);
+    const tracking = lists.flatMap((l) => l.tracking).sort((x, y) => y.count - x.count);
+    // The addresses are sealed at rest (SECURITY.md, "Records at rest"): opened here, for the owner's view only.
+    const addrs = await dir.openGuardAddrs([...blocks, ...tracking].map((r) => ({ scope: r.scope, key: r.key, addr: r.addr, rk: r.rk })));
+    const shown = (list, off) => list.map(({ addr: _a, rk: _k, ...r }, i) => ({ ...r, addr: addrs[off + i] }));
+    return json({ blocks: shown(blocks, 0), tracking: shown(tracking, blocks.length) });
   }
   const gm = p.match(/^\/api\/private\/admin\/guard\/(unblock|block)$/);
   if (gm) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const body = await readJsonBody(request);
     if (![...GUARD_SCOPES, ...RATE_LIMIT_SCOPES].includes(body.scope) || typeof body.key !== 'string' || body.key.length > 64) return err(400, 'invalid', 'scope and key are required');
-    const stub = guardShardFor(env, body.key);
+    // A row's key (a tag), or an address / prefix as the owner knows it: its tag (SECURITY.md, "Records at rest").
+    const key = isGuardTag(body.key) ? body.key : await guardKeyFor(env, body.key);
+    const stub = guardShardFor(env, key);
+    // The row's address, for the audit entry (sealed there like every sign-in record).
+    const row = await stub.row(body.scope, key);
     if (gm[1] === 'unblock') {
-      await stub.unblock(body.scope, body.key);
-      await dir.adminLog({ action: 'guard.unblocked', detail: `${body.scope} ${body.key}` }, me);
+      await stub.unblock(body.scope, key);
+      // A row from before the tags (not re-keyed yet) is keyed by the address itself.
+      if (key !== body.key) await guardShardFor(env, body.key).unblock(body.scope, body.key);
+      await dir.guardLog({ action: 'guard.unblocked', scope: body.scope, key, row: row ?? (key !== body.key ? { addr: body.key, rk: null } : null) }, me);
     } else {
       const sec = Number(body.seconds);
       if (!Number.isSafeInteger(sec) || sec < 1 || sec > 365 * 86400) return err(400, 'invalid', 'seconds must be 1–31536000');
-      await stub.block(body.scope, body.key, now() + sec);
-      await dir.adminLog({ action: 'guard.blocked', detail: `${body.scope} ${body.key} ${sec}s` }, me);
+      await stub.block(body.scope, key, now() + sec);
+      await dir.guardLog({ action: 'guard.blocked', scope: body.scope, key, row, seconds: sec }, me);
     }
     return json({ ok: true });
   }

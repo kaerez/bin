@@ -34,6 +34,11 @@ import {
   deriveKek, deriveUserKey, deriveFieldKey, keyFingerprint, keyCheckValue, saltCheckValue, sameCheck, sealSubMek, openSubMek,
   newMekId, newKey, newSalt, KEY_RE, MEK_ID_RE, effectiveAt, mekStatus, checkTimeline,
 } from '../public/js/drivekeys.js';
+import {
+  deriveRecordKey, deriveTableKeyBytes, tableKey, sealRecord, openRecord, wrapRecordKey, unwrapRecordKey, KID_RE,
+  guardTag, guardRowId, importTagKey, isGuardTag,
+} from './lib/records.js';
+import { GUARD_SHARDS, guardShardIndex } from './guard-do.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -60,7 +65,7 @@ CREATE TABLE IF NOT EXISTS failures (user_id TEXT PRIMARY KEY, count INTEGER NOT
 CREATE TABLE IF NOT EXISTS pwchange_failures (user_id TEXT PRIMARY KEY, count INTEGER NOT NULL, start INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor_id TEXT,
   subject_id TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', imp INTEGER NOT NULL DEFAULT 0,
-  adm INTEGER NOT NULL DEFAULT 0);
+  adm INTEGER NOT NULL DEFAULT 0, rk TEXT);
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
   created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL,
@@ -76,7 +81,8 @@ CREATE INDEX IF NOT EXISTS trackers_ip ON trackers(ip_hash, created);
 CREATE INDEX IF NOT EXISTS trackers_seen ON trackers(last_seen);
 CREATE TABLE IF NOT EXISTS opens (id INTEGER PRIMARY KEY AUTOINCREMENT, share_id TEXT NOT NULL, user_id TEXT NOT NULL, ts INTEGER NOT NULL,
   ip TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', region TEXT NOT NULL DEFAULT '', city TEXT NOT NULL DEFAULT '',
-  browser TEXT NOT NULL DEFAULT '', browser_ver TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', langs TEXT NOT NULL DEFAULT '');
+  browser TEXT NOT NULL DEFAULT '', browser_ver TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', langs TEXT NOT NULL DEFAULT '',
+  ip_h TEXT, rk TEXT);
 CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id);
 CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts);
 CREATE INDEX IF NOT EXISTS opens_ts ON opens(ts);
@@ -97,6 +103,7 @@ CREATE TABLE IF NOT EXISTS meks (id TEXT PRIMARY KEY, sealed TEXT NOT NULL, fp T
 CREATE TABLE IF NOT EXISTS user_salts (user_id TEXT PRIMARY KEY, salt TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL, purpose TEXT NOT NULL DEFAULT 'sub');
 CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, v1_items INTEGER, v1_links INTEGER, updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS record_keys (kid TEXT PRIMARY KEY, sealed TEXT NOT NULL, under TEXT NOT NULL, created INTEGER NOT NULL);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -278,6 +285,22 @@ const MIGRATIONS = [
     }
     materializeDefaultRole(m.sql);
   },
+  // 18: sign-in and viewer records sealed at rest (SECURITY.md, "Records at rest"): each
+  // record row's key id (activity.rk, opens.rk: NULL in the clear, else the
+  // fingerprint of the root MEK its record key comes from), the opener
+  // address's keyed hash for the per-address throttle (opens.ip_h), and the
+  // record keys of earlier roots (record_keys). Nothing is sealed here (the
+  // crypto is asynchronous): the rows already stored are sealed by the
+  // background pass (the alarm, run soon after this step, "records.pass").
+  (m) => {
+    m.addColumn('activity', 'rk', 'TEXT');
+    m.addColumn('opens', 'ip_h', 'TEXT');
+    m.addColumn('opens', 'rk', 'TEXT');
+    m.sql.exec('CREATE TABLE IF NOT EXISTS record_keys (kid TEXT PRIMARY KEY, sealed TEXT NOT NULL, under TEXT NOT NULL, created INTEGER NOT NULL)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS activity_rk ON activity(rk)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS opens_rk ON opens(rk)');
+    m.sql.exec("INSERT INTO meta (k, v) VALUES ('records.pass', '1') ON CONFLICT(k) DO UPDATE SET v = excluded.v");
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -354,7 +377,31 @@ const KEY_INFO = Object.freeze({
   prelogin: 'secbin-directory/prelogin-salt/v1',
   trackerTag: 'secbin-directory/tracker-tag/v1',
   subject: 'secbin-directory/public-subject/v1',
+  // The keyed hashes of the sign-in and viewer records (SECURITY.md, "Records at rest"): a
+  // read receipt's opener address (the per-address throttle) and the Guard's
+  // row keys (the per-network counters and blocks; handed to the Worker).
+  opensIp: 'secbin-records/opens-ip/v1',
+  guardTag: 'secbin-records/guard-ip/v1',
 });
+/**
+ * The activity-log entries that are sign-in records: their detail (a passkey's
+ * name, a lockout, a blocked address, …) is sealed at rest once there is a
+ * keyring (SECURITY.md, "Records at rest"). Every other entry is stored as it is.
+ */
+const RECORD_ACTIONS = new Set(['login', 'login.password_ok', 'logout', 'account.locked', 'account.unlocked', 'sessions.revoked',
+  'passkey.added', 'passkey.removed', 'guard.blocked', 'guard.unblocked']);
+/** A read receipt's sealed columns (all of what the request revealed about the opener). */
+const OPEN_COLS = ['ip', 'country', 'region', 'city', 'browser', 'browser_ver', 'os', 'langs'];
+/** Rows per table the records pass seals per run; with more left, it runs again after RECORD_PASS_AGAIN_MS. */
+const RECORD_PASS_ROWS = 500;
+const RECORD_PASS_AGAIN_MS = 10 * 1000;
+/** A record row still marked "being sealed" after this long never will be (the object restarted): it is released, empty. */
+const RECORD_PENDING_SEC = 3600;
+/** What a sealed record shows when its key is gone (never why in more detail). */
+const UNREADABLE = '(unreadable: its key is not available)';
+/** A record row's key-id column: NULL (in the clear), a key id, "~…" (being sealed) or "!…" (does not open). */
+const pendingMark = () => `~${b64urlFromBytes(randomBytes(6))}`;
+const isKid = (rk) => typeof rk === 'string' && KID_RE.test(rk);
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
 const TRACKER_RE = /^[A-Za-z0-9_-]{32}$/;
@@ -522,6 +569,11 @@ export class Directory extends DurableObject {
         this.#setMeta('viewer_seeded', '1');
       }
       if ((await ctx.storage.getAlarm()) === null) await ctx.storage.setAlarm(Date.now() + 3600 * 1000);
+      // Records stored before they were sealed (migration 18): the background pass runs soon.
+      if (this.#meta('records.pass')) {
+        this.sql.exec("DELETE FROM meta WHERE k = 'records.pass'");
+        await this.#passSoon();
+      }
     });
   }
 
@@ -597,8 +649,14 @@ export class Directory extends DurableObject {
     const imp = !!(obj && actor.imp);
     const adm = !!(obj && actor.adm);
     const actorIdValue = obj ? actor.id : actor;
-    this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp, adm) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      now(), actorIdValue ?? null, subject ?? null, action, cleanDetail(detail), imp ? 1 : 0, adm ? 1 : 0);
+    // A sign-in record (RECORD_ACTIONS) with a keyring: the row is written empty, marked "being
+    // sealed", and its detail sealed right after (#queueSeal) — the detail is never stored in the
+    // clear. Without a keyring it is stored as before (rk NULL) and sealed by the pass later.
+    const text = cleanDetail(detail);
+    const mark = RECORD_ACTIONS.has(action) && this.#recordKid() ? pendingMark() : null;
+    const { id } = this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp, adm, rk) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
+      now(), actorIdValue ?? null, subject ?? null, action, mark ? '' : text, imp ? 1 : 0, adm ? 1 : 0, mark).one();
+    if (mark) this.#queueSeal('activity', id, mark, { detail: text });
   }
   #settings() {
     const rows = {};
@@ -722,6 +780,7 @@ export class Directory extends DurableObject {
         this.sql.exec('DELETE FROM mek_candidates WHERE sid = ?', SETUP_SID);
       }
     });
+    if (made === 'created') await this.#passSoon();
     return { ok: true, recovered, ...(recovered ? { ownerId: owner.id } : {}), ...(made ? { keys: made } : {}) };
   }
 
@@ -1085,10 +1144,11 @@ export class Directory extends DurableObject {
     // the user did, what was done as them, and system events (no actor).
     const where = "subject_id = ? AND adm = 0 AND (actor_id = subject_id OR actor_id IS NULL OR imp = 1)"
       + " AND action NOT IN ('impersonate.start', 'impersonate.end')";
+    await this.#settleRecords();
     const rows = before
-      ? this.sql.exec(`SELECT id, ts, action, detail FROM activity WHERE ${where} AND id < ? ORDER BY id DESC LIMIT ?`, uid, before, lim).toArray()
-      : this.sql.exec(`SELECT id, ts, action, detail FROM activity WHERE ${where} ORDER BY id DESC LIMIT ?`, uid, lim).toArray();
-    return rows;
+      ? this.sql.exec(`SELECT id, ts, action, detail, rk FROM activity WHERE ${where} AND id < ? ORDER BY id DESC LIMIT ?`, uid, before, lim).toArray()
+      : this.sql.exec(`SELECT id, ts, action, detail, rk FROM activity WHERE ${where} ORDER BY id DESC LIMIT ?`, uid, lim).toArray();
+    return this.#openDetails(rows);
   }
 
   // ── API keys ─────────────────────────────────────────────────────────────
@@ -1965,6 +2025,299 @@ export class Directory extends DurableObject {
       FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by WHERE s.id = ?`, id).toArray()[0] || null;
   }
 
+  // ── sign-in and viewer records at rest (SECURITY.md, "Records at rest") ─────────────────
+  // The read receipts' opener details (opens), the sign-in entries of the
+  // activity log (RECORD_ACTIONS: their detail) and the Guard's addresses are
+  // sealed under the record key of the current root MEK (src/lib/records.js),
+  // with its fingerprint as the row's key id (rk). What stays in the clear is
+  // what the indexes, throttles and retention need: ids, times, the share and
+  // account a row belongs to, the action, and keyed hashes of addresses.
+  // Without a keyring (an instance from before the Drive, or one whose keyring
+  // is lost) rows are written in the clear with rk NULL; the background pass
+  // (#recordPass, from the alarm) seals them once there is a keyring, and
+  // re-seals rows under an earlier root's key under the current one. Opened
+  // only for the viewers who may see them (activity, audit, shareOpens,
+  // openGuardAddrs); never logged, never in an error.
+
+  /** The current record key's id (the root MEK's fingerprint), or null: no keyring, records are written in the clear. */
+  #recordKid() {
+    return this.#keyRoot()?.fp ?? null;
+  }
+
+  /** A read receipt's address as the throttle compares it: HMAC under its own key (KEY_INFO.opensIp), never the address. */
+  async #recordHash(value) {
+    const key = await this.#purposeKey(KEY_INFO.opensIp);
+    return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(`secbin-records/opens-ip:${value}`))).subarray(0, 18));
+  }
+
+  /** 32 bytes of one use of the Directory's secret (HKDF, as #purposeKey), for a key handed to the Worker. */
+  async #purposeBits(info) {
+    const ikm = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), 'HKDF', false, ['deriveBits']);
+    return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: utf8(info) }, ikm, 256));
+  }
+
+  /**
+   * The record key with id `kid` (bytes) or null: derived from the root MEK or
+   * the previous one (during a root change), else an earlier root's key kept
+   * sealed under the root (record_keys). A key id names one root's key for
+   * good, so what is found is cached.
+   */
+  async #recordKeyBytes(kid) {
+    this.recordKeys ??= new Map();
+    if (this.recordKeys.has(kid)) return this.recordKeys.get(kid);
+    const roots = [this.#keyRoot(), this.#keyRoot('mek.rootOld')].filter(Boolean);
+    let key = null;
+    const own = roots.find((r) => r.fp === kid);
+    if (own) key = await deriveRecordKey(own.key);
+    else {
+      const w = this.sql.exec('SELECT sealed, under FROM record_keys WHERE kid = ?', kid).toArray()[0];
+      const by = w && roots.find((r) => r.fp === w.under);
+      if (by) { try { key = await unwrapRecordKey(by.key, kid, w.sealed); } catch { key = null; } }
+    }
+    if (key) this.recordKeys.set(kid, key);
+    return key;
+  }
+
+  /** One table's key under record key `kid` (an AES-GCM CryptoKey), or null when that record key is not available. */
+  async #tableKey(kid, table) {
+    this.tableKeys ??= new Map();
+    const id = `${kid}\n${table}`;
+    if (!this.tableKeys.has(id)) {
+      const rk = await this.#recordKeyBytes(kid);
+      if (!rk) return null;
+      this.tableKeys.set(id, await tableKey(rk, table));
+    }
+    return this.tableKeys.get(id);
+  }
+
+  /** One stored record value as it reads: in the clear, opened, '' (still being sealed) or null (it does not open). */
+  async #recordValue(rk, where, value) {
+    if (rk === null || rk === undefined) return value;
+    if (rk.startsWith('~')) return '';
+    if (!isKid(rk)) return null;
+    const key = await this.#tableKey(rk, where.table);
+    if (!key) return null;
+    try { return await openRecord(key, where, value); } catch { return null; }
+  }
+
+  /** Activity rows with their sealed details opened (UNREADABLE when a key is gone); `rk` is not returned. */
+  async #openDetails(rows) {
+    const out = [];
+    for (const { rk, ...r } of rows) {
+      if (rk !== null && rk !== undefined) r.detail = (await this.#recordValue(rk, { table: 'activity', col: 'detail', id: r.id }, r.detail)) ?? UNREADABLE;
+      out.push(r);
+    }
+    return out;
+  }
+
+  /**
+   * Seal `values` ({ column: text }) of row `id` of `table`, written with the
+   * pending mark `mark` and none of those values (the row id is part of every
+   * value's AAD, so the row is written first). Sealed before the call that
+   * wrote the row returns (every RPC method settles, see the end of this
+   * file); a mark is random, so a row id that a rolled-back transaction gave
+   * out again is never written over.
+   */
+  #queueSeal(table, id, mark, values) {
+    (this.sealQueue ??= []).push({ table, id, mark, values });
+  }
+  /**
+   * Seal what is queued, in the calling request (a promise is never shared
+   * between requests). Rows whose sealing fails stay pending, holding no
+   * value; the pass releases them.
+   */
+  async #settleRecords() {
+    while (this.sealQueue?.length) {
+      const batch = this.sealQueue.splice(0);
+      const kid = this.#recordKid();
+      for (const it of batch) {
+        try {
+          const key = kid ? await this.#tableKey(kid, it.table) : null;
+          const cols = Object.keys(it.values);
+          const vals = [];
+          // No record key any more (the keyring was lost meanwhile): in the clear, flagged (rk NULL) for the pass.
+          for (const c of cols) vals.push(key ? await sealRecord(key, { table: it.table, col: c, id: it.id }, it.values[c]) : it.values[c]);
+          this.sql.exec(`UPDATE ${it.table} SET ${cols.map((c) => `${c} = ?`).join(', ')}, rk = ? WHERE id = ? AND rk = ?`, ...vals, key ? kid : null, it.id, it.mark);
+        } catch { /* stays pending (empty) */ }
+      }
+    }
+  }
+  /** For the RPC wrapper at the end of this file. */
+  async settleRecords() {
+    await this.#settleRecords();
+  }
+
+  /**
+   * The record keys of earlier roots, sealed under `target` (the root MEK a
+   * change makes current), with each root in `add` (the current root, the
+   * previous one) that stops being derivable once it goes. A key that opens
+   * under none of the roots here stays as it is. → [{ kid, sealed, under, created }].
+   */
+  async #rewrapRecordKeys(target, add = []) {
+    const roots = [this.#keyRoot(), this.#keyRoot('mek.rootOld'), target].filter(Boolean);
+    const out = [];
+    for (const r of this.sql.exec('SELECT kid, sealed, under, created FROM record_keys ORDER BY kid').toArray()) {
+      if (r.kid === target.fp) continue; // derived from the root itself
+      const by = roots.find((x) => x.fp === r.under);
+      let key = null;
+      if (by) { try { key = await unwrapRecordKey(by.key, r.kid, r.sealed); } catch { key = null; } }
+      out.push(key ? { kid: r.kid, sealed: await wrapRecordKey(target.key, r.kid, key), under: target.fp, created: r.created } : r);
+    }
+    for (const a of add) {
+      if (!a || a.fp === target.fp || out.some((x) => x.kid === a.fp)) continue;
+      out.push({ kid: a.fp, sealed: await wrapRecordKey(target.key, a.fp, await deriveRecordKey(a.key)), under: target.fp, created: now() });
+    }
+    return out;
+  }
+  /**
+   * The previous root's record key, kept under the root when the previous
+   * root goes (a root change done, or dropped): a change made here kept it
+   * already; a previous root put back from a kit may not have. → the list to
+   * write, or null when there is nothing to add.
+   */
+  async #keepOldRecordKey(old) {
+    const root = this.#keyRoot();
+    if (!root || !old || this.sql.exec('SELECT 1 FROM record_keys WHERE kid = ?', old.fp).toArray().length) return null;
+    return this.#rewrapRecordKeys(root, [old]);
+  }
+  /** Write what #rewrapRecordKeys gave (inside the root change's own transaction). */
+  #writeRecordKeys(list) {
+    this.sql.exec('DELETE FROM record_keys');
+    for (const r of list) this.sql.exec('INSERT INTO record_keys (kid, sealed, under, created) VALUES (?, ?, ?, ?)', r.kid, r.sealed, r.under, r.created);
+  }
+
+  /** Run the alarm (and with it the records pass) within seconds. */
+  async #passSoon() {
+    const at = Date.now() + 2000;
+    const cur = await this.ctx.storage.getAlarm();
+    if (cur === null || cur > at) await this.ctx.storage.setAlarm(at);
+  }
+
+  /**
+   * The Guard's keys, for the Worker (src/lib/guard.js caches them): the tag
+   * key its rows are keyed by (from the Directory's secret: it never changes,
+   * so a root change lifts no block) and, with a keyring, the Guard's table key
+   * under the current record key and its id → { tag, kid, key } (base64url;
+   * kid and key null without a keyring: the addresses are kept in the clear).
+   */
+  async guardKeys() {
+    const tag = b64urlFromBytes(await this.#purposeBits(KEY_INFO.guardTag));
+    const kid = this.#recordKid();
+    const rk = kid ? await this.#recordKeyBytes(kid) : null;
+    return { tag, kid: rk ? kid : null, key: rk ? b64urlFromBytes(await deriveTableKeyBytes(rk, 'guard')) : null };
+  }
+
+  /**
+   * The Guard rows' addresses for the owner's view (Admin → Security):
+   * `rows` [{ scope, key, addr, rk }] as the shards list them → [address]
+   * (UNREADABLE when its key is gone). A row from before the tags is keyed by
+   * its address.
+   */
+  async openGuardAddrs(rows) {
+    const out = [];
+    for (const r of (Array.isArray(rows) ? rows : []).slice(0, 50000)) {
+      if (!r || typeof r.key !== 'string') { out.push(''); continue; }
+      if (!isGuardTag(r.key)) { out.push(r.key); continue; }
+      if (typeof r.addr !== 'string') { out.push(''); continue; }
+      out.push((await this.#recordValue(r.rk ?? null, { table: 'guard', col: 'addr', id: guardRowId(r.scope, r.key) }, r.addr)) ?? UNREADABLE);
+    }
+    return out;
+  }
+
+  /** The owner's block or unblock of a Guard key, in the admin audit with its address (sealed there too). */
+  async guardLog({ action, scope, key, row = null, seconds = null } = {}, actorId) {
+    if (action !== 'guard.blocked' && action !== 'guard.unblocked') return fail(400, 'invalid', 'Unknown action.');
+    const [addr] = await this.openGuardAddrs([{ scope, key, addr: row?.addr ?? null, rk: row?.rk ?? null }]);
+    this.#log(actorId, null, action, `${scope} ${addr || key}${seconds ? ` ${seconds}s` : ''}`);
+    await this.#settleRecords();
+    return { ok: true };
+  }
+
+  /**
+   * The records' background pass (from the alarm): rows stored in the clear
+   * (before there was a keyring, or before migration 18) are sealed, and rows
+   * under an earlier root's record key are sealed again under the current one,
+   * RECORD_PASS_ROWS per table per run; a row that does not open under its key
+   * is marked so ("!…") and skipped from then on. The Guard's rows likewise
+   * (#guardPass). → true when work is left.
+   */
+  async #recordPass() {
+    const ts = now();
+    // Rows whose sealing never finished (the object restarted in between): they hold no value; released.
+    for (const t of ['opens', 'activity']) this.sql.exec(`UPDATE ${t} SET rk = NULL WHERE rk LIKE '~%' AND ts < ?`, ts - RECORD_PENDING_SEC);
+    const kid = this.#recordKid();
+    let more = false;
+    if (kid && await this.#recordKeyBytes(kid)) {
+      // The earlier keys that still open (only their rows can be sealed again).
+      const others = [];
+      for (const k of new Set([this.#keyRoot('mek.rootOld')?.fp, ...this.sql.exec('SELECT kid FROM record_keys').toArray().map((r) => r.kid)])) {
+        if (k && k !== kid && await this.#recordKeyBytes(k)) others.push(k);
+      }
+      const sel = '(rk IS NULL OR rk IN (SELECT value FROM json_each(?)))';
+      const tables = [
+        { table: 'opens', cols: OPEN_COLS, rows: this.sql.exec(`SELECT id, rk, ip_h, ${OPEN_COLS.join(', ')} FROM opens WHERE ${sel} ORDER BY id LIMIT ?`, JSON.stringify(others), RECORD_PASS_ROWS).toArray() },
+        { table: 'activity', cols: ['detail'], rows: this.sql.exec(`SELECT id, rk, detail FROM activity WHERE ${sel} AND action IN (SELECT value FROM json_each(?)) ORDER BY id LIMIT ?`,
+          JSON.stringify(others), JSON.stringify([...RECORD_ACTIONS]), RECORD_PASS_ROWS).toArray() },
+      ];
+      for (const { table, cols, rows } of tables) {
+        if (rows.length >= RECORD_PASS_ROWS) more = true;
+        const key = await this.#tableKey(kid, table);
+        for (const r of rows) {
+          const plain = {};
+          for (const c of cols) plain[c] = await this.#recordValue(r.rk, { table, col: c, id: r.id }, r[c]);
+          if (cols.some((c) => plain[c] === null)) {
+            this.sql.exec(`UPDATE ${table} SET rk = ? WHERE id = ? AND rk = ?`, `!${r.rk}`, r.id, r.rk);
+            continue;
+          }
+          const vals = [];
+          for (const c of cols) vals.push(await sealRecord(key, { table, col: c, id: r.id }, plain[c]));
+          const extra = table === 'opens' ? { ip_h: r.ip_h ?? await this.#recordHash(plain.ip) } : {};
+          const set = [...cols, ...Object.keys(extra)].map((c) => `${c} = ?`).join(', ');
+          this.sql.exec(`UPDATE ${table} SET ${set}, rk = ? WHERE id = ? AND rk IS ?`, ...vals, ...Object.values(extra), kid, r.id, r.rk);
+        }
+      }
+    }
+    return (await this.#guardPass(kid)) || more;
+  }
+
+  /**
+   * The Guard's part of the pass: in every shard, rows from before the tags
+   * are re-keyed (they move to the shard of their tag; a block keeps the later
+   * end), and addresses in the clear or under an earlier key are sealed under
+   * the current one; an address that no longer opens is dropped (the row
+   * stays). → true when a shard had more than one run takes.
+   */
+  async #guardPass(kid) {
+    const ns = this.env?.GUARD;
+    if (!ns) return false;
+    const shards = Array.from({ length: GUARD_SHARDS }, (_, i) => ns.get(ns.idFromName(`shard-${i}`)));
+    const found = await Promise.all(shards.map((s) => s.pending({ kid, limit: RECORD_PASS_ROWS })));
+    if (!found.some((rows) => rows.length)) return false;
+    const tagKey = await importTagKey(await this.#purposeBits(KEY_INFO.guardTag));
+    const gkey = kid ? await this.#tableKey(kid, 'guard') : null;
+    const seal = (scope, tag, addr) => (gkey ? sealRecord(gkey, { table: 'guard', col: 'addr', id: guardRowId(scope, tag) }, addr) : addr);
+    const plan = shards.map(() => ({ reseal: [], adopt: [], drop: [] }));
+    let more = false;
+    for (let i = 0; i < shards.length; i++) {
+      if (found[i].length >= RECORD_PASS_ROWS) more = true;
+      for (const r of found[i]) {
+        if (!isGuardTag(r.key)) {
+          const tag = await guardTag(tagKey, r.key);
+          plan[guardShardIndex(tag)].adopt.push({ ...r, key: tag, addr: await seal(r.scope, tag, r.key), rk: gkey ? kid : null });
+          plan[i].drop.push({ t: r.t, scope: r.scope, key: r.key });
+          continue;
+        }
+        if (!gkey) continue;
+        const addr = await this.#recordValue(r.rk, { table: 'guard', col: 'addr', id: guardRowId(r.scope, r.key) }, r.addr);
+        plan[i].reseal.push({ t: r.t, scope: r.scope, key: r.key, addr: addr === null ? null : await seal(r.scope, r.key, addr), rk: addr === null ? null : kid, was: { addr: r.addr, rk: r.rk } });
+      }
+    }
+    // Every re-keyed row lands in its new shard before its old key goes.
+    await Promise.all(shards.map((s, i) => (plan[i].reseal.length || plan[i].adopt.length ? s.apply({ reseal: plan[i].reseal, adopt: plan[i].adopt }) : null)));
+    await Promise.all(shards.map((s, i) => (plan[i].drop.length ? s.apply({ drop: plan[i].drop }) : null)));
+    return more;
+  }
+
   // ── read receipts ────────────────────────────────────────────────────────
   /**
    * Record one open of a share (only shares in the index — account shares).
@@ -1973,25 +2326,35 @@ export class Directory extends DurableObject {
    * MAX_OPENS_PER_SHARE per share (the oldest go first).
    */
   async recordOpen(shareId, info = {}) {
+    // eslint-disable-next-line no-control-regex
+    const t = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, n);
+    const values = { ip: t(info.ip, 64), country: t(info.country, 8), region: t(info.region, 64), city: t(info.city, 64),
+      browser: t(info.browser, 32), browser_ver: t(info.version, 8), os: t(info.os, 32), langs: t(info.langs, 200) };
+    // The address's keyed hash, before anything is read: nothing below awaits until the row is written.
+    const ipH = await this.#recordHash(values.ip);
     const r = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0];
     if (!r) return;
     const ts = now();
-    // eslint-disable-next-line no-control-regex
-    const t = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, n);
-    const ip = t(info.ip, 64);
     this.sql.exec('UPDATE shares SET opens_total = opens_total + 1 WHERE id = ?', shareId);
-    // Throttle (see OPENS_*): the same address again within the window, or a
+    // Throttle (see OPENS_*): the same address (its keyed hash) again within the window, or a
     // burst beyond the per-minute cap, is counted but not stored again.
-    if (this.sql.exec('SELECT 1 FROM opens WHERE share_id = ? AND ip = ? AND ts > ? LIMIT 1', shareId, ip, ts - OPENS_DEDUPE_SEC).toArray().length) return;
+    if (this.sql.exec('SELECT 1 FROM opens WHERE share_id = ? AND ip_h = ? AND ts > ? LIMIT 1', shareId, ipH, ts - OPENS_DEDUPE_SEC).toArray().length) return;
     if (this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ? AND ts > ?', shareId, ts - 60).one().c >= OPENS_PER_MINUTE) return;
-    this.sql.exec(`INSERT INTO opens (share_id, user_id, ts, ip, country, region, city, browser, browser_ver, os, langs)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, shareId, r.user_id, ts, ip, t(info.country, 8), t(info.region, 64),
-    t(info.city, 64), t(info.browser, 32), t(info.version, 8), t(info.os, 32), t(info.langs, 200));
+    // With a keyring the details are sealed (#queueSeal) and the row holds none of them meanwhile;
+    // without one they are stored in the clear (rk NULL) until the pass seals them.
+    const mark = this.#recordKid() ? pendingMark() : null;
+    const { id } = this.sql.exec(`INSERT INTO opens (share_id, user_id, ts, ip_h, rk, ${OPEN_COLS.join(', ')})
+      VALUES (?, ?, ?, ?, ?, ${OPEN_COLS.map(() => '?').join(', ')}) RETURNING id`, shareId, r.user_id, ts, ipH, mark,
+    ...OPEN_COLS.map((c) => (mark ? '' : values[c]))).one();
     const c = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
     if (c > MAX_OPENS_PER_SHARE) {
       // Keep the first receipts (who opened it first) and the most recent ones.
       this.sql.exec(`DELETE FROM opens WHERE id IN (SELECT id FROM opens WHERE share_id = ? ORDER BY id ASC LIMIT ? OFFSET ?)`,
         shareId, c - MAX_OPENS_PER_SHARE, OPENS_KEEP_FIRST);
+    }
+    if (mark) {
+      this.#queueSeal('opens', id, mark, values);
+      await this.#settleRecords();
     }
   }
 
@@ -2004,7 +2367,8 @@ export class Directory extends DurableObject {
     const s = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0];
     if (!s || (!admin && s.user_id !== uid)) return fail(404, 'not_found', 'Share not found.');
     const lim = Math.max(1, Math.min(MAX_OPENS_PER_SHARE, limit | 0));
-    const rows = this.sql.exec('SELECT ts, ip, country, region, city, browser, browser_ver, os, langs FROM opens WHERE share_id = ? ORDER BY id DESC LIMIT ?', shareId, lim).toArray();
+    await this.#settleRecords();
+    const rows = this.sql.exec(`SELECT id, rk, ts, ${OPEN_COLS.join(', ')} FROM opens WHERE share_id = ? ORDER BY id DESC LIMIT ?`, shareId, lim).toArray();
     // Every open counts, including those not stored individually (throttled, or before receipts existed).
     const stored = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
     const counted = this.sql.exec('SELECT opens_total FROM shares WHERE id = ?', shareId).toArray()[0]?.opens_total ?? 0;
@@ -2016,12 +2380,21 @@ export class Directory extends DurableObject {
       fields = RECEIPT_FIELDS.filter((f) => L[f.limit] === true);
     }
     const keys = new Set(fields.flatMap((f) => f.cols));
-    return {
-      ok: true,
-      total,
-      fields: fields.map((f) => f.limit),
-      rows: rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => k === 'ts' || keys.has(k)))),
-    };
+    // Only the details this viewer may see are opened (SECURITY.md, "Records at rest").
+    const out = [];
+    for (const r of rows) {
+      const row = { ts: r.ts };
+      let unreadable = false;
+      for (const c of OPEN_COLS) {
+        if (!keys.has(c)) continue;
+        const v = await this.#recordValue(r.rk, { table: 'opens', col: c, id: r.id }, r[c]);
+        if (v === null) unreadable = true;
+        row[c] = v ?? '';
+      }
+      if (unreadable) row.unreadable = true;
+      out.push(row);
+    }
+    return { ok: true, total, fields: fields.map((f) => f.limit), rows: out };
   }
 
   /** Is this share locked by the admin? (Used by the public delete-by-token path.) */
@@ -2317,6 +2690,7 @@ export class Directory extends DurableObject {
     // Another call may have made them meanwhile (nothing above wrote).
     if (this.#hasKeyring()) return { ok: true, created: false };
     this.ctx.storage.transactionSync(() => this.#writeKeys(prep, how, actorId));
+    await this.#passSoon(); // the records stored in the clear until now are sealed
     return { ok: true, created: true, root: prep.rfp, sub: { id: prep.id, fp: prep.sfp } };
   }
   /** There is a keyring, or there was one (a lost one is restored, never made anew). */
@@ -2849,6 +3223,8 @@ export class Directory extends DurableObject {
       if (!s.key) return fail(409, 'broken', `Sub-MEK ${r.id} does not open under the current root MEK: restore it from the key kit first.`);
       resealed.push([r.id, await sealSubMek(k.key, r.id, s.key)]);
     }
+    // The records sealed under the current root's record key stay readable once it goes (SECURITY.md, "Records at rest").
+    const recordKeys = await this.#rewrapRecordKeys({ key: k.key, fp }, [root]);
     const t = now();
     const same = this.#mekRows();
     if (this.#keyRoot()?.fp !== root.fp || same.length !== rows.length || same.some((r, i) => r.sealed !== rows[i].sealed)) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
@@ -2859,11 +3235,13 @@ export class Directory extends DurableObject {
       this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(k.key), fp, created: t }));
       this.sql.exec("DELETE FROM meta WHERE k = 'mek.rootCheck'");
       for (const [id, sealed] of resealed) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
+      this.#writeRecordKeys(recordKeys);
       if (k.candidate) this.sql.exec('DELETE FROM mek_candidates WHERE id = ?', k.candidate);
       this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.root_changed', `root MEK ${root.fp} → ${fp} (${k.how}); sub-MEKs re-sealed: ${rows.length}`);
     });
     k.key.fill(0);
+    await this.#passSoon(); // the records are sealed again under the new root's record key
     return { ok: true, fp, old: root.fp };
   }
 
@@ -2888,15 +3266,18 @@ export class Directory extends DurableObject {
       if (!k) return fail(409, 'broken', `Sub-MEK ${r.id} does not open under the root MEK: restore it from the key kit first.`);
       resealed.push([r.id, await sealSubMek(old.key, r.id, k)]);
     }
+    const recordKeys = await this.#rewrapRecordKeys(old, [root]);
     if (this.#keyRoot()?.fp !== root.fp) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
     this.ctx.storage.transactionSync(() => {
       this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(old.key), fp: old.fp, created: old.created }));
       this.#setMeta('mek.rootOld', JSON.stringify({ key: b64urlFromBytes(root.key), fp: root.fp, created: root.created, origin: 'changed' }));
       this.sql.exec("DELETE FROM meta WHERE k = 'mek.rootCheck'");
       for (const [id, sealed] of resealed) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
+      this.#writeRecordKeys(recordKeys);
       this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.root_changed', `root change undone: back to root MEK ${old.fp} (from ${root.fp}${old.origin === 'changed' ? '' : '; it was put back from a key kit and opened items here'}); every item is re-sealed under it`);
     });
+    await this.#passSoon();
     return { ok: true, fp: old.fp, old: root.fp };
   }
 
@@ -2917,7 +3298,9 @@ export class Directory extends DurableObject {
     const check = this.#json('mek.rootCheck');
     if (!check || check.oldFp !== old.fp || check.root !== this.#keyRoot()?.fp) return fail(409, 'not_checked', 'Run the re-seal again first: it checks every item, so that removing the previous root says how many stay unreadable.');
     const lost = Number(check.failed) || 0;
+    const recordKeys = await this.#keepOldRecordKey(old);
     this.ctx.storage.transactionSync(() => {
+      if (recordKeys) this.#writeRecordKeys(recordKeys);
       this.sql.exec("DELETE FROM meta WHERE k IN ('mek.rootOld', 'mek.rootCheck')");
       this.#keyLog(ownerId, 'keys.root_old_dropped', `old root MEK ${old.fp} removed by the owner; items left unreadable: ${lost}${lost && check.ids?.length ? ` (${check.ids.slice(0, 20).join(', ')}${lost > 20 ? ', …' : ''})` : ''}`);
     });
@@ -2943,7 +3326,9 @@ export class Directory extends DurableObject {
     if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
     const old = this.#keyRoot('mek.rootOld');
     if (!old) return { ok: true, done: false };
+    const recordKeys = await this.#keepOldRecordKey(old);
     this.ctx.storage.transactionSync(() => {
+      if (recordKeys) this.#writeRecordKeys(recordKeys);
       this.sql.exec("DELETE FROM meta WHERE k IN ('mek.rootOld', 'mek.rootCheck')");
       this.#keyLog(ownerId, 'keys.root_change_done', `old root MEK ${old.fp} removed: every item is re-sealed`);
     });
@@ -3158,6 +3543,8 @@ export class Directory extends DurableObject {
       }
     }
     if (next.length && checkTimeline(next, t)) return fail(409, 'invalid_dates', `After the restore, ${checkTimeline(next, t)}`);
+    // A restored root replaces the one here: the record keys of this one and the earlier ones are kept under it (SECURITY.md, "Records at rest").
+    const recordKeys = newRoot && !dryRun ? await this.#rewrapRecordKeys(newRoot, [cur, prev]) : null;
     // User salts: only for an account that has none.
     const addSalts = [];
     for (const [uid, v] of Object.entries(salts && typeof salts === 'object' ? salts : {}).slice(0, 10000)) {
@@ -3175,6 +3562,7 @@ export class Directory extends DurableObject {
     if (this.#keyRoot()?.fp !== cur?.fp || this.#mekRows().length !== rows.length) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
     this.ctx.storage.transactionSync(() => {
       if (newRoot) this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(newRoot.key), fp: newRoot.fp, created: root.created ?? t }));
+      if (recordKeys) this.#writeRecordKeys(recordKeys);
       if (oldRoot) {
         this.#setMeta('mek.rootOld', JSON.stringify({ key: b64urlFromBytes(oldRoot.key), fp: oldRoot.fp, created: oldRoot.created, origin: 'restored' }));
         this.sql.exec("DELETE FROM meta WHERE k = 'mek.rootCheck'");
@@ -3190,6 +3578,7 @@ export class Directory extends DurableObject {
       if (newRoot || oldRoot || reseal.length || next.length !== rows.length) this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.restored', `root MEK ${out.root}${newRoot ? ` (${rootFp})` : ''}${oldRoot ? `; the previous root MEK ${oldRoot.fp} put back (the root change's re-seal is to run again)` : ''}; sub-MEKs ${out.subs.filter((s) => /restored|added/.test(s.result)).length} put back; user salts ${addSalts.length} put back`);
     });
+    if (newRoot) await this.#passSoon();
     return { ok: true, dryRun: false, changed: true, ...out };
   }
 
@@ -4734,6 +5123,7 @@ export class Directory extends DurableObject {
 
   async adminLog(entry, actorId) {
     this.#log(actorId, entry.subject ?? null, entry.action, entry.detail ?? '');
+    await this.#settleRecords();
   }
 
   async audit({ before = null, limit = 100, subject = null } = {}) {
@@ -4742,10 +5132,11 @@ export class Directory extends DurableObject {
     const args = [];
     if (before) { where.push('a.id < ?'); args.push(before); }
     if (subject) { where.push('a.subject_id = ?'); args.push(subject); }
-    return this.sql.exec(
-      `SELECT a.id, a.ts, a.action, a.detail, a.actor_id, a.subject_id, a.imp, a.adm, ua.username AS actor, us.username AS subject
+    await this.#settleRecords();
+    return this.#openDetails(this.sql.exec(
+      `SELECT a.id, a.ts, a.action, a.detail, a.rk, a.actor_id, a.subject_id, a.imp, a.adm, ua.username AS actor, us.username AS subject
        FROM activity a LEFT JOIN users ua ON ua.id = a.actor_id LEFT JOIN users us ON us.id = a.subject_id
-       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ?`, ...args, lim).toArray();
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ?`, ...args, lim).toArray());
   }
 
   // ── housekeeping ─────────────────────────────────────────────────────────
@@ -4774,8 +5165,26 @@ export class Directory extends DurableObject {
     this.sql.exec("DELETE FROM shares WHERE status = 'pending' AND created < ?", ts - PENDING_REVERSE_SEC);
     // Receipts go with their share: once the share row is gone nobody can see them.
     this.sql.exec('DELETE FROM opens WHERE share_id NOT IN (SELECT id FROM shares)');
-    await this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
+    // Records stored in the clear or under an earlier root's key (SECURITY.md, "Records at rest"); sooner again while some are left.
+    let more = false;
+    try { more = await this.#recordPass(); } catch (e) { console.warn('secbin: records pass not finished', e && e.name ? e.name : 'error'); }
+    await this.ctx.storage.setAlarm(Date.now() + (more ? RECORD_PASS_AGAIN_MS : 3600 * 1000));
   }
+}
+
+// Every RPC method (every async method of the class) seals the records it
+// queued before it returns (#queueSeal): #log is synchronous and called from
+// inside transactions, while the sealing is asynchronous, so it is done here,
+// in the same request, once the method's own work is done.
+for (const name of Object.getOwnPropertyNames(Directory.prototype)) {
+  const fn = Directory.prototype[name];
+  if (name === 'constructor' || name === 'settleRecords' || typeof fn !== 'function' || fn.constructor.name !== 'AsyncFunction') continue;
+  Object.defineProperty(Directory.prototype, name, {
+    configurable: true, writable: true,
+    value: { async [name](...args) {
+      try { return await fn.apply(this, args); } finally { await this.settleRecords(); }
+    } }[name],
+  });
 }
 
 export const SETTING_KEYS = Object.keys(SETTINGS);

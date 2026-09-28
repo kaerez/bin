@@ -15,6 +15,21 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Sign-in and viewer records are sealed at rest.** Read receipts (the opener's address,
+  location, browser, system and languages), the detail of the activity log's sign-in entries
+  (sign-ins, sign-outs, lockouts, passkeys added or removed, blocked and unblocked addresses) and
+  the addresses the brute-force guard tracks are sealed with AES-256-GCM (a random IV per value,
+  the table, column and row id as AAD) under a record key derived from the Drive's root MEK
+  (HKDF, `secbin-records/v1`), with the key id stored per row. The throttles compare keyed
+  hashes of addresses instead of the addresses; the guard's rows are keyed by one, so Admin →
+  Security shows the address the server opens for the owner (`addr`) and the row's key is a
+  hash (unblocking by the address still works). A root change, "Go back", a restored root or a
+  dropped previous root keep the earlier record keys sealed under the root, so every record stays
+  readable, and a background pass seals them again under the current key. An instance with no
+  keyring yet writes records in the clear, as before, and the pass seals them once a keyring
+  exists; it also seals the rows stored before this release (Directory migration 18) and
+  re-keys the guard's earlier rows. The server can derive the key: this protects a copy of the
+  stored rows, not the server (SECURITY.md, "Records at rest"). Records are not exported.
 - **Impersonation no longer extends the owner's session.** Starting an impersonation and
   "Return to admin" each issue a new session that keeps the absolute end of the owner's sign-in
   (`session.absSec` counts from the sign-in, and a new session never ends later than the one it
