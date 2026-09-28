@@ -770,13 +770,15 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
       `Cookie` header as well, so the token adds no new kind of exposure. Whoever runs the
       deployment should confirm the fields those logs keep.
 - **API keys** (`sbk_…`, stored hashed) authenticate share creation, the policy read and the
-  key user's own shares (list, receipts, label, extend, revoke) — never the account itself
+  key user's own shares (list, receipts, label, extend, revoke) and Receive links (list,
+  receipts, change, move, pause, resume, revoke; never create) — never the account itself
   (profile, password, passkeys, keys, activity) or admin endpoints (`403 api_key_not_allowed`).
   The owner decides who may hold keys and how many; API limits and quotas can only narrow the
   account's limits. Revoking API permission disables existing keys at once.
   - **Scopes:** each key carries a subset of `notes`, `files`, `policy` (create), `read` (list
-    the user's shares, one share, and its read receipts) and `manage` (label, extend views /
-    expiry, revoke). A key created without a choice gets the three creation scopes only; `read`
+    the user's shares and Receive links, one of them, and its receipts) and `manage` (label,
+    extend views / expiry, revoke; a Receive link's changes short of weakening it, its folder,
+    pause and resume). A key created without a choice gets the three creation scopes only; `read`
     and `manage` are always an explicit choice. Scopes are chosen at creation and can be changed
     later (by the user with their password or a passkey, or by the owner); a call
     outside them is `403 scope_denied`. Issue each automation the narrowest key it needs (least
@@ -788,9 +790,11 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     (`apikey=<id>`), never the key.
   - **Exposure:** a leaked `read` key reveals the user's share labels (not encrypted), sizes,
     dates and read receipts (which may include recipients' network addresses, locations and
-    browsers, as far as the owner enables receipt details — personal data); a leaked `manage`
-    key can revoke the user's shares (availability) but can never read their content, which
-    stays encrypted with keys the server never holds.
+    browsers, as far as the owner enables receipt details — personal data), and the same of
+    Receive links (their folder ids, limits and the senders' receipts); a leaked `manage` key
+    can revoke or pause the user's shares and links (availability) and move a link to another
+    of the user's folders, but can never read their content, which stays encrypted with keys
+    the server never holds (or, for the Drive, keys a key never gets), nor weaken a link.
   - **Storage:** the key is shown once. Keep it in a secrets manager (for example HashiCorp Vault
     or AWS Secrets Manager) and pass it through the environment, never in source code, shell
     history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`
@@ -1180,7 +1184,8 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
 
 ### Read receipts
 
-- Every successful open of an account's share (a wrong link or password is not an open) is
+- Every successful open of an account's share (a wrong link or password is not an open), and
+  every upload session granted by a Receive link (a view of it: a failed start is none), is
   recorded: the time, and what the opener's request itself revealed — the IP address,
   Cloudflare's coarse location (country, region, city), the browser and version, the operating
   system and the `Accept-Language` languages.
@@ -1201,6 +1206,7 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   shares are recorded for the admin only.
 - The share page tells recipients that opening is recorded: before they reveal or unlock a share,
   and on the note or files view itself (a share without a password or view limit opens at once).
+  A Receive link's uploader page says that sending is recorded, before anything is sent.
   The admin decides what senders may see; receipts are kept as long as the activity log.
 
 ### Activity log retention and clearing
@@ -1615,7 +1621,31 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   password, the note, the limits and the CAPTCHA are the user's. Changes are refused on revoked,
   ended or locked links, and need the CSRF token and the role checks like every change. The
   activity log names what changed (`share.updated`: expiry, views, CAPTCHA, `password=set` /
-  `removed`, `note=set` / `removed`, `limits`, `accept=<kinds>`), never a value.
+  `removed`, `note=set` / `removed`, `limits`, `accept=<kinds>`, `folder=<node id>`), never a
+  value the user typed.
+- **Moving a link.** The user (the Edit form, or an API key with `manage`) can point a link at
+  another folder of their own Drive: the Drive object checks the folder is one of its own (a
+  folder, not a received item, not deleted — another user's ids do not exist there), within the
+  role's folder depth (for a key, its API limit), and moves the link's items not yet taken in
+  with it in the same step, so its take-in places them there; the owner changing a link directly
+  cannot. It changes where anonymous uploads land, not what may reach the user, so it is not a
+  weakening change.
+- **Pausing a link.** The user (or an API key with `manage`) can pause a link and resume it.
+  Paused, `open` and `begin` answer `409 paused` once the link proof matched (never counted by
+  the Guard, like a late visitor of an ended link; a wrong link proof is, as always), the sessions
+  open then end and their unfinished uploads are deleted at once; received items stay and are
+  taken in. Resuming restores the link as it was (no protection changes), so neither needs the
+  step-up; a link an owner's start over paused cannot be resumed.
+- **Receipts.** Each upload session granted is recorded as a read receipt for the link's user
+  (*Read receipts*): the uploader page says so, and the same visibility, throttling and
+  retention apply.
+- **The Receive links' API** (`/api/private/receive`, docs/API.md) is the My shares surface for
+  links: the scopes `read` (list, one link, receipts) and `manage` (change, move, pause, resume,
+  revoke), only the caller's own links, the role's reverse shares required, the lock and the
+  API limits applied, and weakening changes refused for keys (`403 step_up_required`). A link is
+  listed without its key, note or password (only whether it has them). A key cannot create a
+  link: the link's private key is sealed under the user's Drive keys, which a key never gets, and
+  creating one needs the step-up.
 - **Quotas on Receive.** The owner can cap, per role, the upload sessions a user's links receive
   (`receive-upload`, and `receive` with new links; and by what a session sends: `receive-file`,
   `receive-note`, `receive-url`, `receive-secret`) in a fixed window. A session is counted for

@@ -27,7 +27,7 @@ import { normalizeRules } from '../../js/filepolicy.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { captchaBox } from '../../js/captcha.js';
-import { SESSION_CHANGED_EVENT, updateShare } from '../../js/api.js';
+import { SESSION_CHANGED_EVENT, updateShare, pauseReceive } from '../../js/api.js';
 import { reverseViews, reversePasswordChoice, reverseEditForm, saveReverseEdit, acceptChoice, acceptBox } from './reverse-edit.js';
 import { KIND_LABELS, KIND_PLURALS, itemExport, SECRET_EXPORT_WARNING } from '../../js/receivekinds.js';
 import { linkCard, secretCard, stopTotp, noteKind, drawNote } from '../../js/typedview.js';
@@ -610,6 +610,8 @@ function mountApp(mount, client, deps) {
   };
   const canReceive = !!(deps.profile && deps.profile.caps && deps.profile.caps.reverseEnabled === true);
   B.receive.hidden = !canReceive;
+  // Until the open folder has listed there is no folder (nor its name) to receive into.
+  B.receive.disabled = true;
   for (const [k, b] of Object.entries(B)) b.id = `drive-${k}`;
   const selInfo = h('span.mono.muted.drive-selinfo', { id: 'drive-selinfo' });
   const toolbar = h('div.drive-toolbar', { role: 'group', 'aria-label': 'Drive actions' },
@@ -783,7 +785,7 @@ function mountApp(mount, client, deps) {
     B.share.disabled = busy || n === 0;
     B.download.disabled = busy || !one;
     B.download.textContent = one && one.kind === 'dir' ? 'Download (.zip)' : 'Download';
-    B.receive.disabled = busy || n > 1 || (n === 1 && (!one || one.kind !== 'dir'));
+    B.receive.disabled = busy || !listing || n > 1 || (n === 1 && (!one || one.kind !== 'dir'));
     for (const b of [B.upload, B.uploadDir, B.mkdir]) b.disabled = busy;
     const total = kids().length;
     selAll.checked = total > 0 && n === total;
@@ -1168,7 +1170,7 @@ function mountApp(mount, client, deps) {
   }
 
   function receiveSel() {
-    if (!canReceive) return;
+    if (!canReceive || !listing) return;
     const folder = receiveTarget();
     const labelIn = h('input.input', { id: 'drive-rev-label', maxlength: '100', placeholder: 'e.g. Tax documents 2026' });
     const hint = unencryptedHint('drive-rev-label-hint', labelIn);
@@ -1319,7 +1321,8 @@ function mountApp(mount, client, deps) {
    */
   function editReverse(d, s, { onSaved = null } = {}) {
     const acting = !!(deps.user?.impersonating || deps.profile?.impersonatedBy);
-    const form = reverseEditForm(s, deps.profile, { impersonating: acting, confirm: deps.confirm || null });
+    // The folders it can receive into instead: this Drive's, as the tree lists them.
+    const form = reverseEditForm(s, deps.profile, { impersonating: acting, confirm: deps.confirm || null, folders: { list: (id) => fetchList(id) } });
     d.clearError();
     d.setTitle(`Edit ${s.label ? `“${s.label}”` : 'this upload link'}`);
     d.subEl.textContent = 'The password and the note are encrypted in this browser with the link’s key: they are not sent in plain text, but like uploads to this link they are not end-to-end (the server holds the keys that open the link’s key). Files already received stay in your Drive.';
@@ -1342,7 +1345,7 @@ function mountApp(mount, client, deps) {
       try {
         await saveReverseEdit(s.id, { ...o.patch, ...step }, { updateShare, driveClient: async () => client });
         form.clearSecrets();
-        toast('Upload link updated.');
+        toast(o.patch.folder !== undefined ? 'Upload link updated: it receives into the folder you chose now.' : 'Upload link updated.');
         d.close();
         if (onSaved) onSaved();
       } catch (e) {
@@ -1353,6 +1356,24 @@ function mountApp(mount, client, deps) {
     });
     d.setActions(btn('Cancel', () => d.close(), 'modal-btn'), save);
     form.focus();
+  }
+
+  /** A Receive link's Pause (no uploads until resumed) or Resume, in dialog `d`; `redraw` shows its new state. */
+  function pauseBtn(d, s, redraw) {
+    const on = s.status !== 'paused';
+    const b = h('button.btn.tree-btn', { type: 'button', text: on ? 'Pause' : 'Resume', 'aria-label': `${on ? 'Pause' : 'Resume'} ${s.label || 'this link'}` });
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      d.clearError();
+      try {
+        await (deps.pause || pauseReceive)(s.id, on);
+        Object.assign(s, on ? { status: 'paused', held: true } : { status: 'active', held: false });
+        toast(on ? 'Link paused: it accepts no uploads until you resume it.' : 'Link resumed.');
+        redraw();
+        d.box.focus();
+      } catch (e) { b.disabled = false; d.error(friendlyError(e)); }
+    });
+    return b;
   }
 
   async function reverseList(d, box, folder) {
@@ -1372,10 +1393,12 @@ function mountApp(mount, client, deps) {
         const active = s.status === 'active';
         const cell = h('td.cell-actions');
         const row = h('div.btn-row');
-        if (s.url && active) {
+        // Paused by the user (`held`): it has not ended, so it keeps its link, Edit and Resume.
+        const held = s.status === 'paused' && s.held === true;
+        if (s.url && (active || held)) {
           row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Copy link', 'aria-label': `Copy link${s.label ? ` ${s.label}` : ''}`, on: { click: async (e) => flashCopied(e.currentTarget, (await copyText(s.url)) ? 'copied' : 'failed') } }));
         }
-        // A paused link (the owner started over) has not ended: it can be revoked too.
+        // A paused link (by the user, or the owner's start over) has not ended: it can be revoked too.
         const live = active || s.status === 'paused';
         if (live && s.locked) row.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
         else if (live) {
@@ -1385,7 +1408,8 @@ function mountApp(mount, client, deps) {
             try { await deps.revoke(s.id); s.status = 'revoked'; toast('Link revoked. Files already received stay.'); draw(); d.box.focus(); } catch (e) { rv.disabled = false; d.error(friendlyError(e)); }
           });
           row.appendChild(rv);
-          if (active && L.reverseEdit !== false) row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${s.label || 'this link'}`, on: { click: () => editReverse(d, s) } }));
+          if ((active || held) && L.reverseEdit !== false) row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${s.label || 'this link'}`, on: { click: () => editReverse(d, s) } }));
+          if (active || held) row.appendChild(pauseBtn(d, s, draw));
         }
         cell.appendChild(row);
         tb.appendChild(h('tr', { dataset: { status: s.status || '' } },
@@ -1570,7 +1594,8 @@ function mountApp(mount, client, deps) {
         const expires = expiresText(s, now);
         const cell = h('td.cell-actions');
         const btns = h('div.btn-row');
-        if (rev && s.url && active) {
+        const held = rev && s.status === 'paused' && s.held === true;
+        if (rev && s.url && (active || held)) {
           btns.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Copy link', 'aria-label': `Copy link${s.label ? ` ${s.label}` : ''}`, on: { click: async (e) => flashCopied(e.currentTarget, (await copyText(s.url)) ? 'copied' : 'failed') } }));
         }
         if (live && s.locked) btns.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
@@ -1581,8 +1606,9 @@ function mountApp(mount, client, deps) {
             try { await deps.revoke(s.id); s.status = 'revoked'; toast(rev ? 'Link revoked. Files already received stay.' : 'Share revoked.'); draw(); d.box.focus(); } catch (e) { rv.disabled = false; d.error(friendlyError(e)); }
           });
           btns.appendChild(rv);
-          // A Receive link's options, as the role lets the user change them.
-          if (rev && active && L.reverseEdit !== false) btns.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${s.label || 'this link'}`, on: { click: () => editReverse(d, s) } }));
+          // A Receive link's options, as the role lets the user change them; Pause / Resume.
+          if (rev && (active || held) && L.reverseEdit !== false) btns.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${s.label || 'this link'}`, on: { click: () => editReverse(d, s) } }));
+          if (rev && (active || held)) btns.appendChild(pauseBtn(d, s, draw));
         }
         cell.appendChild(btns);
         tb.appendChild(h('tr', { dataset: { status: s.status || '', kind: s.kind || '' } },

@@ -261,7 +261,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         id: r.id, folder: r.folder, label: r.label || '', created: r.created, expires: r.expires, status: r.status, locked: false, priv: r.priv, mek: r.mek ?? null,
         password: !!r.password, note: !!r.note, captcha: r.captcha === true, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
         views: r.views ?? null, used: r.used ?? 0, left: r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)),
-        accept: r.accept ?? ['files'],
+        accept: r.accept ?? ['files'], held: r.held === true,
       }));
       return ok({ reverse: rows });
     }
@@ -310,8 +310,17 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       const rv = S.reverse.find((x) => x.id === m[1]);
       if (!rv) return fail(404, 'not_found');
       S.patches = (S.patches || []).concat([{ id: rv.id, body }]);
-      for (const k of ['label', 'expires', 'views', 'maxFiles', 'maxBytes', 'maxFileBytes', 'types', 'captcha', 'password', 'note', 'accept']) if (body[k] !== undefined) rv[k] = body[k];
-      return ok({ ok: true, expires: rv.expires, views: rv.views ?? null });
+      for (const k of ['label', 'expires', 'views', 'maxFiles', 'maxBytes', 'maxFileBytes', 'types', 'captcha', 'password', 'note', 'accept', 'folder']) if (body[k] !== undefined) rv[k] = body[k];
+      return ok({ ok: true, expires: rv.expires, views: rv.views ?? null, folder: rv.folder });
+    }
+    if ((m = p.match(/^\/api\/private\/receive\/([^/]+)\/(pause|resume)$/)) && method === 'POST') {
+      // Pause / resume a Receive link (src/routes/reverse.js pauseReverse): recorded, applied to the row.
+      const rv = S.reverse.find((x) => x.id === m[1]);
+      if (!rv) return fail(404, 'not_found');
+      const on = m[2] === 'pause';
+      S.pauses = (S.pauses || []).concat([{ id: rv.id, on, intent: headerOf(init.headers, 'x-secbin-intent') ?? null }]);
+      Object.assign(rv, on ? { status: 'paused', held: true } : { status: 'active', held: false });
+      return ok({ ok: true, paused: on });
     }
     if ((m = p.match(/^\/api\/private\/shares\/([^/]+)\/revoke$/)) && method === 'POST') {
       const rv = S.reverse.find((x) => x.id === m[1]);

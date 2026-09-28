@@ -118,6 +118,15 @@ const fileOf = (name, text, type = 'text/plain') => new File([utf8(text)], name,
 const pick = (input, files) => { Object.defineProperty(input, 'files', { configurable: true, get: () => files }); input.dispatchEvent(new Event('change')); };
 
 describe('the uploader page', () => {
+  it('says that a send is recorded for the recipient, as a share page says an opening is', async () => {
+    const S = await reverseServer();
+    const r = await mountUploader(page(), { location: S.location });
+    expect(r.state).toBe('ready');
+    const note = $('#reverse-receipt-note');
+    expect(note.textContent).toBe('Sending is recorded for the recipient and the administrator: the time, and possibly your network address, approximate location, browser, system and languages.');
+    expect(note.classList.contains('receipt-note')).toBe(true);
+  });
+
   it('shows the note as text, the limits, and sends encrypted files (no Turnstile script on this page, even with the server\'s keys)', async () => {
     const S = await reverseServer({ note: 'Send the <b>contract</b>, please.\nThanks!', limits: { filesLeft: 5, bytesLeft: 1 << 20, maxFileBytes: 1 << 19 }, turnstile: '0x4AAAAAAAsitekey' });
     const w = fakeTurnstile();

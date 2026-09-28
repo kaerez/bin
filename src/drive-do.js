@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS rhuman (j TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 // it at its start (files, note, url or secret: public/js/receivekinds.js; a
 // session from before this column sends files) — for its limits and to give
 // its quota back; received items themselves carry no plaintext kind.
+// reverse.held: when the user paused the link (null: not paused): it takes no
+// upload session until they resume it (docs/REVERSE.md §5).
 // archive_*: an owner's Drive started over in the release before; kept as it
 // is until the owner deletes it (Admin → Security → Keys); nothing here opens
 // it, and it does not count towards the Drive's capacity.
@@ -104,6 +106,7 @@ const COLUMNS = [
   ['reverse', 'retired', 'INTEGER'],
   ['reverse', 'views', 'INTEGER'], ['reverse', 'used', 'INTEGER NOT NULL DEFAULT 0'],
   ['rsessions', 'kind', 'TEXT'],
+  ['reverse', 'held', 'INTEGER'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
 const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify', 'wrapsHeld'];
@@ -164,7 +167,7 @@ const NOT_ARCHIVED_KEY = 'rs NOT IN (SELECT id FROM reverse WHERE agen IS NOT NU
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
 /** The reverse columns updateReverse may change (and restoreReverse put back). */
-const REVERSE_EDITABLE = ['expires', 'views', 'ph', 'salt', 't', 'note', 'captcha', 'opts'];
+const REVERSE_EDITABLE = ['expires', 'views', 'ph', 'salt', 't', 'note', 'captcha', 'opts', 'folder'];
 /** A reverse share's views left (null: unlimited). */
 const viewsLeft = (r) => (r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)));
 /** What upload session `x` sends (sessions from before rsessions.kind send files). */
@@ -1089,8 +1092,9 @@ export class Drive extends DurableObject {
   }
   /**
    * A reverse share's state now: 'active' | 'paused' | 'expired' | 'revoked'
-   * (the row may say active past its expiry). 'paused': the owner started
-   * over and the link's key is sealed under the archived Drive's key.
+   * (the row may say active past its expiry). 'paused': the user paused it
+   * (`held`), or the owner started over in the release before and the link's
+   * key is sealed under the archived Drive's key.
    */
   #reverseState(r) {
     if (!r) return 'gone';
@@ -1098,7 +1102,7 @@ export class Drive extends DurableObject {
     if (r.status !== 'active') return r.status;
     if (r.expires <= nowSec()) return 'expired';
     if (!this.#node(r.folder)) return 'revoked';
-    return 'active';
+    return r.held ? 'paused' : 'active';
   }
   #reverseOut(r, { priv = true } = {}) {
     let opts = {};
@@ -1108,6 +1112,8 @@ export class Drive extends DurableObject {
       password: !!r.ph, note: !!r.note, captcha: r.captcha !== 0, maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null,
       maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, accept: acceptOf(opts), files: r.files, bytes: r.bytes,
       views: r.views ?? null, used: r.used ?? 0, left: viewsLeft(r),
+      // Paused by the user (resumed by them); a link the owner's start over paused has `held` false.
+      held: !!r.held,
       pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NULL", r.id).one().c,
       failed: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NOT NULL", r.id).one().c,
       // Received items kept in an archive (the owner started over), sealed as they arrived.
@@ -1220,13 +1226,13 @@ export class Drive extends DurableObject {
     return { ok: true, id: rec.id, created: t, expires };
   }
 
-  /** Every reverse share (or one folder's), newest first, with its sealed private key. */
-  async listReverse(uid, folder = null) {
+  /** Every reverse share (or one folder's), newest first, with its sealed private key (`priv: false`: without it). */
+  async listReverse(uid, folder = null, { priv = true } = {}) {
     this.#bind(uid);
     const rows = folder === null
       ? this.sql.exec('SELECT * FROM reverse ORDER BY created DESC').toArray()
       : this.sql.exec('SELECT * FROM reverse WHERE folder = ? ORDER BY created DESC', folder).toArray();
-    return { ok: true, reverse: rows.map((r) => this.#reverseOut(r)) };
+    return { ok: true, reverse: rows.map((r) => this.#reverseOut(r, { priv })) };
   }
 
   /** A reverse share's state and counters (My shares' live status). */
@@ -1238,8 +1244,9 @@ export class Drive extends DurableObject {
     // Paused (the owner started over) is not ended: the link resumes when the archive is restored.
     let opts = {};
     try { opts = JSON.parse(r.opts); } catch { /* none */ }
-    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0, accept: acceptOf(opts) };
-    if (st === 'paused') return { status: 'ok', paused: true, files: r.files, bytes: r.bytes, expires: r.expires, ...v };
+    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0, accept: acceptOf(opts), folder: r.folder };
+    // Paused by the user (`held`: they resume it), or by the owner's start over in the release before.
+    if (st === 'paused') return { status: 'ok', paused: true, held: !!r.held, files: r.files, bytes: r.bytes, expires: r.expires, ...v };
     return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires, ...v } : { status: 'gone', state: st, files: r.files, bytes: r.bytes, ...v };
   }
 
@@ -1277,8 +1284,15 @@ export class Drive extends DurableObject {
    * - `password` ({ ph, salt, t } or null: none): the uploader's gate only;
    *   the link's lockout state stays as it is;
    * - `note` (the sealed note as stored, or null), `opts` (a partial
-   *   { maxFiles, maxBytes, maxFileBytes, types, accept }), `captcha` (true / false).
-   * Sessions already started keep going. → { status: 'ok' | 'gone' | 'invalid', … }.
+   *   { maxFiles, maxBytes, maxFileBytes, types, accept }), `captcha` (true / false);
+   * - `folder`: the Drive folder uploads land in from now on — a folder of
+   *   this Drive (not a received item waiting to be taken in), no deeper than
+   *   `maxDepth` (the role's folder-depth limit, null: none; the Drive's own
+   *   rule, as on create). The items it received and the user's browser has
+   *   not taken in yet (waiting, failed, or still uploading) move with it, so
+   *   they are taken in there.
+   * Sessions already started keep going. → { status: 'ok' | 'gone' | 'invalid' | 'refused', … }
+   * ('refused': `fail`, the Drive's refusal of the folder).
    */
   async updateReverse(uid, id, change = {}) {
     this.#bind(uid);
@@ -1286,6 +1300,11 @@ export class Drive extends DurableObject {
     if (!r || !['active', 'paused'].includes(this.#reverseState(r))) return { status: 'gone' };
     const used = r.used ?? 0;
     const set = {};
+    if (change.folder !== undefined && change.folder !== r.folder) {
+      const bad = this.#reverseFolder(id, change.folder, change.maxDepth ?? null);
+      if (bad) return { status: 'refused', fail: bad };
+      set.folder = change.folder;
+    }
     if (change.expires !== undefined) {
       const e = change.expires;
       if (!Number.isSafeInteger(e) || e <= nowSec()) return { status: 'invalid', message: 'Expiry must be in the future.' };
@@ -1316,19 +1335,87 @@ export class Drive extends DurableObject {
     const cols = Object.keys(set);
     // What they held (restoreReverse puts it back when the share index refuses the change).
     const prev = Object.fromEntries(cols.map((c) => [c, r[c] ?? null]));
-    if (cols.length) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => set[c]), id);
+    this.ctx.storage.transactionSync(() => {
+      if (cols.length) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => set[c]), id);
+      // What it received and is not taken in yet goes with it (its take-in places it there).
+      if (set.folder !== undefined) this.sql.exec('UPDATE nodes SET parent = ? WHERE rs = ?', set.folder, id);
+    });
     const n = this.#reverse(id);
     let nopts = {};
     try { nopts = JSON.parse(n.opts); } catch { /* none */ }
-    return { status: 'ok', expires: n.expires, views: n.views ?? null, used: n.used ?? 0, left: viewsLeft(n), captcha: n.captcha !== 0, password: !!n.ph, accept: acceptOf(nopts), prev };
+    return { status: 'ok', expires: n.expires, views: n.views ?? null, used: n.used ?? 0, left: viewsLeft(n), captcha: n.captcha !== 0, password: !!n.ph, accept: acceptOf(nopts), folder: n.folder, prev };
   }
 
-  /** Undo an updateReverse (`prev`, as it returned it): only the columns it can change. */
+  /**
+   * Why reverse share `id` cannot receive into `folder` (a failure), or null:
+   * the folder must be one of this Drive's (a deleted one, another user's or
+   * an unknown id is not), a folder, not a received item, at most `maxDepth`
+   * deep (#tooDeep: a file at its folder's depth, as the take-in checks it),
+   * and able to hold the items the link has waiting.
+   */
+  #reverseFolder(id, folder, maxDepth) {
+    const f = this.#node(folder);
+    if (!f || f.rs) return fail(404, 'folder_not_found', 'That folder does not exist in your Drive.');
+    if (f.kind !== 'dir') return fail(400, 'not_a_folder', 'Files can only be received into a folder.');
+    const deep = this.#tooDeep(this.#depth(folder), maxDepth);
+    if (deep) return deep;
+    const waiting = this.sql.exec('SELECT COUNT(*) AS c FROM nodes WHERE rs = ?', id).one().c;
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM nodes WHERE parent = ?', folder).one().c + waiting > MAX_CHILDREN) {
+      return fail(409, 'folder_full', `A folder holds at most ${MAX_CHILDREN} items.`);
+    }
+    return null;
+  }
+
+  /** Undo an updateReverse (`prev`, as it returned it): only the columns it can change (a folder with its waiting items). */
   async restoreReverse(uid, id, prev = {}) {
     this.#bind(uid);
     const cols = Object.keys(prev).filter((c) => REVERSE_EDITABLE.includes(c));
-    if (cols.length && this.#reverse(id)) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => prev[c]), id);
+    if (cols.length && this.#reverse(id)) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => prev[c]), id);
+        if (typeof prev.folder === 'string' && this.#node(prev.folder)) this.sql.exec('UPDATE nodes SET parent = ? WHERE rs = ?', prev.folder, id);
+      });
+    }
     return { ok: true };
+  }
+
+  /**
+   * The user pauses reverse share `id` (`on`) or resumes it: paused, it takes
+   * no upload session (open and begin answer 'paused'); the sessions open
+   * now end (what they finished is logged and kept, a session that sent
+   * nothing gives its quota back, #lapseSessions) and the uploads they left
+   * unfinished are deleted, their reservations given back. What it received
+   * stays, and is taken in as before. Only an active link can be paused, and
+   * only one the user paused resumed (not one the owner's start over paused
+   * in the release before). → { status: 'ok' | 'gone' | 'unchanged', held }.
+   */
+  async pauseReverse(uid, id, on) {
+    this.#bind(uid);
+    const out = await this.ctx.blockConcurrencyWhile(async () => {
+      const r = this.#reverse(id);
+      const st = this.#reverseState(r);
+      if (on) {
+        if (st === 'paused') return { status: 'unchanged', held: !!r.held };
+        if (st !== 'active') return { status: 'gone' };
+        const pending = this.sql.exec("SELECT id, chunks, size, rs FROM nodes WHERE rs = ? AND state = 'pending'", id).toArray();
+        await this.#deleteObjects(uid, pending);
+        const t = nowSec();
+        this.ctx.storage.transactionSync(() => {
+          for (const f of pending) this.#dropPending(f);
+          this.sql.exec('UPDATE reverse SET held = ? WHERE id = ?', t, id);
+          this.sql.exec('UPDATE rsessions SET expires = ? WHERE rid = ? AND expires > ?', t, id, t);
+        });
+        return { status: 'ok', held: true, dropped: pending.length };
+      }
+      if (st === 'active') return { status: 'unchanged', held: false };
+      if (st !== 'paused' || r.status !== 'active' || !r.held) return { status: 'gone' };
+      this.sql.exec('UPDATE reverse SET held = NULL WHERE id = ?', id);
+      return { status: 'ok', held: false };
+    });
+    if (out.dropped) await this.#reportUsage();
+    if (out.status === 'ok' && on) await this.#lapseSessions();
+    const { dropped, ...rest } = out; // eslint-disable-line no-unused-vars
+    return { ...rest, used: this.#used() };
   }
 
   /**

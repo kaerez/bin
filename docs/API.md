@@ -2,7 +2,8 @@
 
 API keys let scripts and tools work with secbin without a browser session: **create shares**
 and, when the key allows it, **list your shares and their read receipts** and **label, extend
-and revoke** them. A key never signs in and never reaches the account itself (profile,
+and revoke** them, and **list, change, move, pause, resume and revoke your "Receive" links**
+(below). A key never signs in and never reaches the account itself (profile,
 password, passkeys, API keys, activity) or the admin panel. The CLI
 ([`cli/`](../cli/README.md)) uses exactly this API.
 
@@ -33,8 +34,8 @@ Each key has **scopes** — give it only what it needs:
 | `notes` | `POST /api/private/paste` — notes of every format (text, link, credential) |
 | `files` | `POST /api/private/file`, `PUT …/chunk/:i`, `POST …/finalize` — file shares |
 | `policy` | `GET /api/private/policy` — what your client must check before creating (link rules) |
-| `read` | `GET /api/private/shares`, `GET /api/private/shares/:id`, `GET /api/private/shares/:id/opens` — your shares and their read receipts |
-| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry; a Receive link's other details too, except the changes that weaken it: below), `POST /api/private/shares/:id/revoke` |
+| `read` | `GET /api/private/shares`, `GET /api/private/shares/:id`, `GET /api/private/shares/:id/opens` — your shares and their read receipts; `GET /api/private/receive`, `GET /api/private/receive/:id`, `GET /api/private/receive/:id/opens` — your Receive links and their receipts |
+| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry; a Receive link's other details too, except the changes that weaken it: below), `POST /api/private/shares/:id/revoke`; `PATCH /api/private/receive/:id`, `POST /api/private/receive/:id/pause`, `…/resume`, `…/revoke` |
 
 A key created without a choice of scopes gets `notes`, `files` and `policy` (creation only):
 `read` and `manage` must be chosen explicitly. Scopes can be changed later (Account → API keys →
@@ -563,7 +564,8 @@ recipient's page shows an entry as one only where that is `true`), and its chunk
 `GET /api/file/:id/chunk/:ref/:i` and the download grant.
 
 Reverse shares ("Receive" links) are listed, changed and revoked with the share routes above
-(kind `reverse`; an API key with `read` / `manage` can do that, not create one). On create,
+(kind `reverse`) and with their own routes ([Receive links](#receive-links-reverse-shares),
+below); an API key with `read` / `manage` can do that, not create one. On create,
 `expire: "never"` makes a link with no expiry (only where the role's `reverseNoExpiry` allows it)
 and `views` (1–100 000, or `null` / absent: unlimited, where `reverseAllowUnlimitedViews`
 allows it; at most `reverseMaxViews`) limits the upload sessions; `expire` is held to
@@ -587,6 +589,7 @@ Admin → Roles apply on top):
 | `captcha` | `true` / `false`, within `reverseCaptcha` (`403 captcha_required_by_role` / `captcha_disabled`) |
 | `password` | `{ salt, t, ph }` made in the browser from the link's key (docs/REVERSE.md §3), or `null`: none — within `reversePassword`. The password is not sent; the server, which holds the keys that open the link's key, can test guesses at it |
 | `note` | `{ iv, ct }` sealed in the browser with the link's key, or `null`: none. Not end-to-end: the server can open it, as it can the link's uploads |
+| `folder` | the Drive folder it receives into from now on: a folder id of your own Drive (`"root"`: its top folder), no deeper than the role's folder depth (`maxFolderDepth`; for a key, its API limit: `403 folder_too_deep` with `max`). A folder that is not in your Drive — another user's, a deleted one, an unknown id, or a received item not yet taken in — is `404 folder_not_found`; a file `400 not_a_folder`; a folder that could not hold what the link has waiting `409 folder_full`. What the link received and your Drive has not taken in yet (waiting, failed or still uploading) moves with it and is taken in there. Not weakening. Logged as `folder=<id>` |
 | `current` / `reauth` | the confirmation a weakening change needs (below) |
 
 A change that **weakens** a link — its password removed or changed, its CAPTCHA turned off, no
@@ -598,12 +601,194 @@ Tightening needs no confirmation and works with an API key: adding a password to
 none, turning the CAPTCHA on, an expiry (extended within the role, or given to a link with none),
 fewer views or more within the role's limit, tighter file limits, the label.
 
-→ `{ ok, expires, views, left, used, accept }` (`expires` `null`: none). A revoked or ended link can only
+→ `{ ok, expires, views, left, used, accept, folder }` (`expires` `null`: none). A revoked or ended link can only
 be relabelled (`409 not_active`); a locked one not at all (`423`). The owner changing another
 user's link directly (Admin → Shares) may change its label, expiry and views only (`403
-user_only` otherwise), and a link with no expiry only where that user's role allows it. The
+user_only` otherwise: its folder too), and a link with no expiry only where that user's role allows it. The
 anonymous uploader's routes (`/api/reverse/:id/open`, `begin`, `human`, `files`, chunks,
 `finalize`, `done`) take no account at all: see [`REVERSE.md`](./REVERSE.md) §6.2.
+
+## Receive links (reverse shares)
+
+A "Receive" link (`/r/<id>#<key>`, [`REVERSE.md`](./REVERSE.md)) lets anyone send notes, links,
+credentials and files into a folder of your Drive. It is **made in the Drive page** (Drive →
+Receive…); a key can list it, read its receipts, change it, move it to another folder, pause,
+resume and revoke it. The same routes work for a signed-in browser session (with its CSRF token,
+above). Every route needs a role with the Drive and reverse shares (`403 reverse_disabled`
+otherwise) and reaches only your own links (`404 not_found` for anything else, a regular share
+included).
+
+| Method & path | Scope | Body → result |
+| --- | --- | --- |
+| `GET /api/private/receive?q=&status=&expiry=&offset=` | `read` | → `{ rows: [link], total }`: 50 per page, newest first; `q` matches the label, `status` is one of `active`, `revoked`, `expired`, `ended`; `expiry=none` / `set` as for shares |
+| `GET /api/private/receive/:id` | `read` | → `{ link }` |
+| `GET /api/private/receive/:id/opens` | `read` | → `{ total, fields, rows: [{ ts, …}] }` — its receipts: one per **upload session** started (a view of the link), newest first (at most 200), with the details the administrator lets your account see, exactly as a share's read receipts (`fields` above) |
+| `PATCH /api/private/receive/:id` | `manage` | the fields of a Receive link's change (above: label, expiry, views, limits, `accept`, CAPTCHA, password, note, `folder`) → `{ ok, expires, views, left, used, accept, folder }`. A change that **weakens** the link is `403 step_up_required` (with `weakens`) for a key, whatever else it sends |
+| `POST /api/private/receive/:id/pause` | `manage` | header `X-Secbin-Intent: 1`, no body → `{ ok, paused: true }` — it takes no new upload session until resumed: the sender's page says it is not accepting files right now (`409 paused`); sessions open now end and their unfinished uploads are deleted (their reservations given back); what it received stays and is taken in as before |
+| `POST /api/private/receive/:id/resume` | `manage` | header `X-Secbin-Intent: 1` → `{ ok, paused: false }` — it takes uploads again (a link paused by an owner's start over in the release before cannot be resumed: `409 not_paused`) |
+| `POST /api/private/receive/:id/revoke` | `manage` | header `X-Secbin-Intent: 1` → `{ ok }` — uploads stop for good; what it received stays in your Drive |
+
+A link is `{ id, label, created, expires, status, locked, captcha, paused, held, opens, views,
+used, left, received: { files, bytes }, folder, accept, password, note, maxFiles, maxBytes,
+maxFileBytes, types, pending, failed }`: `expires` `null` for no expiry; `status` as in the share
+index (`active`, `revoked`, `expired`, `ended`); `paused` is `true` while it takes no uploads and
+`held` when you paused it (you can resume it); `opens` counts its upload sessions (its receipts);
+`views` is its views (`null`: unlimited), `used` and `left` the views used and left; `folder` the
+id of the Drive folder it receives into (`"root"`: the top folder; its name stays encrypted);
+`accept` what it takes (`files`, `note`, `url`, `secret`); `password` and `note` say only
+**whether** it has them (neither is ever returned, nor is its key); `pending` / `failed` the items
+waiting to be taken in / that could not be. A link that has left the Drive (ended more than 30
+days ago) has the index's fields only (`folder: null`).
+
+Pausing and resuming need no `reverseEdit` (like the label and revoking); both need an active link
+that is not locked (`409 not_active`, `423 share_locked`). Everything else follows the rules of
+`PATCH /api/private/shares/:id` above: the role's options for the channel the change comes
+through (for a key, the account's **API limits** of Admin → Roles: `reverseEdit`, the kinds,
+expiry, views and folder depth), the step-up rule, the lock. Every change is in your activity log
+(`share.updated` with `paused`, `resumed`, `folder=<id>`, …; `share.revoked`), with the key's id
+(`apikey=<id>`) when a key made it.
+
+**Why a key cannot create one:** a link's private key is made in the Drive page and sealed there
+under your Drive keys (so that the Drive can take in what it receives), and an API key never gets
+those keys; creating a link also needs your password or a passkey, which a key cannot give, as
+for the changes that weaken a link. `POST /api/private/receive` is `405`, and
+`POST /api/private/drive/reverse` with a key `403 api_key_not_allowed`.
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 403 | `reverse_disabled` | your role does not allow reverse shares (or has no Drive) |
+| 403 | `step_up_required` | a change that weakens the link, with an API key (`weakens` lists what) |
+| 403 | `reverse_edit_disabled` | your role (for a key: its API limits) does not allow changing a link after it is made |
+| 403 | `receive_kind_disabled` | `accept` adds a kind your role (or its API limits) does not allow (`kinds`) |
+| 403 | `folder_too_deep` | `folder` is deeper than your role's folder depth (`max`) |
+| 404 | `folder_not_found` | `folder` is not a folder of your Drive (another user's, deleted, unknown, a received item) |
+| 400 | `not_a_folder` | `folder` is a file |
+| 409 | `folder_full` | `folder` could not hold what the link has waiting |
+| 409 | `not_active` | the link has ended (only its label can change) |
+| 409 | `not_paused` | resuming a link you did not pause |
+| 423 | `share_locked` | the administrator has locked it |
+
+### List your Receive links
+
+Scope: `read`.
+
+curl:
+
+```sh
+curl -sS -H "Authorization: Bearer $SECBIN_API_KEY" "https://bin.example.com/api/private/receive?status=active"
+# one link (its folder, what it accepts, views, receipts count), and its receipts:
+curl -sS -H "Authorization: Bearer $SECBIN_API_KEY" "https://bin.example.com/api/private/receive/$LINK_ID"
+curl -sS -H "Authorization: Bearer $SECBIN_API_KEY" "https://bin.example.com/api/private/receive/$LINK_ID/opens"
+```
+
+Node.js:
+
+```js
+// receive-links.mjs (run: node receive-links.mjs)
+const res = await fetch('https://bin.example.com/api/private/receive?status=active', {
+  headers: { authorization: `Bearer ${process.env.SECBIN_API_KEY}` },
+});
+if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.json()).error}`);
+const { rows, total } = await res.json();
+for (const l of rows) console.log(l.id, l.paused ? 'paused' : l.status, l.accept.join(','), `${l.opens} sessions`, l.received.files, l.label);
+console.log(`${rows.length} of ${total}`);
+```
+
+Python:
+
+```python
+# receive_links.py (run: python3 receive_links.py)
+import os, requests
+
+res = requests.get("https://bin.example.com/api/private/receive", params={"status": "active"}, timeout=30,
+                   headers={"Authorization": f"Bearer {os.environ['SECBIN_API_KEY']}"})
+res.raise_for_status()
+data = res.json()
+for l in data["rows"]:
+    print(l["id"], "paused" if l["paused"] else l["status"], ",".join(l["accept"]), l["opens"], "sessions", l["label"])
+print(len(data["rows"]), "of", data["total"])
+```
+
+### Pause and resume a Receive link
+
+Scope: `manage`.
+
+curl:
+
+```sh
+# paused, it takes no uploads (sessions open now end); what it received stays
+curl -sS -X POST -H "Authorization: Bearer $SECBIN_API_KEY" -H "X-Secbin-Intent: 1" \
+  "https://bin.example.com/api/private/receive/$LINK_ID/pause"
+curl -sS -X POST -H "Authorization: Bearer $SECBIN_API_KEY" -H "X-Secbin-Intent: 1" \
+  "https://bin.example.com/api/private/receive/$LINK_ID/resume"
+```
+
+Node.js:
+
+```js
+// pause.mjs (run: LINK_ID=... node pause.mjs pause|resume)
+const action = process.argv[2] === 'resume' ? 'resume' : 'pause';
+const res = await fetch(`https://bin.example.com/api/private/receive/${process.env.LINK_ID}/${action}`, {
+  method: 'POST',
+  headers: { authorization: `Bearer ${process.env.SECBIN_API_KEY}`, 'x-secbin-intent': '1' },
+});
+console.log(res.status, await res.json()); // { ok: true, paused: true | false }
+```
+
+Python:
+
+```python
+# pause.py (run: LINK_ID=... python3 pause.py pause|resume)
+import os, sys, requests
+
+action = "resume" if sys.argv[1:] == ["resume"] else "pause"
+res = requests.post(f"https://bin.example.com/api/private/receive/{os.environ['LINK_ID']}/{action}", timeout=30,
+                    headers={"Authorization": f"Bearer {os.environ['SECBIN_API_KEY']}", "X-Secbin-Intent": "1"})
+print(res.status_code, res.json())
+```
+
+### Change or move a Receive link
+
+Scope: `manage`. The folder id is a folder of your own Drive (`"root"`: its top folder; a link's
+`folder` above says where it receives into now). A change that weakens the link (no expiry,
+unlimited views, its CAPTCHA off, its password removed or changed, files, links or credentials it
+did not accept) is `403 step_up_required`: make it in the browser.
+
+curl:
+
+```sh
+# fewer views, a label, and another folder (what it has waiting moves with it)
+curl -sS -X PATCH -H "Authorization: Bearer $SECBIN_API_KEY" -H "Content-Type: application/json" \
+  --data "{\"views\":10,\"label\":\"scans 2026\",\"folder\":\"$FOLDER_ID\"}" \
+  "https://bin.example.com/api/private/receive/$LINK_ID"
+```
+
+Node.js:
+
+```js
+// move.mjs (run: LINK_ID=... FOLDER_ID=... node move.mjs)
+const res = await fetch(`https://bin.example.com/api/private/receive/${process.env.LINK_ID}`, {
+  method: 'PATCH',
+  headers: { authorization: `Bearer ${process.env.SECBIN_API_KEY}`, 'content-type': 'application/json' },
+  body: JSON.stringify({ folder: process.env.FOLDER_ID }),
+});
+console.log(res.status, await res.json()); // 403 folder_too_deep / 404 folder_not_found when refused
+```
+
+Python:
+
+```python
+# move.py (run: LINK_ID=... FOLDER_ID=... python3 move.py)
+import os, requests
+
+res = requests.patch(f"https://bin.example.com/api/private/receive/{os.environ['LINK_ID']}", timeout=30,
+                     json={"folder": os.environ["FOLDER_ID"]},
+                     headers={"Authorization": f"Bearer {os.environ['SECBIN_API_KEY']}"})
+print(res.status_code, res.json())
+```
+
+Revoking works as for shares: `POST /api/private/receive/:id/revoke` (or
+`/api/private/shares/:id/revoke`) with `X-Secbin-Intent: 1`.
 
 ## Security notes
 
@@ -617,5 +802,6 @@ anonymous uploader's routes (`/api/reverse/:id/open`, `begin`, `human`, `files`,
 - Every key creation, change and revocation, every share created with a key and every change a
   key makes to a share is recorded in your activity log (and the administrator's audit log).
 - Read receipts can contain personal data about the people who opened a share (network address,
-  location, browser, languages — only the details the administrator enables). Treat what you
-  fetch as sensitive: keep it only as long as you need it and protect it like the key itself.
+  location, browser, languages — only the details the administrator enables), and a Receive
+  link's receipts the same about the people who sent to it. Treat what you fetch as sensitive:
+  keep it only as long as you need it and protect it like the key itself.

@@ -309,6 +309,8 @@ export const listShares = (qs = '') => request(`/api/private/shares${qs}`);
 export const shareOpens = (id) => request(`/api/private/shares/${encodeURIComponent(id)}/opens`);
 export const updateShare = (id, body) => request(`/api/private/shares/${enc(id)}`, { method: 'PATCH', body });
 export const revokeShare = (id) => request(`/api/private/shares/${enc(id)}/revoke`, { method: 'POST', headers: INTENT });
+/** Pause (`on`) or resume a Receive link (docs/API.md, /api/private/receive/<id>/pause | resume). */
+export const pauseReceive = (id, on) => request(`/api/private/receive/${enc(id)}/${on ? 'pause' : 'resume'}`, { method: 'POST', headers: INTENT });
 
 // ── admin ────────────────────────────────────────────────────────────────────
 const A = '/api/private/admin';

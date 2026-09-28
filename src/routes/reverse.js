@@ -19,6 +19,7 @@
 import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
 import { actorId } from '../lib/auth.js';
 import { directory, ipContext, isBlocked, recordFailure } from '../lib/guard.js';
+import { recordOpen } from '../lib/receipts.js';
 import { genToken, hashToken } from '../lib/ids.js';
 import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
@@ -343,10 +344,13 @@ const now = () => Math.floor(Date.now() / 1000);
  * `maxBytes`, `maxFileBytes`, `types`), the CAPTCHA (`captcha`), the
  * uploader password (`password`: { salt, t, ph } made in the browser from
  * the link's key, or null: none), the note (`note`: { iv, ct } sealed in
- * the browser, or null: none) and what the link accepts (`accept`: files,
- * note, url, secret — as the role allows the kinds it adds). The server sees
- * neither the password nor the note. The owner changing another user's link directly (`admin`) may
- * change the label, expiry and views only.
+ * the browser, or null: none), what the link accepts (`accept`: files,
+ * note, url, secret — as the role allows the kinds it adds) and the Drive
+ * folder uploads land in (`folder`: a folder of the user's own Drive, within
+ * the role's folder depth; what it received and is not taken in yet moves
+ * with it). The server sees neither the password nor the note. The owner
+ * changing another user's link directly (`admin`) may change the label,
+ * expiry and views only.
  */
 export async function changeReverse(env, dir, row, body, { uid, actor, admin = null, channel = 'all', keyId = null, request = null, impersonating = false }) {
   const id = row.id;
@@ -402,10 +406,14 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
     if (note === null && body.note !== null) return invalid('note must be {iv, ct} or null.');
     change.note = set.note = note;
   }
+  if (body.folder !== undefined) {
+    if (typeof body.folder !== 'string' || (body.folder !== ROOT && !NODE_ID_RE.test(body.folder))) return invalid('folder must be a folder id of your Drive ("root" for its top folder).');
+    change.folder = set.folder = body.folder;
+  }
   const keys = Object.keys(change);
   if (!keys.length) return invalid('Nothing to change.');
   if (admin && keys.some((k) => !['label', 'expires', 'views'].includes(k))) {
-    return err(403, 'user_only', 'Only the user can change a link’s limits, CAPTCHA, password or note.');
+    return err(403, 'user_only', 'Only the user can change a link’s limits, folder, CAPTCHA, password or note.');
   }
   const detail = keys.some((k) => k !== 'label');
   if (detail && row.status !== 'active') return err(409, 'not_active', 'Only active shares can be changed.');
@@ -424,6 +432,8 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
   const ok = await dir.authorizeReverseChange(uid, change, { channel, admin: !!admin });
   if (!ok.ok) return fromDo(ok);
   if (ok.maxBytes !== undefined) set.opts.maxBytes = ok.maxBytes; // "none" is the role's limit, when it has one
+  // A new folder is held to the role's folder depth (for this channel), by the Drive's own rule.
+  if (set.folder !== undefined) set.maxDepth = ok.maxFolderDepth ?? null;
   const patch = {};
   if (change.label !== undefined) patch.label = change.label;
   let r = null;
@@ -457,6 +467,7 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
     }
     r = await drive.updateReverse(owner, id, set);
     if (r.status === 'invalid') return err(400, 'invalid', r.message, r.used !== undefined ? { used: r.used } : undefined);
+    if (r.status === 'refused') return fromDo(r.fail); // the folder: not the user's, not a folder, too deep or full
     if (r.status !== 'ok') {
       await dir.markShareEnded(id, 'ended');
       return err(410, 'gone', 'This share no longer exists.');
@@ -470,6 +481,7 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
       ...(set.note !== undefined ? [set.note ? 'note=set' : 'note=removed'] : []),
       ...(set.opts !== undefined ? ['limits'] : []),
       ...(set.opts?.accept !== undefined ? [`accept=${set.opts.accept.join(',')}`] : []),
+      ...(r.prev && r.prev.folder !== undefined ? [`folder=${r.folder}`] : []),
     ];
   }
   const u = await dir.updateShare(uid, id, patch, actor, { admin, keyId });
@@ -478,7 +490,45 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
     if (r && r.prev) await drive.restoreReverse(owner, id, r.prev);
     return fromDo(u);
   }
-  return json(r ? { ok: true, expires: apiExpiry(r.expires), views: r.views, left: r.left, used: r.used, accept: r.accept } : { ok: true });
+  return json(r ? { ok: true, expires: apiExpiry(r.expires), views: r.views, left: r.left, used: r.used, accept: r.accept, folder: r.folder } : { ok: true });
+}
+
+/**
+ * Pause (`on`) or resume reverse share `row` (its share-index row, the
+ * caller's own; a session, or an API key with "manage"): paused, it takes no
+ * new upload session — the uploader's `open` and `begin` answer `409 paused`
+ * — and the sessions open now end, their unfinished uploads deleted; what it
+ * received stays and is taken in as before. Neither needs reverseEdit (like
+ * revoking and the label), both only an active link that is not locked, and
+ * the role's reverse shares. Logged as a share change (`paused` / `resumed`,
+ * with the API key's id).
+ */
+export async function pauseReverse(env, dir, row, on, { uid, actor, channel = 'all', keyId = null }) {
+  const id = row.id;
+  if (row.locked || await dir.isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
+  if (row.status !== 'active') return err(409, 'not_active', 'Only active links can be paused or resumed.');
+  const ok = await dir.authorizeReverseChange(uid, { pause: on }, { channel });
+  if (!ok.ok) return fromDo(ok);
+  const drive = driveStub(env, uid);
+  const r = await drive.pauseReverse(uid, id, on);
+  if (r.status === 'gone') {
+    // Ended in its Drive (expired, its folder deleted); one the owner's start over paused cannot be resumed.
+    const s = await drive.reverseStatus(uid, id);
+    if (s.status === 'gone') {
+      await dir.markShareEnded(id, s.state === 'expired' ? 'expired' : 'ended');
+      return err(410, 'gone', 'This share no longer exists.');
+    }
+    return err(409, 'not_paused', 'This link was not paused by you, so it cannot be resumed.');
+  }
+  await dir.setDriveUsed(uid, r.used);
+  if (r.status === 'unchanged') return json({ ok: true, paused: on }); // already so: nothing to log
+  const u = await dir.updateShare(uid, id, { detail: [on ? 'paused' : 'resumed'] }, actor, { keyId });
+  if (!u.ok) {
+    // The index refused (locked in the meantime): the link goes back to how it was.
+    await drive.pauseReverse(uid, id, !on);
+    return fromDo(u);
+  }
+  return json({ ok: true, paused: on });
 }
 
 /**
@@ -666,6 +716,8 @@ export async function handleReversePublic(request, env, url) {
     if (s.status === 'paused') return pausedRes();
     // used_up (the last view went to a concurrent start) or ended: 410, as a used-up share.
     if (s.status !== 'ok') return err(410, 'gone', GONE);
+    // A receipt for the user: one view, one upload session granted (a start that failed is none).
+    await recordOpen(env, request, id);
     return json({ grant, expires: s.expires });
   }
 

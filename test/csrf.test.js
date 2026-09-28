@@ -130,9 +130,15 @@ const REVERSE_METHODS = {
   [`/api/private/drive/received/${DRIVE_ID}`]: 'POST',
 };
 const REVERSE_PATHS = Object.keys(REVERSE_METHODS);
-/** A reverse link's changes through the shares routes (src/routes/private.js, admin.js): extend, revoke, lock. */
+/**
+ * A reverse link's changes through the shares routes (src/routes/private.js, admin.js): extend,
+ * revoke, lock; and through the Receive links' routes (private.js handleReceive): change, pause,
+ * resume, revoke.
+ */
 const REVERSE_SHARE_ROUTES = [
   dj('PATCH', `/api/private/shares/${REV_ID}`), da('POST', `/api/private/shares/${REV_ID}/revoke`),
+  dj('PATCH', `/api/private/receive/${REV_ID}`), da('POST', `/api/private/receive/${REV_ID}/pause`),
+  da('POST', `/api/private/receive/${REV_ID}/resume`), da('POST', `/api/private/receive/${REV_ID}/revoke`),
   dj('PATCH', `/api/private/admin/shares/${REV_ID}`), da('POST', `/api/private/admin/shares/${REV_ID}/revoke`), dj('POST', `/api/private/admin/shares/${REV_ID}/lock`),
 ];
 /**

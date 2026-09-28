@@ -1,11 +1,11 @@
 // shares.js — "My shares": list what I sent (label, type, lifetime, views),
 // raise views / extend expiry within my limits, rename labels, revoke now;
 // a "Receive" link (reverse share) has an Edit instead (reverse-edit.js: its
-// expiry or none, views, limits, CAPTCHA, password and note, as the role
-// allows). A share the administrator has locked is shown frozen: no control
-// changes it.
+// expiry or none, views, limits, folder, CAPTCHA, password and note, as the
+// role allows) and Pause / Resume. A share the administrator has locked is
+// shown frozen: no control changes it.
 
-import { listShares, updateShare, revokeShare, shareOpens, drive as driveApi } from '../../js/api.js';
+import { listShares, updateShare, revokeShare, shareOpens, pauseReceive, drive as driveApi } from '../../js/api.js';
 import { opensButton } from './receipts.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, viewsText, expiresText } from '../../js/common.js';
 import { toast, keepFocus } from '../../js/ui.js';
@@ -75,6 +75,8 @@ function render(focusKey = null) {
       // A Receive link: Edit (everything the role lets the user change after making it; reverseEdit off: only the label).
       if (r.kind === 'reverse') {
         if (profile.limits?.reverseEdit !== false) actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${r.label || 'this upload link'}`, dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openReverseEdit(r, tr) } }));
+        // Pause / Resume (one the owner's start over paused in the release before can only be revoked).
+        if (!r.paused || r.held) actions.appendChild(pauseButton(r));
       } else actions.appendChild(h('button.btn', { type: 'button', text: 'Extend', dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openExtend(r, tr) } }));
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `share:${r.id}:revoke` } });
       armConfirm(rv, 'Revoke now — irreversible', async () => {
@@ -94,16 +96,34 @@ function render(focusKey = null) {
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status }),
         locked ? h('span.pill.warn', { text: 'locked', title: 'Locked by the administrator' }) : null,
         r.captcha ? h('span.pill.captcha-badge', { text: 'CAPTCHA', title: r.kind === 'reverse' ? 'Senders complete a CAPTCHA before uploading' : 'Recipients complete a CAPTCHA before opening' }) : null,
-        r.paused ? h('span.pill.warn', { text: 'paused', title: 'Paused when the Drive was started over in the previous release: it does not accept files' }) : null),
+        r.paused ? h('span.pill.warn', { text: 'paused', title: r.held ? 'Paused by you: it accepts no uploads until you resume it' : 'Paused when the Drive was started over in the previous release: it does not accept files' }) : null),
       h('td.cell-actions', {}, actions));
-    tr.querySelector('td[data-label="Opened"]').appendChild(opensButton(r, () => shareOpens(r.id), 8, tr));
+    tr.querySelector('td[data-label="Opened"]').appendChild(opensButton(r, () => shareOpens(r.id), 8, tr, { receive: r.kind === 'reverse' }));
     body.appendChild(tr);
   }
   refocus();
 }
 
+/** A Receive link's Pause (it takes no uploads until resumed) or Resume. */
+function pauseButton(r) {
+  const on = !r.paused;
+  const b = h('button.btn', { type: 'button', text: on ? 'Pause' : 'Resume', 'aria-label': `${on ? 'Pause' : 'Resume'} ${r.label || 'this upload link'}`, dataset: { focusKey: `share:${r.id}:pause` } });
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await pauseReceive(r.id, on);
+      toast(on ? 'Upload link paused: it accepts no uploads until you resume it.' : 'Upload link resumed.');
+      reload(`share:${r.id}:pause`);
+    } catch (e) { b.disabled = false; toast(friendlyError(e), { error: true }); }
+  });
+  return b;
+}
+
+/** The Drive's folders for the Edit form's folder choice (their names opened by the Drive client, loaded on first need). */
+const folders = { list: async (id) => (await driveClient()).list(id) };
+
 let client = null;
-/** The Drive client (for a note or a password: sealed with the link's key), opened once, on first need. */
+/** The Drive client (for a note, a password or the folders: the link's key and the names open with it), opened once, on first need. */
 async function driveClient() {
   if (!client) {
     const m = await import('../../js/driveclient.js');
@@ -129,7 +149,7 @@ async function openReverseEdit(r, tr) {
     status.classList.add('error');
     return;
   }
-  const form = reverseEditForm(cur, profile);
+  const form = reverseEditForm(cur, profile, { folders });
   const msg = h('p.msg.error', { role: 'alert', hidden: true });
   const save = h('button.btn', { type: 'button', text: 'Save changes' });
   save.onclick = async () => {
