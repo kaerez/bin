@@ -36,13 +36,127 @@ const touched = (path, res) => {
   if (res.ok && path.startsWith('/api/private/')) for (const fn of activity) { try { fn(path); } catch { /* a listener's bug is not the request's */ } }
 };
 
+// ── CSRF token and the page's session ────────────────────────────────────────
+// Every state-changing request of a signed-in page carries a CSRF token in
+// X-Secbin-CSRF (src/lib/csrf.js), and the token a page sends is the one of
+// the session the page was loaded for, not whatever the (shared) cookie holds
+// now. The dashboard chrome records that session when the page loads
+// (bindSession, from /api/private/me: the user id, the impersonation state and
+// the token); a page that has not recorded one records the current session
+// before its first change. So when another tab signs in as someone else, or
+// starts or ends impersonation, this page's token no longer matches and the
+// server refuses the change (403 csrf_mismatch, before changing anything).
+// The page then asks /api/private/me who the browser is signed in as now:
+//   • the same user, in the same impersonation state (e.g. signed out and in
+//     again, or a password change): it takes the new token and retries once;
+//   • anyone else: it does not retry. It stops acting for any session
+//     (every later change is refused here, without a request) and shows
+//     SESSION_CHANGED with a Reload button (onSessionChanged). A page loaded
+//     for one user never changes another user's account.
+// The header goes only where the server checks it (/api/private and logout);
+// anonymous routes have no session and ignore it. That includes the reverse-
+// share uploader (reverseApi, /api/reverse/…): it sends no token and never
+// asks /api/private/me, whatever this page has recorded. The Drive's own
+// reverse-share calls (drive.createReverse, acceptReceived, receivedFailed,
+// receivedRetry) are under /api/private and carry the page's token.
+export const CSRF_COOKIE = '__Host-secbin_csrf';
+const CSRF_HEADER = 'x-secbin-csrf';
+const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+export const SESSION_CHANGED = 'Your session changed in another tab; reload the page.';
+
+/** The token in the browser's cookie ('' when there is none): the current session's, not necessarily the page's. */
+export function csrfToken() {
+  let jar;
+  try { jar = document.cookie || ''; } catch { return ''; }
+  for (const part of jar.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === CSRF_COOKIE) {
+      const v = part.slice(i + 1).trim();
+      return TOKEN_RE.test(v) ? v : '';
+    }
+  }
+  return '';
+}
+
+/** null (none recorded yet), { userId, impersonatedBy, token }, or { ended: true }. */
+let page = null;
+let sessionChangedHandler = () => {};
+const who = (profile) => ({
+  userId: isPlainObject(profile) && isPlainObject(profile.user) && typeof profile.user.id === 'string' ? profile.user.id : null,
+  impersonatedBy: isPlainObject(profile) && typeof profile.impersonatedBy === 'string' ? profile.impersonatedBy : null,
+});
+const tokenFrom = (profile) => (isPlainObject(profile) && typeof profile.csrf === 'string' && TOKEN_RE.test(profile.csrf) ? profile.csrf : '');
+
+/** Record the session this page is for, from a /api/private/me profile. */
+export function bindSession(profile) {
+  const w = who(profile);
+  page = w.userId ? { ...w, token: tokenFrom(profile) } : { ended: true };
+}
+
+/** Stop acting for any session: every later change from this page is refused here, without a request. */
+export function forgetSession() { page = { ended: true }; }
+
+/** `fn()` runs when the page finds that the browser is now signed in as someone else. */
+export function onSessionChanged(fn) { sessionChangedHandler = typeof fn === 'function' ? fn : () => {}; }
+
+/** The error for a page whose session is gone (the message pages show, with a Reload button). */
+export const isSessionChanged = (e) => e instanceof ApiError && e.extra.sessionChanged === true;
+function sessionChanged() {
+  const first = !page?.ended;
+  forgetSession();
+  if (first) { try { sessionChangedHandler(); } catch { /* the error below still reaches the page */ } }
+  return new ApiError(SESSION_CHANGED, 403, 'csrf_mismatch', { sessionChanged: true });
+}
+
+const needsCsrf = (path, method) => STATE_CHANGING.has(method) && (path.startsWith('/api/private/') || path === '/api/auth/logout');
+
+/**
+ * Send `init` to `path`. A signed-in state-changing request carries the
+ * page's token; if the server refuses it (403 csrf_mismatch, which it answers
+ * before changing anything), /api/private/me says who is signed in now (a 401
+ * there is the normal signed-out flow): the page's own user and impersonation
+ * state → one retry with the new token; anyone else, or a second refusal →
+ * SESSION_CHANGED, and no retry.
+ */
+async function send(path, init) {
+  if (!needsCsrf(path, init.method)) return fetch(path, init);
+  if (!page) bindSession(await request('/api/private/me'));
+  if (page.ended) throw sessionChanged();
+  const withToken = (token) => {
+    const headers = { ...init.headers };
+    if (token) headers[CSRF_HEADER] = token; else delete headers[CSRF_HEADER];
+    return fetch(path, { ...init, headers });
+  };
+  const res = await withToken(page.token);
+  if (!(await isCsrfMismatch(res))) return res;
+  const bound = page;
+  const now = await request('/api/private/me');
+  const w = who(now);
+  if (page !== bound || page.ended || w.userId !== bound.userId || w.impersonatedBy !== bound.impersonatedBy) throw sessionChanged();
+  bound.token = tokenFrom(now);
+  const again = await withToken(bound.token);
+  if (await isCsrfMismatch(again)) throw sessionChanged();
+  return again;
+}
+
+async function isCsrfMismatch(res) {
+  if (res.status !== 403) return false;
+  try {
+    const d = await res.clone().json();
+    return isPlainObject(d) && d.error === 'csrf_mismatch';
+  } catch {
+    return false;
+  }
+}
+
 async function request(path, { method = 'GET', body, headers = {}, raw = false, signal } = {}) {
   const init = { method, headers: { ...headers }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual', ...(signal ? { signal } : {}) };
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(path, init);
+  const res = await send(path, init);
   if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
   touched(path, res);
   if (raw && res.ok) return res;
@@ -224,7 +338,7 @@ export const drive = {
   // download / use / check (admin audit), a check's live escrow wraps, and
   // sealed escrow keys put back from the kit.
   kit: (body) => request(`${D}/kit`, { method: 'POST', headers: INTENT, body }),
-  kitProbe: () => request(`${D}/kit/probe`),
+  kitProbe: () => request(`${D}/kit/probe`, { method: 'POST', headers: INTENT, body: {} }),
   kitKeys: (body) => request(`${D}/kit/keys`, { method: 'PUT', headers: INTENT, body }),
   // The owner, with no kit and no way to open their Drive: start it over (new keys).
   startOver: (body) => request(`${D}/start-over`, { method: 'POST', headers: INTENT, body }),
@@ -257,7 +371,7 @@ export const reverseApi = {
 export const uploadChunk = (id, i, bytes, uploadToken) => putChunkTo(`/api/private/file/${enc(id)}/chunk/${i}`, bytes, uploadToken);
 
 async function putChunkTo(path, bytes, uploadToken, signal) {
-  const res = await fetch(path, {
+  const res = await send(path, {
     method: 'PUT', body: bytes, cache: 'no-store', credentials: 'same-origin', redirect: 'manual',
     headers: { 'content-type': 'application/octet-stream', 'x-upload-token': uploadToken },
     ...(signal ? { signal } : {}),

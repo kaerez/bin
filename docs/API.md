@@ -50,6 +50,34 @@ scopes — under the same rules as the dashboard's **My shares** page:
 - Every change made with a key (label, extension, revocation) is recorded in your activity log
   with the key's id (`apikey=<id>`; never the key itself); creations are recorded as usual.
 
+### Browser sessions: `X-Secbin-CSRF`
+
+API-key requests **never** need a CSRF token. It applies only to requests authenticated by the
+browser's session cookie, for example a script running in the signed-in dashboard.
+Such a request that changes something (`POST`, `PUT`, `PATCH` or `DELETE` on
+`/api/private/*`, the Drive's `/api/private/drive/*` and `/api/private/admin/drive/*`
+included, and `POST /api/auth/logout`) must send:
+
+```
+X-Secbin-CSRF: <token>
+```
+
+- **The token:** the value of the `__Host-secbin_csrf` cookie, or `csrf` in
+  `GET /api/private/me`.
+- **Lifetime:** it belongs to the session and changes only when the session does (sign-in,
+  sign-out, a password change, impersonation start or end).
+- **Shape first:** such a request also needs a JSON body, a chunk
+  (`application/octet-stream`, as in file and Drive uploads) or `X-Secbin-Intent: 1` (and the
+  intent header on a `DELETE`). Without it the request is refused before the token is looked
+  at: `415 unsupported_media_type` for a body of another type, else `400 missing_intent`.
+- **Refusal:** a missing or stale token gets `403 csrf_mismatch` and nothing changes. Fetch
+  `/api/private/me` for the current token and send the request again, after checking that
+  `/me` still names the account (and impersonation state) the script meant to act for.
+- **Other routes:** reads (`GET`) and the anonymous routes (share open and delete, public
+  creation, login, setup) never need it.
+- **Owner switch:** the owner can turn the requirement off in Admin → Settings → CSRF tokens.
+  The header is then ignored; the JSON / `X-Secbin-Intent` and cross-site rules still apply.
+
 ## Endpoints
 
 All bodies and results are JSON unless stated. `:id` is a share id (`k…`/`b…` notes, `f…` file
@@ -96,6 +124,7 @@ SPEC.md §10). The ones specific to keys and shares:
 | 409 | `not_active` | extending a share that is no longer active |
 | 400 | `invalid`, `invalid_views`, `invalid_expiry`, `invalid_label` | nothing to change, a smaller or invalid value, a label over 100 characters |
 | 400 | `missing_intent` | revoke without `X-Secbin-Intent: 1` |
+| 403 | `csrf_mismatch` | browser session only (never an API key): a change without the session's `X-Secbin-CSRF` token (see above) |
 | 403 | `too_many_views`, `unlimited_views_disabled`, `expiry_too_long` | beyond the account's limits (for a key: its API limits); `max` is attached |
 | 403 | `bad_token` | wrong delete token |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
@@ -458,7 +487,7 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/received/:id` | `{ parent, name, meta, fk }` → `{ ok }` — a received file re-wrapped into the Drive |
 | `POST /api/private/drive/received/:id/failed` | `{ reason }` → `{ ok, received, failed }` — the browser could not take it in (it leaves the queue); `DELETE` puts it back |
 | `POST /api/private/drive/kit` | the owner: `{ event: "exported" \| "used", current \| reauth }` or `{ event: "verified", verdict, issues?, version? }` — the owner recovery kit's download, use and check, recorded (the kit itself is never sent) |
-| `GET /api/private/drive/kit/probe` | the owner: one user's escrow wrap per kid in use (each in the admin audit), for "Verify kit" |
+| `POST /api/private/drive/kit/probe` | the owner: one user's escrow wrap per kid in use (each in the admin audit), for "Verify kit" |
 | `PUT /api/private/drive/kit/keys` | the owner, with `current` / `reauth`: sealed escrow keys put back from a kit (only the server's own public keys and kids in use) |
 | `POST /api/private/drive/start-over` | the owner, when nothing they sign in with opens their Drive: `{ confirm, driveSalt, set, escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv, current \| reauth }` — new keys; the old Drive archived |
 | `GET`, `DELETE /api/private/drive/archive/:gen`; `PUT …/nodes`; `POST …/finish` | the owner: an archived Drive — read (for a kit restore; the first page lists its reverse links, `reverse: [{ id, priv, status }]`, and a received item carries `rs`), items back (a received item as `{ id }` only: `400 received_as_is` otherwise), finish (`reverse: { <linkId>: {iv, ct} }`, every link's private key re-sealed under the Drive key now: `409 reverse_keys_required` otherwise → `{ ok, resumed }`), or delete (`confirm` + `current` / `reauth`; its paused reverse links are revoked) |

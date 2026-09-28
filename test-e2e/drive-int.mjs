@@ -48,7 +48,14 @@ const watch = (p) => {
   p.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   p.on('console', (m) => { if (m.type() === 'error' && !/status of (40[134]|409|410|429)/.test(m.text())) errors.push(`console: ${m.text()}`); });
   p.on('request', (r) => { if (/\/api\/private\/drive/.test(r.url())) { const d = r.postDataBuffer(); if (d) wire.push(d.toString('latin1')); } });
+  // Every Drive change (the chunk uploads included) with the session's CSRF token (src/lib/csrf.js).
+  p.on('response', (r) => {
+    const q = r.request();
+    if (!/\/api\/private\/(admin\/)?drive(\/|$|\?)/.test(new URL(r.url()).pathname + '/') || q.method() === 'GET') return;
+    changes.push({ what: `${q.method()} ${new URL(r.url()).pathname}`, token: /^[A-Za-z0-9_-]{43}$/.test(q.headers()['x-secbin-csrf'] || ''), status: r.status() });
+  });
 };
+const changes = []; // the Drive's state-changing requests: { what, token, status }
 const axeFails = [];
 async function audit(p, label) {
   await p.evaluate(AXE);
@@ -142,7 +149,8 @@ try {
   info(`passkey wrap after registration: ${pkWrap ? 'yes (PRF at creation)' : 'no (PRF only on use)'}`);
 
   // ── the sign-in unlock with a passkey (PRF) and with a recovery code ──
-  const logout = () => p.evaluate(() => fetch('/api/auth/logout', { method: 'POST', headers: { 'x-secbin-intent': '1' } }));
+  // Signing out is a change: the session's CSRF token too, as the page's own client sends it (api.js).
+  const logout = () => p.evaluate(() => fetch('/api/auth/logout', { method: 'POST', headers: { 'x-secbin-intent': '1', 'x-secbin-csrf': (document.cookie.match(/(?:^|;\s*)__Host-secbin_csrf=([^;]+)/) || [])[1] || '' } }));
   const forget = () => p.evaluate(() => { sessionStorage.removeItem('secbin_dk'); sessionStorage.removeItem('secbin_dk_uid'); });
   if (pkWrap) {
     await logout(); await forget();
@@ -476,6 +484,10 @@ try {
   // ── zero knowledge on the wire ────────────────────────────────────────
   const leaks = ['Documents', 'readme.txt', 'notes.md', 'Welcome to the Drive', 'Q1 numbers', PW, 'pw-one'].filter((s) => wire.some((w) => w.includes(s)));
   check('wire: no names, contents or secrets in any Drive request', leaks.length === 0 && wire.length > 0, leaks.join(','));
+  const noToken = changes.filter((c) => !c.token).map((c) => c.what);
+  const refused = changes.filter((c) => c.status === 403 && c.token).length;
+  check('wire: every Drive change carries the session’s CSRF token (chunk uploads included)', changes.length > 0 && changes.some((c) => /\/chunk\//.test(c.what)) && noToken.length === 0, `${changes.length} changes; without: ${[...new Set(noToken)].join(', ')}`);
+  info(`Drive changes seen: ${changes.length}; 403s: ${refused}`);
 } catch (e) {
   console.log('ERROR', e);
   results.push(false);

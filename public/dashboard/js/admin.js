@@ -983,7 +983,23 @@ async function renderSettings() {
   };
   p.appendChild(save);
   // Its own section, saved with its own button.
+  p.appendChild(csrfEditor(s));
   p.appendChild(statementEditor(s, defs));
+}
+
+/** Settings → CSRF tokens: one server-wide switch (on by default). */
+function csrfEditor(s) {
+  const HELP = 'set-csrf-help';
+  const on = h('input', { type: 'checkbox', id: 'set-csrf', checked: s.csrfTokens !== false, 'aria-describedby': HELP });
+  const saveBtn = h('button.cta', { type: 'button', id: 'set-csrf-save', text: 'Save' });
+  saveBtn.onclick = async () => {
+    const r = await guard(() => admin.settings({ csrfTokens: on.checked }), on.checked ? 'CSRF tokens are on.' : 'CSRF tokens are off.');
+    if (r) on.checked = r.settings.csrfTokens !== false;
+  };
+  return h('div.card.stack', {}, h('h2.section-title', { text: 'CSRF tokens' }),
+    h('p.mono.muted', { id: HELP, text: 'CSRF tokens add a second check on every change made from the browser. With it off, the other protections still apply: SameSite cookies, the cross-site check, and the required JSON or intent header.' }),
+    h('label.inline', {}, on, ' Require CSRF tokens'),
+    h('div.btn-row', {}, saveBtn));
 }
 
 /**
@@ -1154,7 +1170,7 @@ async function turnstileCard() {
   });
   card.append(
     h('label.field', {}, h('span.field-label', { text: 'Turnstile site key' }), sitekey), h('p.mono.muted', { text: 'Public: it is sent to every browser that shows the check.' }),
-    h('label.field', {}, h('span.field-label', { text: 'Turnstile secret key' }), secret), st.secretSet ? h('p.mono.muted', { text: 'Secret key saved; never shown again.' }) : null,
+    h('label.field', {}, h('span.field-label', { text: 'Turnstile secret key' }), secret), ...(st.secretSet ? [h('p.mono.muted', { text: 'Secret key saved; never shown again.' })] : []),
     h('label.field', {}, h('span.field-label', { text: mineLabel }), mine),
     h('div.btn-row', {}, save, remove),
     h('p.mono.muted', { text: 'The secret key is stored in the server\'s database, never returned by any API and never logged. Test the keys by signing in from a private window before relying on them.' }));

@@ -66,8 +66,12 @@ describe('R4-L1: a session with nothing unfinished is idle again, whatever it se
     expect((await sessions(u.id))[0].expires).toBeGreaterThan(Math.floor(t0 / 1000) + SESSION_IDLE_SEC);
     const c = await rv(r.id, `/files/${f.node}`, { method: 'DELETE', headers: { 'x-reverse-grant': g, 'x-upload-token': f.data.uploadToken }, ip });
     expect(c.status).toBe(200);
-    expect((await sessions(u.id))[0].expires).toBeLessThanOrEqual(Math.floor(t0 / 1000) + SESSION_IDLE_SEC);
-    at(t0 + (SESSION_IDLE_SEC + 60) * 1000);
+    // The cancel sets the session's end to (the server's second at the cancel) + SESSION_IDLE_SEC,
+    // and that second lies between t0 and t1: the bound is the latest of them (t0 is before the
+    // cancel and may be a second earlier).
+    const t1 = Date.now();
+    expect((await sessions(u.id))[0].expires).toBeLessThanOrEqual(Math.floor(t1 / 1000) + SESSION_IDLE_SEC);
+    at(t1 + (SESSION_IDLE_SEC + 60) * 1000);
     const late = await reserve(r, g, { ip });
     expect([late.res.status, await errorOf(late.res)]).toEqual([403, 'bad_grant']);
   }, 60000);

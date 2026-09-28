@@ -93,7 +93,7 @@ describe('the owner recovery kit (server)', () => {
   });
 
   it('the kit routes are the owner\'s only: 403 for a user and while impersonating', async () => {
-    for (const [method, path] of [['POST', '/api/private/drive/kit'], ['GET', '/api/private/drive/kit/probe'], ['PUT', '/api/private/drive/kit/keys'], ['POST', '/api/private/drive/start-over'], ['GET', '/api/private/drive/archive/1'], ['DELETE', '/api/private/drive/archive/1']]) {
+    for (const [method, path] of [['POST', '/api/private/drive/kit'], ['POST', '/api/private/drive/kit/probe'], ['PUT', '/api/private/drive/kit/keys'], ['POST', '/api/private/drive/start-over'], ['GET', '/api/private/drive/archive/1'], ['DELETE', '/api/private/drive/archive/1']]) {
       const r = await fetchJson(path, { method, cookie: a.u.cookie, headers: intent, body: method === 'GET' ? undefined : { event: 'exported', current: proofFor(USER_PW) } });
       expect(r.status, `${method} ${path}`).toBe(403);
       expect(await errorOf(r)).toBe('owner_only');
@@ -138,15 +138,19 @@ describe('the owner recovery kit (server)', () => {
     const v = (await audit(o.id)).find((x) => x.action === 'drive.kit_verified');
     expect(v.detail).toContain('verdict=incomplete');
     expect(v.detail).toContain('issues=current,version');
-    const pr = await fetchJson('/api/private/drive/kit/probe', { cookie: oc });
+    const pr = await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, headers: intent, body: {} });
     expect(pr.status).toBe(200);
     const { probes } = await pr.json();
     expect(probes).toHaveLength(1);
     expect(probes[0].kid).toBe(o.kid1);
     expect(probes[0].wrap.kind).toBe('escrow');
     expect((await audit(a.u.id)).some((x) => x.action === 'drive.escrow_used' && x.detail.includes('owner recovery kit check'))).toBe(true);
-    const cross = await fetchJson('/api/private/drive/kit/probe', { cookie: oc, headers: { 'sec-fetch-site': 'cross-site' } });
+    const cross = await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, headers: { ...intent, 'sec-fetch-site': 'cross-site' }, body: {} });
     expect(cross.status).toBe(403);
+    // It writes to the admin audit: a POST with the intent header (and the CSRF token), never a GET.
+    expect((await fetchJson('/api/private/drive/kit/probe', { cookie: oc })).status).toBe(405);
+    expect(await errorOf(await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, body: {} }))).toBe('missing_intent');
+    expect(await errorOf(await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, csrf: false, headers: intent, body: {} }))).toBe('csrf_mismatch');
   });
 
   it('a rotation is version 2; restoring the public key alone moves no version', async () => {

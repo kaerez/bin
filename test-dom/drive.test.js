@@ -13,6 +13,7 @@ import { deriveAccess, openPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { TAG } from '../public/js/files.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
+import { revokeShare } from '../public/js/api.js';
 
 const until = async (fn, ms = 5000) => {
   const t0 = Date.now();
@@ -63,7 +64,8 @@ function mountPoint() {
   return mount;
 }
 
-const deps = (extra = {}) => ({ drive, profile: PROFILE, user: S.user, revoke: (id) => fetch(`/api/private/shares/${id}/revoke`, { method: 'POST' }), ...extra });
+// `revoke` as the page passes it (drive.js): api.js, which sends the session's CSRF token.
+const deps = (extra = {}) => ({ drive, profile: PROFILE, user: S.user, revoke: revokeShare, ...extra });
 
 async function openApp(extra = {}) {
   await server();
@@ -281,6 +283,110 @@ describe('startDrive states', () => {
     await until(() => mount.querySelector('#drive-unlock'));
     expect(loadSessionKey(S.user.id)).toBeNull();
   });
+});
+
+/** `mount`'s children: the page's status line (kept in place, WCAG 4.1.3) by its role, the rest by id, text nodes as '#text'. */
+const children = (mount) => [...mount.childNodes].map((n) => (n.nodeType !== 1 ? '#text' : n.id || n.getAttribute('role')));
+/** Text nodes reading "null" or "undefined" under `root` (a nullish child passed to append/replaceChildren). */
+function strayText(root) {
+  const out = [];
+  const walk = (n) => {
+    for (const c of n.childNodes) {
+      if (c.nodeType === 3 && ['null', 'undefined'].includes(c.textContent.trim())) out.push(`${c.textContent.trim()} in <${n.nodeName.toLowerCase()}${n.id ? `#${n.id}` : ''}>`);
+      else if (c.nodeType === 1) walk(c);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+describe('no stray "null" / "undefined" text on the unlock and set-up views', () => {
+  const start = async (extra = {}) => {
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps(extra));
+    return { r, mount };
+  };
+  const ownerDeps = () => ({ profile: { ...PROFILE, user: { ...S.user } } });
+  const wrapCode = async () => {
+    const w = await wrapRecovery(createDriveKey(), CODE, await recoveryRef(CODE));
+    S.wraps.set(`${w.kind}|${w.ref}`, w);
+  };
+
+  it('a user: set-up and unlock', async () => {
+    S = fakeServer();
+    S.escrowPub = (await createEscrowKeyPair()).publicJwk;
+    globalThis.fetch = S.fetch;
+    let { r, mount } = await start();
+    expect(r.state).toBe('locked');
+    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Set up your Drive');
+    expect(children(mount)).toEqual(['status', 'drive-unlock']);
+    expect(strayText(document.body)).toEqual([]);
+
+    await server({ locked: true });
+    S.received = 2;
+    ({ r, mount } = await start());
+    expect(r.state).toBe('locked');
+    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Unlock your Drive');
+    expect(children(mount)).toEqual(['status', 'drive-unlock']);
+    expect(strayText(document.body)).toEqual([]);
+  });
+
+  it('the owner: set-up, unlock (with the kit restore) and nothing that opens the Drive (restore or start over)', async () => {
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    let { r, mount } = await start(ownerDeps());
+    expect(r.state).toBe('locked');
+    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Set up your Drive');
+    expect(children(mount)).toEqual(['status', 'drive-unlock']);
+    expect(strayText(document.body)).toEqual([]);
+
+    await wrapCode();
+    S.escrowPub = (await createEscrowKeyPair()).publicJwk;
+    ({ r, mount } = await start(ownerDeps()));
+    expect(r.state).toBe('locked');
+    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Unlock your Drive');
+    expect(children(mount)).toEqual(['status', 'drive-unlock', 'drive-kit-unlock']);
+    expect(strayText(document.body)).toEqual([]);
+
+    S.wraps.clear();
+    ({ r, mount } = await start(ownerDeps()));
+    expect(r.state).toBe('locked');
+    expect(children(mount)).toEqual(['status', 'drive-unlock', 'drive-owner-recovery']);
+    expect(strayText(document.body)).toEqual([]);
+  });
+
+  it('the owner acting as a user: the Drive notices in place of the unlock and set-up views', async () => {
+    S = fakeServer();
+    globalThis.fetch = S.fetch;
+    S.impersonatedBy = 'owner';
+    const acting = () => ({ user: { ...S.user, impersonating: true }, profile: { ...PROFILE, user: { ...S.user }, impersonatedBy: 'owner' } });
+    let { r, mount } = await start(acting()); // the user has no Drive yet
+    expect(r).toMatchObject({ state: 'impersonating', reason: 'no_drive' });
+    expect(mount.querySelector('#drive-unlock')).toBeNull();
+    expect(strayText(document.body)).toEqual([]);
+
+    await wrapCode(); // the user's Drive exists; the owner's own is not unlocked in this tab
+    ({ r, mount } = await start(acting()));
+    expect(r).toMatchObject({ state: 'impersonating', reason: 'owner_locked' });
+    expect(mount.querySelector('#drive-unlock')).toBeNull();
+    expect(strayText(document.body)).toEqual([]);
+  });
+
+  it('the open Drive, for a user and for the owner', async () => {
+    await openApp();
+    expect(strayText(document.body)).toEqual([]);
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps(ownerDeps()));
+    expect(r.state).toBe('locked');
+    mount.querySelector('#drive-unlock-pw').value = 'owner password';
+    mount.querySelector('#drive-pw-form').dispatchEvent(new Event('submit', { cancelable: true }));
+    const app = await r.unlocked;
+    await app.ready;
+    expect(mount.querySelector('#drive-app')).not.toBeNull();
+    expect(strayText(document.body)).toEqual([]);
+  }, 60000);
 });
 
 describe('the Drive', () => {
@@ -551,7 +657,10 @@ describe('the client\'s progress and cancel for downloads', () => {
 describe('nav: Drive link', () => {
   it('driveAllowed reads caps.driveEnabled', async () => {
     vi.resetModules();
-    vi.doMock('../public/js/api.js', () => ({ me: () => new Promise(() => {}), logout: async () => {}, admin: {}, ApiError: class extends Error {} }));
+    vi.doMock('../public/js/api.js', () => ({
+      me: () => new Promise(() => {}), logout: async () => {}, admin: {}, ApiError: class extends Error {},
+      bindSession: () => {}, forgetSession: () => {}, onSessionChanged: () => {}, isSessionChanged: () => false, SESSION_CHANGED: '',
+    }));
     const { driveAllowed } = await import('../public/dashboard/js/nav.js');
     expect(driveAllowed({ caps: { driveEnabled: true } })).toBe(true);
     expect(driveAllowed({ caps: { driveEnabled: 1 } })).toBe(false);

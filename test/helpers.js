@@ -5,6 +5,7 @@
 import { env, SELF } from 'cloudflare:test';
 import { encryptPaste, deriveAccess, setPasswordStretcher, hkdf32 } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes, utf8 } from '../public/js/bytes.js';
+import { CSRF_COOKIE } from '../src/lib/csrf.js';
 
 export const ORIGIN = 'https://secbin.test';
 export const AUTHN = env.AUTHN;
@@ -28,7 +29,7 @@ const userRoles = new Map();
 async function roleForUser(uid, cookie) {
   if (userRoles.has(uid)) return userRoles.get(uid);
   const name = `user ${uid}`;
-  const call = (p, init) => SELF.fetch(`${ORIGIN}${p}`, { ...init, headers: { 'content-type': 'application/json', cookie, 'x-secbin-intent': '1' }, redirect: 'manual' });
+  const call = async (p, init) => SELF.fetch(`${ORIGIN}${p}`, { ...init, headers: { 'content-type': 'application/json', cookie, 'x-secbin-intent': '1', ...(await csrfHeaders(cookie)) }, redirect: 'manual' });
   let r = await call('/api/private/admin/roles', { method: 'POST', body: JSON.stringify({ name }) });
   let id = r.status === 201 ? (await r.json()).id : null;
   if (!id) id = (await (await call('/api/private/admin/roles', { method: 'GET' })).json()).roles.find((x) => x.name === name)?.id;
@@ -38,20 +39,52 @@ async function roleForUser(uid, cookie) {
   return id;
 }
 
-export async function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip } = {}) {
+// CSRF tokens (src/lib/csrf.js): like the browser client (public/js/api.js),
+// a signed-in state-changing request carries the session's token. The helpers
+// take it from the response that set the session cookie (cookieOf), or else
+// from GET /api/private/me, once per cookie, and send it unless the test
+// passes `csrf: false` or sets X-Secbin-CSRF itself.
+export const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const csrfCache = new Map();
+/** The session's CSRF token for `cookie` (null when the session is not valid). */
+export async function csrfFor(cookie, ip) {
+  if (!cookie) return null;
+  if (csrfCache.has(cookie)) return csrfCache.get(cookie);
+  const r = await SELF.fetch(`${ORIGIN}/api/private/me`, { headers: { cookie, ...(ip ? { 'cf-connecting-ip': ip } : {}) }, redirect: 'manual' });
+  const token = r.status === 200 ? (await r.json()).csrf ?? null : null;
+  if (token) csrfCache.set(cookie, token);
+  return token;
+}
+/** { 'x-secbin-csrf': token } for `cookie`, or {}. */
+export async function csrfHeaders(cookie, ip) {
+  const t = await csrfFor(cookie, ip);
+  return t ? { 'x-secbin-csrf': t } : {};
+}
+
+export async function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip, csrf = true } = {}) {
   if (ROLE_SCOPED.test(path) && body && typeof body.scope === 'string' && /^[A-Za-z0-9_-]{16}$/.test(body.scope) && body.scope !== 'public-user-0000') {
     body = { ...body, scope: `role:${await roleForUser(body.scope, cookie)}` };
   }
   const h = { ...headers };
+  if (csrf && cookie && STATE_CHANGING.has(method) && !Object.keys(h).some((k) => k.toLowerCase() === 'x-secbin-csrf')) Object.assign(h, await csrfHeaders(cookie, ip));
   if (body !== undefined) h['content-type'] = 'application/json';
   if (cookie) h.cookie = cookie;
   if (ip) h['cf-connecting-ip'] = ip;
   return SELF.fetch(`${ORIGIN}${path}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
 }
 
+/**
+ * The session cookie a response sets (`name=value`), or null. A response that
+ * starts a session also sets its CSRF token cookie (src/lib/csrf.js); that
+ * token is recorded for the session cookie, as the browser has it from the
+ * same response, so the helpers need no GET /api/private/me for it.
+ */
 export const cookieOf = (res) => {
-  const sc = res.headers.get('set-cookie');
-  return sc ? sc.split(';')[0] : null;
+  const all = res.headers.getSetCookie().map((c) => c.split(';')[0]);
+  const cookie = all[0] ?? null;
+  const t = all.find((c) => c.startsWith(`${CSRF_COOKIE}=`))?.slice(CSRF_COOKIE.length + 1);
+  if (cookie && /^__Host-secbin_sess=./.test(cookie) && /^[A-Za-z0-9_-]{43}$/.test(t || '')) csrfCache.set(cookie, t);
+  return cookie;
 };
 
 let ownerCookie = null;

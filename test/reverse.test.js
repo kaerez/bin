@@ -660,6 +660,13 @@ describe('keys', () => {
 // in the archive), a kit restore resumes them, deleting the archive revokes
 // them; no other user's link is touched.
 describe('the owner starting over: reverse links paused, resumed, revoked', () => {
+  // Each of these is a whole start-over flow (two users with Drives and links,
+  // uploads, AUTHN owner recovery, a sign-in, the start-over itself and ~40
+  // requests with their checks): about 1 s alone, but 4.5–5 s under a full
+  // parallel workerd run (4726 ms on main's CI at 3df2e6f), which is at
+  // vitest's 5 s default. An explicit timeout, like the other heavy flows
+  // (reverse-audit*.test.js).
+  const FLOW_TIMEOUT = 60000;
   const o = { pw: 'owner-password' };
   const W = () => `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}`;
   const startOver = (body) => fetchJson('/api/private/drive/start-over', { method: 'POST', cookie: oc, headers: intent, body });
@@ -759,7 +766,7 @@ describe('the owner starting over: reverse links paused, resumed, revoked', () =
     await send(o.ulink, await grantOf(o.ulink, { ip: uip }), { ip: uip, path: 'more.txt' });
     expect((await received(o.u.cookie)).items).toHaveLength(2);
     expect((await activity(o.u.cookie)).some((x) => /^reverse\.(paused|resumed|revoked)$/.test(x.action))).toBe(false);
-  });
+  }, FLOW_TIMEOUT);
 
   it('a kit for the old Drive restores the archive: the links resume, uploads work, and the kept items are taken in with the re-sealed key', async () => {
     const view = await (await fetchJson('/api/private/drive/archive/1', { cookie: oc })).json();
@@ -809,7 +816,7 @@ describe('the owner starting over: reverse links paused, resumed, revoked', () =
     const chunk = await fetchJson(`/api/private/drive/files/${o.item.node}/chunk/0`, { cookie: oc });
     expect(fromUtf8(await decryptChunk(await importFileKey(b64urlFromBytes(got.fk)), 0, 1, new Uint8Array(await chunk.arrayBuffer())))).toBe('signed by bob');
     o.again = again;
-  });
+  }, FLOW_TIMEOUT);
 
   it('deleting the archive revokes the paused links and deletes their received items; other users\' links go on', async () => {
     // A second link, with an item; then the owner loses the way in again and starts over.
@@ -847,5 +854,5 @@ describe('the owner starting over: reverse links paused, resumed, revoked', () =
     expect((await openLink(o.ulink, uip)).status).toBe(200);
     await send(o.ulink, await grantOf(o.ulink, { ip: uip }), { ip: uip, path: 'late.txt' });
     expect((await received(o.u.cookie)).items).toHaveLength(3);
-  });
+  }, FLOW_TIMEOUT);
 });

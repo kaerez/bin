@@ -5,7 +5,7 @@
 // Owner role). The built-in Public role belongs to the public account only.
 import { SELF } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
-import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, proofFor } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, proofFor, csrfHeaders } from './helpers.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk } from '../public/js/files.js';
 import { utf8 } from '../public/js/bytes.js';
@@ -29,7 +29,7 @@ async function upload(cookie, text = 'hello') {
   const sources = [{ off: l.entries[0].off, size: bytes.length, read: async (a, b) => bytes.slice(a, b) }];
   for (let i = 0; i < chunks; i++) {
     const ct = await encryptChunk(key, i, chunks, await readStreamChunk(sources, i, l.total));
-    const r = await SELF.fetch(`${ORIGIN}/api/private/file/${id}/chunk/${i}`, { method: 'PUT', headers: { cookie, 'x-upload-token': uploadtoken, 'content-type': 'application/octet-stream' }, body: ct });
+    const r = await SELF.fetch(`${ORIGIN}/api/private/file/${id}/chunk/${i}`, { method: 'PUT', headers: { cookie, ...(await csrfHeaders(cookie)), 'x-upload-token': uploadtoken, 'content-type': 'application/octet-stream' }, body: ct });
     expect(r.status).toBe(200);
   }
   const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', expire: '1h' });

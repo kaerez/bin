@@ -18,7 +18,7 @@ import { stretch } from '../public/js/pwauth.js';
 import { b64urlFromBytes } from '../public/js/bytes.js';
 import { startDrive } from '../public/dashboard/js/drive-app.js';
 import { kitCard, resetThrottle } from '../public/dashboard/js/drivekit-ui.js';
-import { fakeServer, seedTree } from './drive-fake-server.js';
+import { fakeServer, seedTree, FAKE_CSRF } from './drive-fake-server.js';
 
 const PW = 'owner password 1';
 const NEWPW = 'owner password after recovery';
@@ -38,6 +38,8 @@ const until = async (fn, ms = 60000) => {
     await new Promise((r) => setTimeout(r, 20));
   }
 };
+/** A raw request straight to the server still carries the session's CSRF token (as api.js sends it). */
+const CSRF = { 'x-secbin-csrf': FAKE_CSRF };
 const nonGet = (srv, from = 0) => srv.requests.slice(from).filter((r) => r.method !== 'GET');
 const publicKeys = (srv) => JSON.stringify({ p: srv.escrowPub, s: srv.escrowSignPub, v: srv.escrowVer });
 const PROOF = {};
@@ -144,7 +146,7 @@ describe('the owner recovery kit: download, AUTHN recovery, restore', () => {
     expect(nonGet(SO, n)).toEqual([]);
     expect(loadSessionKey(user.id)).toBeNull();
     // The server refuses a mismatched key by itself too.
-    const res = await fetch('/api/private/drive/kit/keys', { method: 'PUT', body: JSON.stringify({ escrowPriv: { pub: (await createEscrowKeyPair()).publicJwk, data: '1.a.b' }, current: PROOF.new }) });
+    const res = await fetch('/api/private/drive/kit/keys', { method: 'PUT', headers: CSRF, body: JSON.stringify({ escrowPriv: { pub: (await createEscrowKeyPair()).publicJwk, data: '1.a.b' }, current: PROOF.new }) });
     expect(res.status).toBe(400);
   }, T);
 
@@ -167,7 +169,7 @@ describe('the owner recovery kit: download, AUTHN recovery, restore', () => {
 
   it('a user gets 403 on the kit and restore routes, and the client refuses them', async () => {
     const SU = use(fakeServer());
-    for (const [method, path] of [['POST', '/api/private/drive/kit'], ['GET', '/api/private/drive/kit/probe'], ['PUT', '/api/private/drive/kit/keys'], ['POST', '/api/private/drive/start-over']]) {
+    for (const [method, path] of [['POST', '/api/private/drive/kit'], ['POST', '/api/private/drive/kit/probe'], ['PUT', '/api/private/drive/kit/keys'], ['POST', '/api/private/drive/start-over']]) {
       const r = await fetch(path, { method, ...(method === 'GET' ? {} : { body: JSON.stringify({ event: 'exported' }) }) });
       expect(r.status, path).toBe(403);
     }
@@ -330,8 +332,9 @@ describe('Verify kit (read-only)', () => {
     expect(by.version.detail).toMatch(/^Older version 1 \(the current one is 2\): still works through the Drive key, but download a fresh kit for a complete snapshot\./);
     expect(by.proof.status).toBe('warn'); // the new key's user opens only through the Drive key
     expect(r.fixes.join(' ')).toMatch(/Download a fresh kit/);
-    // No writes but the audit record; no Drive state changed.
-    expect(nonGet(SO, n).map((x) => `${x.method} ${x.path} ${x.body.event}`)).toEqual(['POST /api/private/drive/kit verified']);
+    // No writes but the audit records (the live check, a POST since it records
+    // escrow use, and the verdict); no Drive state changed.
+    expect(nonGet(SO, n).map((x) => `${x.method} ${x.path} ${x.body.event}`)).toEqual(['POST /api/private/drive/kit/probe undefined', 'POST /api/private/drive/kit verified']);
     expect(snapshot()).toBe(before);
     expect(SO.audit.at(-1)).toMatchObject({ action: 'drive.kit_verified' });
     expect(SO.audit.at(-1).detail).toMatch(/verdict=incomplete/);
@@ -675,7 +678,7 @@ describe('a password change or an admin reset keeps the same Drive key', () => {
     // A pw wrap of another key is refused (even when no step-up is needed).
     SU.pwStale = true;
     const other = createDriveKey();
-    const r = await fetch('/api/private/drive/keys', { method: 'PUT', body: JSON.stringify({ driveSalt: SALT, set: [(await (await import('../public/js/drivekeys.js')).wrapPassword(other, 'x')).wrap], kcv: await keyCheckValue(other) }) });
+    const r = await fetch('/api/private/drive/keys', { method: 'PUT', headers: CSRF, body: JSON.stringify({ driveSalt: SALT, set: [(await (await import('../public/js/drivekeys.js')).wrapPassword(other, 'x')).wrap], kcv: await keyCheckValue(other) }) });
     expect(r.status).toBe(409);
   }, T);
 

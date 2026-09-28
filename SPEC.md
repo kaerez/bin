@@ -231,7 +231,11 @@ setting, default 1 h).
 All responses are JSON with real status codes; errors are `{ "error": "<code>", "message": "…" }`.
 The API sends **no CORS headers**. State-changing requests must be non-simple (JSON content
 type, or a custom header), and `Sec-Fetch-Site` values `cross-site` and `same-site` are refused
-(`403 cross_site`).
+(`403 cross_site`). A state-changing request authenticated by the session cookie must also
+carry the session's CSRF token in `X-Secbin-CSRF` (the `__Host-secbin_csrf` cookie, or `csrf`
+in `GET /api/private/me`), else `403 csrf_mismatch`; the cross-site and shape checks
+(`415` / `400 missing_intent`) come first, and all three run before anything else. API keys and the anonymous routes need
+none; the owner can turn the check off (`csrfTokens`). See SECURITY.md §6.
 
 Common errors on any route:
 - `503 not_configured`: a required Cloudflare binding is missing. The name is logged, not returned.
@@ -306,8 +310,8 @@ blocked}}`; `POST /api/private/admin/public/trackers/:prefix` `{action: unblock|
 | `POST /api/auth/setup` | `{token, username, salt, t, proof}` | owner created or recovered; 404 if `AUTHN` unset; 403 wrong token; 410 token already used |
 | `POST /api/auth/prelogin` | `{username}` | `{salt, t}` (a stable fake salt for unknown users; `t` is always the default, 3) |
 | `POST /api/auth/login` | `{username, proof}` (+ `X-Secbin-Turnstile` when on) | session cookie; 401, 423 locked, 403 disabled, 403 `turnstile_*`, 429, 503 not configured |
-| `POST /api/auth/logout` | `X-Secbin-Intent: 1` | session revoked |
-| `POST /api/auth/passkey/options` | `{}` | `{challengeId, publicKey}`: WebAuthn request options (JSON form; any passkey of this site, user verification required). The challenge is not stored: `challengeId` equals `publicKey.challenge`, 48 base64url characters (16 random bytes, the expiry, an HMAC tag) |
+| `POST /api/auth/logout` | `X-Secbin-Intent: 1`, `X-Secbin-CSRF` (a live session) | session revoked; the session and CSRF token cookies are cleared |
+| `POST /api/auth/passkey/options` | `{}` (JSON; refused cross-site) | `{challengeId, publicKey}`: WebAuthn request options (JSON form; any passkey of this site, user verification required). The challenge is not stored: `challengeId` equals `publicKey.challenge`, 48 base64url characters (16 random bytes, the expiry, an HMAC tag) |
 | `POST /api/auth/passkey/login` | `{challengeId, credential}` (+ Turnstile) | session cookie; 401 `invalid_passkey`, 400 `challenge_expired`, 403 `password_first` (limit `second`), 403 `passkeys_disabled`, 403 disabled |
 | `POST /api/auth/recovery` | `{username, code}` (+ Turnstile) | session cookie + `recoveryLeft`, whatever the `passkeys` limit or the user's second step; 401 `invalid_login`, 423 locked, 403 disabled |
 | `POST /api/auth/second-factor` | `{challengeId, credential}` or `{challengeId, code}` | session cookie (+ `recoveryLeft` when a code was used); 401 `invalid_second_factor` (5 tries per challenge), 400 `challenge_expired` |
@@ -333,7 +337,7 @@ spaces are ignored, O/I/L read as 0/1/1).
 | `PUT /api/private/file/:id/chunk/:i` (octet-stream, `X-Upload-Token`) | session / key | upload chunk `i` (exact size, §12) |
 | `POST /api/private/file/:id/finalize` `{paste, label?}` (`X-Upload-Token`) | session / key | activate with the encrypted manifest |
 | `GET /api/private/policy` | session / key | what the client must check itself before creating: `{url, urlRules}` for the channel used |
-| `GET /api/private/me` | session | profile, effective limits, quotas, viewer policy, `passwordPolicy` `{pwMinLength, pwUpper, pwLower, pwDigit, pwSymbol}` (the browser enforces it; the server cannot) |
+| `GET /api/private/me` | session | profile, `csrf` (the session's CSRF token; its `__Host-secbin_csrf` cookie is re-set), effective limits, quotas, viewer policy, `passwordPolicy` `{pwMinLength, pwUpper, pwLower, pwDigit, pwSymbol}` (the browser enforces it; the server cannot) |
 | `POST /api/private/me/reauth` | session, not impersonating | `{challengeId, publicKey}` request options for confirming a change with one of the account's passkeys; 409 `no_passkeys`; 409 `not_needed` while impersonating (nothing is confirmed then) |
 | `POST /api/private/me/password` `{step…, salt, t, proof}` | session | change password (ends other sessions). Never blocked by a login lockout. Success → `{ok, passkeys, recoveryLeft}` (they are not tied to the password). Impersonating: no `step…`, the user's sessions end and the owner's carries on (no new cookie) |
 | `POST /api/private/me/username` `{username, step…}` | session | `{ok, username}`; 409 `username_taken`, 400 `invalid_username`. Sessions carry on |

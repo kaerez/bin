@@ -427,7 +427,7 @@ function unlockView(mount, deps, lockedErr) {
       pwForm,
       h('div.login-alt', {}, pkBtn, codeToggle),
       codeForm,
-      msg), recovery);
+      msg), ...(recovery ? [recovery] : []));
     if (said) said.textContent = setup ? 'Set up your Drive' : `Unlock your Drive${waitingText ? `. ${waitingText}` : ''}`;
     pw.focus();
   });

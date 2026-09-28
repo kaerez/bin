@@ -18,7 +18,7 @@ import { setSiteverify } from '../src/lib/turnstile.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk } from '../public/js/files.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { utf8 } from '../public/js/bytes.js';
-import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16 } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16, csrfHeaders, STATE_CHANGING } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
 import { enc, enableDrive, someBytes, escrowWrap, KCV } from './drive-helpers.js';
 import { driveChunkSize } from '../src/drive-do.js';
@@ -51,10 +51,11 @@ async function direct(path, envPatch, init = {}) {
 // The Worker with Turnstile on (SELF runs without it), for the Account page's
 // human checks; a fake siteverify accepts each "ok:<action>#n" token once.
 const TS_ENV = { TURNSTILE_SITEKEY: '0x4AAAAAAAtestsitekey', TURNSTILE_SECRET: '0x4AAAAAAAtestsecretvalue' };
-function tsFetch(path, { method = 'GET', body, cookie, headers = {}, token } = {}) {
+async function tsFetch(path, { method = 'GET', body, cookie, headers = {}, token } = {}) {
   const h = { 'cf-connecting-ip': freshIp(), ...headers };
   if (body !== undefined) h['content-type'] = 'application/json';
   if (cookie) h.cookie = cookie;
+  if (cookie && STATE_CHANGING.has(method)) Object.assign(h, await csrfHeaders(cookie));
   if (token) h['x-secbin-turnstile'] = token;
   return direct(path, TS_ENV, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
 }
@@ -81,7 +82,7 @@ async function uploadFile(cookie) {
   const sources = [{ off: 0, size: bytes.length, read: async (a, b) => bytes.slice(a, b) }];
   for (let i = 0; i < chunks; i++) {
     const ct = await encryptChunk(key, i, chunks, await readStreamChunk(sources, i, l.total));
-    record(`PUT chunk ${i}`, await raw(`/api/private/file/${id}/chunk/${i}`, { method: 'PUT', headers: { cookie, 'content-type': 'application/octet-stream', 'x-upload-token': uploadtoken }, body: ct }));
+    record(`PUT chunk ${i}`, await raw(`/api/private/file/${id}/chunk/${i}`, { method: 'PUT', headers: { cookie, ...(await csrfHeaders(cookie)), 'content-type': 'application/octet-stream', 'x-upload-token': uploadtoken }, body: ct }));
   }
   const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', expire: '1h' });
   record('POST finalize', await fetchJson(`/api/private/file/${id}/finalize`, { method: 'POST', cookie, headers: { 'x-upload-token': uploadtoken }, body: { paste: body } }));
@@ -318,10 +319,10 @@ describe('cache policy (Workers Caching)', () => {
     const created = record('POST /api/private/drive/files (201)', await get('/api/private/drive/files', { method: 'POST', cookie: dc, body: { id: fileId, parent: folderId, name: enc(), meta: enc(), size: 40, fk: enc(32) } }));
     const { uploadToken } = await created.json();
     record('GET /api/private/drive/files/<id>/chunk/0 (pending, 404)', await raw(`/api/private/drive/files/${fileId}/chunk/0`, { headers: { cookie: dc } }));
-    record('POST /api/private/drive/files/<id>/finalize (incomplete, 409)', await get(`/api/private/drive/files/${fileId}/finalize`, { method: 'POST', cookie: dc, headers: { 'x-upload-token': uploadToken } }));
-    record('PUT /api/private/drive/files/<id>/chunk/0 (200)', await raw(`/api/private/drive/files/${fileId}/chunk/0`, { method: 'PUT', headers: { cookie: dc, 'content-type': 'application/octet-stream', 'x-upload-token': uploadToken }, body: someBytes(driveChunkSize(40, 0)) }));
-    record('PUT /api/private/drive/files/<id>/chunk/0 (wrong token, 403)', await raw(`/api/private/drive/files/${fileId}/chunk/0`, { method: 'PUT', headers: { cookie: dc, 'content-type': 'application/octet-stream', 'x-upload-token': 'A'.repeat(43) }, body: someBytes(driveChunkSize(40, 0)) }));
-    record('POST /api/private/drive/files/<id>/finalize (200)', await get(`/api/private/drive/files/${fileId}/finalize`, { method: 'POST', cookie: dc, headers: { 'x-upload-token': uploadToken } }));
+    record('POST /api/private/drive/files/<id>/finalize (incomplete, 409)', await get(`/api/private/drive/files/${fileId}/finalize`, { method: 'POST', cookie: dc, headers: { ...intent, 'x-upload-token': uploadToken } }));
+    record('PUT /api/private/drive/files/<id>/chunk/0 (200)', await raw(`/api/private/drive/files/${fileId}/chunk/0`, { method: 'PUT', headers: { cookie: dc, ...(await csrfHeaders(dc)), 'content-type': 'application/octet-stream', 'x-upload-token': uploadToken }, body: someBytes(driveChunkSize(40, 0)) }));
+    record('PUT /api/private/drive/files/<id>/chunk/0 (wrong token, 403)', await raw(`/api/private/drive/files/${fileId}/chunk/0`, { method: 'PUT', headers: { cookie: dc, ...(await csrfHeaders(dc)), 'content-type': 'application/octet-stream', 'x-upload-token': 'A'.repeat(43) }, body: someBytes(driveChunkSize(40, 0)) }));
+    record('POST /api/private/drive/files/<id>/finalize (200)', await get(`/api/private/drive/files/${fileId}/finalize`, { method: 'POST', cookie: dc, headers: { ...intent, 'x-upload-token': uploadToken } }));
     record('GET /api/private/drive/files/<id>/chunk/0 (200)', await raw(`/api/private/drive/files/${fileId}/chunk/0`, { headers: { cookie: dc } }));
     record('GET /api/private/drive/files/<id>/chunk/9 (404)', await raw(`/api/private/drive/files/${fileId}/chunk/9`, { headers: { cookie: dc } }));
     record('GET /api/private/drive/nodes/root (200)', await get('/api/private/drive/nodes/root', { cookie: dc }));

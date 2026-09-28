@@ -58,7 +58,13 @@ async function login(p, user, pw) {
   await p.fill('#login-user', user); await p.fill('#login-pass', pw); await p.click('#login-btn');
   await p.waitForURL(/\/dashboard\/(account\/)?(\?.*)?$/, { timeout: 60000 });
 }
-const api = (p, url, init) => p.evaluate(async ([u, i]) => { const r = await fetch(u, { cache: 'no-store', ...(i || {}) }); return { status: r.status, body: await r.json().catch(() => null) }; }, [url, init]);
+// A raw request as the page's own client sends it (public/js/api.js): a change carries the session's CSRF token.
+const api = (p, url, init) => p.evaluate(async ([u, i]) => {
+  const csrf = (document.cookie.match(/(?:^|;\s*)__Host-secbin_csrf=([^;]+)/) || [])[1] || '';
+  const x = i || {};
+  const r = await fetch(u, { cache: 'no-store', ...x, headers: { ...(x.method && x.method !== 'GET' ? { 'x-secbin-csrf': csrf } : {}), ...(x.headers || {}) } });
+  return { status: r.status, body: await r.json().catch(() => null) };
+}, [url, init]);
 const drivePage = async (p) => {
   await p.goto(`${BASE}/dashboard/drive/`);
   await p.waitForSelector('#drive-app, #drive-unlock', { timeout: 60000 });
