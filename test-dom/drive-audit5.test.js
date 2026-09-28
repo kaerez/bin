@@ -5,15 +5,16 @@
 // of concept that passed against be7654a:
 //   - R5-M2: a missing pin, a missing escrow wrap or a wrap for another key
 //     than the pinned one is never a first use: the tamper notice, no re-wrap;
-//   - R5-M1: the automatic re-wrap after an owner reset (the accepted
-//     exception) happens at most once per Drive per 30 days; a second one in
-//     that time gets the notice and "Trust the new key";
+//   - the automatic re-wrap after an owner reset (the accepted exception) is
+//     automatic every time: two genuine resets in a row both move the Drive by
+//     itself (no time limit; the 30-day limit of R5-M1 was removed by the
+//     maintainer), each epoch once;
 //   - the accepted exception otherwise as specified (each variant: notice);
 //   - R5-L2 (client): a first set-up that loses the race to another tab (or
 //     to the owner) opens the Drive that won instead of failing.
 // Synthetic data only.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { unlockDrive, openDrive, RESET_REWRAP_GAP_SEC } from '../public/js/driveclient.js';
+import { unlockDrive } from '../public/js/driveclient.js';
 import { ApiError } from '../public/js/api.js';
 import {
   createEscrowKeyPair, createSigningKeyPair, endorseEscrowKey, escrowKeyId, signingKeyId, openEscrowPin,
@@ -128,8 +129,8 @@ describe('R5-M2: a stripped or mismatched pin is tampering, never a first use', 
   }, T);
 });
 
-describe('R5-M1: the automatic reset re-wrap, at most once per Drive per 30 days', () => {
-  /** A reset the server reports: epoch `epoch`, new keys signed by a new signing key (genuine or fabricated alike). */
+describe('the automatic reset re-wrap: every genuine reset, each epoch once', () => {
+  /** A reset the server reports: epoch `epoch`, new keys signed by a new signing key. */
   async function reset(SU, epoch) {
     const s = await createSigningKeyPair();
     const e = await createEscrowKeyPair();
@@ -139,60 +140,35 @@ describe('R5-M1: the automatic reset re-wrap, at most once per Drive per 30 days
     return { s, e };
   }
   const T0 = 1_800_000_000_000;
+  const ROTATED = { kind: 'escrow_rotated', text: 'Your administrator rotated a security key; nothing for you to do.' };
 
-  it('a first reset moves the Drive by itself; a second within 30 days gets the notice; after 30 days it moves again', async () => {
+  it('two consecutive genuine resets (a day apart) both move the Drive by itself, with the short notice; each epoch applies once', async () => {
     const k = await ownerKeys();
     const now = vi.spyOn(Date, 'now').mockReturnValue(T0);
     const { SU, dk } = await userOn(k);
-    // 1. Epoch 1: moved by itself (the accepted exception), resetAt sealed in the pin.
-    const r1 = await reset(SU, 1);
-    let from = SU.requests.length;
-    clearSessionKey();
-    let c = await unlockDrive({ password: PW });
-    expect(c.notice).toMatchObject({ kind: 'escrow_rotated' });
-    expect(sentEscrowWraps(SU, from)).toHaveLength(1);
-    const pin1 = await openEscrowPin(dk, SU.escrowPin);
-    expect(pin1).toMatchObject({ epoch: 1, resetAt: T0 / 1000, escrow: await escrowKeyId(r1.e.publicJwk) });
-    // 2. Epoch 2 a day later (a response-changing server could report it): the notice, no re-wrap.
-    now.mockReturnValue(T0 + 86400 * 1000);
-    const r2 = await reset(SU, 2);
-    const wrap1 = SU.wraps.get('escrow|escrow');
-    from = SU.requests.length;
-    clearSessionKey();
-    c = await unlockDrive({ password: PW });
-    expect(c.notice).toMatchObject({ kind: 'escrow_changed' });
-    expect(c.notice.tampered).toBeUndefined();
-    expect(sentEscrowWraps(SU, from)).toHaveLength(0);
-    expect(SU.wraps.get('escrow|escrow')).toEqual(wrap1);
-    // Just before the 30 days: still the notice.
-    now.mockReturnValue(T0 + (RESET_REWRAP_GAP_SEC - 1) * 1000);
-    clearSessionKey();
-    expect((await unlockDrive({ password: PW })).notice).toMatchObject({ kind: 'escrow_changed' });
-    // A clock moved back counts as too soon.
-    now.mockReturnValue(T0 - 86400 * 1000);
-    clearSessionKey();
-    expect((await unlockDrive({ password: PW })).notice).toMatchObject({ kind: 'escrow_changed' });
-    // "Trust the new key" (the user's choice) moves it and keeps resetAt.
-    now.mockReturnValue(T0 + 2 * 86400 * 1000);
-    clearSessionKey();
-    c = await unlockDrive({ password: PW });
-    await c.acceptEscrowKey();
-    expect(escrowWrapKeyId(SU.wraps.get('escrow|escrow'))).toBe(await escrowKeyId(r2.e.publicJwk));
-    expect(await openEscrowPin(dk, SU.escrowPin)).toMatchObject({ epoch: 2, resetAt: T0 / 1000 });
-    // 3. After 30 days, the next reset (epoch 3) moves it by itself again.
-    now.mockReturnValue(T0 + (RESET_REWRAP_GAP_SEC + 60) * 1000);
-    await reset(SU, 3);
-    from = SU.requests.length;
-    clearSessionKey();
-    c = await unlockDrive({ password: PW });
-    expect(c.notice).toMatchObject({ kind: 'escrow_rotated' });
-    expect(sentEscrowWraps(SU, from)).toHaveLength(1);
-    expect(await openEscrowPin(dk, SU.escrowPin)).toMatchObject({ epoch: 3, resetAt: T0 / 1000 + RESET_REWRAP_GAP_SEC + 60 });
+    for (const [epoch, at] of [[1, T0], [2, T0 + 86400 * 1000]]) {
+      now.mockReturnValue(at);
+      const r = await reset(SU, epoch);
+      const from = SU.requests.length;
+      clearSessionKey();
+      const c = await unlockDrive({ password: PW });
+      expect(c.notice, `epoch ${epoch}`).toEqual(ROTATED);
+      const sent = sentKeys(SU, from).filter((b) => b.escrowReset !== undefined);
+      expect(sent.map((b) => b.escrowReset)).toEqual([epoch]);
+      expect(sentEscrowWraps(SU, from)).toHaveLength(1);
+      expect(escrowWrapKeyId(SU.wraps.get('escrow|escrow'))).toBe(await escrowKeyId(r.e.publicJwk));
+      expect(await openEscrowPin(dk, SU.escrowPin)).toEqual({ escrow: await escrowKeyId(r.e.publicJwk), sign: await signingKeyId(r.s.publicJwk), epoch });
+      // The same reset reported again: already pinned, nothing re-wrapped.
+      const again = SU.requests.length;
+      clearSessionKey();
+      expect((await unlockDrive({ password: PW })).notice).toBeNull();
+      expect(sentEscrowWraps(SU, again)).toHaveLength(0);
+    }
+    expect(SU.activity.filter((x) => x.action === 'drive.escrow_rewrapped')).toHaveLength(2);
   }, T);
 
-  it('a signed rotation after an automatic move keeps resetAt (the limit is not reset by it)', async () => {
+  it('a signed rotation after an automatic move: moved by itself, the reset’s signing key and epoch stay pinned', async () => {
     const k = await ownerKeys();
-    const now = vi.spyOn(Date, 'now').mockReturnValue(T0);
     const { SU, dk } = await userOn(k);
     const r1 = await reset(SU, 1);
     clearSessionKey();
@@ -200,30 +176,9 @@ describe('R5-M1: the automatic reset re-wrap, at most once per Drive per 30 days
     // The (reset's) signing key signs a new escrow key: moved by itself, as always.
     const e2 = await createEscrowKeyPair();
     Object.assign(SU, { escrowPub: e2.publicJwk, escrowSig: await endorseEscrowKey(r1.s.privateKey, e2.publicJwk) });
-    now.mockReturnValue(T0 + 3600 * 1000);
     clearSessionKey();
     expect((await unlockDrive({ password: PW })).notice).toBeNull();
-    expect(await openEscrowPin(dk, SU.escrowPin)).toMatchObject({ escrow: await escrowKeyId(e2.publicJwk), epoch: 1, resetAt: T0 / 1000 });
-  }, T);
-
-  it('a fabricated reset right after the genuine one: the attacker’s key never gets the DK within 30 days', async () => {
-    const k = await ownerKeys();
-    vi.spyOn(Date, 'now').mockReturnValue(T0);
-    const { SU, dk } = await userOn(k);
-    await reset(SU, 1);
-    clearSessionKey();
-    expect((await unlockDrive({ password: PW })).notice).toMatchObject({ kind: 'escrow_rotated' }); // the genuine one moved it
-    expect(await openEscrowPin(dk, SU.escrowPin)).toMatchObject({ epoch: 1 });
-    const as = await createSigningKeyPair();
-    const ae = await createEscrowKeyPair();
-    const rec = { epoch: 2, kid: await escrowKeyId(ae.publicJwk), signPub: as.publicJwk, at: 4 };
-    const sig = await endorseEscrowKey(as.privateKey, ae.publicJwk);
-    tamper(SU, (d) => Object.assign(d, { escrowPub: ae.publicJwk, escrowSignPub: as.publicJwk, escrowSig: sig, ownerReset: rec }));
-    const from = SU.requests.length;
-    clearSessionKey();
-    const c = await openDrive({ user: SU.user }).catch(() => null) || await unlockDrive({ password: PW });
-    expect(c.notice).toMatchObject({ kind: 'escrow_changed' });
-    expect(sentEscrowWraps(SU, from)).toHaveLength(0);
+    expect(await openEscrowPin(dk, SU.escrowPin)).toEqual({ escrow: await escrowKeyId(e2.publicJwk), sign: await signingKeyId(r1.s.publicJwk), epoch: 1 });
   }, T);
 });
 

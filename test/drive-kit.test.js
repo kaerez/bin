@@ -395,6 +395,27 @@ describe('the owner sets up a new user’s Drive (Admin → Users)', () => {
     expect(await errorOf(bad)).toBe('kcv_mismatch');
   });
 
+  it('the create response says whether the role has the Drive; for a role without one the server still refuses (409 drive_disabled) and stores nothing', async () => {
+    const created = async (username) => {
+      const r = await fetchJson('/api/private/admin/users', { method: 'POST', cookie: oc, body: { username, salt: salt16(), t: 3, proof: proofFor(USER_PW) } });
+      expect(r.status).toBe(201);
+      return (await r.json()).user;
+    };
+    // The Default role has no Drive: the owner's browser makes no set-up request for it.
+    const u = await created('kit-create-nodrive');
+    expect(u.drive).toEqual(expect.objectContaining({ enabled: false, used: 0 }));
+    // Were it sent anyway (a race with a role change), the guard stays: 409, no wrap, no pin, no audit entry.
+    const dk = createDriveKey();
+    const r = await adminKeys(oc, u.id, await firstBody(dk, await escrowNow()));
+    expect(r.status).toBe(409);
+    expect(await errorOf(r)).toBe('drive_disabled');
+    expect(await rows(u.id, 'SELECT kind FROM wraps')).toEqual([]);
+    expect((await audit(u.id)).some((x) => x.action === 'drive.created_by_owner')).toBe(false);
+    // With the Drive on its role, the same request sets it up.
+    await enableDrive(u.id);
+    expect((await adminKeys(oc, u.id, await firstBody(dk, await escrowNow()))).status).toBe(200);
+  });
+
   it('refused while impersonating, and for a role without a Drive; an imported account has no Drive until it signs in', async () => {
     const d = await makeUser('kit-nodrive');
     const dk = createDriveKey();

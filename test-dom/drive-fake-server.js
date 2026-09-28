@@ -60,6 +60,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     activity: [], // the user's own activity rows the fake records (drive.escrow_rewrapped)
     kcv: null, // the Drive key's check value, kept from the first set-up
     userDrives: {}, // other users' Drives the owner set up here: { [userId]: { wraps, driveSalt, escrowPin, kcv } }
+    driveOff: new Set(), // other users whose role has no Drive (the admin keys route answers 409 drive_disabled)
   };
   let clock = 1700000000;
   const tick = () => ++clock;
@@ -378,6 +379,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       // The owner, for another user: a pw wrap after a reset (the key check value
       // must be the Drive's), or the first set-up of a Drive that has no wrap.
       S.adminKeys.push({ userId: m[1], body });
+      if (S.driveOff.has(m[1])) return fail(409, 'drive_disabled');
       const d = S.userDrives[m[1]];
       if (!body.kcv) return fail(400, 'kcv_required');
       if (body.first) {

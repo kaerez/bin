@@ -107,9 +107,8 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
      ("Your Drive's escrow record does not match") and nothing is re-wrapped or re-pinned; "Trust
      the new key" then writes the pin (and a wrap, unless the wrap is already for that key). The
      one exception, accepted by the maintainer, is an owner reset (starting over without a kit,
-     §3.2): the pin also holds the owner-reset epoch it has seen and the time of its last
-     automatic reset re-wrap (`resetAt`), and a user's browser moves to a reset's key by itself
-     at most once per reset and at most once per 30 days.
+     §3.2): the pin also holds the owner-reset epoch it has seen, and a user's browser moves to
+     a reset's key by itself once per reset, every time (no time limit).
      **Rotation.** The owner replaces the escrow key pair from the Drive page (with the step-up);
      the new key is signed by the owner's signing key, so each user's browser re-wraps to it at
      its next unlock. Until then the old private key stays in the owner's Drive, **sealed under the
@@ -149,9 +148,15 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   while impersonating), only for a user whose role has the Drive and whose Drive has no wrap
   yet, and only with exactly one `pw` and one `escrow` wrap for the current kid, the salt, the
   pin and the key check value (below); it is `drive.created_by_owner` in the admin audit and a
-  system event (no detail) in the user's activity. When the owner's Drive is locked or there is
-  no escrow key yet, the account is still created and its Drive is set up at the user's first
-  sign-in; the create form says which happened. Imported accounts (a verifier, never a
+  system event (no detail) in the user's activity. The owner's browser first checks that the
+  user's role has the Drive (the create response's `user.drive.enabled`; for a reset, the user's
+  role options): when it does not, it makes no Drive request for that user and the create form
+  says "Drive is not enabled for this role, so no Drive was created."; if the role gets the
+  Drive later, it is set up at the user's first sign-in. The server's `409 drive_disabled`
+  stays as the guard (a role changed at the same moment), and the page shows it as the same
+  case. When the owner's Drive is locked or there is no escrow key yet, the account is still
+  created and its Drive is set up at the user's first sign-in; the create form says which
+  happened. Imported accounts (a verifier, never a
   password) and a user the owner impersonates never get a Drive this way.
 - **The Drive key never changes.** A password change by the user and an admin reset keep the
   same DK: only the `pw` wrap is replaced, so file keys, passkey, recovery-code and escrow
@@ -348,25 +353,24 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
 - **Users move automatically** (the maintainer's accepted exception to the signed-key pin, for
   this case only; all its rules are in `resetApplies`, `public/js/driveclient.js`). At a user's
   next unlock their browser re-wraps DK to the new escrow key and re-pins `{ escrow, sign,
-  epoch, resetAt }` by itself only when the server reports an owner reset whose epoch is
-  exactly one more than the pinned one (a pin without an epoch counts as 0), whose signing key
-  is the server's `escrowSignPub` and signed the escrow key, and when this Drive has had no
-  automatic reset re-wrap in the last 30 days (`resetAt` in the sealed pin, the browser's clock;
-  a clock moved back counts as too soon). The epoch in the sealed pin means the same reset
-  never applies twice. The user sees once "Your administrator rotated a security key; nothing
+  epoch }` by itself only when the server reports an owner reset whose epoch is exactly one
+  more than the pinned one (a pin without an epoch counts as 0) and whose signing key is the
+  server's `escrowSignPub` and signed the escrow key. There is no time limit (the maintainer's
+  decision: automatic, with no user approval, every time): a second genuine reset soon after
+  the first moves the Drive again. The epoch in the sealed pin means the same reset never
+  applies twice. The user sees once "Your administrator rotated a security key; nothing
   for you to do."; the server records `drive.escrow_rewrapped` (the new key's fingerprint) as a
   system event in the user's activity and, with the user, in the admin audit (`escrowReset:
   <epoch>` on the key change), once per user and epoch (a repeat writes nothing; at most 5
   `escrowReset` requests per user per 10 minutes, `429 rate_limited`). Any other unsigned change
-  — no reset, a skipped or repeated epoch, a signature by another key, a second reset within 30
-  days — keeps the notice and "Trust the new key", with no re-wrap. Signed rotations stay
-  automatic as before (and keep `resetAt`).
+  — no reset, a skipped or repeated epoch, a signature by another key — keeps the notice and
+  "Trust the new key", with no re-wrap. Signed rotations stay automatic as before (and keep the
+  pinned epoch).
 - **What the exception allows.** It is not limited to a window after a genuine reset: nothing
   a user's browser holds ties a reported reset to a real start over. Anyone able to change the
   server's responses (a compromised Cloudflare account, a malicious deploy or an insider) can
   report a fabricated reset at any time, with their own signing and escrow keys, and receive
-  users' Drive keys at their next unlock, and again at each later epoch (at most once per Drive
-  per 30 days). So can anyone able to complete AUTHN owner recovery and then start over, which
+  users' Drive keys at their next unlock, and again at each later epoch. So can anyone able to complete AUTHN owner recovery and then start over, which
   means anyone with access to the Worker's `AUTHN` secret configuration. The signed-key pin
   applies to every other unsigned change.
 - **The archive back.** A kit for the old DK brings it back with "Restore from kit": the

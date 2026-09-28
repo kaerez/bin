@@ -48,7 +48,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     `drive.archive_restored`, `drive.archive_deleted`;
   - **maintainer-accepted weakening:** after a start over, users' browsers move their Drives to
     the new escrow key **automatically**, once per owner reset (an epoch one more than the pinned
-    one, the key signed by the reset's signing key; at most once per Drive per 30 days), with a
+    one, the key signed by the reset's signing key; every time, with no time limit), with a
     one-time notice and `drive.escrow_rewrapped` in the user's activity and the admin audit.
     This is not limited to a window after a real reset: anyone able to change the server's
     responses can report a fabricated reset at any time (and again at each later epoch), and so
@@ -57,7 +57,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - **Drives the owner sets up**: creating an account (or resetting the password of a user with no
     Drive yet) with the owner's Drive unlocked sets the user's Drive up in the owner's browser
     (`pw` and `escrow` wraps, the pin; `drive.created_by_owner`); otherwise it waits for the
-    user's first sign-in, and the create form says which. Imports and impersonation never do;
+    user's first sign-in, and the create form says which. For a role without the Drive the
+    owner's browser makes no Drive request (the create response says whether the role has one)
+    and the form says "Drive is not enabled for this role, so no Drive was created."; the
+    server's `409 drive_disabled` stays as a guard. Imports and impersonation never do;
   - **the Drive key never changes**: a password change opens the Drive key first (the old
     password or the passkey's PRF) and writes the new password wrap at once; an admin reset asks
     the owner to unlock their own Drive inline and re-wraps through the escrow (or continues
@@ -67,8 +70,6 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - a user's browser never treats a missing pin, a missing escrow wrap or an escrow wrap for
     another key than the pinned one as a first use: it shows a tamper notice and re-wraps
     nothing (only the genuine first set-up pins); a signing key is never added to a pin silently;
-  - the automatic move after an owner reset happens at most once per Drive per 30 days (the
-    time sealed in the pin); a second one gets the notice and "Trust the new key";
   - the Drive key's check value is required at every first set-up (the user's own, one the
     owner makes, the owner's own, starting over) and with every later wrap or pin, and is never
     taken from a later change; a Drive without one takes no key;

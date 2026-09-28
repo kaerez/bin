@@ -2168,7 +2168,9 @@ export class Directory extends DurableObject {
     this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
       id, username, salt, t, verifier, ts, ts);
     this.#log(actorId, id, 'user.created', `username=${username}`);
-    return { ok: true, user: this.#publicUser(this.#user(id)) };
+    // With whether their role has a Drive: the owner's browser sets one up only then.
+    const u = this.#user(id);
+    return { ok: true, user: { ...this.#publicUser(u), drive: this.#driveOf(u, 0) } };
   }
 
   async updateUser(id, { username, disabled }, actorId) {

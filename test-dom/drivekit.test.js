@@ -528,10 +528,9 @@ describe('starting over without a kit', () => {
     const c = await unlockDrive({ password: 'user password 1' });
     expect(c.notice).toMatchObject({ kind: 'escrow_rotated', text: 'Your administrator rotated a security key; nothing for you to do.' });
     expect(escrowWrapKeyId(SU.wraps.get('escrow|escrow'))).toBe(await escrowKeyId(SO.escrowPub));
-    // The pin also records when this Drive last moved by itself (at most once per 30 days).
+    // The pin: the reset's key, its signing key and its epoch (so the same reset never applies twice).
     const movedPin = await openEscrowPin(userDk, SU.escrowPin);
-    expect(movedPin).toEqual({ escrow: await escrowKeyId(SO.escrowPub), sign: await signingKeyId(SO.escrowSignPub), epoch: 1, resetAt: expect.any(Number) });
-    expect(Math.abs(movedPin.resetAt - Date.now() / 1000)).toBeLessThan(120);
+    expect(movedPin).toEqual({ escrow: await escrowKeyId(SO.escrowPub), sign: await signingKeyId(SO.escrowSignPub), epoch: 1 });
     expect(SU.activity).toEqual([expect.objectContaining({ action: 'drive.escrow_rewrapped' })]);
     expect(SU.audit).toEqual([expect.objectContaining({ action: 'drive.escrow_rewrapped' })]);
     expect((await c.list()).children.map((x) => x.name)).toEqual(['theirs.txt']); // intact, usable by the user

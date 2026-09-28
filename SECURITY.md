@@ -797,12 +797,11 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
   - so can anyone able to complete AUTHN owner recovery and then start over: anyone with access
     to the Worker's `AUTHN` secret configuration (it is a real start over, through the API).
 
-  The one mitigation in the browser: **at most one automatic reset re-wrap per Drive per 30
-  days** (`resetAt`, the time of the last one by the browser's clock, sealed in the pin; a clock
-  moved back counts as too soon). A second reset within 30 days gets the notice and "Trust the
-  new key", like any other unsigned change. The server records each user's move once per epoch
-  (`drive.escrow_rewrapped`; a repeated `escrowReset` for an epoch already applied writes
-  nothing) and accepts at most 5 `escrowReset` requests per user per 10 minutes. The signed-key
+  There is no time limit: by the maintainer's decision the move is automatic, with no user
+  approval, every time a reset meets these rules, however soon after the previous one. Each
+  epoch applies once (the epoch is sealed in the pin). The server records each user's move once
+  per epoch (`drive.escrow_rewrapped`; a repeated `escrowReset` for an epoch already applied
+  writes nothing) and accepts at most 5 `escrowReset` requests per user per 10 minutes. The signed-key
   pin applies to every other unsigned change: no reset, a skipped or repeated epoch, or another
   signature gets the notice and no re-wrap. The exception's rules are all in one function
   (`resetApplies` in `public/js/driveclient.js`).
