@@ -16,7 +16,8 @@
 //   both-permissive  — both; refused only when both are over a quota.
 //   both-restrictive — both; refused when either is over a quota.
 
-import { json, err, methodNotAllowed, decodePathSegment, assertNotCrossSite } from '../lib/http.js';
+import { json, err, methodNotAllowed, decodePathSegment, assertNotCrossSite, assertJsonRequest } from '../lib/http.js';
+import { MAX_BODY } from '../lib/store.js';
 import { directory, ipContext, isBlocked, recordFailure, cachedSettings } from '../lib/guard.js';
 import { parseId } from '../lib/ids.js';
 import { createNote, initFile, putChunk, finalizeFile } from './private.js';
@@ -134,11 +135,16 @@ export async function handlePublicApi(request, env, url) {
   if (p === '/api/public/paste' || p === '/api/public/file') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
+    // The request's type and declared size first, so that one refused for its
+    // shape spends no human-check token; the body itself (up to 4 MiB, from
+    // anyone) is read only after the human check.
+    const paste = p.endsWith('paste');
+    assertJsonRequest(request, paste ? MAX_BODY : undefined);
     // Chunks and finalize ride on the upload token; only starting a share is checked.
     await requireTurnstile(env, request, TURNSTILE_ACTIONS.public);
     const { a, error } = await asPublic();
     if (error) return error;
-    const res = await (p.endsWith('paste') ? createNote(request, env, a) : initFile(request, env, a));
+    const res = await (paste ? createNote(request, env, a) : initFile(request, env, a));
     // The admin's "shares" count per tracker: successful creations only.
     if (res.status === 201) {
       const t = a.subjects.keys.find((k) => k.startsWith('pub:t:'));

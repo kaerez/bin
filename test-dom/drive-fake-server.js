@@ -15,12 +15,31 @@
 // value with every first set-up and every later wrap or pin, the step-up for
 // replacing a wrap, no escrow wrap in the owner's own Drive, no first set-up
 // of a Drive with content or keys but no wrap, one `escrowReset` record per
-// epoch. Not a test file itself (vitest.dom.config.js picks up *.test.js only).
+// epoch. Like the real server (src/lib/csrf.js), every signed-in change
+// (POST / PUT / PATCH / DELETE under /api/private/, and log-out) must carry the
+// session's CSRF token in X-Secbin-CSRF, the one GET /api/private/me hands out
+// (403 csrf_mismatch otherwise, before anything changes): the Drive client
+// sends it through public/js/api.js. Every fake server stands for the same
+// browser session, so they share the token (FAKE_CSRF). Not a test file itself
+// (vitest.dom.config.js picks up *.test.js only).
 import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
 import { deriveSubkeys, sealField, escrowKeyId, escrowWrapKeyId, escrowKeyEndorsed, keyCheckValue } from '../public/js/drivekeys.js';
 import { randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
 import { sealUpload, newNodeId } from '../public/js/reversekeys.js';
+
+/** The session's CSRF token (43 base64url characters, as the server's HMAC). */
+export const FAKE_CSRF = b64urlFromBytes(randomBytes(32));
+const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+/** Where the real server checks the token: cookie-authenticated changes (authenticate()) and log-out. */
+export const needsCsrf = (method, path) => STATE_CHANGING.has(method) && (path.startsWith('/api/private/') || path === '/api/auth/logout');
+/** A request header, from a plain object or a Headers. */
+export const headerOf = (headers, name) => {
+  if (!headers) return undefined;
+  if (typeof headers.get === 'function') return headers.get(name) ?? undefined;
+  const k = Object.keys(headers).find((x) => x.toLowerCase() === name);
+  return k === undefined ? undefined : headers[k];
+};
 
 /** An in-memory Drive server for one user (plus an owner) and a fetch that talks to it. */
 export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 } = {}) {
@@ -64,6 +83,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     kcv: null, // the Drive key's check value, kept from the first set-up
     userDrives: {}, // other users' Drives the owner set up here: { [userId]: { wraps, driveSalt, escrowPin, kcv } }
     driveOff: new Set(), // other users whose role has no Drive (the admin keys route answers 409 drive_disabled)
+    meCalls: 0, // GET /api/private/me (the page recording its session)
   };
   let clock = 1700000000;
   const tick = () => ++clock;
@@ -84,7 +104,11 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     S.escrowVer = { version: S.escrowVer ? S.escrowVer.version + 1 : 1, kid, created: tick() };
   };
   const sameKey = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y;
-  const ok = (data, status = 200) => ({ ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) });
+  const ok = (data, status = 200) => {
+    const res = { ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) };
+    res.clone = () => res; // api.js reads a 403's body twice (csrf_mismatch or not)
+    return res;
+  };
   const bin = (bytes) => ({ ok: true, status: 200, type: 'basic', json: async () => null, arrayBuffer: async () => bytes.slice().buffer });
   const fail = (status, error) => ok({ error, message: error }, status);
   // Received files (reverse shares) are not in the tree until the browser re-wraps them.
@@ -99,7 +123,13 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     const u = new URL(url, 'https://bin.example');
     const p = u.pathname;
     const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
+    // The page records its session (api.js bindSession) from here; not a Drive request.
+    if (p === '/api/private/me' && method === 'GET') {
+      S.meCalls++;
+      return ok({ user: S.user, impersonatedBy: S.impersonatedBy, csrf: FAKE_CSRF });
+    }
     S.requests.push({ method, path: p, body, headers: init.headers || {} });
+    if (needsCsrf(method, p) && headerOf(init.headers, 'x-secbin-csrf') !== FAKE_CSRF) return fail(403, 'csrf_mismatch');
     let m;
     if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: S.impersonatedBy });
     if (p === '/api/private/drive' && method === 'GET') {
@@ -223,7 +253,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         }
         return fail(400, 'invalid');
       }
-      if (p === '/api/private/drive/kit/probe' && method === 'GET') {
+      if (p === '/api/private/drive/kit/probe' && method === 'POST') {
         S.escrowUses += S.probes.length;
         return ok({ probes: S.probes });
       }

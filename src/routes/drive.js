@@ -1,8 +1,11 @@
 // drive.js — /api/private/drive*: the signed-in user's Drive (docs/DRIVE.md
 // §6), and the Drive half of the owner's escrow route. Session only (API keys
 // are refused by authenticate()). Every state-changing call goes through the
-// same CSRF guards as the rest of the private API (JSON body, Sec-Fetch-Site,
-// intent header or upload token).
+// same CSRF guards as the rest of the private API, in authenticate() before
+// anything else runs (src/lib/auth.js checkCsrf): Sec-Fetch-Site, the request
+// shape (a JSON body, a chunk or the intent header), then the session's CSRF
+// token; and then each route's own (JSON body, intent header, upload token).
+// The kit check (kit/probe) writes admin-audit rows, so it is a POST too.
 //
 // Every user's Drive is set up with an escrow wrap for the owner's current
 // escrow key (the owner's key must exist first), which the user cannot
@@ -17,7 +20,7 @@
 // see: the tree's shape, sizes and chunk counts against the role's Drive
 // capacity and largest file, and exact chunk sizes on upload.
 
-import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
+import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, appendCookies, SECURITY_HEADERS } from '../lib/http.js';
 import { authenticate, actorId } from '../lib/auth.js';
 import { directory, ipContext } from '../lib/guard.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
@@ -36,10 +39,8 @@ const fromDir = (r) => {
   for (const k of ['max', 'used', 'quota', 'policy', 'refused']) if (r[k] !== undefined) extra[k] = r[k];
   return err(r.status, r.error, r.message, Object.keys(extra).length ? extra : undefined);
 };
-const withAuth = (a, res) => {
-  if (a.setCookie) res.headers.append('set-cookie', a.setCookie);
-  return res;
-};
+/** Attach a sliding-session cookie refresh (session + CSRF token cookies) to a response. */
+const withAuth = (a, res) => appendCookies(res, a.setCookie);
 const invalid = (message) => err(400, 'invalid', message);
 
 // ── validation of what the browser sends (all of it opaque to the server) ──
@@ -618,10 +619,11 @@ async function ownerStepUp(request, env, url, dir, uid, body) {
  *   owner's Drive (the step-up also proves the password the new `pw` wrap is
  *   made with); `{ event: 'verified', verdict, issues?, version? }` — the
  *   read-only check's verdict (`drive.kit_verified`), nothing else is written;
- * - `GET …/kit/probe` — for the check: one user's escrow wrap per kid users'
- *   wraps are made for (each recorded as `drive.escrow_used`, as the admin
- *   escrow route), to be opened in the browser and discarded; at most
- *   KIT_PROBE_MAX per session per KIT_PROBE_WINDOW seconds (`429 rate_limited`);
+ * - `POST …/kit/probe` `{}` — for the check (a POST: it writes to the admin
+ *   audit): one user's escrow wrap per kid users' wraps are made for (each
+ *   recorded as `drive.escrow_used`, as the admin escrow route), to be opened
+ *   in the browser and discarded; at most KIT_PROBE_MAX per session per
+ *   KIT_PROBE_WINDOW seconds (`429 rate_limited`);
  * - `PUT …/kit/keys` — restore sealed escrow keys (restoreKitKeys).
  */
 async function kitRoute(request, env, url, dir, uid, pol, username, sid) {
@@ -657,8 +659,10 @@ async function kitRoute(request, env, url, dir, uid, pol, username, sid) {
     return invalid('Send { event: "exported" | "used" | "verified" }.');
   }
   if (p === '/api/private/drive/kit/probe') {
-    if (request.method !== 'GET') return methodNotAllowed('GET');
-    assertNotCrossSite(request); // it records escrow use
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    // It records escrow use: a change like any other (intent header, JSON body {}).
+    assertIntent(request);
+    await readJsonBody(request);
     // Each call writes admin-audit rows and wakes one Drive per kid: a few per session and window (R5-I2).
     const rl = await driveStub(env, uid).hit(uid, `probe:${sid || 'none'}`, KIT_PROBE_MAX, KIT_PROBE_WINDOW);
     if (!rl.ok) return err(429, 'rate_limited', 'Too many kit checks: try again in a few minutes.', { retryAfter: rl.retryAfter });

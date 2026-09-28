@@ -49,6 +49,8 @@ function adminFetch(url, init = {}) {
     return reply({ role: { id: CUSTOM, name: 'Contractors', ownQuotas: false }, users: [], limits: { all: { ...state.customRows }, api: {} },
       effective: { all: { ...state.defaultRows, ...state.customRows }, api: {} }, inherited: { ...state.defaultRows }, quotas: [], viewerRules: [] });
   }
+  // The page records its session (and its CSRF token) before its first change (public/js/api.js).
+  if (p === '/api/private/me') return reply({ user: { id: 'owner-0000000000', username: 'owner', role: 'owner' }, impersonatedBy: null, csrf: 'C'.repeat(43) });
   if (p === '/api/private/admin/limits' && method === 'PATCH') { state.patches.push(body); return reply({ ok: true }); }
   if (p === '/api/private/admin/users/public-user-0000') {
     return reply({ user: { id: 'public-user-0000' }, limits: { all: {}, api: {} }, effective: { all: { ...state.defaultRows, shareCaptcha: 'off', reverseCaptcha: 'off' }, api: {} }, quotas: [], viewerRules: [] });

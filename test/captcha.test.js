@@ -18,7 +18,7 @@ import { CSP, TURNSTILE_CSP, API_CSP } from '../src/lib/http.js';
 import { SCHEMA_VERSION } from '../src/directory-do.js';
 import { SHARE_GRANT_SEC, SHARE_GRANT_CAP_SEC } from '../src/lib/human.js';
 import publicRoutesSource from '../src/routes/public.js?raw';
-import { owner, makeUser, fetchJson, freshIp, proofFor, ORIGIN, USER_PW, intent, proofHeaders } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, proofFor, ORIGIN, USER_PW, intent, proofHeaders, csrfHeaders } from './helpers.js';
 import { enableDrive, driveLimits, uploadFile } from './drive-helpers.js';
 import { receiver, newReverse, dirStub, driveOf } from './reverse-helpers.js';
 import { linkProof, passwordProof } from '../public/js/reversekeys.js';
@@ -93,7 +93,7 @@ async function fileShare(auth, { views = null, captcha } = {}) {
   const sources = files.map((f, i) => ({ off: l.entries[i].off, size: f.bytes.length, read: async (a, b) => f.bytes.slice(a, b) }));
   for (let i = 0; i < i0.chunks; i++) {
     const ct = await encryptChunk(key, i, i0.chunks, await readStreamChunk(sources, i, l.total));
-    const r = await SELF.fetch(`${ORIGIN}/api/private/file/${i0.id}/chunk/${i}`, { method: 'PUT', headers: { ...(auth.cookie ? { cookie: auth.cookie } : {}), ...(auth.headers || {}), 'content-type': 'application/octet-stream', 'x-upload-token': i0.uploadtoken }, body: ct });
+    const r = await SELF.fetch(`${ORIGIN}/api/private/file/${i0.id}/chunk/${i}`, { method: 'PUT', headers: { ...(auth.cookie ? { cookie: auth.cookie, ...(await csrfHeaders(auth.cookie)) } : {}), ...(auth.headers || {}), 'content-type': 'application/octet-stream', 'x-upload-token': i0.uploadtoken }, body: ct });
     expect(r.status).toBe(200);
   }
   const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', bar: views !== null, views: views ?? undefined, expire: '1h' });

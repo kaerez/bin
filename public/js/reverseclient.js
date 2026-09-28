@@ -4,6 +4,12 @@
 // exactly like a Drive file, and end the session. Everything that describes a
 // file — its path, type, time and key — leaves this browser only sealed to the
 // share's public key, which is in the link's #fragment and never sent.
+//
+// Every request goes through api.js (`reverseApi`, /api/reverse/<id>/…). The
+// uploader is anonymous: those routes read no session, so api.js sends no CSRF
+// token with them and never asks /api/private/me, even when a signed-in user's
+// cookie is in the same browser (SECURITY.md "CSRF"). The link proof, the
+// session grant and the upload tokens stand in for it.
 
 import { reverseApi, ApiError } from './api.js';
 import { pubFromFragment, linkProof, passwordProof, openNote, sealUpload, newNodeId, MAX_PATH_BYTES } from './reversekeys.js';

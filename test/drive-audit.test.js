@@ -13,7 +13,7 @@
 import { env, SELF, runInDurableObject, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src/index.js';
-import { ORIGIN, owner, makeUser, fetchJson, intent, cookieOf, salt16, freshIp, proofFor, USER_PW, proofHeaders, login } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, intent, cookieOf, salt16, freshIp, proofFor, USER_PW, proofHeaders, login, csrfHeaders } from './helpers.js';
 import { enc, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, drive, DIR_BYTES, FILE_BYTES, escrowWrap, KCV } from './drive-helpers.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import { encryptPaste } from '../public/js/crypto.js';
@@ -313,7 +313,7 @@ describe('L-7: deleting an account', () => {
     const s = await shareOf(u.cookie, [f.id]);
     expect(s.res.status).toBe(201);
     const ctx = createExecutionContext();
-    const res = await worker.fetch(new Request(`${ORIGIN}/api/private/admin/users/${u.id}`, { method: 'DELETE', headers: { cookie: oc, ...intent } }), { ...env, FILES: undefined }, ctx);
+    const res = await worker.fetch(new Request(`${ORIGIN}/api/private/admin/users/${u.id}`, { method: 'DELETE', headers: { cookie: oc, ...intent, ...(await csrfHeaders(oc)) } }), { ...env, FILES: undefined }, ctx);
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(503);
     expect((await fetchJson(`/api/private/admin/users/${u.id}`, { cookie: oc })).status).toBe(200); // still there

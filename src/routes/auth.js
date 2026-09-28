@@ -3,9 +3,9 @@
 // the browser sends d = Argon2id(password, salt); the server stores and compares
 // SHA-256("secbin-auth/v2" ‖ d) only.
 
-import { json, err, readJsonBody, assertIntent, methodNotAllowed } from '../lib/http.js';
+import { json, err, readJsonBody, assertIntent, assertNotCrossSite, methodNotAllowed } from '../lib/http.js';
 import { authnToken, sessionKeys } from '../lib/config.js';
-import { readSession, issueSession, logoutCookie, unconfigured } from '../lib/auth.js';
+import { readSession, issueSession, logoutCookie, unconfigured, checkCsrf } from '../lib/auth.js';
 import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
@@ -117,9 +117,10 @@ export async function handleAuth(request, env, url) {
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
-    // The human check comes before the password is looked at.
-    await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
+    // The human check comes before the password is looked at, and after the
+    // body is read (a malformed request spends no token).
     const body = await readJsonBody(request);
+    await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
     const verifier = await verifierFrom(body.proof);
     const res = await directory(env).login({ username: body.username, verifier: verifier ?? '', lockoutOff: g.off.all });
     if (res.ok && res.secondFactor) {
@@ -133,6 +134,10 @@ export async function handleAuth(request, env, url) {
   // ── passkeys: sign in alone, or as the second step of a password login ──
   if (p === '/api/auth/passkey/options') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
+    // Stateless (the challenge is signed, not stored), but held to the same
+    // guards as every other auth route: same-origin, and a JSON body ({}).
+    assertNotCrossSite(request);
+    await readJsonBody(request);
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
@@ -145,9 +150,9 @@ export async function handleAuth(request, env, url) {
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
+    const body = await readJsonBody(request); // before the human check: a malformed request spends no token
     // The second step rides on the password step's human check.
     if (p !== '/api/auth/second-factor') await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
-    const body = await readJsonBody(request);
     const dir = directory(env);
     const origin = url.origin;
     const rpId = url.hostname;
@@ -163,6 +168,9 @@ export async function handleAuth(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
     const s = await readSession(request, env);
+    // Signing out is a change too: a live session must present its CSRF token
+    // (no session, nothing to end: the cookies are cleared either way).
+    if (s.ok) await checkCsrf(request, env, s);
     if (s.ok) await directory(env).revokeSession(s.claims.sid, s.claims.exp, s.actor ? { id: s.actor.id, imp: true } : s.user.id, s.user.id);
     return json({ ok: true }, 200, { 'set-cookie': logoutCookie() });
   }
