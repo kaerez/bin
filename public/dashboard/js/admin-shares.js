@@ -160,7 +160,7 @@ export async function renderShares(p) {
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(r.created) }),
       h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
       h('td.mono', { dataset: { label: 'Views' }, text: views }),
-      h('td', { dataset: { label: 'Opened' } }, opensButton(r, () => admin.shareOpens(r.id), 9, tr)),
+      h('td', { dataset: { label: 'Opened' } }, opensButton(r, () => admin.shareOpens(r.id), 9, tr, { receive: r.kind === 'reverse' })),
       statusCell,
       h('td', { dataset: { label: 'Actions' } }, actions));
     return tr;

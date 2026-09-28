@@ -204,6 +204,30 @@ npx wrangler dev --port 9170 --persist-to .wrangler/rp-state
 WT=$PWD BASE=http://localhost:9170 node test-e2e/reverse-parity.mjs
 ```
 
+## `receive-api.mjs` — Receive links through their API: receipts, pause / resume, their folder
+
+What it covers ([docs/REVERSE.md](../docs/REVERSE.md) §2, §5, §6.1, §8; [docs/API.md](../docs/API.md)
+"Receive links"): the Drive's "Receive…" disabled while the open folder lists (its listing held
+back) and enabled once it has; a link on a folder; the uploader page saying a send is recorded;
+an API key with `read` and `manage` listing the link (its folder, what it accepts, one session,
+never its key), reading its receipt with the details the owner lets the user see, a tightening
+change, a weakening one refused (`403 step_up_required`), no creation (`403 api_key_not_allowed`),
+and pausing it — the uploader page then says it is not accepting files; My shares with the
+"paused" badge, the receipts ("1 upload session", its table) and Resume; a file waiting (not taken
+in) while My shares' Edit moves the link with the folder tree — a folder past the role's depth
+refused in the form and by the server (`403 folder_too_deep`) — so the waiting file and a new one
+land in the new folder; the folders' Shares dialogs following the move, with Pause / Resume; the
+owner's Admin → Shares counting the sessions and showing every detail; the audit naming the pause,
+the resume, the move (by folder id) and the key's changes, never the key; nothing on the wire
+naming a file; axe (WCAG 2.2 A/AA and the AAA contrast rule) on each new state; no page errors or
+CSP / Trusted Types violations. It needs a fresh server (no owner yet):
+
+```sh
+rm -rf .wrangler/ra-state
+npx wrangler dev --port 9390 --persist-to .wrangler/ra-state
+WT=$PWD BASE=http://localhost:9390 node test-e2e/receive-api.mjs
+```
+
 ## `quotas.mjs` — role quota kinds
 
 What it covers (README "Quotas"): Admin → Roles → a custom role → Quotas — the kind select's

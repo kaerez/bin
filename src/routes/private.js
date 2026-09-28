@@ -1,8 +1,9 @@
 // private.js — /api/private/*: everything that needs an account. Share
 // creation (notes + file uploads), the policy and "My shares" (list, one
-// share, receipts, label / extend / revoke) accept a session or an API key
-// with the matching scope; the account, its keys and credentials and the admin
-// surfaces are session-only.
+// share, receipts, label / extend / revoke) and the Receive links (list, one
+// link, its receipts, change, pause / resume, revoke) accept a session or an
+// API key with the matching scope; the account, its keys and credentials and
+// the admin surfaces are session-only.
 
 import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, appendCookies } from '../lib/http.js';
 import { csrfTokenFor, csrfCookie } from '../lib/csrf.js';
@@ -20,7 +21,7 @@ import { requireTurnstile, turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turns
 import { creationOptions, requestOptions } from '../lib/webauthn.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { handleDrive, syncCredentialWraps, drivePasswordChanged } from './drive.js';
-import { changeReverse } from './reverse.js';
+import { changeReverse, pauseReverse, REVERSE_ID_RE } from './reverse.js';
 import { apiExpiry } from '../lib/settings.js';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -93,6 +94,8 @@ export async function handlePrivate(request, env, url, ctx) {
 
   // ── My shares (session, or an API key: "read" to look, "manage" to change) ─
   if (p === '/api/private/shares' || p.startsWith('/api/private/shares/')) return handleShares(request, env, url);
+  // ── Receive links (the same, for reverse shares; docs/API.md) ─────────────
+  if (p === '/api/private/receive' || p.startsWith('/api/private/receive/')) return handleReceive(request, env, url);
 
   // ── session-only surfaces ─────────────────────────────────────────────────
   const a = await authenticate(request, env);
@@ -282,6 +285,99 @@ async function handleShares(request, env, url) {
   return withAuth(a, await updateShare(request, env, a, id, info));
 }
 
+/**
+ * The Receive links (reverse shares, docs/REVERSE.md) of the caller: the
+ * list, one link, its receipts (one per upload session), a change (as My
+ * shares' Edit: changeReverse, the weakening ones refused for an API key),
+ * pause / resume, and revoke. A session, or an API key with "read" (GET) or
+ * "manage" (anything else); either way only the caller's own links, the
+ * admin's locks apply, the role must allow reverse shares (and a key is held
+ * to the account's API limits) — except to revoke, which ends a link and is
+ * always the user's to do (as /shares/<id>/revoke). Resuming weakens a link
+ * (the step-up, never for a key: src/routes/reverse.js pauseReverse). Creating one stays in the Drive page: its key
+ * is sealed under the user's Drive keys, which an API key never gets, and it
+ * needs the step-up (docs/API.md).
+ */
+async function handleReceive(request, env, url) {
+  const p = url.pathname;
+  const a = await authenticate(request, env, { allowApiKey: true, scope: request.method === 'GET' ? 'read' : 'manage' });
+  const dir = directory(env);
+  const m = p.match(/^\/api\/private\/receive\/([^/]+)(\/pause|\/resume|\/revoke|\/opens)?$/);
+  // Revoking needs no role option (it only ends the link); everything else needs the role's reverse shares.
+  if (!(m && m[2] === '/revoke')) {
+    const access = await dir.reverseAccess(a.user.id, a.channel);
+    if (!access.ok) return withAuth(a, fromDir(access));
+  }
+  if (p === '/api/private/receive') {
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    return withAuth(a, json(await listReceive(env, a, url)));
+  }
+  if (!m) return err(404, 'not_found', 'Not found.');
+  const id = decodePathSegment(m[1]);
+  if (!id || !REVERSE_ID_RE.test(id)) return err(404, 'not_found', 'Receive link not found.');
+  const row = await dir.getShare(a.user.id, id);
+  if (!row || row.kind !== 'reverse' || row.status === 'pending') return err(404, 'not_found', 'Receive link not found.');
+  if (m[2] === '/opens') {
+    // Receipts: one per upload session started; times always, details as the admin allows this account.
+    if (request.method !== 'GET') return methodNotAllowed('GET');
+    const r = await dir.shareOpens(a.user.id, id);
+    return withAuth(a, r.ok ? json({ total: r.total, fields: r.fields, rows: r.rows }) : fromDir(r));
+  }
+  if (m[2]) {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertIntent(request);
+    if (m[2] === '/revoke') return withAuth(a, await revokeShare(env, a, id, shareInfo(id)));
+    // Resume: the step-up in a JSON body ({ current } or { reauth }); pause takes none.
+    const isJson = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json';
+    const body = m[2] === '/resume' && isJson ? await readJsonBody(request) : {};
+    return withAuth(a, await pauseReverse(env, dir, row, m[2] === '/pause', { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId, request, body, impersonating: !!a.actor }));
+  }
+  if (request.method === 'GET') {
+    const [link] = await receiveLinks(env, dir, a.user.id, [row]);
+    return withAuth(a, json({ link }));
+  }
+  if (request.method !== 'PATCH') return methodNotAllowed('GET, PATCH');
+  return withAuth(a, await updateShare(request, env, a, id, shareInfo(id)));
+}
+
+async function listReceive(env, a, url) {
+  const q = (url.searchParams.get('q') || '').slice(0, 100);
+  const status = ['active', 'revoked', 'expired', 'ended'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : '';
+  const expiry = ['none', 'set'].includes(url.searchParams.get('expiry')) ? url.searchParams.get('expiry') : '';
+  const offset = Number(url.searchParams.get('offset')) || 0;
+  const dir = directory(env);
+  const { rows, total } = await dir.listShares(a.user.id, { q, status, expiry, kind: 'reverse', limit: 50, offset });
+  return { rows: await receiveLinks(env, dir, a.user.id, rows), total };
+}
+
+/**
+ * Share-index rows of Receive links → the API's links: the index (label,
+ * status, lock, receipts) and the Drive (folder, what it accepts, limits,
+ * counters, paused) together. Never its key, its note or its password: only
+ * whether it has them.
+ */
+async function receiveLinks(env, dir, uid, rows) {
+  if (!rows.length) return [];
+  const live = await withLiveStatus(env, dir, rows, uid);
+  // Just these links' Drive rows (a page of the list is at most 50).
+  const drive = await driveStub(env, uid).reverseLinks(uid, rows.map((r) => r.id));
+  const byId = new Map((drive.reverse || []).map((x) => [x.id, x]));
+  return live.map((r) => {
+    const x = byId.get(r.id) || null;
+    const paused = r.status === 'active' && !!x && x.status === 'paused';
+    return {
+      id: r.id, label: r.label, created: r.created, expires: r.expires, status: r.status, locked: !!r.locked, captcha: !!r.captcha,
+      paused, held: paused && x.held === true, opens: r.opens ?? 0,
+      views: x ? x.views ?? null : r.views_total ?? null, used: x ? x.used ?? 0 : r.used ?? 0, left: x ? x.left ?? null : r.left ?? null,
+      received: r.received ?? { files: 0, bytes: 0 },
+      ...(x ? {
+        folder: x.folder, accept: x.accept, password: x.password, note: x.note, maxFiles: x.maxFiles, maxBytes: x.maxBytes,
+        maxFileBytes: x.maxFileBytes, types: x.types, pending: x.pending, failed: x.failed,
+      } : { folder: null }),
+    };
+  });
+}
+
 async function sessionSettings(env) {
   const s = await cachedSettings(env);
   return { idleSec: s['session.idleSec'], absSec: s['session.absSec'] };
@@ -463,8 +559,9 @@ export async function withLiveStatus(env, dir, rows, uid = null) {
       await dir.markShareEnded(r.id, s.state === 'expired' ? 'expired' : 'ended');
       return out({ ...r, status: s.state === 'expired' ? 'expired' : 'ended', left: 0, ...received });
     }
-    // A paused reverse link (the owner started over; docs/DRIVE.md §3.2) is still active: it resumes on a restore.
-    if (s.paused) received.paused = true;
+    // A paused reverse link is still active: paused by its user (`held`: they resume it), or by the
+    // owner's start over in the release before (docs/DRIVE.md §3.2).
+    if (s.paused) Object.assign(received, { paused: true, ...(s.held ? { held: true } : {}) });
     // A reverse share's views live in its Drive (null there: unlimited).
     const views = r.kind === 'reverse' && s.status === 'ok' ? { views_total: s.views ?? null, left: s.left ?? null, used: s.used ?? 0 }
       : { views_total: s.views ?? r.views_total, left: s.left ?? null };

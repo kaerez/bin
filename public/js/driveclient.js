@@ -973,8 +973,9 @@ export class DriveClient {
    *   usable, the Drive refuses its place) is recorded as failed on the
    *   server: it leaves the queue (the Drive lists it to delete or try again),
    *   so it never holds up the items behind it. A network or server error —
-   *   or a link whose key waits for the Drive upgrade — leaves it for the
-   *   next time (`deferred`). The queue is read page by page (`next`).
+   *   or a link whose key waits for the Drive upgrade, or one that moved to
+   *   another folder since the listing (`409 folder_moved`) — leaves it for
+   *   the next time (`deferred`). The queue is read page by page (`next`).
    */
   async receivePending({ onItem } = {}) {
     const keys = new Map(); // share id → private key, or null (does not open) / 'later' (waits for the upgrade)
@@ -1113,6 +1114,9 @@ export class DriveClient {
             await this.#fresh(async () => api.acceptReceived(it.id, { parent, ...(types ? { types } : {}), ...(await this.#sealNew({ name: leaf, meta: JSON.stringify(meta), dek: got.fk })) }));
           } catch (e) {
             taken.delete(leaf);
+            // Its link moved to another folder since this page listed it: the server keeps it for
+            // the next take-in, which places it in the link's folder now (never marked failed).
+            if (e instanceof ApiError && e.code === 'folder_moved') throw e;
             throw refused(e) ? failure(reasonOf(e)) : e;
           } finally {
             got.fk.fill(0);
