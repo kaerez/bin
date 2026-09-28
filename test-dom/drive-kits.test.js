@@ -2,18 +2,19 @@
 // §3.1) with the real modules against the in-memory server
 // (drive-fake-server.js): the personal kit card on Account (download with the
 // step-up, verify a selected file with a date — read-only, only check values
-// sent — and restore; a note instead while the owner acts as the user), Admin
+// sent; no restore, for a user or the owner; a note instead while the owner
+// acts as the user), Admin
 // → Security → Keys (the keyring with its plain-language help, Show with the
 // step-up and hidden again, a generated sub-MEK used or thrown away, entering
 // one by hand, rotation, a re-seal with its progress, the key kit download
-// and verify), and the Drive keys card of Import / export (the parts, the
+// and verify, a restore from a user's personal kit), and the Drive keys card of Import / export (the parts, the
 // user picker with search, select all / deselect all and id lists, the
 // masked view, the sealed file, an import previewed then applied).
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fakeServer, seedTree } from './drive-fake-server.js';
 import * as drive from '../public/js/driveclient.js';
 import { clearSessionKey } from '../public/js/drivekeys.js';
-import { parseDriveKit, openDriveKit } from '../public/js/drivekit.js';
+import { parseDriveKit, openDriveKit, sealDriveKit } from '../public/js/drivekit.js';
 import { openExport } from '../public/js/exportcrypt.js';
 import { resetThrottle } from '../public/dashboard/js/kit-ui.js';
 
@@ -71,7 +72,7 @@ describe('Account → Drive personal kit', () => {
     return { current: v };
   };
 
-  it('download (the step-up), verify the selected file with a date, restore — the kit file itself is never sent', async () => {
+  it('download (the step-up), verify the selected file with a date — the kit file itself is never sent', async () => {
     S = fakeServer();
     S.proof = 'account-pw';
     globalThis.fetch = S.fetch;
@@ -113,14 +114,26 @@ describe('Account → Drive personal kit', () => {
     expect(JSON.stringify(sent[0].body)).not.toContain(S.salt);
     expect(JSON.stringify(sent[0].body)).not.toContain(payload.keks[0].kek);
     expect($('#ukit-verify-pass').value).toBe(''); // cleared after use
-    // Restore: the step-up, then only what the server lost (here nothing).
-    pick($('#ukit-restore-file'), [new File([text], 'kit.json', { type: 'application/json' })]);
-    $('#ukit-restore-pass').value = 'kit passphrase 123';
-    $('#ukit-restore-confirm').value = 'account-pw';
-    $('#ukit-restore').click();
-    await until(() => /Restore done/.test($('#ukit-restore-msg').textContent), 60000);
-    expect($('#ukit-restore-msg').textContent).toMatch(/already there/);
+    // Nothing on this card restores (only the owner does, from Admin → Security → Keys).
+    expect(S.requests.some((r) => /\/kit\/(restore|items)/.test(r.path))).toBe(false);
   }, 120000);
+
+  // Only the owner restores from a personal kit (Admin → Security → Keys): the Account page is the same for everyone.
+  for (const role of ['user', 'owner']) {
+    it(`no Restore section, for ${role === 'owner' ? 'the owner’s own Account page' : 'a user'}: only Download and Verify, and the text does not offer one`, async () => {
+      S = fakeServer({ role });
+      globalThis.fetch = S.fetch;
+      await S.ready;
+      const { personalKitCard } = await import('../public/dashboard/js/userkit.js');
+      const card = mount(personalKitCard({ profile: { user: S.user, caps: { driveEnabled: true } }, drive, confirm }));
+      expect([...card.querySelectorAll('legend')].map((l) => l.textContent)).toEqual(['Download', 'Verify']);
+      for (const id of ['#ukit-restore-set', '#ukit-restore', '#ukit-restore-file', '#ukit-restore-pass', '#ukit-restore-confirm', '#ukit-restore-msg']) expect(card.querySelector(id), id).toBeNull();
+      expect([...card.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Download personal kit', 'Verify kit']);
+      expect(card.textContent).not.toMatch(/restor|puts? back/i);
+      expect($('#ukit-download')).not.toBeNull();
+      expect($('#ukit-verify-file')).not.toBeNull();
+    });
+  }
 
   it('while the owner acts as the user: a note, no kit', async () => {
     S = fakeServer();
@@ -409,6 +422,82 @@ describe('Admin → Security → Keys', () => {
     expect(verify).toBeTruthy();
     expect(JSON.stringify(verify.body)).not.toContain(S.salt);
   }, 120000);
+
+  it('restore a user’s personal kit: the user chosen, that user’s kit only, the step-up (a password once for every call), only check-free kit content sent', async () => {
+    S = fakeServer({ role: 'owner' });
+    S.otherUsers = [{ id: 'bobbobbobbobbob1', username: 'bob', role: 'user' }];
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    // The owner's own personal kit (made on their Account page), and bob's.
+    const own = await drive.buildPersonalKit({ user: S.user, passphrase: 'kit pass', step: { current: 'proof:x' } });
+    const payload = await openDriveKit(parseDriveKit(own.text), { kind: 'user', accountId: S.user.id, origin: location.origin, passphrase: 'kit pass' });
+    const bobs = await sealDriveKit('user', { ...payload, id: 'bobbobbobbobbob1', username: 'bob' }, { accountId: 'bobbobbobbobbob1', origin: location.origin, passphrase: 'kit pass' });
+    const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
+    mount(keysSection({ profile: profile() }));
+    await until(() => $('#ukr-user option'));
+    expect($('#keys-user-kit-title').textContent).toBe('Restore a user’s personal kit');
+    expect([...$('#ukr-user').options].map((o) => o.textContent)).toEqual(['owner (you)', 'bob']);
+    expect($('#ukr-restore').disabled).toBe(true); // no file yet
+    const sent = () => S.requests.filter((r) => /\/kit-restore$/.test(r.path));
+    // Another user's kit for the chosen user: refused in this browser, nothing sent.
+    $('#ukr-user').value = S.user.id;
+    $('#ukr-user').dispatchEvent(new Event('change'));
+    pick($('#ukr-file'), [new File([bobs], 'kit.json')]);
+    expect($('#ukr-restore').disabled).toBe(false);
+    $('#ukr-pass').value = 'kit pass';
+    $('#ukr-confirm').value = 'pw';
+    $('#ukr-restore').click();
+    await until(() => /another account/.test($('#ukr-msg').textContent), 60000);
+    expect(sent()).toHaveLength(0);
+    resetThrottle();
+    // Without the password: refused before anything is sent.
+    pick($('#ukr-file'), [new File([own.text], 'kit.json')]);
+    $('#ukr-pass').value = 'kit pass';
+    $('#ukr-restore').click();
+    await until(() => /password/.test($('#ukr-msg').textContent) && !$('#ukr-restore').disabled);
+    expect(sent()).toHaveLength(0);
+    // The right kit, with the step-up: only what the server lost comes back (here nothing).
+    $('#ukr-pass').value = 'kit pass';
+    $('#ukr-confirm').value = 'pw';
+    $('#ukr-restore').click();
+    await until(() => /Restore done/.test($('#ukr-msg').textContent), 60000);
+    expect($('#ukr-msg').textContent).toBe('Restore done for owner: the user salt was already there; nothing else was missing.');
+    expect(sent()).toHaveLength(1);
+    expect(sent()[0].path).toBe(`/api/private/admin/keys/users/${S.user.id}/kit-restore`);
+    expect(sent()[0].body).toMatchObject({ current: 'proof:pw', kit: { id: S.user.id, salt: S.salt, keks: [{ mekId: payload.keks[0].mekId, kek: payload.keks[0].kek }] } });
+    expect(JSON.stringify(sent()[0].body)).not.toContain(parseDriveKit(own.text).ct); // the file itself is not uploaded
+    expect($('#ukr-pass').value).toBe(''); // the passphrase is cleared after use
+    expect(S.audit.at(-1).action).toBe('drive.kit_restored');
+    // A Drive that takes two calls: the password is asked once, the second call resumes where the first stopped.
+    S.kitLost = [S.current().id];
+    S.kitRestorePages = 2;
+    S.kitRestoreBodies = [];
+    pick($('#ukr-file'), [new File([own.text], 'kit.json')]);
+    $('#ukr-pass').value = 'kit pass';
+    $('#ukr-confirm').value = 'pw';
+    const n0 = sent().length;
+    $('#ukr-restore').click();
+    await until(() => /Restore done/.test($('#ukr-msg').textContent) && sent().length === n0 + 2, 60000);
+    const [a, b] = sent().slice(n0);
+    expect(a.body.resume).toBeUndefined();
+    expect(b.body).toMatchObject({ current: 'proof:pw', resume: { mek: S.current().id, after: `n.${'A'.repeat(22)}` } });
+    expect($('#ukr-msg').textContent).toMatch(/4 items sealed again under the current key/);
+    // No stray "null" / "undefined" text in the card.
+    const stray = [];
+    const walk = (n) => { for (const c of n.childNodes) { if (c.nodeType === 3 && ['null', 'undefined'].includes(c.textContent.trim())) stray.push(n.id || n.nodeName); else if (c.nodeType === 1) walk(c); } };
+    walk($('#keys-user-kit'));
+    expect(stray).toEqual([]);
+  }, 120000);
+
+  it('the restore card’s message sits in a status line that is in the page before it (WCAG 4.1.3); every field has a label', async () => {
+    await open();
+    await until(() => $('#ukr-user option'));
+    const m = $('#ukr-msg');
+    expect(m.hasAttribute('role')).toBe(false);
+    expect(m.parentElement.getAttribute('role')).toBe('status');
+    expect(m.parentElement.hidden).toBe(false);
+    for (const id of ['ukr-user', 'ukr-file', 'ukr-pass', 'ukr-confirm']) expect($(`#${id}`).closest('label.field').querySelector('.field-label').textContent.length, id).toBeGreaterThan(3);
+  });
 });
 
 describe('WCAG 2.2 (docs/WCAG22.md): the kit forms', () => {
@@ -418,7 +507,7 @@ describe('WCAG 2.2 (docs/WCAG22.md): the kit forms', () => {
     await S.ready;
     const { personalKitCard } = await import('../public/dashboard/js/userkit.js');
     mount(personalKitCard({ profile: { user: { ...S.user, username: 'alice' } }, drive, confirm: async () => ({ current: 'proof:pw' }) }));
-    for (const id of ['ukit-download-msg', 'ukit-verify-msg', 'ukit-restore-msg']) {
+    for (const id of ['ukit-download-msg', 'ukit-verify-msg']) {
       const m = document.getElementById(id);
       expect(m.hasAttribute('role'), id).toBe(false);
       expect(m.parentElement.getAttribute('role'), id).toBe('status');

@@ -2,8 +2,8 @@
 // the Drive keyring (the root MEK and the sub-MEKs: generate, view, add,
 // rotate, edit dates, set current, re-seal, delete, change the root), the key
 // kit (download, verify with a date, restore), the upgrade of Drives made
-// before the key model v2 (per user, with progress), and one user's keys.
-// Every change and every view needs the owner's password or a passkey (the
+// before the key model v2 (per user, with progress), one user's keys, and a
+// restore from a user's personal kit (the only place one restores). Every change and every view needs the owner's password or a passkey (the
 // step-up) and is in the admin audit by fingerprint only. Plain-language
 // help sits next to every action. DOM through h() only (strict CSP).
 
@@ -13,7 +13,7 @@ import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { progressBar } from '../../js/progress.js';
 import { parseManualKey } from '../../js/drivekeys.js';
 import { b64urlFromBytes } from '../../js/bytes.js';
-import { buildKeyKit, verifyKeyKit, restoreKeyKit, fpText } from '../../js/keysclient.js';
+import { buildKeyKit, verifyKeyKit, restoreKeyKit, restoreUserKit, fpText } from '../../js/keysclient.js';
 import { confirmStep, canUsePasskey, confirmLabel } from './confirm.js';
 import {
   field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff, liveMsg,
@@ -159,7 +159,8 @@ export function keysSection({ profile }) {
       keyringCard(st, profile, { loud, changed: () => { loud = true; render(); } }),
       keyKitCard(st, profile, () => { loud = false; render(); }),
       upgradeCard(profile),
-      userKeysCard(profile));
+      userKeysCard(profile),
+      userKitCard(profile));
     loud = false;
   };
   render();
@@ -627,16 +628,27 @@ function archiveBox(a, profile, redraw) {
 }
 
 // ── one user's keys ─────────────────────────────────────────────────────────
+/**
+ * A list of every account (the owner included, not the public one) for one
+ * user's action; `label`: its accessible name when no visible label wraps it.
+ * `onLoad()` once the accounts are in; `onError(e)` if they do not load.
+ */
+function userSelect(id, { label = null, onLoad = () => {}, onError = () => {} } = {}) {
+  const el = h('select.input', { id, ...(label ? { 'aria-label': label } : {}) });
+  admin.users().then((r) => {
+    el.replaceChildren(...r.users.filter((u) => u.role !== 'public').map((u) => h('option', { value: u.id, dataset: { username: u.username }, text: u.role === 'owner' ? `${u.username} (you)` : u.username })));
+    onLoad();
+  }).catch(onError);
+  return el;
+}
+
 function userKeysCard(profile) {
-  const pick = h('select.input', { id: 'keys-user', 'aria-label': 'User' });
+  const { msg, live } = liveMsg('keys-user-msg');
+  const pick = userSelect('keys-user', { label: 'User', onError: (e) => showMsg(msg, friendlyError(e)) });
   const mine = secret('keys-user-confirm', 'current-password');
   const go = h('button.btn', { type: 'button', id: 'keys-user-view', text: 'View keys' });
   const deks = h('button.btn', { type: 'button', id: 'keys-user-deks', text: 'List file keys (DEKs)' });
   const out = h('div', { id: 'keys-user-out' });
-  const { msg, live } = liveMsg('keys-user-msg');
-  admin.users().then((r) => {
-    pick.replaceChildren(...r.users.filter((u) => u.role !== 'public').map((u) => h('option', { value: u.id, text: u.role === 'owner' ? `${u.username} (you)` : u.username })));
-  }).catch((e) => showMsg(msg, friendlyError(e)));
   // The values fetched stay in this card only until the session ends or changes (dropHeld).
   const ref = { values: [] };
   const drop = () => {
@@ -684,4 +696,58 @@ function userKeysCard(profile) {
     h('p.subtitle', { text: 'Read-only: a user’s salt and KEKs, or their files’ keys (DEKs) with each file’s name. Each view is in the admin audit (ids and counts only); the values stay masked until you choose Show and hide again after 60 seconds.' }),
     h('div.toolbar', {}, field('User', pick), field('Your password (or leave it empty to confirm with a passkey)', mine)),
     h('div.btn-row', {}, go, deks), live, out);
+}
+
+// ── a user's personal kit, restored here ─────────────────────────────────────
+const KIT_SALT = {
+  restored: 'the user salt was put back', same: 'the user salt was already there',
+  kept: 'the user salt on the server was kept (it is not the kit’s)', wrong: 'the kit’s salt does not open this user’s Drive, so it was not used', absent: '',
+};
+
+/**
+ * Restore a user's personal kit: the owner only (no Account page restores),
+ * so that no user can change what opens a Drive. The user is chosen here and
+ * the kit opens in this browser for that user only; the server takes only
+ * what it lost (the salt, items under a Drive key it no longer has) and never
+ * replaces a working key. The step-up: a password is asked once; a passkey
+ * again for each further call a large Drive needs.
+ */
+function userKitCard(profile) {
+  const { msg, live } = liveMsg('ukr-msg');
+  const file = fileInput('ukr-file');
+  const pass = secret('ukr-pass', 'off');
+  const mine = secret('ukr-confirm', 'current-password');
+  const go = h('button.btn', { type: 'button', id: 'ukr-restore', text: 'Restore from the personal kit', disabled: true, 'aria-describedby': 'ukr-hint' });
+  const pick = userSelect('ukr-user', { onLoad: () => sync(), onError: (e) => showMsg(msg, friendlyError(e)) });
+  const sync = () => { go.disabled = !file.files || !file.files.length || !pick.value; };
+  pick.addEventListener('change', sync);
+  file.addEventListener('change', sync);
+  go.addEventListener('click', async () => {
+    if (!file.files || !file.files.length || !pick.value) { sync(); return showMsg(msg, 'Choose the user and their kit file first.'); }
+    if (throttleWait()) return holdOff(go, msg, sync);
+    go.disabled = true;
+    const user = { id: pick.value, username: pick.selectedOptions[0]?.dataset.username || pick.value };
+    showMsg(msg, 'Opening the kit and restoring…', false);
+    try {
+      const first = await stepFrom(mine, profile);
+      const { text, passphrase } = await takeFile(file, pass, sync);
+      const step = async (n) => (n === 0 || first.current ? first : stepFrom(mine, profile));
+      const r = await restoreUserKit({ userId: user.id, text, passphrase, step, onProgress: (n) => showMsg(msg, `Restoring… ${n} item${n === 1 ? '' : 's'} sealed again`, false) });
+      kitSucceeded();
+      const parts = [KIT_SALT[r.salt] || '', r.unreadable.length ? `${r.done} item${r.done === 1 ? '' : 's'} sealed again under the current key` : 'nothing else was missing'].filter(Boolean);
+      showMsg(msg, `Restore done for ${user.username}: ${parts.join('; ')}.${r.failed ? ` ${r.failed} did not open with the kit and stay as they are.` : ''}${r.left.length ? ` The kit has no key for ${r.left.length} of the Drive keys the server lost: the key kit may.` : ''}`, false);
+      toast(`Restored from ${user.username}’s personal kit.`);
+    } catch (e) {
+      if (kitFailure(e)) kitFailed();
+      showMsg(msg, friendlyError(e));
+    } finally {
+      sync();
+    }
+  });
+  return h('div.card.stack', { id: 'keys-user-kit', 'aria-labelledby': 'keys-user-kit-title' },
+    h('h3.section-title', { id: 'keys-user-kit-title', text: 'Restore a user’s personal kit' }),
+    h('p.subtitle', { text: 'Only you restore from a personal kit, so no user can change what opens a Drive. Choose the user, then their kit file and its passphrase. The kit opens in this browser and must be that user’s; its file is not uploaded.' }),
+    h('div.toolbar', {}, field('User whose kit it is', pick), field('Personal kit file', file), field('Its passphrase', pass)),
+    h('p.type-hint', { id: 'ukr-hint', text: 'Only what the server lost comes back: the user’s salt if the server has none (and only if it opens their files), and files sealed under a Drive key the server no longer has, sealed again under the current key. A working key is never replaced. The restore is in the admin audit (ids and counts only).' }),
+    field('Your password (or leave it empty to confirm with a passkey)', mine), h('div.btn-row', {}, go), live);
 }

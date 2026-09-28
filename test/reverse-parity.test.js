@@ -282,6 +282,29 @@ describe('views (a view: one upload session granted)', () => {
     expect(await listed(u.cookie, unl.id)).toMatchObject({ views: 4, used: 3, left: 1 });
   });
 
+  it('a views-limited start still passes the "receive-upload" quota: a start the quota refuses spends no view, and a used-up link spends no quota', async () => {
+    const u = await receiver('rp-views-quota');
+    const r = await newReverse(u.cookie, { views: 3 });
+    const setQuotas = (list) => fetchJson('/api/private/admin/quotas', { method: 'PUT', cookie: oc, body: { scope: u.id, list } });
+    const used = async () => Object.fromEntries((await me(u.cookie)).quotas.map((x) => [x.kind, x.used]));
+    expect((await setQuotas([{ channel: 'all', kind: 'receive-upload', n: 100, unit: 'y', max: 1 }])).status).toBe(200);
+    const ip = freshIp();
+    const g = await grantOf(r, { ip });
+    await send(r, g, { ip });
+    expect((await rv(r.id, '/done', { headers: { 'x-reverse-grant': g }, ip })).status).toBe(200);
+    expect((await used())['receive-upload']).toBe(1);
+    // At the quota: 429, and the view is not spent.
+    const refused = await begin(r, { ip });
+    expect(refused.status).toBe(429);
+    expect(await errorOf(refused)).toBe('not_accepting');
+    expect((await driveRow(u.id, r.id)).used).toBe(1);
+    // A used-up link: 410 before the quota is looked at (nothing charged).
+    expect((await setQuotas([{ channel: 'all', kind: 'receive-upload', n: 100, unit: 'y', max: 10 }])).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { views: 1 })).status).toBe(200);
+    expect((await begin(r, { ip })).status).toBe(410);
+    expect((await used())['receive-upload']).toBe(0);
+  });
+
   it('concurrent starts never get more sessions than the views', async () => {
     const u = await receiver('rp-views-race');
     const r = await newReverse(u.cookie, { views: 3 });

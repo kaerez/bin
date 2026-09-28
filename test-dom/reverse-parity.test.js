@@ -102,10 +102,11 @@ describe('the options as typed', () => {
 
 // ── the Drive: Receive… ──────────────────────────────────────────────────────
 let S;
+let ids;
 async function server() {
   S = fakeServer({ capacity: 50 * 1024 * 1024 });
   globalThis.fetch = S.fetch;
-  await seedTree(S, { Documents: {} });
+  ids = await seedTree(S, { Documents: {} });
   return S;
 }
 const BASE = { maxViews: 100, allowUnlimitedViews: true, maxExpireSec: null, files: true, reverseMaxBytes: 1024 ** 3 };
@@ -198,6 +199,64 @@ describe('Drive: Receive… with no expiry, views and the password mode', () => 
     expect(cells[2]).toBe('No expiry');
     expect(cells[4]).toBe('2 left of 3');
     expect([...$('#drive-rev-table thead tr').children].map((c) => c.textContent)).toEqual(['Label', 'Created', 'Expires', 'Received', 'Views', 'Status', 'Actions']);
+  });
+});
+
+describe('Drive: Edit a link from its lists', () => {
+  async function seeded(profile, folder = 'root') {
+    await server();
+    const id = newReverseId();
+    const { pub, privateKey } = await createReverseKey();
+    const mek = S.current().id;
+    const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
+    const priv = await sealLinkKey(await S.kekOf(mek), { userId: S.user.id, mekId: mek, linkId: id }, pkcs8);
+    S.reverse.push({ id, folder: folder === 'root' ? 'root' : ids.get(folder), label: 'inbox', priv, mek, status: 'active', files: 0, bytes: 0, created: now() - 60, expires: now() + 86400, views: 2, used: 1 });
+    const r = await startDrive(mountPoint(), deps(profile));
+    await r.app.ready;
+    return { id, pub };
+  }
+
+  it('the Receive dialog: Edit turns it into the form; Save sends the change, the note sealed with the link\'s key', async () => {
+    const { id, pub } = await seeded(profileWith({ reverseNoExpiry: true }));
+    $('#drive-receive').click();
+    await until(() => $('#drive-rev-table'));
+    button($('#drive-rev-table tbody tr'), 'Edit').click();
+    await until(() => dialog().querySelector('.rev-edit'));
+    expect(dialog().querySelector('.modal-title').textContent).toBe('Edit “inbox”');
+    const groups = dialog().querySelectorAll('fieldset.rev-edit-group');
+    groups[0].querySelectorAll('input')[2].click(); // No expiry
+    groups[2].querySelectorAll('input')[1].click(); // the note: Add one
+    groups[2].querySelectorAll('input')[1].dispatchEvent(new Event('change'));
+    dialog().querySelector('textarea[id$="-note"]').value = 'drop the scans here';
+    dialog().querySelector('input[id$="-views"]').value = '1'; // lowered to the one used
+    button(dialog(), 'Save changes').click();
+    await until(() => S.patches?.length);
+    const sent = S.patches.at(-1);
+    expect(sent).toMatchObject({ id, body: { expires: null, views: 1 } });
+    expect(JSON.stringify(sent.body)).not.toContain('drop the scans');
+    expect(await openNote(pub, id, sent.body.note)).toBe('drop the scans here');
+    await until(() => !dialog());
+  });
+
+  it('a folder\'s Shares: its links with "No expiry", views and Edit; no Edit where the role does not allow it', async () => {
+    for (const edit of [true, false]) {
+      await seeded(profileWith({ reverseEdit: edit }), 'Documents');
+      S.reverse[0].expires = null;
+      const tr = [...document.querySelectorAll('#drive-rows tr')].find((x) => x.children[1].textContent.trim() === 'Documents');
+      button(tr, 'Shares').click();
+      await until(() => dialog()?.querySelector('#drive-shares-table'));
+      const row = dialog().querySelector('#drive-shares-table tbody tr');
+      expect(row.querySelector('td[data-label="Expires"]').textContent).toBe('No expiry');
+      expect(row.querySelector('td[data-label="Views"]').textContent).toBe('0 files received · 1 left of 2 views');
+      expect(!!button(row, 'Edit'), `reverseEdit ${edit}`).toBe(edit);
+      if (edit) {
+        button(row, 'Edit').click();
+        await until(() => dialog().querySelector('.rev-edit'));
+        expect(dialog().querySelector('legend').textContent).toMatch(/It has no expiry now/);
+      }
+      dialog().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await until(() => !dialog());
+    }
   });
 });
 

@@ -28,7 +28,7 @@ import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { captchaBox } from '../../js/captcha.js';
 import { SESSION_CHANGED_EVENT } from '../../js/api.js';
-import { reverseViews, reversePasswordChoice } from './reverse-edit.js';
+import { reverseViews, reversePasswordChoice, reverseEditForm, saveReverseEdit } from './reverse-edit.js';
 
 export { reverseViews, reversePasswordChoice };
 
@@ -331,13 +331,12 @@ function disabledNotice() {
 function unavailableNotice(e, deps) {
   const owner = deps.user && deps.user.role === 'owner' && !deps.user.impersonating;
   const text = e.reason === 'salt_missing'
-    ? 'This account’s user salt, one of the values its Drive keys are made from, is missing on the server. Nothing was deleted. It comes back from your personal kit (Account → Drive personal kit → Restore) or from the administrator’s key kit.'
+    ? 'This account’s user salt, one of the values its Drive keys are made from, is missing on the server. Nothing was deleted. The administrator puts it back from your personal kit or from the key kit (Admin → Security → Keys).'
     : 'The server’s Drive keys are missing, so no Drive can be opened right now. Nothing was deleted. The administrator restores them from the key kit (Admin → Security → Keys).';
   return h('div.card.drive-notice', { id: 'drive-unavailable', dataset: { reason: e.reason || '' } },
     h('h2.section-title', { text: 'Your Drive cannot be opened right now' }),
     h('p.msg.error', { text }), // content: the page's status line says the title
-    h('div.btn-row', {}, e.reason === 'salt_missing' ? h('a.btn', { href: '/dashboard/account/#drive-kit', text: 'Personal kit' }) : null,
-      owner ? h('a.btn', { href: '/dashboard/admin/#keys', text: 'Admin → Security → Keys' }) : null));
+    owner ? h('div.btn-row', {}, h('a.btn', { href: '/dashboard/admin/#keys', text: 'Admin → Security → Keys' })) : null);
 }
 
 /** The page's status line (startDrive), when there is one. */
@@ -1187,6 +1186,39 @@ function mountApp(mount, client, deps) {
     copy.focus();
   }
 
+  /**
+   * A Receive link's Edit (reverse-edit.js) in the dialog `d` it is listed in:
+   * its body becomes the form; saved, the dialog closes (the lists show the
+   * link as it is now the next time they open). The note and the password
+   * are sealed here with the link's key (driveclient.js updateReverse).
+   */
+  function editReverse(d, s, { onSaved = null } = {}) {
+    const form = reverseEditForm(s, deps.profile);
+    d.clearError();
+    d.setTitle(`Edit ${s.label ? `“${s.label}”` : 'this upload link'}`);
+    d.subEl.textContent = 'The password and the note are encrypted in this browser with the link’s key; the server never sees them. Files already received stay in your Drive.';
+    d.subEl.hidden = false;
+    d.setBody(form.el);
+    const save = primary('Save changes', async () => {
+      d.clearError();
+      const o = form.read();
+      if (o.error) { d.error(o.error, o.field ? form.field(o.field) : null); return; }
+      save.disabled = true;
+      try {
+        await saveReverseEdit(s.id, o.patch, { updateShare: (id, body) => client.updateReverse(id, body), driveClient: async () => client });
+        form.clearSecrets();
+        toast('Upload link updated.');
+        d.close();
+        if (onSaved) onSaved();
+      } catch (e) {
+        save.disabled = false;
+        d.error(friendlyError(e));
+      }
+    });
+    d.setActions(btn('Cancel', () => d.close(), 'modal-btn'), save);
+    form.focus();
+  }
+
   async function reverseList(d, box, folder) {
     let rows;
     try {
@@ -1217,6 +1249,7 @@ function mountApp(mount, client, deps) {
             try { await deps.revoke(s.id); s.status = 'revoked'; toast('Link revoked. Files already received stay.'); draw(); d.box.focus(); } catch (e) { rv.disabled = false; d.error(friendlyError(e)); }
           });
           row.appendChild(rv);
+          if (active && L.reverseEdit !== false) row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${s.label || 'this link'}`, on: { click: () => editReverse(d, s) } }));
         }
         cell.appendChild(row);
         tb.appendChild(h('tr', { dataset: { status: s.status || '' } },
@@ -1361,7 +1394,7 @@ function mountApp(mount, client, deps) {
     const status = h('p.msg', { role: 'status', text: 'Loading…' });
     const d = openDialog({ title: `Shares of “${it.name}”`, sub: 'Links that include this item. Revoking a link ends it for everyone; the item stays in your Drive.', body: [status], wide: true, fallback: focusPane });
     d.setActions(h('a.btn.modal-btn', { href: '/dashboard/shares/', text: 'All my shares' }), btn('Close', () => d.close(), 'modal-btn'));
-    // A folder's "Receive files" links are its shares too (they upload into it).
+    // A folder's "Receive" links are its shares too (they upload into it).
     const isDir = it.kind === 'dir';
     let rows;
     try {
@@ -1376,7 +1409,7 @@ function mountApp(mount, client, deps) {
     const draw = () => {
       if (!rows.length) {
         d.setBody(h('p.msg', { id: 'drive-shares-empty', text: isDir
-          ? 'No shares or upload links of this folder yet. Select it and choose Share… or Receive files… to create one.'
+          ? 'No shares or upload links of this folder yet. Select it and choose Share… or Receive… to create one.'
           : 'No shares of this item yet. Select it and choose Share… to create one.' }));
         return;
       }
@@ -1387,8 +1420,8 @@ function mountApp(mount, client, deps) {
         const active = s.status === 'active';
         // A paused upload link has not ended: it can be revoked too.
         const live = active || (rev && s.status === 'paused');
-        const views = rev ? `${s.files} file${s.files === 1 ? '' : 's'} received` : viewsText(s);
-        const expires = s.expires ? (active && s.expires > now ? `in ${formatCoarse(s.expires - now)}` : formatDate(s.expires)) : '—';
+        const views = rev ? viewsText({ kind: 'reverse', views_total: s.views ?? null, left: s.left, received: { files: s.files } }) : viewsText(s);
+        const expires = expiresText(s, now);
         const cell = h('td.cell-actions');
         const btns = h('div.btn-row');
         if (rev && s.url && active) {
@@ -1402,6 +1435,8 @@ function mountApp(mount, client, deps) {
             try { await deps.revoke(s.id); s.status = 'revoked'; toast(rev ? 'Link revoked. Files already received stay.' : 'Share revoked.'); draw(); d.box.focus(); } catch (e) { rv.disabled = false; d.error(friendlyError(e)); }
           });
           btns.appendChild(rv);
+          // A Receive link's options, as the role lets the user change them.
+          if (rev && active && L.reverseEdit !== false) btns.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${s.label || 'this link'}`, on: { click: () => editReverse(d, s) } }));
         }
         cell.appendChild(btns);
         tb.appendChild(h('tr', { dataset: { status: s.status || '', kind: s.kind || '' } },

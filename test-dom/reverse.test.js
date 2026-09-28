@@ -428,7 +428,7 @@ describe('Drive: Receive…', () => {
     const tr = [...document.querySelectorAll('#drive-rows tr')].find((x) => x.children[1].textContent.trim() === 'Documents');
     button(tr, 'Shares').click();
     await until(() => dialog()?.querySelector('#drive-shares-empty'));
-    expect(dialog().querySelector('#drive-shares-empty').textContent).toMatch(/Share… or Receive files…/);
+    expect(dialog().querySelector('#drive-shares-empty').textContent).toMatch(/Share… or Receive…/);
   });
 
   it('the owner acting as the user is not asked to confirm (the server asks for nothing then)', async () => {

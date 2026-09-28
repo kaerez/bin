@@ -348,8 +348,10 @@ many files arrive.
   none —, or none), the views (raise, lower to the views used, or unlimited), the limits and
   file types, the CAPTCHA, the password (keep, change or add, remove) and the note (keep,
   replace or add, remove), each as the role allows. The password and the note are sealed in the
-  browser, which opens the Drive's keys for it only when one of them changes. Admin → Shares
-  changes a Receive link's views and expiry (or none) only.
+  browser, which opens the Drive's keys for it only when one of them changes. The same **Edit**
+  is in the Drive, on each link of the Receive… dialog's list and of a folder's Shares dialog (the
+  dialog shows the form; saving closes it). Admin → Shares changes a Receive link's views and
+  expiry (or none) only.
 - Empty folders in an upload are not sent (only files are received; their paths make the folders).
 
 ## 9. Links of the previous release

@@ -8,7 +8,7 @@
 // recipient would), reading v3 shares in downloads.js, and the personal kit.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-  openDrive, DriveDisabled, DriveUnavailable, checkName, buildPersonalKit, verifyPersonalKit, restorePersonalKit,
+  openDrive, DriveDisabled, DriveUnavailable, checkName, buildPersonalKit, verifyPersonalKit,
 } from '../public/js/driveclient.js';
 import { clearSessionKey, openName, openDek, chunkHash, ciphertextHash } from '../public/js/drivekeys.js';
 import { keyCheckValueV1, saveLegacyKey } from '../public/js/drivev1.js';
@@ -197,7 +197,7 @@ describe('opening the Drive', () => {
 });
 
 describe('the personal kit', () => {
-  it('download (the step-up), verify with a date (read-only, check values only), restore', async () => {
+  it('download (the step-up), verify with a date (read-only, check values only); no restore', async () => {
     install();
     S.proof = 'proof-1';
     const d = await openDrive();
@@ -227,9 +227,8 @@ describe('the personal kit', () => {
     expect((await verifyPersonalKit({ user: S.user, text: kit.text, passphrase: 'wrong' })).verdict).toBe('failed');
     const other = await sealDriveKit('user', { ...payload }, { accountId: 'someoneelse00000', origin: location.origin, passphrase: '' });
     expect((await verifyPersonalKit({ user: S.user, text: other, passphrase: '' })).checks[0]).toMatchObject({ id: 'format', status: 'fail' });
-    // Restore: the salt is there already, so nothing changes.
-    const r = await restorePersonalKit({ user: S.user, text: kit.text, passphrase: 'kit pass', step: { current: 'proof-1' } });
-    expect(r).toEqual({ salt: 'same', items: 0, links: 0, left: [] });
+    // No restore from here: only the owner restores from a personal kit (Admin → Security → Keys, keysclient.js).
+    expect(Object.keys(await import('../public/js/driveclient.js'))).not.toContain('restorePersonalKit');
     // Never while the owner acts as the user.
     await expect(buildPersonalKit({ user: { ...S.user, impersonating: true }, step: { current: 'proof-1' } })).rejects.toMatchObject({ code: 'impersonating' });
   }, 60000);
