@@ -55,7 +55,7 @@ const NETWORK_ONLY_PREFIXES = ['/api/', '/p/', '/r/'];
 // The SHA-256 (base64) of each static asset this build serves: a cached copy is used only with this exact body.
 const ASSET_SHA256 = Object.freeze({
   "/": "g+IVPUfTOrEEZP7664xhKPNihKPYsSGpCwWcsETP6M8=",
-  "/css/styles.css": "U3xRdyeL0WBnbRT5U0Y7WKbPk9FLNTOl+QlKu9Z9uFY=",
+  "/css/styles.css": "5S6zEOd+NRDkCM7c5EBHgA815UT3QKB3nl5XMcdNMw4=",
   "/favicon.ico": "e5iZ0ERlUEcIvTABlyiU5SRJtFc92PWn2P6B/S+EckI=",
   "/fonts/geist-400.woff2": "5u9quznHYu0iWcyBTm8WiIxUDNhINZYiJ7VqsjVPJ/E=",
   "/fonts/geist-500.woff2": "QAc+kIFjFckuT0OBvVC2/clQsisN0BCkF5BGz1iNTxI=",
