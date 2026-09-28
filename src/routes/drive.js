@@ -213,11 +213,25 @@ export async function handleDrive(request, env, url) {
     const keys = await userKeys(env, uid);
     const mfp = await checkNewItem(uid, keys, { kind: 'file', ...kf, name, meta, dek });
     const uploadToken = genToken();
-    const r = await drive().createFile(uid, {
-      id, parent, name, meta, size: body.size, dek, ...kf, mfp, uploadHash: await hashToken(uploadToken),
-      capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: pol.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: pol.pendingSec,
-    });
-    if (!r.ok) return withAuth(a, fromDir(r));
+    // One file added to the Drive: the quotas of kind drive-upload count it
+    // now, and give it back when the Drive refuses it (below) or the upload
+    // never completes (deleted unfinished, or purged: the Drive reports it).
+    const quota = await dir.authorizeDriveUpload(uid);
+    if (!quota.ok) return withAuth(a, fromDir(quota));
+    let r;
+    try {
+      r = await drive().createFile(uid, {
+        id, parent, name, meta, size: body.size, dek, ...kf, mfp, uploadHash: await hashToken(uploadToken),
+        capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: pol.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: pol.pendingSec,
+      });
+    } catch (e) {
+      await dir.refund(uid, quota.refund);
+      throw e;
+    }
+    if (!r.ok) {
+      await dir.refund(uid, quota.refund);
+      return withAuth(a, fromDir(r));
+    }
     await dir.setDriveUsed(uid, r.used);
     return withAuth(a, json({ id: r.id, uploadToken, chunks: r.chunks }, 201));
   }
@@ -299,6 +313,7 @@ export async function handleDrive(request, env, url) {
       binding(env, 'FILES'); // never report a delete that left ciphertext in R2
       const r = await drive().deleteNode(uid, id);
       if (!r.ok) return withAuth(a, fromDir(r));
+      if (r.unfinished?.length) await dir.refundAt(uid, 'drive-upload', r.unfinished);
       await endShares(env, dir, uid, r.shares, actorId(a));
       // Reverse shares of a deleted folder end with it (no FileShare record to revoke).
       if (r.reverse.length) await dir.endDriveShares(uid, r.reverse, actorId(a));
@@ -924,8 +939,9 @@ async function nodeShares(env, dir, uid, id) {
 
 /**
  * A Drive share: a FileShare record referencing Drive files, authorized
- * exactly like a file share (limits, file policy declarations, quotas of kind
- * "files"), recorded in My shares as kind "drive".
+ * exactly like a file share (limits, file policy declarations; counted by the
+ * quotas of kind "drive", "files" and "all"), recorded in My shares as kind
+ * "drive".
  */
 async function createShare(request, env, dir, a) {
   const uid = a.user.id;

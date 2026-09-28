@@ -1367,6 +1367,12 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   (`409 busy`), so a late chunk write never lands on, or is deleted from, a finished file; a
   write that finishes after its upload ended (cancelled, revoked, purged) is deleted. An uploader can fill the user's Drive up to the link's limits: the user
   chooses those limits, and revokes the link at any time.
+- **Quotas on Receive.** The owner can cap, per role, the upload sessions a user's links receive
+  (`receive-upload`, and `receive` with new links) in a fixed window. A session is counted for
+  the user when it starts (before the password is checked), atomically in the Directory, and
+  given back when it does not start or ends having sent no file. At the quota `begin` answers
+  `429 not_accepting` ("This link can’t accept more uploads right now. Try again later."): the
+  uploader learns nothing of the quota (no numbers, no window, no `Retry-After`).
 - **Ending.** Revoking a link, its expiry, an admin lock (paused), the role losing the option, or
   deleting its folder stops uploads at once; unfinished uploads are deleted; files already
   received stay. Deleting the account deletes everything.
@@ -1397,6 +1403,12 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - No CORS headers; JSON bodies are read under a streaming byte cap (4 MiB; 8 MiB + 16 B for
   file chunks, with the exact expected size enforced).
 - Every value is re-validated server-side (formats, views, expiry, limits, quotas, settings).
+- **Quotas** (role option lists; public/js/quotakinds.js) are checked and counted in one
+  synchronous Directory step, so concurrent creations cannot pass a quota: outgoing shares
+  (every share, or by type), Drive uploads (`drive-upload`, each file, at the upload's start) and
+  Receive (`receive-link`, `receive-upload`). An API-only quota narrows API creations only; the
+  Drive and Receive have no API channel. The public account's quotas count per anonymous
+  subject and take only the kinds it can use. The owner is never counted.
 - Reads that spend views need custom headers (non-simple): ambient GETs never consume anything.
 - Download grants are stored apart from the share record.
   - One client (an IP, or an IPv6 /64) holds at most 20 live grants per file share; opening

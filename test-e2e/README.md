@@ -122,3 +122,19 @@ npx wrangler dev --port 8787 --persist-to .wrangler/captcha-state \
 WT=$PWD BASE=http://localhost:8787 node test-e2e/captcha.mjs
 # behind an HTTPS-intercepting proxy: PROXY_SPKI=<its CA's SPKI hash> (HTTPS_PROXY is used when set)
 ```
+
+## `quotas.mjs` — role quota kinds
+
+What it covers (README "Quotas"): Admin → Roles → a custom role → Quotas — the kind select's
+groups (Outgoing shares, Drive, Receive) and labels, "API only" disabled for a Drive or Receive
+kind, a quota of each group saved through the editor; the Public role offering only the outgoing
+kinds it can use; then, as the user, each quota reached through the UI — a second note refused in
+the composer, a second Drive upload refused, a second Receive link refused in its dialog, and the
+anonymous uploader's page refusing a second upload session with "This link can’t accept more
+uploads right now. Try again later." (nothing of the quota shown); the Account page's quota list;
+axe (WCAG 2.2 A/AA) on the editors and every refusal; no page errors or CSP / Trusted Types
+violations. It needs a fresh server (no owner yet):
+
+```sh
+WT=$PWD BASE=http://localhost:8787 node test-e2e/quotas.mjs
+```

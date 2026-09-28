@@ -354,8 +354,13 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   null = no limit up to a hard 100 GiB); `driveMaxFileBytes` (bytes, nullable, default null).
 - Drive shares obey the same share options as file shares: `files`, `maxViews`,
   `allowUnlimitedViews`, `maxExpireSec`, `maxFilesPerShare`, `openerDelete`, file-type rules,
-  quotas (kind `files`), receipts, and the CAPTCHA (`shareCaptcha` / `shareCaptchaDefault`:
+  quotas (kinds `drive`, `files` and `all`), receipts, and the CAPTCHA (`shareCaptcha` / `shareCaptchaDefault`:
   SECURITY.md, *CAPTCHA on shares*). The owner has no limits. The public account has no Drive.
+- Uploads: each file added by an upload (a folder upload: each of its files) is counted by the
+  role's quotas of kind `drive-upload` when `POST /api/private/drive/files` reserves it
+  (`429 quota_exceeded` at the quota), and given back when the Drive refuses it or the upload
+  never completes (the browser deletes the unfinished file, or the purge removes it). Files
+  taken in from reverse shares are counted under Receive (docs/REVERSE.md §6.2), not here.
 - Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
   `reverseCaptcha`, `reverseCaptchaDefault`): [`REVERSE.md`](./REVERSE.md) §5. The reverse-share
   CAPTCHA is shown in the role editor only while the role has the Drive and reverse shares.
