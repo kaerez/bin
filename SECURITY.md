@@ -1197,8 +1197,11 @@ The rest of the activity log (settings, roles, shares, the Drive, imports) is st
   are sealed as they are written, and the **background pass** (the Directory's alarm, run within
   seconds of the keyring's creation, of a root change and of this release's migration 18) seals
   the rows written before, 500 per table per run. It also re-keys the Guard rows from before this
-  release (they were keyed by the address) to their keyed hash; until it has run (seconds after
-  the upgrade), those earlier blocks do not apply.
+  release (they were keyed by the address, in the address's shard) to their keyed hash. Until the
+  pass has done so for a shard (its meta flag `legacy.done`; a shard made by this release starts
+  done), the Worker also looks the network up by its address there: a block made before still
+  refuses, and failures counted before are taken over by the tagged counter, so the upgrade opens
+  no window without blocks.
 - **Writing.** The row id is part of the AAD, so a row is written first holding none of the
   values and marked "being sealed", then sealed in the same request before it returns. A row whose
   sealing never finished holds nothing and is released, empty, by the pass after an hour.

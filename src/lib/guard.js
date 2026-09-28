@@ -20,6 +20,8 @@ let rulesCache = { at: 0, rules: [] };
 let settingsCache = { at: 0, settings: null };
 let publicConfigCache = { at: 0, config: null };
 let guardKeysCache = { at: 0, keys: null };
+/** The Guard shards whose legacy rows the Directory's pass has re-keyed (legacyDone): never asked again by this isolate. */
+let legacyDoneShards = new Set();
 
 export const directory = (env) => {
   const ns = binding(env, 'DIRECTORY');
@@ -32,6 +34,7 @@ export function invalidateGuardCaches() {
   settingsCache = { at: 0, settings: null };
   publicConfigCache = { at: 0, config: null };
   guardKeysCache = { at: 0, keys: null };
+  legacyDoneShards = new Set();
 }
 
 /**
@@ -137,7 +140,30 @@ export async function isBlocked(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   if (g.manual === 'block') return { blocked: true, manual: true };
   const tag = await tagOf(env, g);
-  return shard(env, tag).check(scope, tag);
+  const [cur, before] = await Promise.all([shard(env, tag).check(scope, tag), legacy(env, g, (s) => s.legacyCheck(scope, g.key))]);
+  return cur.blocked || !before?.blocked ? cur : { blocked: true, until: before.until };
+}
+
+/**
+ * The caller's rows from before the tags (keyed by its tracking key, in that
+ * key's shard; src/guard-do.js), until the Directory's pass has re-keyed that
+ * shard: `ask(stub)` → its answer, or null once the shard is done.
+ */
+async function legacy(env, g, ask) {
+  const i = guardShardIndex(g.key);
+  if (legacyDoneShards.has(i)) return null;
+  const ns = binding(env, 'GUARD');
+  const r = await ask(ns.get(ns.idFromName(`shard-${i}`)));
+  if (r.done) { legacyDoneShards.add(i); return null; }
+  return r;
+}
+
+/** One failure on the caller's tag, counting on (and taking) its failures from before the tags; a block from before refuses at once. */
+async function failOnTag(env, g, scope, rule) {
+  const tag = await tagOf(env, g);
+  const before = await legacy(env, g, (s) => s.legacyTake(scope, g.key));
+  if (before?.blocked) return { blocked: true, until: before.until };
+  return shard(env, tag).fail(scope, tag, rule, await sealedAddr(env, g, scope, tag), before?.carry ?? null);
 }
 
 /** Record one failure for `scope`; returns the block state after it. */
@@ -145,8 +171,7 @@ export async function recordFailure(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   const s = g.settings;
   const rule = { max: s[`guard.${scope}.max`], windowSec: s[`guard.${scope}.windowSec`], blockSec: s[`guard.${scope}.blockSec`] };
-  const tag = await tagOf(env, g);
-  return shard(env, tag).fail(scope, tag, rule, await sealedAddr(env, g, scope, tag));
+  return failOnTag(env, g, scope, rule);
 }
 
 /**
@@ -159,8 +184,7 @@ export async function recordFailure(env, g, scope) {
 export async function rateLimit(env, g, scope, rule) {
   if (g.off.all || g.manual === 'allow') return { ok: true };
   if (g.manual === 'block') return { ok: false, until: null };
-  const tag = await tagOf(env, g);
-  const r = await shard(env, tag).fail(scope, tag, rule, await sealedAddr(env, g, scope, tag));
+  const r = await failOnTag(env, g, scope, rule);
   return r.blocked ? { ok: false, until: r.until ?? null } : { ok: true };
 }
 

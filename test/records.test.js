@@ -9,7 +9,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { owner, makeUser, fetchJson, createNote, openNote, freshIp, proofFor, OWNER_STEP } from './helpers.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
-import { GUARD_SHARDS } from '../src/guard-do.js';
+import { GUARD_SHARDS, guardShardIndex as at } from '../src/guard-do.js';
 import { deriveRecordKey, tableKey, sealRecord, openRecord, wrapRecordKey, unwrapRecordKey, isSealedRecord, guardTag, importTagKey } from '../src/lib/records.js';
 import { randomBytes, b64urlFromBytes, bytesFromB64url } from '../public/js/bytes.js';
 import { keyFingerprint } from '../public/js/drivekeys.js';
@@ -278,27 +278,62 @@ describe('no keyring yet (an instance from before the Drive)', () => {
 });
 
 describe('Guard rows from before the tags', () => {
-  it('the pass re-keys a block made before (to its tag\'s shard), seals its address, and the block still applies', async () => {
+  /** The Guard shards as the release before left them: no "legacy.done" (nothing re-keyed yet). */
+  const upgraded = () => Promise.all(shards().map((s) => runInDurableObject(s, (g) => g.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'"))));
+  const doneFlags = () => Promise.all(shards().map((s) => runInDurableObject(s, (g) => g.sql.exec("SELECT COUNT(*) AS c FROM meta WHERE k = 'legacy.done'").one().c)));
+  const tagOf = (legacy) => runInDurableObject(dirOf(), async (d) => guardTag(await importTagKey(bytesFromB64url((await d.guardKeys()).tag)), legacy));
+
+  it('a block made before applies at once after the upgrade (legacy lookup), and after the pass as its tagged row', async () => {
     const ip = '203.0.113.201';
     const legacy = `${ip}/32`;
     const t = now();
+    await upgraded();
     // A block the release before left: keyed by the address, in the shard of the address.
-    const { guardShardIndex } = await import('../src/guard-do.js');
-    await runInDurableObject(shards()[guardShardIndex(legacy)], (g) => g.sql.exec("INSERT OR REPLACE INTO blocks (scope, key, until, since) VALUES ('invalid', ?, ?, ?)", legacy, t + 600, t));
+    await runInDurableObject(shards()[at(legacy)], (g) => g.sql.exec("INSERT OR REPLACE INTO blocks (scope, key, until, since) VALUES ('invalid', ?, ?, ?)", legacy, t + 600, t));
+    invalidateGuardCaches();
+    const n = await createNote(oc, { text: 'x', bar: true });
+    // Right after the deploy, before any pass: still blocked.
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(429);
+    expect(await doneFlags()).toEqual(Array(GUARD_SHARDS).fill(0));
+    // The pass re-keys it (to its tag's shard) and marks every shard done.
     await runInDurableObject(dirOf(), (d) => d.alarm());
+    expect(await doneFlags()).toEqual(Array(GUARD_SHARDS).fill(1));
     const stored = (await Promise.all(shards().map((s) => runInDurableObject(s, (g) => g.sql.exec("SELECT * FROM blocks WHERE scope = 'invalid'").toArray())))).flat();
     expect(JSON.stringify(stored)).not.toContain(ip);
-    const tag = await runInDurableObject(dirOf(), async (d) => guardTag(await importTagKey(bytesFromB64url((await d.guardKeys()).tag)), legacy));
+    const tag = await tagOf(legacy);
     const row = stored.find((r) => r.key === tag);
     expect(row).toMatchObject({ until: t + 600 });
     expect(isSealedRecord(row.addr)).toBe(true);
-    // Still blocked, through the Worker's own lookup.
+    // Still blocked, now through the tag alone (the legacy lookup has stopped).
     invalidateGuardCaches();
-    const n = await createNote(oc, { text: 'x', bar: true });
     expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(429);
     const g = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
     expect(g.blocks.find((x) => x.key === tag).addr).toBe(legacy);
     expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: tag } })).status).toBe(200);
     expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(200);
+  });
+
+  it('failures counted before the upgrade still count toward the block before the pass', async () => {
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': 3, 'guard.invalid.windowSec': 600, 'guard.invalid.blockSec': 600, ...OWNER_STEP } });
+    const ip = '203.0.113.202';
+    const legacy = `${ip}/32`;
+    const t = now();
+    await upgraded();
+    await runInDurableObject(shards()[at(legacy)], (g) => g.sql.exec("INSERT OR REPLACE INTO tracking (scope, key, count, start, expires) VALUES ('invalid', ?, 2, ?, ?)", legacy, t - 10, t + 590));
+    invalidateGuardCaches();
+    const n = await createNote(oc, { text: 'x', bar: true, password: 'pw-123456789' });
+    // Two failures before the upgrade, one after: the third blocks.
+    expect((await openNote(n.id, n.fragment, 'wrong', { ip })).res.status).toBe(429);
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(429);
+    // The legacy counter was taken over by the tagged row (not counted twice); the block is the tag's.
+    expect(await runInDurableObject(shards()[at(legacy)], (g) => g.sql.exec("SELECT COUNT(*) AS c FROM tracking WHERE key = ?", legacy).one().c)).toBe(0);
+    const tag = await tagOf(legacy);
+    const g = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
+    expect(g.blocks.find((x) => x.key === tag && x.scope === 'invalid').addr).toBe(legacy);
+    await runInDurableObject(dirOf(), (d) => d.alarm());
+    expect(await doneFlags()).toEqual(Array(GUARD_SHARDS).fill(1));
+    expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: tag } })).status).toBe(200);
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': 60, 'guard.invalid.windowSec': 600, 'guard.invalid.blockSec': 1800, ...OWNER_STEP } });
+    invalidateGuardCaches();
   });
 });

@@ -28,7 +28,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   readable, and a background pass seals them again under the current key. An instance with no
   keyring yet writes records in the clear, as before, and the pass seals them once a keyring
   exists; it also seals the rows stored before this release (Directory migration 18) and
-  re-keys the guard's earlier rows. The server can derive the key: this protects a copy of the
+  re-keys the guard's earlier rows. Until a guard shard's earlier rows are re-keyed, lookups
+  check the address too, so blocks and failure counts from before the upgrade keep applying. The server can derive the key: this protects a copy of the
   stored rows, not the server (SECURITY.md, "Records at rest"). Records are not exported.
 - **Impersonation no longer extends the owner's session.** Starting an impersonation and
   "Return to admin" each issue a new session that keeps the absolute end of the owner's sign-in

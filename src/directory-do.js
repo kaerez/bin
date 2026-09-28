@@ -2285,14 +2285,21 @@ export class Directory extends DurableObject {
    * are re-keyed (they move to the shard of their tag; a block keeps the later
    * end), and addresses in the clear or under an earlier key are sealed under
    * the current one; an address that no longer opens is dropped (the row
-   * stays). → true when a shard had more than one run takes.
+   * stays). A shard with no row from before the tags left is then marked done
+   * (Guard.legacyDone), and the Worker stops looking for such rows there.
+   * → true when a shard had more than one run takes.
    */
   async #guardPass(kid) {
     const ns = this.env?.GUARD;
     if (!ns) return false;
     const shards = Array.from({ length: GUARD_SHARDS }, (_, i) => ns.get(ns.idFromName(`shard-${i}`)));
     const found = await Promise.all(shards.map((s) => s.pending({ kid, limit: RECORD_PASS_ROWS })));
-    if (!found.some((rows) => rows.length)) return false;
+    // Once done, a shard answers from its flag alone.
+    const markDone = () => Promise.all(shards.map((s) => s.legacyDone()));
+    if (!found.some((rows) => rows.length)) {
+      await markDone();
+      return false;
+    }
     const tagKey = await importTagKey(await this.#purposeBits(KEY_INFO.guardTag));
     const gkey = kid ? await this.#tableKey(kid, 'guard') : null;
     const seal = (scope, tag, addr) => (gkey ? sealRecord(gkey, { table: 'guard', col: 'addr', id: guardRowId(scope, tag) }, addr) : addr);
@@ -2315,6 +2322,7 @@ export class Directory extends DurableObject {
     // Every re-keyed row lands in its new shard before its old key goes.
     await Promise.all(shards.map((s, i) => (plan[i].reseal.length || plan[i].adopt.length ? s.apply({ reseal: plan[i].reseal, adopt: plan[i].adopt }) : null)));
     await Promise.all(shards.map((s, i) => (plan[i].drop.length ? s.apply({ drop: plan[i].drop }) : null)));
+    await markDone();
     return more;
   }
 
