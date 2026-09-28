@@ -41,9 +41,11 @@ directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 # "/" too: the home page gets the Turnstile headers when public sharing and
-# Turnstile are both on (src/index.js); /p/* stays static and strict. /r/* is
-# the reverse-share uploader page (Turnstile headers when Turnstile is on).
-run_worker_first = [ "/", "/index.html", "/api/*", "/dashboard", "/dashboard/*", "/r", "/r/*" ]
+# Turnstile are both on (src/index.js). /p/* (the recipient's page) and /r/*
+# (the reverse-share uploader page) always keep the strict headers and get a
+# per-navigation page key; /p|r/<id>?check is the CAPTCHA page of a share that
+# has one (Turnstile headers). /check/* is served only that way (else 404).
+run_worker_first = [ "/", "/index.html", "/api/*", "/dashboard", "/dashboard/*", "/r", "/r/*", "/p/*", "/check", "/check/*" ]
 
 # ── KV: unlimited-view notes, immutable, native TTL expiry ───────────────────
 [[kv_namespaces]]

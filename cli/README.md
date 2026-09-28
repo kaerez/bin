@@ -113,6 +113,7 @@ and a one-line summary of the share's lifecycle go to **stderr**.
 | `-f, --file <path>` | Read the content from a file instead of stdin |
 | `--fmt <fmt>` | `plaintext` (default), `code`, `markdown`, `url` or `secret` (see below); this affects rendering |
 | `--recipient-can-delete` | Let whoever opens the share delete it at once ("delete now"). The administrator must allow it. Also on `send`. |
+| `--captcha`, `--no-captcha` | Recipients must (not) pass a CAPTCHA in a browser before the share opens. Neither: your role's default. Your role may require it (it is then on whatever you pass) or not allow it (`--captcha` is refused). A share with it opens in a browser only (not with `secbin get` or the API). Also on `send`. |
 | `--views <n\|unlimited>` | Views before the note is deleted. The default is `1` and the maximum is `100000`. `unlimited` keeps the note until it expires. |
 | `--expire <n>m\|h\|d` | Lifetime from `1m` to `365d` (default `24h`) |
 | `--label <text>` | A label in your account's share list (up to 100 characters). It is **not encrypted**: the server and its administrators can see it. |
@@ -121,7 +122,7 @@ and a one-line summary of the share's lifecycle go to **stderr**.
 | `--api-key-file <path>` | Read the API key from a file instead of `$SECBIN_API_KEY` |
 | `-s, --server <origin>` | Server origin (default `$SECBIN_SERVER`) |
 | `-q, --qr` | Also print a scannable QR code to stderr |
-| `-j, --json` | Print `{url, id, deletetoken, expires, views}` as JSON (`views: null` = unlimited) |
+| `-j, --json` | Print `{url, id, deletetoken, expires, views, captcha}` as JSON (`views: null` = unlimited; `captcha`: the share has the CAPTCHA) |
 
 Your account's limits (maximum views, maximum expiry, quotas) are enforced by the server. A
 request beyond them is refused with the server's reason; it is never silently shortened.
@@ -198,6 +199,9 @@ directory). Only the chunks that cover the selected files are downloaded.
 | `-y, --yes` | Skip the "this uses a view" confirmation |
 | `--password-env <VAR>` | Read the password from an environment variable. Otherwise you are prompted on a TTY. |
 | `--field <name>` | Credential share: print one field, or `code` for the current one-time code |
+
+A share whose sender required a CAPTCHA opens in a browser only: `secbin get` stops with
+`This share requires a CAPTCHA; open it in a browser` (exit 1), and nothing is spent.
 
 Downloads are confined to the output folder. Every target must resolve inside `--out`.
 Every path component below it is checked right before use, and a symbolic link found there

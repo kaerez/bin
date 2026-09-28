@@ -451,7 +451,11 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   null = no limit up to a hard 100 GiB); `driveMaxFileBytes` (bytes, nullable, default null).
 - Drive shares obey the same share options as file shares: `files`, `maxViews`,
   `allowUnlimitedViews`, `maxExpireSec`, `maxFilesPerShare`, `openerDelete`, file-type rules,
-  quotas (kind `files`), receipts. The owner has no limits. The public account has no Drive.
+  quotas (kind `files`), receipts, and the CAPTCHA (`shareCaptcha` / `shareCaptchaDefault`:
+  SECURITY.md, *CAPTCHA on shares*). The owner has no limits. The public account has no Drive.
+- Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
+  `reverseCaptcha`, `reverseCaptchaDefault`): [`REVERSE.md`](./REVERSE.md) §5. The reverse-share
+  CAPTCHA is shown in the role editor only while the role has the Drive and reverse shares.
 - New keys join the Default role (a Directory migration materialises them) and appear in the
   role editors under a **Drive** section.
 
@@ -461,7 +465,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the ones with `?` for the owner only; while impersonating, the `escrow` wrap's `data` is null; `capacity` null = no limit; `driveSalt`, `escrowPub`, `escrowPin` null until set). A role without a Drive: `200 { enabled: false, wraps: [] }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
+| `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, kcv, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the ones with `?` for the owner only; `kcv` is the Drive key's check value, which the browser proves a key from its tab storage against before using it; while impersonating, the `escrow` wrap's `data` is null; `capacity` null = no limit; `driveSalt`, `escrowPub`, `escrowPin` null until set). A role without a Drive: `200 { enabled: false, wraps: [] }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
 | `PUT /api/private/drive/keys` | set wraps: `{ driveSalt?, set: [{kind, ref, data}], remove: [{kind, ref}], escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, kcv?, escrowReset?, current? \| reauth? }` (`kcv` with the first set-up and with every later wrap or pin: `400 kcv_required`, `409 kcv_mismatch`, `409 kcv_missing`; a first set-up is a compare-and-set, `409 drive_exists`, and refused for a Drive with content or keys but no wrap, `409 drive_keyless`; `escrowReset`: the owner reset a user's browser moved the Drive to, §3.2, recorded once per epoch, `429 rate_limited` after 5 in 10 minutes; `400 escrow_own` for an escrow wrap in the owner's own Drive) (the `escrow…` keys owner only; the step-up `current` / `reauth` where §3 says, `400 reauth_required` without it; a user's first set-up `409 escrow_not_ready` before the owner's escrow key exists, `400` without an escrow wrap for the current key and a wrap of the user's own; `403 escrow_required` for removing the escrow wrap; `409 last_wrap` / `last_own_wrap`) |
 | `POST /api/private/drive/kit` | the owner (not impersonating): `{ event: "exported", current \| reauth }` → `{ ok, kit }` (records `{ version, kid, at }`; `409 no_escrow` without an escrow key); `{ event: "used", version?, current \| reauth }`; `{ event: "verified", verdict: "complete" \| "incomplete" \| "failed", issues?, version? }` (§3.1; all in the admin audit); a user `403 owner_only`, impersonating `403 impersonating` (as every kit, start-over and archive route) |
 | `POST /api/private/drive/kit/probe` | the owner, with `{}` and the intent header (it writes to the admin audit): `{ probes: [{ kid, wrap }] }` — one user's escrow wrap per kid in use, each `drive.escrow_used` (the check's live proof); at most 30 per session per 10 minutes (`429 rate_limited`) |
@@ -514,6 +518,10 @@ shares and Admin → Shares with `kind = 'drive'`.
   grant. `public/js/downloads.js` and the viewer read v3 manifests (per-file keys and chunk
   sequences), including preview, single-file download and zip.
 - Deleting a drive node revokes every share whose `refs` include it (or a descendant).
+- **The CAPTCHA:** a Drive share can require its recipients to pass a CAPTCHA first, as any
+  share (`captcha` on `POST /api/private/drive/shares`, as the role allows; the FileShare
+  record's `hc` and the index row's `captcha`): without a grant its head, open, "delete now"
+  and every `/chunk/<ref>/<i>` answer `403 captcha_required` (SECURITY.md, *CAPTCHA on shares*).
 
 ## 8. UI
 
@@ -601,8 +609,9 @@ stand-in. What each side relies on:
   handle whose `save()` streams the file to disk or a download, and
   `downloadFolder(id, { onProgress, signal })` (a ZIP).
 - `mkdir(parent, name)` → the new id; `rename(id, name)`, `move(id, parent)`, `remove(id)`.
-- `share(ids, { views, expire, password, deletable, label, limits, view })` → `{ url, id,
-  deletetoken }`: `ids` may be files and folders (the client flattens them to files for the
+- `share(ids, { views, expire, password, deletable, label, limits, view, captcha })` → `{ url, id,
+  deletetoken, captcha }` (`captcha`: the Share dialog's "Require CAPTCHA to open", shown as the
+  role says — a choice pre-set from its default, ticked and disabled, or hidden): `ids` may be files and folders (the client flattens them to files for the
   server); `views` is a number or `null` (unlimited), `expire` the composer's string form
   (`"24h"`, `"30m"`, `"7d"`); `limits` is the profile's `limits` (the client applies the
   file-type and folder-depth policy and declares `types` / `depth`, as the composer does);

@@ -86,10 +86,10 @@ shares).
 | Method & path | Scope | Body → result |
 | --- | --- | --- |
 | `GET /api/private/policy` | `policy` | → `{ url, urlRules }` — whether link shares are allowed and which links (SPEC.md §5.6) |
-| `POST /api/private/paste` | `notes` | `{ paste, label? }` → `201 { id, deletetoken, expires }` — `paste` is the encrypted create body (SPEC.md §5.2) |
-| `POST /api/private/file` | `files` | `{ views, expire, padded, files?, maxFile?, types?, depth?, deletable? }` → `201 { id, uploadtoken, deletetoken, chunks }` (SPEC.md §12) |
+| `POST /api/private/paste` | `notes` | `{ paste, label?, captcha? }` → `201 { id, deletetoken, expires, captcha }` — `paste` is the encrypted create body (SPEC.md §5.2); `captcha`: see below |
+| `POST /api/private/file` | `files` | `{ views, expire, padded, files?, maxFile?, types?, depth?, deletable?, captcha? }` → `201 { id, uploadtoken, deletetoken, chunks, captcha }` (SPEC.md §12) |
 | `PUT /api/private/file/:id/chunk/:i` | `files` | encrypted chunk bytes (`application/octet-stream`), header `X-Upload-Token` → `{ ok }` |
-| `POST /api/private/file/:id/finalize` | `files` | `{ paste, label? }` with `X-Upload-Token` — the encrypted manifest → `{ ok, id, expires }` |
+| `POST /api/private/file/:id/finalize` | `files` | `{ paste, label? }` with `X-Upload-Token` — the encrypted manifest → `{ ok, id, expires, captcha }` |
 | `GET /api/private/shares?q=&status=&offset=` | `read` | → `{ rows, total }`: 50 per page, newest first; `q` matches the label, `status` is one of `active`, `revoked`, `expired`, `consumed`, `deleted`, `ended` |
 | `GET /api/private/shares/:id` | `read` | → `{ share }` (one row, as below) |
 | `GET /api/private/shares/:id/opens` | `read` | → `{ total, fields, rows: [{ ts, …}] }` — read receipts, newest first (at most 200); `fields` lists the details the administrator lets your account see (`receiptIp`, `receiptLocation`, `receiptBrowser`, `receiptOs`, `receiptLanguages`); times are always there |
@@ -97,10 +97,37 @@ shares).
 | `POST /api/private/shares/:id/revoke` | `manage` | header `X-Secbin-Intent: 1`, no body → `{ ok }` — destroys the content at once; the row stays as `revoked` |
 | `DELETE /api/paste/:id`, `DELETE /api/file/:id` | none | header `X-Delete-Token` → `{ status: "deleted", id }` — the delete token is the capability, no API key; `423 share_locked` for a locked share |
 
-A share row is `{ id, kind, label, created, expires, views_total, left, opens, status, locked }`:
+A share row is `{ id, kind, label, created, expires, views_total, left, opens, status, locked, captcha }`:
 `kind` is `text`, `url`, `secret` or `files`; `views_total` the view limit (`null` =
 unlimited) and `left` the views left (`null` when unlimited or not active); `opens` counts every
-open; `locked` is `1` when the administrator has locked it. Times are unix seconds.
+open; `locked` is `1` when the administrator has locked it; `captcha` is `true` when recipients
+must pass a CAPTCHA first. Times are unix seconds.
+
+### CAPTCHA (`captcha`)
+
+Whether recipients must pass a CAPTCHA (Cloudflare Turnstile) in a browser before anything of
+the share is served is your role's decision (Admin → Roles, "CAPTCHA on shares"):
+
+- **Allow CAPTCHA (user chooses per share):** send `captcha: true` or `false`; left out, the
+  role's default for new shares applies.
+- **Require CAPTCHA for all shares:** every share has it, whatever you send.
+- **Disable CAPTCHA:** none; `captcha: true` is refused (`403 captcha_disabled`).
+
+The result's `captcha` says what the share got. The flag is set when the share is created. While
+the server has no Turnstile keys it is stored but not asked for.
+
+A share with the CAPTCHA can be opened in a browser only. Every recipient route
+(`GET /api/paste/:id`, `/api/file/:id`, `…/open`, `…/expire`, `…/chunk/…`) answers
+`403 captcha_required` ("This share requires a CAPTCHA; open it in a browser") without a grant
+from the share's CAPTCHA page, and nothing is spent: an API client or `secbin get` cannot open
+it. The grant route is `POST /api/(paste|file)/:id/human` with `X-Secbin-Intent: 1` and a
+Turnstile token (`X-Secbin-Turnstile`) for the action `share-open`, which only the page's
+widget produces. At most 30 such checks per network per 10 minutes (`429 rate_limited`), and
+a failed token counts as an invalid request.
+
+While Turnstile is configured, a recipient route without a grant answers the same `403
+captcha_required` for an id whose share does not exist or has ended, so it tells nothing about
+an id before the check. A share without the CAPTCHA answers as usual.
 
 The share link is `https://<server>/p/<id>#<fragment>`, where `fragment` is the base64url
 32-byte secret your client generated. Anyone with the link (and the password, if set) can open
@@ -127,6 +154,10 @@ SPEC.md §10). The ones specific to keys and shares:
 | 403 | `csrf_mismatch` | browser session only (never an API key): a change without the session's `X-Secbin-CSRF` token (see above) |
 | 403 | `too_many_views`, `unlimited_views_disabled`, `expiry_too_long` | beyond the account's limits (for a key: its API limits); `max` is attached |
 | 403 | `bad_token` | wrong delete token |
+| 400 | `invalid_captcha` | `captcha` is not `true` or `false` |
+| 403 | `captcha_disabled` | `captcha: true` while your role has the CAPTCHA off |
+| 403 | `captcha_required` | a recipient route of a share with the CAPTCHA — or of a missing or ended share, while Turnstile is on — without a grant (open it in a browser) |
+| 429 | `rate_limited` | too many CAPTCHA checks from your network (30 per 10 minutes) |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
 
 ## Examples
@@ -468,7 +499,7 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 | Method & path | Body → result |
 | --- | --- |
-| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the `?` ones for the owner only; `capacity` / `maxFile` null = no limit) |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, kcv, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the `?` ones for the owner only; `capacity` / `maxFile` null = no limit) |
 | `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, kcv?, escrowReset?, current? \| reauth? }` — key wraps (a later `pw` wrap only with the Drive key's check value `kcv`) (kinds `pw`, `recovery`, `passkey`, `escrow`); removing a wrap, replacing the password wrap or the salt, and changing the escrow or signing keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); a user's first set-up needs the owner's escrow key (`409 escrow_not_ready`), an escrow wrap for the current key and a wrap of the user's own; the escrow wrap cannot be removed (`403 escrow_required`); while impersonating, only added wraps (never a first set-up) |
 | `POST /api/private/drive/escrow` | the owner impersonating the user: `{}` → `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }` (in the admin audit) |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
@@ -480,8 +511,8 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
-| `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
-| `POST /api/private/drive/reverse` | `{ id, folder, priv, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id |
+| `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth?, captcha? }` → `201 { id, deletetoken, expires, captcha }` (`captcha` as above) |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above) |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
 | `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
 | `POST /api/private/drive/received/:id` | `{ parent, name, meta, fk }` → `{ ok }` — a received file re-wrapped into the Drive |
@@ -501,7 +532,7 @@ then also returns `refs: [{ chunks, size }]`), and its chunks are read with
 
 Reverse shares are listed, extended (a later `expires`) and revoked with the share routes above
 (kind `reverse`; an API key with `read` / `manage` can do that, not create one). The anonymous
-uploader's routes (`/api/reverse/:id/open`, `begin`, `files`, chunks, `finalize`, `done`) take no
+uploader's routes (`/api/reverse/:id/open`, `begin`, `human`, `files`, chunks, `finalize`, `done`) take no
 account at all: see [`REVERSE.md`](./REVERSE.md) §6.2.
 
 ## Security notes

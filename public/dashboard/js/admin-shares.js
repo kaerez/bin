@@ -150,6 +150,7 @@ export async function renderShares(p) {
     }
     const statusCell = h('td', { dataset: { label: 'Status' } }, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status }));
     if (r.locked) statusCell.appendChild(h('span.pill.warn', { text: 'locked', title: r.locked_by ? `locked by ${r.locked_by}${r.locked_at ? ` on ${formatDate(r.locked_at)}` : ''}` : 'locked' }));
+    if (r.captcha) statusCell.appendChild(h('span.pill.captcha-badge', { text: 'CAPTCHA', title: r.kind === 'reverse' ? 'Senders complete a CAPTCHA before uploading' : 'Recipients complete a CAPTCHA before opening' }));
     tr.append(
       h('td.mono', { dataset: { label: 'User' }, text: r.username || '(deleted user)' }),
       h('td', { dataset: { label: 'Label' } }, labelIn, unencryptedHint(hintId)),

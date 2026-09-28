@@ -42,7 +42,7 @@ export const STATEMENT_FIELDS = {
   limits: list([
     'Files and notes are made by their senders; we cannot make a shared document (for example a PDF) accessible. You can always download it and open it in your own reader.',
     'The in-browser preview of PDFs and some other file types may not expose the document’s structure to screen readers. Download the file instead.',
-    'When this server uses the Cloudflare Turnstile human check (a third-party component), it may occasionally ask you to confirm. If you cannot complete it, contact us.',
+    'When this server uses the Cloudflare Turnstile CAPTCHA (a third-party component), it may occasionally ask you to confirm. If you cannot complete it, contact us.',
   ], 'Known limitations'),
   reportHeading: line(120, 'Report a problem or ask for an adjustment', 'Report a problem: heading'),
   report: paras(1000, 'If something here is not accessible to you, or you need an adjustment, tell us:', 'Report a problem: introduction'),

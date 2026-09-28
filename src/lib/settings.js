@@ -164,6 +164,11 @@ export function settingsWithDefaults(rows) {
 // → code default. The public account has its own rows instead of a role.
 // `null` on a numeric key means "no limit" (still bounded by hard ceilings).
 export const PASSKEY_MODES = ['any', 'second', 'off'];
+/** CAPTCHA role options (shareCaptcha, reverseCaptcha) and their per-share defaults. */
+export const CAPTCHA_MODES = ['allow', 'require', 'off'];
+export const CAPTCHA_DEFAULTS = ['on', 'off'];
+/** The CAPTCHA role options, which the public account never has. */
+export const CAPTCHA_KEYS = ['shareCaptcha', 'shareCaptchaDefault', 'reverseCaptcha', 'reverseCaptchaDefault'];
 /** Passkeys per account, at most (the passkeysMax limit can lower it). */
 export const MAX_PASSKEYS = 10;
 
@@ -244,7 +249,41 @@ export const LIMITS = {
   reverseEnabled:      { type: 'bool', def: false, owner: true },
   reverseMaxActive:    { type: 'int', min: 1, max: 1000, nullable: true, def: 10, owner: null },
   reverseMaxBytes:     { type: 'int', min: 1, max: HARD_MAX_DRIVE_BYTES, nullable: true, def: GiB, owner: null },
+  // CAPTCHA (the Turnstile check, src/lib/turnstile.js) on the role's shares:
+  // "allow" — the user ticks it per share (the *Default option pre-sets the
+  // box), "require" — every new share has it, "off" — none. Regular shares
+  // (notes, file shares, Drive shares): recipients pass it before anything
+  // of the share is served. Reverse shares: the anonymous uploader passes it
+  // before a session starts (every reverse link had it before these options
+  // existed, so the Default role requires it). Stored per share when it is
+  // created; inactive while the server has no Turnstile keys. The owner may
+  // choose per share; the public account never has it (PUBLIC_NA_LIMITS).
+  shareCaptcha:        { type: 'enum', values: CAPTCHA_MODES, def: 'allow', owner: 'allow' },
+  shareCaptchaDefault: { type: 'enum', values: CAPTCHA_DEFAULTS, def: 'off', owner: 'off' },
+  reverseCaptcha:      { type: 'enum', values: CAPTCHA_MODES, def: 'require', owner: 'allow' },
+  reverseCaptchaDefault: { type: 'enum', values: CAPTCHA_DEFAULTS, def: 'on', owner: 'on' },
 };
+
+/**
+ * Whether a new share of `which` ('share' or 'reverse') gets the CAPTCHA, from
+ * the creator's resolved limits `L` and what the client asked for
+ * (`requested`: true, false or undefined = the role's default). The client's
+ * value counts only as far as the role allows: "require" is always on, and
+ * "off" refuses a request for it (so a sender is never led to believe a share
+ * is protected when it is not). → { ok: true, captcha } or { ok: false, error, message }.
+ */
+export function resolveCaptcha(L, which, requested) {
+  if (requested !== undefined && requested !== null && typeof requested !== 'boolean') {
+    return { ok: false, error: 'invalid_captcha', message: 'captcha must be true or false.' };
+  }
+  const mode = L[`${which}Captcha`];
+  if (mode === 'require') return { ok: true, captcha: true };
+  if (mode === 'allow') return { ok: true, captcha: requested ?? L[`${which}CaptchaDefault`] === 'on' };
+  if (requested === true) {
+    return { ok: false, error: 'captcha_disabled', message: which === 'reverse' ? 'CAPTCHA is disabled for reverse shares of your role.' : 'CAPTCHA is disabled for shares of your role.' };
+  }
+  return { ok: true, captcha: false };
+}
 
 /** Hard ceiling on active reverse shares per account, whatever the role says. */
 export const MAX_REVERSE_ACTIVE = 1000;

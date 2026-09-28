@@ -175,6 +175,25 @@ const OWNER_LOST = 'Your Drive has no key you can open with your account now: re
 const ownerCannotUnlock = (st) => !st.wraps.some((w) => w.kind === 'passkey' || w.kind === 'recovery' || (w.kind === 'pw' && !st.pwStale));
 
 /**
+ * A Drive key read from this tab's storage (`sessionStorage`), used only once
+ * it is proven to be this Drive's key against what the server holds: its key
+ * check value must be the Drive's (`st.kcv`, stored with the first wraps). A
+ * script on this origin can write the tab's storage (a share's CAPTCHA page
+ * runs Cloudflare's script; SECURITY.md, "CAPTCHA on shares"), so a key that
+ * does not match — or any key while the server has no check value — is
+ * removed (`drop`) and not used: the Drive then asks to be unlocked the
+ * normal way. → dk or null.
+ */
+async function provenKey(dk, st, drop) {
+  if (!dk) return null;
+  let ok;
+  try { ok = typeof st.kcv === 'string' && st.kcv.length > 0 && (await keyCheckValue(dk)) === st.kcv; } catch { ok = false; }
+  if (ok) return dk;
+  drop();
+  return null;
+}
+
+/**
  * The Drive with this tab's DK → DriveClient. Throws DriveLocked when the tab
  * has none (reason 'setup' when the Drive has no key yet, 'not_ready' when it
  * cannot have one yet), DriveDisabled when the role has no Drive. `user`
@@ -193,7 +212,7 @@ export async function openDrive({ user } = {}) {
     if (u.role === 'owner' && !noOwnerKeys(st)) throw new DriveLocked(OWNER_LOST, 'locked', [], { ownerRecovery: true });
     throw new DriveLocked('Set up your Drive with your password.', 'setup');
   }
-  const dk = loadSessionKey(u.id);
+  const dk = await provenKey(loadSessionKey(u.id), st, clearSessionKey);
   if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st), { ownerRecovery: u.role === 'owner' && ownerCannotUnlock(st), received: Number(st.received) || 0 });
   const client = await DriveClient.create(dk, u);
   await client.maintain(st).catch(() => {});
@@ -381,7 +400,7 @@ async function escrowKeyFor(ownerDk, wrap, current, old) {
  */
 async function openAsOwner(u, st) {
   if (!st.wraps.length) throw new DriveLocked('The user hasn’t signed in since the Drive was enabled.', 'no_drive');
-  const kept = loadImpersonationKey(u.id);
+  const kept = await provenKey(loadImpersonationKey(u.id), st, clearImpersonationKey);
   if (kept) return DriveClient.create(kept, u);
   const ownerUid = sessionKeyUser();
   if (!ownerUid || ownerUid === u.id) throw new DriveLocked('Your own Drive is not unlocked in this tab.', 'owner_locked');
@@ -421,7 +440,7 @@ export async function unlockAtSignIn({ user, password, code, prfOutput, credenti
  */
 async function upkeepKey(userId, st, { password, prfOutput, credentialId, impersonating = false } = {}) {
   if (impersonating) {
-    const kept = loadImpersonationKey(userId);
+    const kept = await provenKey(loadImpersonationKey(userId), st, clearImpersonationKey);
     if (kept) return kept;
     try {
       return (await openAsOwner({ id: userId, role: 'user', impersonating: true }, st)).dk;
@@ -429,7 +448,7 @@ async function upkeepKey(userId, st, { password, prfOutput, credentialId, impers
       return null;
     }
   }
-  let dk = loadSessionKey(userId);
+  let dk = await provenKey(loadSessionKey(userId), st, clearSessionKey);
   if (!dk && password) dk = await unlockWithPassword(password, st.driveSalt, st.wraps);
   // A step-up with a passkey that gave a PRF output (the Drive's salt) opens it too.
   if (!dk && prfOutput && credentialId) dk = await unlockWithPrf(prfOutput, credentialId, st.wraps);
@@ -799,7 +818,7 @@ async function findArchive(kit, st) {
  * The kit's DK is not kept.
  */
 async function restoreArchive(u, kit, st, arch, password, step) {
-  const dk = loadSessionKey(u.id) || await unlockWithPassword(password, st.driveSalt, st.wraps);
+  const dk = (await provenKey(loadSessionKey(u.id), st, clearSessionKey)) || await unlockWithPassword(password, st.driveSalt, st.wraps);
   if (!dk) throw new DriveLocked('This kit is for your Drive before you started over. Unlock your Drive (with your password) first, then restore.', 'locked');
   await api.kit({ event: 'used', ...(kit.version ? { version: kit.version } : {}), ...step });
   const all = [];
@@ -1036,6 +1055,11 @@ export class DriveClient {
     this.archives = [];
   }
 
+  /**
+   * `dk` must be a key this page generated (a first set-up), unwrapped (a
+   * password, recovery code, passkey or the owner escrow) or read from the
+   * tab's storage and proven (provenKey): never a stored key taken as it is.
+   */
   static async create(dk, user) {
     return new DriveClient(dk, await deriveSubkeys(dk), user);
   }
@@ -1518,8 +1542,9 @@ export class DriveClient {
    * composer does; `view` is the viewer snapshot ({ rules, maxBytes } or null).
    * The manifest (v3: paths, sizes, types and each file's key) is sealed with
    * a fresh link key and optional password exactly like a file share's.
+   * `captcha`: true / false (the role allows a choice), undefined (its default).
    */
-  async share(nodeIds, { views = null, expire, password = '', deletable = false, label = '', limits = null, view = null } = {}) {
+  async share(nodeIds, { views = null, expire, password = '', deletable = false, label = '', limits = null, view = null, captcha } = {}) {
     if (!Array.isArray(nodeIds) || !nodeIds.length) throw new Error('Choose what to share.');
     const { files, dirs } = await this.#collect(nodeIds);
     if (!files.length) throw new Error('There are no files to share.');
@@ -1545,9 +1570,10 @@ export class DriveClient {
     Object.assign(body, { paste, acc: paste.acc });
     if (deletable) body.deletable = true;
     if (label) body.label = label;
+    if (typeof captcha === 'boolean') body.captcha = captcha;
     const r = await api.share(body);
     if (typeof r.id !== 'string' || typeof r.deletetoken !== 'string') throw malformed();
-    return { url: `${location.origin}/p/${r.id}#${fragment}`, id: r.id, deletetoken: r.deletetoken };
+    return { url: `${location.origin}/p/${r.id}#${fragment}`, id: r.id, deletetoken: r.deletetoken, captcha: r.captcha === true };
   }
 
   /** The shares that reference a node. */
@@ -1567,8 +1593,10 @@ export class DriveClient {
    * maxFileBytes (null = none), types ({ mode, rules } or null), and `step`:
    * the "confirm it's you" part ({ current } or { reauth }, as for API keys) —
    * a link adds key material to the Drive, so the server asks for it.
+   * `captcha`: uploaders pass the CAPTCHA first (true / false where the role
+   * allows a choice; undefined: its default).
    */
-  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {} } = {}) {
+  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {}, captcha } = {}) {
     const id = newReverseId();
     const { pub, privateKey } = await createReverseKey();
     const body = {
@@ -1578,10 +1606,11 @@ export class DriveClient {
     if (note) body.note = await sealNote(pub, id, note);
     if (password) body.password = await passwordGate(password, pub);
     if (label) body.label = label;
+    if (typeof captcha === 'boolean') body.captcha = captcha;
     Object.assign(body, step);
     const r = await api.createReverse(body);
     if (r.id !== id) throw malformed();
-    return { url: reverseUrl(id, pub), id, expires: r.expires };
+    return { url: reverseUrl(id, pub), id, expires: r.expires, captcha: r.captcha === true };
   }
 
   /**
