@@ -327,11 +327,11 @@ describe('humanCheck help', () => {
     const c = humanCheck(box, 'login', { gate: [btn] });
     await c;
     const note = document.querySelector('.human-wait');
-    expect(note.textContent).toBe('Waiting for the human check… If you cannot complete it, contact the administrator.');
+    expect(note.textContent).toBe('Waiting for the CAPTCHA… If you cannot complete it, contact the administrator.');
     const btn2 = document.createElement('button');
     document.body.append(btn2);
     await humanCheck(Object.assign(document.createElement('div'), { hidden: true }), 'account', { gate: [btn2], alternative: 'Ask the owner to make the change for you.' });
-    expect(btn2.nextElementSibling.textContent).toMatch(/Waiting for the human check… Ask the owner to make the change for you\. If you cannot complete it/);
+    expect(btn2.nextElementSibling.textContent).toMatch(/Waiting for the CAPTCHA… Ask the owner to make the change for you\. If you cannot complete it/);
     expect(note.querySelector('a').getAttribute('href')).toBe('/accessibility/#st-contact');
     delete globalThis.turnstile;
     api.config = { turnstile: null };

@@ -1394,7 +1394,10 @@ function mountApp(mount, client, deps) {
       return;
     }
     if (r.added) {
-      toast(`Added ${r.added} received file${r.added === 1 ? '' : 's'}.`);
+      // The take-in runs in the background: a modal dialog opened meanwhile gets no toast about the
+      // page behind it (nothing outside a modal dialog is shown or read); the status line below
+      // says the same and stays.
+      if (!document.querySelector('[aria-modal="true"]')) toast(`Added ${r.added} received file${r.added === 1 ? '' : 's'}.`);
       await refresh();
     }
     const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;

@@ -16,7 +16,7 @@ from kit and their results, the unlock screen's restore and "Start over without 
 archive of the Drive from before a start over, the create-user form's Drive note, the reset's
 "unlock your own Drive" box, and a user's Drive moved to a reset's escrow key), and reverse
 shares ("Receive files": the anonymous uploader page `/r/<id>` ready, with a password, with the
-human check, uploading, done, paused and ended; the Drive's "Receive files…" dialog, the received
+CAPTCHA, uploading, done, paused and ended; the Drive's "Receive files…" dialog, the received
 files' line, their review, and the unlock screen's count of files waiting). Content that
 users share (notes, files, PDFs, images, audio and video) is theirs, not secbin's: this report
 covers how secbin presents it, not the content itself.
@@ -137,7 +137,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 1.4.13 Content on Hover or Focus | AA | Supports | No custom tooltips; the "not encrypted" hint shown on focus is in the flow, not over other content (`public/css/styles.css:800`). | Comp, Shares, Drive |
 | 2.4.5 Multiple Ways | AA | Supports | The navigation on every dashboard page, the links between related pages, and (**added**) a site map on the accessibility statement, linked from every footer (`public/accessibility/index.html:104`). Share links are the result of a process. | All |
 | 2.4.6 Headings and Labels | AA | Supports | Headings name their sections; labels name their fields (see 3.3.2); duration fields in the role editor now say what they are for (see 1.3.1). | All |
-| 2.4.7 Focus Visible | AA | Supports | Every Tab stop draws a ring (`wcag22.mjs` "2.4.7 no focus ring": 0; the Drive tree draws it on its row). **Fixed:** in forced colours (Windows High Contrast) the box-shadow rings were dropped; a system-coloured outline replaces them (`public/css/styles.css:1186`). **Added:** the human check's container draws the ring while focus is inside Cloudflare's widget, which may draw none (`public/css/styles.css` `.turnstile:focus-within`). | All |
+| 2.4.7 Focus Visible | AA | Supports | Every Tab stop draws a ring (`wcag22.mjs` "2.4.7 no focus ring": 0; the Drive tree draws it on its row). **Fixed:** in forced colours (Windows High Contrast) the box-shadow rings were dropped; a system-coloured outline replaces them (`public/css/styles.css:1186`). **Added:** the CAPTCHA's container draws the ring while focus is inside Cloudflare's widget, which may draw none (`public/css/styles.css` `.turnstile:focus-within, .turnstile.focus-in`; the class is set from the page's focus changes, as `:focus-within` does not match inside the widget's frame: `public/js/turnstile.js`). | All |
 | 2.4.11 Focus Not Obscured (Minimum) | 2.2 only | Supports | **Fixed:** the fixed accessibility button no longer covers what has focus: the page scrolls it clear, the toast moves to the top, the panel closes when focus leaves it, and the button sits below dialogs (`public/js/a11y.js:201`, `public/css/styles.css:986`, `public/js/a11y.js:172`). **Fixed** (found on the owner's view of a user with no Drive): the impersonation banner, sticky at the top, covered the focused theme button at 320×256; it no longer sticks on short viewports, and focus is scrolled clear of it elsewhere (`public/css/styles.css` `.imp-banner`, `public/js/a11y.js` `FIXED`). **Fixed** (found on the kit's and the create-user form's states, which show a toast): at 320×256 a toast that had moved to the top stayed there and covered, entirely, the controls that Tab reached next (the role select, "Manage", the navigation, the footer links); it now moves back to the other edge when focus goes under it, and is put away when it would cover the focused control at either edge (it has been announced) (`public/js/a11y.js` `unobscure`). `wcag22.mjs` "2.4.11 focus obscured" (Tab through every page at 1280×900, 320×256 and 400 % zoom): 0. | All |
 | 2.5.7 Dragging Movements | 2.2 only | Supports | Nothing needs dragging: files dropped onto the composer or the Drive can also be chosen with "Add files" / "Upload"; items move with "Move" and a folder picker (`public/dashboard/js/drive-app.js:697`). | Comp, Land, Drive |
 | 2.5.8 Target Size (Minimum) | 2.2 only | Supports | `wcag22.mjs` "2.5.8 target size": every target ≥24×24 or spaced; 0 on every state. **Fixed:** the widget's statement link, and the Drive's selection boxes, whose `<label>` is now the target (24 px, 44 px on phones: `public/css/styles.css:1171`). | All |
@@ -146,8 +146,8 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 3.2.4 Consistent Identification | AA | Supports | The same function has the same name and icon everywhere (Copy, Delete now, Show password, the lock). | All |
 | 3.3.3 Error Suggestion | AA | Supports | Messages say how to fix it ("Passwords do not match — repeat the same password in both fields."; the password policy is spelled out). | All |
 | 3.3.4 Error Prevention (Legal, Financial, Data) | AA | Supports | Deleting asks for a second press (`public/js/common.js:146`); an import is shown as a plan before it runs; a share can be deleted at once after creation. | Comp, Shares, Acct, Admin, Drive |
-| 3.3.8 Accessible Authentication (Minimum) | 2.2 only | Supports | No step of signing in or confirming it is you asks for a cognitive function test. Passwords and recovery codes can be pasted and filled in by password managers: they carry the right `autocomplete` tokens and nothing blocks paste (`test-dom/wcag22.test.js:251`) — the criterion's *mechanism* alternative. A passkey signs in without any password. The human check, when the owner turns it on, is Cloudflare Turnstile: it asks no puzzle, no transcription and no object recognition (usually it passes on its own, at most it asks for a box to be ticked), so it is not a cognitive function test either, and every sign-in (password, passkey, recovery code) and every account change goes through it. For someone who cannot complete the widget itself, the way through is the contact: the note under each protected button links to it (`public/js/turnstile.js:58`). The widget's own operability is third-party content: see “The human check (third-party)” below. Share passwords (a secret between two people, not a login) can be pasted; password managers are kept from saving them as the site's login. | Login, Acct, Land, View, Drive |
-| 4.1.3 Status Messages | AA | Supports | Saves, copies and errors are announced (`role="status"` toast, alert regions, progress live regions, the human-check note); the new warnings are an alert dialog (session) and an alert (download window). **Fixed:** the sign-in's "Signing in…" (while it, and the Drive's unlock or automatic set-up, run) was only a button label; it is now also said by a status line that is in the page from the start (`public/dashboard/login/index.html`, `public/js/login.js` `busy`). The Drive page's notices ("Drive is not ready yet", the owner's "The user hasn’t signed in since the Drive was enabled", "not enabled") were a live region inserted together with its text, which screen readers often do not read; the page's own "Opening your Drive…" status line now says the notice's title, and the notice is content with its heading (`public/dashboard/js/drive-app.js` `startDrive`). **Fixed** (the owner recovery kit, from `main`): each kit form's message (Download, Verify, Restore) was a live region shown together with its text; it now appears inside a status line that is in the page from the start (`public/dashboard/js/drivekit-ui.js` `liveMsg`); the empty or short passphrase warning describes the passphrase field while it shows; the create-user form's Drive note, drawn again with the form, is also said through the page's toast (`public/dashboard/js/admin.js`); a user's Drive moved by itself to a reset's escrow key was a live region drawn with its text, and is now said by the Drive page's status line, which stays in place (the same node) through the unlock screen and the Drive (`public/dashboard/js/drive-app.js` `swap`). A check's verdict takes focus; the notice to download a fresh kit is an alert when a rotation or a start over has just caused it, and a note otherwise. **Fixed** (reverse shares, from `main` 3df2e6f): the uploader's "Sent …" and the Drive's received-files line were live regions shown together with their text; each now appears inside a status line that is in the page from the start (`public/js/reverse.js`, `public/dashboard/js/drive-app.js` `receivedLive`); the unlock screen's "N new received files" was a live region drawn with its text; it is content, and the page's status line says it with "Unlock your Drive". | Login, Drive, Admin, Up, All |
+| 3.3.8 Accessible Authentication (Minimum) | 2.2 only | Supports | No step of signing in or confirming it is you asks for a cognitive function test. Passwords and recovery codes can be pasted and filled in by password managers: they carry the right `autocomplete` tokens and nothing blocks paste (`test-dom/wcag22.test.js:251`) — the criterion's *mechanism* alternative. A passkey signs in without any password. The CAPTCHA, when the owner turns it on, is Cloudflare Turnstile: it asks no puzzle, no transcription and no object recognition (usually it passes on its own, at most it asks for a box to be ticked), so it is not a cognitive function test either, and every sign-in (password, passkey, recovery code) and every account change goes through it. For someone who cannot complete the widget itself, the way through is the contact: the note under each protected button links to it (`public/js/turnstile.js:58`). The widget's own operability is third-party content: see “The CAPTCHA (third-party)” below. Share passwords (a secret between two people, not a login) can be pasted; password managers are kept from saving them as the site's login. | Login, Acct, Land, View, Drive |
+| 4.1.3 Status Messages | AA | Supports | Saves, copies and errors are announced (`role="status"` toast, alert regions, progress live regions, the CAPTCHA note); the new warnings are an alert dialog (session) and an alert (download window). **Fixed:** the sign-in's "Signing in…" (while it, and the Drive's unlock or automatic set-up, run) was only a button label; it is now also said by a status line that is in the page from the start (`public/dashboard/login/index.html`, `public/js/login.js` `busy`). The Drive page's notices ("Drive is not ready yet", the owner's "The user hasn’t signed in since the Drive was enabled", "not enabled") were a live region inserted together with its text, which screen readers often do not read; the page's own "Opening your Drive…" status line now says the notice's title, and the notice is content with its heading (`public/dashboard/js/drive-app.js` `startDrive`). **Fixed** (the owner recovery kit, from `main`): each kit form's message (Download, Verify, Restore) was a live region shown together with its text; it now appears inside a status line that is in the page from the start (`public/dashboard/js/drivekit-ui.js` `liveMsg`); the empty or short passphrase warning describes the passphrase field while it shows; the create-user form's Drive note, drawn again with the form, is also said through the page's toast (`public/dashboard/js/admin.js`); a user's Drive moved by itself to a reset's escrow key was a live region drawn with its text, and is now said by the Drive page's status line, which stays in place (the same node) through the unlock screen and the Drive (`public/dashboard/js/drive-app.js` `swap`). A check's verdict takes focus; the notice to download a fresh kit is an alert when a rotation or a start over has just caused it, and a note otherwise. **Fixed** (reverse shares, from `main` 3df2e6f): the uploader's "Sent …" and the Drive's received-files line were live regions shown together with their text; each now appears inside a status line that is in the page from the start (`public/js/reverse.js`, `public/dashboard/js/drive-app.js` `receivedLive`); the unlock screen's "N new received files" was a live region drawn with its text; it is content, and the page's status line says it with "Unlock your Drive". | Login, Drive, Admin, Up, All |
 
 ## Level AAA
 
@@ -158,7 +158,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 1.2.8 Media Alternative (Prerecorded) | AAA | Not applicable | As 1.2.6. | — |
 | 1.2.9 Audio-only (Live) | AAA | Not applicable | As 1.2.6. | — |
 | 1.3.6 Identify Purpose | AAA | Supports | Regions are landmarks, controls have names and roles, fields their `autocomplete` purpose, icons are named or hidden. | All |
-| 1.4.6 Contrast (Enhanced) | AAA | Supports | **Fixed:** the palette now gives every text colour ≥7:1 on paper, sheet and raised surfaces, in both themes (`public/css/styles.css:40`); the high-contrast mode is white or yellow on black. axe `color-contrast-enhanced`: 0 on 23 states × dark, light and high-contrast (`wcag22.mjs --aaa`); tokens checked by `test-dom/wcag22.test.js`. | All |
+| 1.4.6 Contrast (Enhanced) | AAA | Supports | **Fixed:** the palette now gives every text colour ≥7:1 on paper, sheet and raised surfaces, in both themes (`public/css/styles.css:40`); the high-contrast mode is white or yellow on black. **Fixed** (found on the start over's and the archive's error states): an armed or hovered danger button, red on its red-tinted fill, was 6.5:1 in the light theme; the light red is now `#772d25`, 7.4:1 on that fill (`public/css/styles.css:50`). axe `color-contrast-enhanced`: 0 on 23 states × dark, light and high-contrast (`wcag22.mjs --aaa`); tokens checked by `test-dom/wcag22.test.js`. | All |
 | 1.4.7 Low or No Background Audio | AAA | Not applicable | No audio of secbin's own. | — |
 | 1.4.8 Visual Presentation | AAA | Supports | Colours can be chosen (light, dark, high contrast); text is never justified; lines are at most about 80 characters (`.wrap` 680 px, subtitles 52 ch); line height 1.65; text resizes to 400 % without horizontal scrolling. **Added:** the widget's "Text spacing" mode sets line spacing 1.8, paragraph spacing 1.5 times that and lines of at most 70 characters (`public/css/styles.css:1216`). | All |
 | 1.4.9 Images of Text (No Exception) | AAA | Supports | No images of text. | All |
@@ -177,15 +177,15 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 2.5.5 Target Size (Enhanced) | AAA | Supports | **Added:** the widget's "Large buttons and links" mode makes every target at least 44×44 (`public/css/styles.css:1194`; inline links in text are exempt). Measured: `wcag22.mjs --aaa` "2.5.5": 0 on 23 states. The accessibility button itself is 44×44 on every page. | All |
 | 2.5.6 Concurrent Input Mechanisms | AAA | Supports | Keyboard, mouse, touch and pen all work together; nothing is restricted to one input. | All |
 | 3.1.3 Unusual Words | AAA | Supports | **Added:** a glossary of the technical words (`public/accessibility/index.html:120`), linked from every page's footer; its "Drive" and "Escrow key" say that the administrator can open every Drive with the escrow key. What a user reads in the Drive calls the owner "the administrator" everywhere ("Drive is not ready yet" included). | All |
-| 3.1.4 Abbreviations | AAA | Supports | **Added:** the glossary expands every abbreviation the interface uses (AES-256-GCM, API, CIDR, CLI, HKDF, IP, KB/MB/GB, m/h/d, PDF, QR, TOTP, URL, WCAG). | All |
+| 3.1.4 Abbreviations | AAA | Supports | **Added:** the glossary expands every abbreviation the interface uses (AES-256-GCM, API, CAPTCHA, CIDR, CLI, HKDF, IP, KB/MB/GB, m/h/d, PDF, QR, TOTP, URL, WCAG). | All |
 | 3.1.5 Reading Level | AAA | Does not support | The interface text is short and plain, but its subject (encryption, access keys, administration) needs words beyond lower-secondary reading level, and there is no simplified version. The glossary explains the terms. Shared notes are the senders' own text. | All |
 | 3.1.6 Pronunciation | AAA | Not applicable | No words whose meaning depends on their pronunciation in context. | — |
-| 3.2.5 Change on Request | AAA | Supports | Nothing changes page on its own. **Fixed:** when a session ends the page no longer depends on a redirect: the dialog offers "Sign in again" (2.2.5); links that open a new tab say so (2.4.9). **Fixed** (found by the accessibility-tree suite on the reverse shares' states): when received files were taken in just as the person opened a folder, the Drive's refresh re-listed the folder they were leaving, so the Drive stayed there and focus fell to the page; a refresh now re-lists the folder being opened and keeps its focus (`public/dashboard/js/drive-app.js` `open`, `refresh`; `test-dom/reverse.test.js`). | All |
+| 3.2.5 Change on Request | AAA | Supports | Nothing changes page on its own. **Fixed:** when a session ends the page no longer depends on a redirect: the dialog offers "Sign in again" (2.2.5); links that open a new tab say so (2.4.9). **Fixed** (found by the accessibility-tree suite on the reverse shares' states): when received files were taken in just as the person opened a folder, the Drive's refresh re-listed the folder they were leaving, so the Drive stayed there and focus fell to the page; a refresh now re-lists the folder being opened and keeps its focus (`public/dashboard/js/drive-app.js` `open`, `refresh`; `test-dom/reverse.test.js`). **Fixed** (found by the end-to-end suite on a loaded machine): an Admin tab opened while the page was still loading was replaced by the default tab (Users) when the loading finished; the default now applies only if no tab was chosen (`public/dashboard/js/admin.js`; `test-dom/admin-tabs.test.js`). | All |
 | 3.3.5 Help | AAA | Supports | Instructions next to the fields that need them (password policy, link rules, file policy, expiry), help panels in the admin, the glossary and the statement's contact on every page. | All |
 | 3.3.6 Error Prevention (All) | AAA | Supports | Input is checked before it is sent; deleting asks twice; imports show a plan; a share can be deleted after creation; settings can be changed back. | All |
-| 3.3.9 Accessible Authentication (Enhanced) | 2.2 only | Supports | As 3.3.8, without relying on the object-recognition or personal-content exceptions: none of the steps uses either. The same third-party caveat applies to the human check. | Login, Acct, Drive |
+| 3.3.9 Accessible Authentication (Enhanced) | 2.2 only | Supports | As 3.3.8, without relying on the object-recognition or personal-content exceptions: none of the steps uses either. The same third-party caveat applies to the CAPTCHA. | Login, Acct, Drive |
 
-## The human check (third-party)
+## The CAPTCHA (third-party)
 
 When the owner turns it on (Admin → Security, or the deployment's keys), Cloudflare Turnstile
 guards every sign-in (password, passkey and recovery code), every change to one's own account,
@@ -206,7 +206,7 @@ terms.
   says why, with the same link (`public/js/turnstile.js:58`). The owner can make
   account changes for a user, and can turn the check off.
 
-So: with the human check **off**, the verdicts above hold for every page. With it **on**, they
+So: with the CAPTCHA **off**, the verdicts above hold for every page. With it **on**, they
 hold for secbin's own content on the login, Account and public composer pages, and the widget is
 covered by a statement of partial conformance for third-party content: secbin relies on
 Cloudflare's claim for the widget's own conformance, and the contact is the way through for
@@ -219,7 +219,7 @@ A rule of this project: no accessibility fix weakens a security control. Where a
 control pull in different directions, the control stays and the criterion gets the verdict that
 follows:
 
-- **The human check** stays on every sign-in (password, passkey, recovery code), every change to
+- **The CAPTCHA** stays on every sign-in (password, passkey, recovery code), every change to
   one's own account and anonymous sharing. 3.3.8 and 3.3.9 are still met (it asks for no
   cognitive function test); its own operability is third-party (see the section above).
 - **The absolute session limit** cannot be extended: the warning only says when it comes. At the
@@ -271,7 +271,7 @@ Level A and AA failures (all fixed):
   targets (44 px on phones).
 - **3.3.2** fields labelled only by a placeholder (share passwords, repeat-password fields,
   passkey and API key names, API key lifetime, My shares filters, admin fields) → visible labels.
-- **3.3.8** (help route) the human check's note under each protected button now links to the
+- **3.3.8** (help route) the CAPTCHA's note under each protected button now links to the
   site's contact, while it waits and when it fails. (A passkey route around the check was built
   and then withdrawn at the maintainer's decision: every sign-in keeps the check.)
 - **4.1.1** (verified although obsolete) two admin renders could duplicate a panel and its ids
@@ -306,8 +306,15 @@ Level A and AA failures (all fixed):
   being left, and focus to the page (3.2.5, 2.4.3) → the refresh goes to the folder being opened.
 - **1.3.1 / 4.1.2** (found by the accessibility-tree suite: a toast from before a Drive dialog
   opened stayed shown and in the tree outside the modal dialog) → a dialog opening puts it away.
-- **2.4.7** (the human check, found with Turnstile's testing keys) focus inside Cloudflare's widget
-  showed no ring on secbin's side → its container draws one.
+  Received files taken in (in the background) after a dialog opened no longer raise their toast
+  outside it; the Drive's status line says the same and stays (`public/dashboard/js/drive-app.js`
+  `takeInReceived`; `test-dom/reverse.test.js`).
+- **2.4.7** (the CAPTCHA, found with Turnstile's testing keys) focus inside Cloudflare's widget
+  showed no ring on secbin's side → its container draws one. In Chromium `:focus-within` does not
+  match while focus is in the widget's frame (behind a closed shadow root), and the page gets no
+  focus event for it, only its window's blur; the container is now marked whenever the page's focus
+  changes (`public/js/turnstile.js`, `.focus-in`), and the ring was confirmed with the testing keys
+  on the uploader page's three widget Tab stops (`test-dom/turnstile.test.js`).
 - **2.4.11, 2.4.12** (found on the new states that show a toast) at 320×256 a toast moved to the
   top covered the controls Tab reached next → it moves to the other edge when focus goes under
   it, and is put away when it would cover focus at both edges.
@@ -345,7 +352,7 @@ change of page; new tabs announced), plus the site map (2.4.5).
   - *the Turnstile widget* (third party, when the owner turns it on): every sign-in needs it;
     Cloudflare states it conforms to WCAG 2.2 AA, which this audit could not verify (its test keys
     show no challenge). The note under each protected button links to the contact; the owner can
-    make account changes for a user or turn the check off. See “The human check (third-party)”.
+    make account changes for a user or turn the check off. See “The CAPTCHA (third-party)”.
 - **Configuration**: the owner can set the absolute session limit below 20 hours (the default is
   7 days); the app then warns two minutes ahead but cannot extend it, as that limit is a security
   control.
@@ -360,7 +367,7 @@ pages and states:
 - **WCAG 2.2 level A**: meet every criterion, including 3.2.6 and 3.3.7.
 - **WCAG 2.2 level AA**: meet every criterion, including 2.4.11, 2.5.7, 2.5.8 and 3.3.8.
 
-These level results hold for every page with the human check off. With it on, the login,
+These level results hold for every page with the CAPTCHA off. With it on, the login,
 Account and public composer pages also contain the third-party Turnstile widget, whose own
 conformance secbin takes from Cloudflare's statement and could not test: for those pages the
 result is WCAG's *partial conformance, third-party content*, with the contact as the way
@@ -393,7 +400,7 @@ Note anything that is not announced, announced wrongly, hard to reach or hard to
    switch every option, change language to Hebrew and back, close with Escape.
 2. **Sign in.** Log in with a password (paste it from a password manager), then with a passkey,
    then with a recovery code. Make a mistake first: is the error announced and tied to the field?
-   With the human check on (real keys, not the testing keys): can the widget and its challenge
+   With the CAPTCHA on (real keys, not the testing keys): can the widget and its challenge
    be completed by keyboard, by voice and with a screen reader? Is the note under the button,
    with its contact link, read?
 3. **Create a note** in the dashboard with a password: the password dialog's two labelled fields,
@@ -433,7 +440,7 @@ Note anything that is not announced, announced wrongly, hard to reach or hard to
 
 - `test-dom/wcag22.test.js`: the session warning (idle and absolute, extend twelve times, focus
   and `inert`, no navigation on its own), "Stop the countdown", focus not obscured, view titles,
-  new-tab links, labels and autocomplete on the static pages, no paste blocking, the human-check
+  new-tab links, labels and autocomplete on the static pages, no paste blocking, the CAPTCHA
   help, and the palette (7:1 text, 3:1 field boundaries) in both themes.
 - `test/files.test.js` "extending a download window": ten extensions and no more, no view
   spent, never past the share's expiry, the purge waits for an extended window; an id that was
@@ -454,7 +461,7 @@ Note anything that is not announced, announced wrongly, hard to reach or hard to
   line; `test-dom/admin-new-user-drive.test.js`: the create-user note also in the toast, the
   reset's unlock field labelled and its box described.
 - `test/turnstile.test.js` (unchanged): every sign-in, the passkey included, needs a token when
-  the human check is on.
+  the CAPTCHA is on.
 - `wcag22.mjs` (scratch Playwright suite used for this report; it is not part of CI): the probes
   described above, on every page and state, at three viewports, and `--aaa`. The kit's states
   come from one scratch module (`kitstates.mjs`) that `wcag22`, `axe-audit`, `a11y` and the
@@ -466,7 +473,7 @@ Note anything that is not announced, announced wrongly, hard to reach or hard to
   `axe-audit` and the accessibility-tree suite: links made through the Drive's dialog on the
   owner's own Drive, uploads from fresh browser contexts (one with its key wrap spoiled on the way,
   so that a received file cannot be added and can be reviewed), chunk uploads held back to see the
-  "uploading" state, and the owner's start over in phase 2 pausing the links; the human check with
+  "uploading" state, and the owner's start over in phase 2 pausing the links; the CAPTCHA with
   Cloudflare's public testing keys in a pass of its own (`REV_TS=1`, Chromium through the agent
   proxy).
 

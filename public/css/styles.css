@@ -47,7 +47,7 @@
   --accent-fg: #f5f7f8;      /* label on ink fill */
   --ring: #2e5472;           /* focus ring */
 
-  --seal: #84342b;           /* wax-seal red — destruction only */
+  --seal: #772d25;           /* wax-seal red — destruction only; ≥7:1 on the armed / hover fill too */
   --seal-fill: #84342b;      /* behind white text (the error toast) */
   --ok: #2b563e;             /* verdigris */
   --warn: #684711;           /* ochre */
@@ -643,8 +643,9 @@ fieldset { min-inline-size: 0; }
 .turnstile { display: flex; justify-content: center; max-width: 100%; }
 .turnstile[hidden] { display: none; }
 /* Focus inside the widget (Cloudflare's frame draws its own focus, or none): a ring around its
-   container too, so where focus is can always be seen (WCAG 2.4.7). */
-.turnstile:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
+   container too, so where focus is can always be seen (WCAG 2.4.7). `.focus-in` is set from the
+   focus events (public/js/turnstile.js): the widget's closed shadow root keeps :focus-within off. */
+.turnstile:focus-within, .turnstile.focus-in { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
 .api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
 .receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
 .opens-box { padding: .5rem 0; }

@@ -126,6 +126,8 @@
                     <dd>Application programming interface: a way for scripts and the secbin command-line tool to use secbin. An API key is the password such a script uses; it can create shares but never sign in.</dd>
                     <dt>Argon2id</dt>
                     <dd>A deliberately slow way to turn a password into a key, so that guessing passwords takes a very long time.</dd>
+                    <dt>CAPTCHA</dt>
+                    <dd>A check (Cloudflare Turnstile) that the visitor is a person, usually without a puzzle: most of the time it passes on its own, at most it asks you to tick a box. The letters stand for “Completely Automated Public Turing test to tell Computers and Humans Apart”.</dd>
                     <dt>CIDR</dt>
                     <dd>Classless Inter-Domain Routing: a way to write a range of network addresses, such as 10.0.0.0/8.</dd>
                     <dt>CLI</dt>
@@ -140,8 +142,6 @@
                     <dd>The part of a link after the # sign. Browsers never send it to the server, so the key kept there stays with you.</dd>
                     <dt>HKDF-SHA256</dt>
                     <dd>A standard way to derive several separate keys from one secret (HMAC-based key derivation with SHA-256).</dd>
-                    <dt>Human check (Turnstile)</dt>
-                    <dd>A check by Cloudflare Turnstile that a person, not a program, is using the page. It asks no questions or puzzles: usually it passes on its own, at most it asks you to tick a box.</dd>
                     <dt>IP address</dt>
                     <dd>Internet Protocol address: the number that identifies a device or network on the internet.</dd>
                     <dt>KB, MB, GB</dt>

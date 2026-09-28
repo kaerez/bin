@@ -261,7 +261,7 @@ describe('extending a download window (WCAG 2.2.1)', () => {
       if (last.status === 429) break;
     }
     expect(last.status).toBe(429);
-  });
+  }, 60000); // up to 60 requests to reach the block, as in the R4-L4 test below
 
   // Audit round 4, R4-L4: an unknown id answered 410 uncounted (a Directory
   // call and a new FileShare object each, never blocked); the chunk route

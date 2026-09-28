@@ -26,6 +26,7 @@ const MiB = 1024 * 1024;
 const th = (t) => (t ? h('th', { text: t }) : h('th', {}, h('span.sr-only', { text: 'Actions' })));
 
 let syncTabs = () => {};
+let chosen = false; // a tab was clicked (or opened by keyboard) before the first one was shown
 
 // Role options in sections (the editor shows a heading per section). Each row:
 // [key, label, type, options]; the section is added as a fifth element.
@@ -144,13 +145,14 @@ const guard = async (fn, okText) => {
     p.setAttribute('role', 'tabpanel');
     p.setAttribute('aria-labelledby', t.id);
     p.tabIndex = -1;
-    t.onclick = () => selectTab(t.dataset.tab);
+    t.onclick = () => { chosen = true; selectTab(t.dataset.tab); };
   }
   // Arrow keys move between the tabs; Enter / Space opens one (panels load from the server).
   syncTabs = tablistKeys(document.querySelector('.tabs[role="tablist"]'));
   await refreshOverview();
-  // /dashboard/admin/#owner-kit (the Drive page's links) opens Import / export.
-  selectTab(['#portable', '#owner-kit'].includes(location.hash) ? 'portable' : 'users');
+  // /dashboard/admin/#owner-kit (the Drive page's links) opens Import / export. A tab the person
+  // chose while the overview loaded stays (WCAG 3.2.5): the first tab is only the default.
+  if (!chosen) selectTab(['#portable', '#owner-kit'].includes(location.hash) ? 'portable' : 'users');
 })();
 
 async function refreshOverview() {
@@ -1123,7 +1125,7 @@ async function renderPublic() {
  */
 async function turnstileCard() {
   const st = await guard(() => admin.turnstile());
-  const card = h('div.card.stack', {}, h('h2.section-title', { text: 'Human check (Cloudflare Turnstile)' }));
+  const card = h('div.card.stack', {}, h('h2.section-title', { text: 'CAPTCHA (Cloudflare Turnstile)' }));
   if (!st) return card;
   const state = st.active === 'env' ? 'On, with the deployment\'s keys (TURNSTILE_SITEKEY and TURNSTILE_SECRET).'
     : st.active === 'admin' ? 'On, with the keys set here.' : 'Off: no keys are set.';
@@ -1142,13 +1144,13 @@ async function turnstileCard() {
   save.onclick = async () => {
     let step;
     try { step = await confirmStep(mine, profile.user.username, passkey); } catch (e) { return msg(friendlyError(e), true); }
-    if (await guard(() => admin.setTurnstile({ sitekey: sitekey.value.trim(), secret: secret.value.trim(), ...step }), 'Turnstile keys saved. The human check is on (other servers pick it up within 30 seconds).')) renderSecurity();
+    if (await guard(() => admin.setTurnstile({ sitekey: sitekey.value.trim(), secret: secret.value.trim(), ...step }), 'Turnstile keys saved. The CAPTCHA is on (other servers pick it up within 30 seconds).')) renderSecurity();
   };
   const remove = h('button.btn.danger', { type: 'button', text: 'Remove keys', disabled: !st.sitekey && !st.secretSet });
   armConfirm(remove, 'Remove keys: turn the check off?', async () => {
     let step;
     try { step = await confirmStep(mine, profile.user.username, passkey); } catch (e) { return msg(friendlyError(e), true); }
-    if (await guard(() => admin.setTurnstile({ clear: true, ...step }), 'Turnstile keys removed. The human check is off.')) renderSecurity();
+    if (await guard(() => admin.setTurnstile({ clear: true, ...step }), 'Turnstile keys removed. The CAPTCHA is off.')) renderSecurity();
   });
   card.append(
     h('label.field', {}, h('span.field-label', { text: 'Turnstile site key' }), sitekey), h('p.mono.muted', { text: 'Public: it is sent to every browser that shows the check.' }),

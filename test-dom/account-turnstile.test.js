@@ -118,7 +118,7 @@ describe('the account page with the human check on', () => {
       }
       // The reason sits right under the card's first button.
       const first = $(sels[0]);
-      expect(first.nextElementSibling.textContent, el).toMatch(/Waiting for the human check/);
+      expect(first.nextElementSibling.textContent, el).toMatch(/Waiting for the CAPTCHA/);
       expect(first.nextElementSibling.hidden, el).toBe(false);
       solve(el);
       for (const sel of sels) for (const b of document.querySelectorAll(sel)) expect(b.disabled, sel).toBe(false);

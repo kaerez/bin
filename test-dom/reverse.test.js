@@ -775,6 +775,32 @@ describe('WCAG 2.2: reverse shares', () => {
     expect(t.inert).toBe(false);
   });
 
+  it('received files taken in while a dialog is open: no toast outside the modal; the status line says it', async () => {
+    await server();
+    const rs = await existingReverse('root');
+    await seedReceived(S, { rid: rs.id, pub: rs.pub, path: 'late.txt', bytes: utf8('late') });
+    const mount = mountPoint(); // (resets the body)
+    const t = document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast' }));
+    t.setAttribute('role', 'status');
+    // The take-in (in the background) finishes only after the dialog has opened.
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const real = drive.DriveClient.prototype.receivePending;
+    const spy = vi.spyOn(drive.DriveClient.prototype, 'receivePending').mockImplementation(async function (...a) { await gate; return real.apply(this, a); });
+    try {
+      const r = await startDrive(mount, deps());
+      await r.app.ready;
+      expect(document.getElementById('toast')).toBe(t);
+      $('#drive-receive').click();
+      await until(() => dialog());
+      release();
+      await r.app.received;
+      expect(t.classList.contains('show')).toBe(false);
+      expect(t.textContent).toBe('');
+      expect($('#drive-received').textContent).toMatch(/1 new received file was added/);
+    } finally { spy.mockRestore(); }
+  });
+
   it('a refresh in the background (received files taken in) while a folder opens: the Drive ends in that folder, with focus on its heading', async () => {
     await server();
     const r = await startDrive(mountPoint(), deps());

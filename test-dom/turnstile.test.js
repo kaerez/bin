@@ -52,6 +52,32 @@ describe('humanCheck', () => {
     expect(await next).toBe('tok-2');
   });
 
+  it('marks its container while focus is inside the widget, so the container draws the focus ring (WCAG 2.4.7)', async () => {
+    config = { turnstile: '0x4AAAAAAAsitekey' };
+    const w = fakeTurnstile();
+    globalThis.turnstile.render = (el, opts) => { w.renders.push({ el, opts }); el.append(Object.assign(document.createElement('button'), { id: 'inside' })); return 'w1'; };
+    const el = document.body.appendChild(document.createElement('div'));
+    const after = document.body.appendChild(Object.assign(document.createElement('button'), { id: 'after' }));
+    await humanCheck(el, 'login');
+    expect(el.classList.contains('focus-in')).toBe(false);
+    el.querySelector('#inside').focus();
+    expect(el.classList.contains('focus-in')).toBe(true);
+    after.focus();
+    expect(el.classList.contains('focus-in')).toBe(false);
+    // Cloudflare's frame: the page gets no focusin, only its window's blur, with the widget active.
+    const quiet = (e) => e.stopImmediatePropagation();
+    window.addEventListener('focusin', quiet, true);
+    try {
+      el.querySelector('#inside').focus();
+      expect(el.classList.contains('focus-in')).toBe(false);
+      window.dispatchEvent(new Event('blur'));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(el.classList.contains('focus-in')).toBe(true);
+    } finally { window.removeEventListener('focusin', quiet, true); }
+    after.focus();
+    expect(el.classList.contains('focus-in')).toBe(false);
+  });
+
   it('waits for a token that is not there yet', async () => {
     config = { turnstile: '0x4AAAAAAAsitekey' };
     const w = fakeTurnstile();
@@ -75,7 +101,7 @@ describe('gated buttons', () => {
     expect(b.disabled).toBe(true);
     // The reason is shown under the button and linked to it.
     const note = b.nextElementSibling;
-    expect(note.textContent).toMatch(/Waiting for the human check/);
+    expect(note.textContent).toMatch(/Waiting for the CAPTCHA/);
     expect(note.hidden).toBe(false);
     expect(b.getAttribute('aria-describedby')).toBe(note.id);
     w.solve('tok-1');

@@ -15,8 +15,8 @@ import { fetchConfig } from './api.js';
 import { holdSessionKeys } from './drivekeys.js';
 
 const WAIT_MS = 120000;
-const LOAD_FAILED = 'The human check (Cloudflare Turnstile) could not load. Check your connection or content blocker, then reload the page.';
-const NOT_DONE = 'Complete the human check, then try again.';
+const LOAD_FAILED = 'The CAPTCHA (Cloudflare Turnstile) could not load. Check your connection or content blocker, then reload the page.';
+const NOT_DONE = 'Complete the CAPTCHA, then try again.';
 
 let loader = null;
 function loadScript() {
@@ -48,7 +48,7 @@ export async function turnstileSiteKey() {
 }
 
 const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {} });
-const WAITING = 'Waiting for the human check…';
+const WAITING = 'Waiting for the CAPTCHA…';
 // The way on for anyone who cannot complete the widget (a third-party
 // component): the page's own alternative, if any, and the site's contact.
 const HELP = 'If you cannot complete it, ';
@@ -143,6 +143,14 @@ export function humanCheck(container, action, { gate: buttons = [], alternative 
     state = 'on';
     update();
     container.hidden = false;
+    // Focus inside Cloudflare's widget (its frame, behind a closed shadow root) does not make the
+    // container match :focus-within in Chromium, and the page gets no focus event for it, only its
+    // window's blur, with the widget's host as the active element. So the container is marked
+    // whenever the page's focus changes, and its ring shows where focus is (WCAG 2.4.7).
+    const mark = () => container.classList.toggle('focus-in', container.contains(document.activeElement));
+    window.addEventListener('blur', () => setTimeout(mark));
+    document.addEventListener('focusin', mark);
+    document.addEventListener('focusout', () => setTimeout(mark));
     let waiters = [];
     const settle = (fn) => { const w = waiters; waiters = []; for (const x of w) fn(x); };
     let ts;

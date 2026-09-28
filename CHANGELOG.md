@@ -257,7 +257,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 - **WCAG 2.2 conformance audit** ([docs/WCAG22.md](docs/WCAG22.md)): every success criterion at
   A, AA and AAA with a verdict, evidence and the pages it concerns. On that evidence (Chromium,
   automated and manual checks; screen-reader testing by people still to come) the pages meet
-  WCAG 2.1 and 2.2 A and AA (with the optional Turnstile human check, a third-party component,
+  WCAG 2.1 and 2.2 A and AA (with the optional Turnstile CAPTCHA, a third-party component,
   covered by a statement of partial conformance), and 23 of the 31 AAA criteria (not 2.2.3, no
   timing: expiry is the product; not 3.1.5, reading level; six do not apply). The default
   accessibility statement
@@ -274,7 +274,7 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     share index without creating a FileShare object;
   - "Stop the countdown" on every per-second countdown; toasts stay until the next key press or
     click (2.2.2);
-  - wherever the Turnstile human check is used, the note under its button links to the
+  - wherever the Turnstile CAPTCHA is used, the note under its button links to the
     site's contact for anyone who cannot complete it (3.3.8);
   - text colours at least 7:1 and field borders at least 3:1 in both themes; the dark theme's
     error toast (3.7:1) fixed (1.4.3, 1.4.6, 1.4.11);
@@ -319,12 +319,19 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     the uploader page has the same footer as every other page, after `<main>` (1.3.1, 3.2.3); in the
     "Receive files…" dialog the file-type list has a visible label (3.3.2), "Copy link" keeps its
     words in its name (2.5.3), "Accept files for" is no longer cut off with text spacing (1.4.12),
-    and "Show more" in the review keeps focus (2.4.3); the human check's container draws a focus
-    ring while focus is in the widget (2.4.7).
+    and "Show more" in the review keeps focus (2.4.3); the CAPTCHA's container draws a focus
+    ring while focus is in the widget, set from the page's focus changes as `:focus-within` does
+    not match inside the widget's frame (2.4.7).
   - the Drive: received files taken in while a folder opens no longer send it back to the folder
     being left (the refresh re-lists the folder being opened and keeps its focus) (3.2.5, 2.4.3).
-  - a Drive dialog opening puts away a toast from before it, so nothing outside the modal dialog
-    is shown or read.
+  - a Drive dialog opening puts away a toast from before it, and received files taken in while a
+    dialog is open raise none (the Drive's status line says it), so nothing outside the modal
+    dialog is shown or read.
+  - Admin: a tab opened while the page is still loading stays open (the default tab no longer
+    replaces it when the loading finishes) (3.2.5).
+  - the light theme's red (destructive actions and errors) is a shade darker, so an armed or
+    hovered danger button ("Start over", "Delete archive", every "click again to confirm") keeps
+    7:1 on its tinted fill (6.5:1 before) (1.4.6).
 
 
 - **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the
