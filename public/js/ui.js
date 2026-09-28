@@ -13,8 +13,18 @@ export function showView(name) {
   // just became hidden — move focus to the shown view (sections carry
   // tabindex="-1"). Repeated transitions to the same view (status updates)
   // keep focus where it is; controllers may then focus a specific field.
-  if (shown && !shown.contains(document.activeElement)) shown.focus();
+  // Focus elsewhere (the header, the footer, the accessibility settings) is
+  // the person's own: it stays.
+  const a = document.activeElement;
+  if (shown && !shown.contains(a) && (!a || a === document.body || a.closest('main section[id^="view-"][hidden]'))) shown.focus();
+  // The page title names the view (2.4.2): `data-title` on the section, else the page's own.
+  if (shown) {
+    if (baseTitle === null) baseTitle = document.title;
+    const t = shown.dataset.title;
+    document.title = t ? `${t} · secbin` : baseTitle;
+  }
 }
+let baseTitle = null;
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
 
@@ -81,19 +91,49 @@ export function tablistKeys(list, { automatic = false } = {}) {
 }
 
 /**
- * Transient bottom toast (role="status", so it is announced). Every save
- * confirms with one. `{ error: true }` styles it as a failure and keeps it up
- * longer.
+ * Bottom toast (role="status", so it is announced). Every save confirms with
+ * one. `{ error: true }` styles it as a failure.
+ *
+ * No time limit (WCAG 2.2.1): it stays until the person's next key press or
+ * click anywhere (after a short grace, so the key that caused it does not
+ * dismiss it), or until the next toast. Clicks pass through it. Focus not
+ * obscured (2.4.11): when it would cover the focused control it shows at the
+ * top instead. A toast may name decrypted items ("Moved …"): it is put away,
+ * its text removed too, when the page is left or its history entry changes,
+ * and when the session ends (dismissToast).
  */
-let toastTimer;
+const TOAST_GRACE_MS = 1500;
+let toastShownAt = 0;
+let toastWired = false;
+/** Put the toast away now and remove its text (it may name decrypted items). */
+export function dismissToast() {
+  const t = typeof document === 'undefined' ? null : document.getElementById('toast');
+  if (!t) return;
+  t.classList.remove('show', 'toast-top');
+  t.textContent = '';
+}
 export function toast(message, { error = false } = {}) {
   const t = document.getElementById('toast');
   if (!t) return;
+  if (!toastWired) {
+    toastWired = true;
+    const dismiss = () => { if (t.classList.contains('show') && Date.now() - toastShownAt >= TOAST_GRACE_MS) dismissToast(); };
+    document.addEventListener('keydown', dismiss, true);
+    document.addEventListener('click', dismiss, true);
+    // Leaving the page (also into the back/forward cache) or moving in its history.
+    for (const ev of ['pagehide', 'popstate', 'hashchange']) window.addEventListener(ev, dismissToast);
+  }
   t.textContent = message;
   t.classList.toggle('error', !!error);
+  t.classList.remove('toast-top');
   t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), error ? 6000 : 3500);
+  toastShownAt = Date.now();
+  const f = document.activeElement;
+  if (f && f !== document.body && typeof f.getBoundingClientRect === 'function') {
+    const a = t.getBoundingClientRect();
+    const r = f.getBoundingClientRect();
+    if (r.bottom > a.top - 8 && r.top < a.bottom + 8 && r.right > a.left && r.left < a.right) t.classList.add('toast-top');
+  }
 }
 
 /** Copy text to the clipboard, with a legacy fallback. Returns a boolean. */
@@ -119,6 +159,27 @@ export async function copyText(text) {
     // never be left in the DOM, even when select/execCommand throws.
     document.body.removeChild(ta);
   }
+}
+
+/**
+ * A "Stop the countdown" switch for text that counts down every second (WCAG
+ * 2.2.2 Pause, Stop, Hide): pressed, the caller shows a fixed time instead and
+ * stops updating it; pressed again, the countdown runs. It starts pressed when
+ * "Stop animations" is on in the accessibility settings. `onChange(stopped)`
+ * re-renders. Returns { el, stopped() }.
+ */
+export function countdownSwitch(onChange) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn mini countdown-switch';
+  let stopped = document.documentElement.classList.contains('a11y-no-anim');
+  const sync = () => {
+    b.setAttribute('aria-pressed', String(stopped));
+    b.textContent = 'Stop the countdown';
+  };
+  b.addEventListener('click', () => { stopped = !stopped; sync(); onChange(stopped); });
+  sync();
+  return { el: b, stopped: () => stopped };
 }
 
 /** Flash a copy button into its "copied" state briefly. */

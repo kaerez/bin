@@ -372,6 +372,108 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **WCAG 2.2 conformance audit** ([docs/WCAG22.md](docs/WCAG22.md)): every success criterion at
+  A, AA and AAA with a verdict, evidence and the pages it concerns. On that evidence (Chromium,
+  automated and manual checks; screen-reader testing by people still to come) the pages meet
+  WCAG 2.1 and 2.2 A and AA (with the optional Turnstile CAPTCHA, a third-party component,
+  covered by a statement of partial conformance), and 23 of the 31 AAA criteria (not 2.2.3, no
+  timing: expiry is the product; not 3.1.5, reading level; six do not apply). The default
+  accessibility statement
+  now says so, with its limits. Fixes and additions:
+  - a warning two minutes before a session times out, with "Stay signed in" (any number of
+    times); after it ends, "Sign in again" in a new tab keeps what was typed; the login page and
+    Account state the timeouts (2.2.1, 2.2.5, 2.2.6);
+  - a warning five minutes before a file share's download window closes, with "Keep downloads
+    open": `POST /api/file/:id/extend` with the download grant moves the window's end by the
+    role's window from now, at most ten times per grant, never past the share's expiry, spending
+    no view; after the last view the purge waits for an extended window (2.2.1), so a one-view
+    share's ciphertext can stay up to ten more windows after its only view (SECURITY.md); an id
+    that was never a share counts as invalid, as on the chunk route, and is answered from the
+    share index without creating a FileShare object;
+  - "Stop the countdown" on every per-second countdown; toasts stay until the next key press or
+    click (2.2.2);
+  - wherever the Turnstile CAPTCHA is used, the note under its button links to the
+    site's contact for anyone who cannot complete it (3.3.8);
+  - text colours at least 7:1 and field borders at least 3:1 in both themes; the dark theme's
+    error toast (3.7:1) fixed (1.4.3, 1.4.6, 1.4.11);
+  - visible labels on every field, with the same words as the field's name (2.5.3, 3.3.2);
+  - the accessibility button no longer hides the focused control (the page scrolls it clear,
+    the toast moves up, the button sits below dialogs); a shorter editor on short screens
+    (2.4.11, 2.4.12); focus outlines in forced colours (2.4.7);
+  - dialogs and the settings panel close on click, not on mouse-down (2.5.2); 24 px Drive
+    checkbox targets (2.5.8); reflow fixes at 320 px (1.4.10); view titles (2.4.2); a view
+    change keeps focus the person placed (2.4.3); queued admin renders (no duplicate ids);
+  - the widget's "Large buttons and links" (44 px) and "Text spacing" modes (2.5.5, 1.4.8);
+  - a glossary and a site map on the accessibility page, self-describing link texts and "opens
+    in a new tab" notices (3.1.3, 3.1.4, 2.4.5, 2.4.9, 3.2.5); a PDF preview page gives its text.
+  - the Drive's notices ("Drive is not ready yet", the owner's "hasn't signed in since the Drive
+    was enabled", "not enabled") are announced through the page's status line, which is in the
+    page from the start, and the sign-in says "Signing in…" to screen readers while it (and the
+    Drive's automatic set-up or unlock) runs (4.1.3); the glossary's "Drive" and "Escrow key"
+    say that the administrator can open every Drive with the escrow key (3.1.3);
+  - the impersonation banner no longer covers the focused control at 400 % zoom (2.4.11); the
+    Drive page's footer is its contentinfo landmark, as on every other page (1.3.1);
+  - the intermittent 2.4.12 overlap at 320×256 explained (a text field already in view is left
+    under the accessibility button by the browser and scrolled clear by the page in the next
+    frame, before it is painted); the audit's check now waits for that frame, tests every point
+    of each overlap with a fixed or sticky element, also at 400 % zoom, and fails on any (2.4.12).
+  - the owner recovery kit, starting over and the archive (from `main`): each kit form's message
+    is said by a status line that is in the page before it; the passphrase warning describes the
+    passphrase field while it shows; the kit card and the archive box are regions named by their
+    headings; the reset's "unlock your own Drive" field has a visible label and its "Continue
+    without unlocking" box is described by its warning; the create-user form's Drive note is also
+    said through the toast; a user's automatic move to a reset's escrow key is said by the Drive
+    page's status line, which now stays in place through the unlock screen and the Drive (4.1.3,
+    1.3.1, 3.3.2); starting over and deleting the archive mark the field at fault invalid and
+    described by the error (3.3.1); after an unlock, a restore, a start over or an archive
+    deletion, focus goes to a heading instead of the page (2.4.3).
+  - a toast at the top of a short screen no longer covers the controls Tab reaches next: it
+    moves to the other edge, or is put away when it would cover focus at both (2.4.11, 2.4.12).
+  - reverse shares (from `main`): the uploader page's "Sent …" and the Drive's received-files
+    line are said by status lines present from the start, and the unlock screen's count of waiting
+    files by the page's status line (4.1.3); the uploader's drop zone is a named group, not a Tab
+    stop, its buttons being the keyboard way (4.1.2); focus goes to "Cancel" while sending and to
+    "Choose files" after it (2.4.3); an ended or paused link names itself in the page title (2.4.2);
+    the uploader page has the same footer as every other page, after `<main>` (1.3.1, 3.2.3); in the
+    "Receive files…" dialog the file-type list has a visible label (3.3.2), "Copy link" keeps its
+    words in its name (2.5.3), "Accept files for" is no longer cut off with text spacing (1.4.12),
+    and "Show more" in the review keeps focus (2.4.3); the CAPTCHA's container draws a focus
+    ring while focus is in the widget, set from the page's focus changes as `:focus-within` does
+    not match inside the widget's frame (2.4.7).
+  - the Drive: received files taken in while a folder opens no longer send it back to the folder
+    being left (the refresh re-lists the folder being opened and keeps its focus) (3.2.5, 2.4.3).
+  - a Drive dialog opening puts away a toast from before it, and received files taken in while a
+    dialog is open raise none (the Drive's status line says it), so nothing outside the modal
+    dialog is shown or read.
+  - buttons (`.cta`, `.send`) and the toast no longer fade their opacity: a button enabled (the
+    CAPTCHA passed, files chosen) was drawn part-way transparent for 0.2 s, 2.24:1 on "Send
+    files" in the light theme (1.4.3); the CAPTCHA check page (`/check/`, from `main`) has every
+    page's footer, the glossary link included, after `<main>` (1.3.1, 3.2.3); Admin renders start at
+    once when none is in flight, so rows being replaced cannot be clicked (3.2.5).
+  - security review of this change (F1–F8):
+    - a sender creating a view-limited file share is told that downloads can outlast the last
+      view (the recipient can keep a download window open up to 10 more times, never past the
+      expiry), and every extension is recorded in the share owner's activity log
+      (`share.download_extended`: share id, extension number, new end);
+    - `POST /api/file/:id/extend` has its own per-network limit (`download-extend`, 120 calls per
+      10 minutes, then 429 `rate_limited`), checked before the Directory, so a loop of calls past
+      the tenth extension (409) ends there; a 409 or a 410 on a share that has ended, with a
+      valid grant, is never counted as invalid;
+    - when the grant table is full, a grant living on an extension gives way to a new open;
+    - the session and download-window warnings go by the server's clock (`now` in `/me`'s
+      `session` and in the open and extend answers);
+    - when a session ends the page locks (hidden and inert; the tab's Drive keys cleared, an open
+      Drive closed, password fields emptied, the toast put away; "Log out" replaces "Close") and
+      unlocks only for the same user; another account signed in meanwhile gets "session changed";
+    - the CAPTCHA's focus listeners are shared and removed with the last widget (`remove()`);
+    - toasts, with their text, also go when the page is left or its history moves.
+  - Admin: a tab opened while the page is still loading stays open (the default tab no longer
+    replaces it when the loading finishes) (3.2.5).
+  - the light theme's red (destructive actions and errors) is a shade darker, so an armed or
+    hovered danger button ("Start over", "Delete archive", every "click again to confirm") keeps
+    7:1 on its tinted fill (6.5:1 before) (1.4.6).
+
+
 - **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the
   Drive key, its sub-keys, sealed fields bound to their node, and the `pw`, `recovery`,
   `passkey` (WebAuthn PRF) and owner `escrow` wraps), `public/js/driveclient.js` (unlock, list,

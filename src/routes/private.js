@@ -109,7 +109,7 @@ export async function handlePrivate(request, env, url, ctx) {
     // page recovers after its token was refused (public/js/api.js).
     // captchaActive: the server has Turnstile keys, so a share's CAPTCHA is enforced (else it waits for them).
     const csrf = await csrfTokenFor(env, a.claims);
-    const res = json({ ...me, impersonatedBy: a.actor ? a.actor.username : null, csrf, captchaActive: !!(await turnstileKeys(env)) });
+    const res = json({ ...me, impersonatedBy: a.actor ? a.actor.username : null, csrf, session: a.session, captchaActive: !!(await turnstileKeys(env)) });
     return appendCookies(res, a.setCookie ?? (csrf && csrfCookie(csrf, a.maxAgeSec)));
   }
 

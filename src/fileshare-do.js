@@ -39,6 +39,11 @@ export const MAX_ACTIVE_GRANTS = 2000;
 // grants; opening again replaces its oldest. So a single link holder cannot
 // fill the table and lock everyone else out — that takes 100 distinct networks.
 export const MAX_GRANTS_PER_CLIENT = 20;
+// The person downloading may keep their window open longer, this many times
+// (WCAG 2.2.1 asks for at least ten), each time by the role's window, never
+// past the share's own expiry. It spends no view. When the grant table is full,
+// a grant past its first window gives way to a new open (open()).
+export const MAX_GRANT_EXTENSIONS = 10;
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && timingSafeEqualHex(a, b);
 
@@ -210,10 +215,17 @@ export class FileShare extends DurableObject {
         const oldest = mine.reduce((a, b) => (b.exp < a.exp ? b : a));
         grants = grants.filter((g) => g !== oldest);
       } else if (grants.length >= MAX_ACTIVE_GRANTS) {
-        return { status: 'busy' };
+        // A full table: a grant living on an extension (past its first window) gives way to a new
+        // open. So keeping a share "busy" still takes a fresh open per slot in every window, as it
+        // did before extensions existed; extensions never make that cheaper.
+        const extended = grants.filter((g) => Number.isInteger(g.f) && g.f <= t);
+        if (!extended.length) return { status: 'busy' };
+        const first = extended.reduce((a, b) => (b.exp < a.exp ? b : a));
+        grants = grants.filter((g) => g !== first);
       }
       const gexp = Math.min(t + grantSec, rec.expires);
-      grants.push({ h: grantHash, exp: gexp, c: client });
+      // `f`: the end of the grant's first window (extensions move `exp`, never `f`).
+      grants.push({ h: grantHash, exp: gexp, f: gexp, c: client });
       // Grants now live under GRANTS_KEY; an empty inline array keeps records
       // readable by the previous release if a deploy is rolled back.
       rec.grants = [];
@@ -252,6 +264,37 @@ export class FileShare extends DurableObject {
       if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };
       await this.#purge(rec);
       return { status: 'ok' };
+    });
+  }
+
+  /**
+   * Keep a live download window open longer (WCAG 2.2.1 Timing Adjustable: the
+   * viewer is warned before it closes and may extend it): the grant then ends
+   * `grantSec` from now, never past the share's expiry, at most
+   * MAX_GRANT_EXTENSIONS times. Spends no view. After the last view (closed)
+   * the purge waits for the extended grant.
+   */
+  async extendGrant(grantHash, grantSec, human = false) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const rec = await this.#live();
+      if (!rec || rec.state === 'pending') return { status: 'gone' };
+      // A share with the CAPTCHA: only with a CAPTCHA grant, as for its chunks.
+      if (rec.hc && human !== true) return { status: 'captcha' };
+      const t = nowSec();
+      const grants = await this.#grants(rec, t);
+      const g = grants.find((x) => safeEq(x.h, grantHash));
+      if (!g) return { status: 'bad_grant' };
+      const used = Number.isInteger(g.n) ? g.n : 0;
+      if (used >= MAX_GRANT_EXTENSIONS) return { status: 'limit', grantExpires: g.exp, extensionsLeft: 0 };
+      g.exp = Math.max(g.exp, Math.min(t + grantSec, rec.expires));
+      g.n = used + 1;
+      await this.ctx.storage.put(GRANTS_KEY, grants);
+      if (rec.state === 'closed' && g.exp > rec.purgeAt) {
+        rec.purgeAt = g.exp;
+        await this.#put(rec);
+        await this.ctx.storage.setAlarm(rec.purgeAt * 1000);
+      }
+      return { status: 'ok', grantExpires: g.exp, extensions: g.n, extensionsLeft: MAX_GRANT_EXTENSIONS - g.n };
     });
   }
 

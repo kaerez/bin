@@ -50,6 +50,13 @@ export function h(spec, props = {}, ...children) {
 }
 
 /**
+ * `el` with its label shown above it (WCAG 3.3.2). The text defaults to the
+ * control's aria-label, so what is shown and what is announced are the same
+ * words (2.5.3).
+ */
+export const labelled = (el, text = el.getAttribute('aria-label')) => h('label.field-inline', {}, h('span.field-label', { text }), el);
+
+/**
  * A file or folder name for display: cleaned (files.js cleanName), inside a
  * bidi isolate that takes its direction from the name itself, with the
  * extension (from the last dot) as its own left-to-right isolate — so a name
@@ -77,6 +84,27 @@ function svg(tag, attrs = {}, ...children) {
 
 /** The one wording for "this field is stored in plaintext" — keep it in one place. */
 /** Share index kinds → the words the UI uses. */
+/**
+ * What a sender is told about a file share with a view limit: after the last
+ * view, a download window that recipient opened may still be kept open, up to
+ * MAX_GRANT_EXTENSIONS (src/fileshare-do.js) more times, never past the expiry.
+ */
+export const LAST_VIEW_DOWNLOADS = 'After the last view, the recipient can still download while their download window is open, and can keep it open up to 10 more times, never past the expiry.';
+
+/**
+ * The first sentences under a new link (the composer and the Drive): who can
+ * open `what`, how often and until when; for files (`files`) with a view
+ * limit, also that downloads can outlast the last view (LAST_VIEW_DOWNLOADS).
+ */
+export function shareLifetimeNote({ what, views, expiryText, files = false }) {
+  return (views === null
+    ? `Anyone with this link can open ${what} any number of times until it self-destructs in ${expiryText}.`
+    : views === 1
+      ? `Anyone with this link can open ${what} once. Unopened, it self-destructs in ${expiryText}.`
+      : `Anyone with this link can open ${what} up to ${views} times. It self-destructs after the last view or in ${expiryText}, whichever comes first.`)
+    + (files && views !== null ? ` ${LAST_VIEW_DOWNLOADS}` : '');
+}
+
 export const KIND_NAMES = Object.freeze({ text: 'note', files: 'files', url: 'link', secret: 'credential', drive: 'drive', reverse: 'receive' });
 
 /**
@@ -201,6 +229,16 @@ export function formatDuration(ms) {
   const pad = (n) => String(n).padStart(2, '0');
   if (d > 0) return `${d}d ${pad(hh)}:${pad(m)}:${pad(s)}`;
   return hh > 0 ? `${hh}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+/** Seconds → words: "12 hours", "5 minutes", "7 days", "1 hour 30 minutes". */
+export function spellDuration(sec) {
+  const parts = [];
+  const unit = (n, w) => { if (n) parts.push(`${n} ${w}${n === 1 ? '' : 's'}`); };
+  unit(Math.floor(sec / 86400), 'day');
+  unit(Math.floor((sec % 86400) / 3600), 'hour');
+  unit(Math.floor((sec % 3600) / 60), 'minute');
+  return parts.slice(0, 2).join(' ') || 'less than a minute';
 }
 
 /** Seconds → coarse "2d 3h" / "3h 12m" / "12m" / "<1m". */

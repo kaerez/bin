@@ -1,13 +1,15 @@
 // nav.js — shared dashboard chrome: loads the signed-in profile (/api/private/me)
 // and records it as the session this page acts for (api.js bindSession), shows
 // the nav (Drive only when the role allows it, Admin only for the owner), the
-// impersonation banner with "Return to admin", log-out, and the "session
-// changed" banner. Every dashboard page awaits `ready`.
+// impersonation banner with "Return to admin", log-out, the "session changed"
+// banner, and the warning before the session times out (session-timeout.js).
+// Every dashboard page awaits `ready`.
 
 import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, SESSION_CHANGED } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError, h } from '../../js/common.js';
 import { clearSessionKey, clearImpersonationKey } from '../../js/drivekeys.js';
+import { watchSession } from './session-timeout.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -49,6 +51,8 @@ export function driveAllowed(profile) {
 export const ready = (async () => {
   const profile = await loadMe();
   bindSession(profile);
+  // A warning before the session times out, with the option to stay signed in (WCAG 2.2.1).
+  watchSession(profile.session);
   // The Drive key of a user the owner acted as lives only while acting as them.
   if (!profile.impersonatedBy) clearImpersonationKey();
   const nav = $('#dash-nav');

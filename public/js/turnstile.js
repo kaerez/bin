@@ -6,7 +6,9 @@
 //
 // The widget is always shown ("always"), so the visitor sees the check pass
 // before the protected button enables; its script is the only third-party code secbin loads,
-// and only on those pages (see the CSP in src/lib/http.js).
+// and only on those pages (see the CSP in src/lib/http.js). While it waits, and
+// if it fails, the note under the button offers the site's contact (and the
+// page's own alternative, if it has one), for anyone who cannot complete it.
 
 import { scriptURL, TURNSTILE_SCRIPT } from './tt.js';
 import { fetchConfig } from './api.js';
@@ -47,7 +49,48 @@ export async function turnstileSiteKey() {
   }
 }
 
-const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {} });
+// Focus inside Cloudflare's widget (its frame, behind a closed shadow root) does not make the
+// container match :focus-within in Chromium, and the page gets no focus event for it, only its
+// window's blur, with the widget's host as the active element. So each widget's container is
+// marked (.focus-in) whenever the page's focus changes, and its ring shows where focus is (WCAG
+// 2.4.7). One set of listeners serves every widget on the page; a container that has left the
+// page is dropped, and the listeners go with the last one.
+const focusBoxes = new Set();
+const markFocus = () => {
+  for (const c of [...focusBoxes]) {
+    if (!c.isConnected) { focusBoxes.delete(c); continue; }
+    c.classList.toggle('focus-in', c.contains(document.activeElement));
+  }
+  if (!focusBoxes.size) unwatchFocus();
+};
+const markLater = () => setTimeout(markFocus);
+function unwatchFocus() {
+  window.removeEventListener('blur', markLater);
+  document.removeEventListener('focusin', markFocus);
+  document.removeEventListener('focusout', markLater);
+}
+function watchFocus(container) {
+  if (!focusBoxes.size) {
+    window.addEventListener('blur', markLater);
+    document.addEventListener('focusin', markFocus);
+    document.addEventListener('focusout', markLater);
+  }
+  focusBoxes.add(container);
+}
+
+const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {}, remove: () => {} });
+// The way on for anyone who cannot complete the widget (a third-party
+// component): the page's own alternative, if any, and the site's contact.
+const HELP = 'If you cannot complete it, ';
+const CONTACT = { href: '/accessibility/#st-contact', text: 'contact the administrator' };
+
+/** " <alternative> If you cannot complete it, contact the administrator." as nodes. */
+function helpNodes(alternative) {
+  const a = document.createElement('a');
+  a.href = CONTACT.href;
+  a.textContent = CONTACT.text;
+  return [document.createTextNode(` ${alternative ? `${alternative} ` : ''}${HELP}`), a, document.createTextNode('.')];
+}
 let noteSeq = 0;
 
 /** The native `disabled` accessor of a button, input, select or fieldset. */
@@ -91,7 +134,7 @@ function gate(btn, waiting) {
  * widget can serve several buttons: each take() uses up the token and starts
  * a fresh check.
  */
-export function humanCheck(container, action, { gate: buttons = [], noun = 'CAPTCHA' } = {}) {
+export function humanCheck(container, action, { gate: buttons = [], alternative = '', noun = 'CAPTCHA' } = {}) {
   let token = null;
   let state = 'pending'; // pending (site key unknown) | on | off
   let broken = null;
@@ -107,7 +150,7 @@ export function humanCheck(container, action, { gate: buttons = [], noun = 'CAPT
     note.className = 'mono muted human-wait';
     note.id = `human-wait-${++noteSeq}`;
     note.setAttribute('role', 'status');
-    note.textContent = `Waiting for the ${noun}…`;
+    note.append(`Waiting for the ${noun}…`, ...helpNodes(alternative));
     note.hidden = true;
     gated[0].insertAdjacentElement('afterend', note);
     for (const b of gated) b.setAttribute('aria-describedby', [b.getAttribute('aria-describedby'), note.id].filter(Boolean).join(' '));
@@ -130,6 +173,7 @@ export function humanCheck(container, action, { gate: buttons = [], noun = 'CAPT
     state = 'on';
     update();
     container.hidden = false;
+    watchFocus(container);
     let waiters = [];
     const settle = (fn) => { const w = waiters; waiters = []; for (const x of w) fn(x); };
     let ts;
@@ -155,12 +199,19 @@ export function humanCheck(container, action, { gate: buttons = [], noun = 'CAPT
       const note = document.createElement('p');
       note.className = 'msg error';
       note.setAttribute('role', 'alert');
-      note.textContent = broken.message;
+      note.append(broken.message, ...helpNodes(alternative));
       container.replaceChildren(note);
     }
     return {
       active: true,
       gate: addGate,
+      /** Tear the widget down: its focus mark and, when it was the last, the page's focus listeners go too. */
+      remove() {
+        focusBoxes.delete(container);
+        container.classList.remove('focus-in');
+        if (!focusBoxes.size) unwatchFocus();
+        try { if (ts && id !== undefined) ts.remove(id); } catch { /* already gone */ }
+      },
       async take() {
         if (broken) throw broken;
         const t = token || await new Promise((resolve, reject) => {

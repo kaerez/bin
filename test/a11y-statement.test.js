@@ -23,8 +23,8 @@ describe('accessibility statement settings', () => {
     expect(a.statements).toHaveLength(1);
     expect(a.statements[0]).toMatchObject({ lang: 'en', dir: 'ltr', title: 'Accessibility statement', doneHeading: 'What we have done' });
     expect(a.statements[0].done.length).toBeGreaterThan(3);
-    expect(a.statements[0].standard.join(' ')).toMatch(/partial conformance/);
-    expect(a).toMatchObject({ contact: '', coordinator: '', reviewed: '2026-09-25' });
+    expect(a.statements[0].standard.join(' ')).toMatch(/met every WCAG 2\.2 level A and AA success criterion/);
+    expect(a).toMatchObject({ contact: '', coordinator: '', reviewed: '2026-09-27' });
     expect(JSON.stringify(a)).not.toMatch(/[֐-׿]/);
     // Public, and cacheable by nobody's cookie: no session needed.
     expect((await fetchJson('/api/config')).status).toBe(200);

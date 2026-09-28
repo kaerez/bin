@@ -264,18 +264,22 @@ Cloudflare Access is no longer needed. You may still layer it in front of `/dash
 
 The pages are built to **WCAG 2.2 level AA as a minimum, and AAA wherever possible**; AA also covers WCAG 2.1
 AA and 2.0 AA. They have skip links, landmarks, full keyboard operation with visible focus,
-labelled fields, AA contrast in both themes, reduced-motion support, reflow down to 320 px and
-24 px touch targets. Every page and state is checked with axe-core.
+labelled fields, 7:1 (AAA) text contrast in both themes, reduced-motion support, reflow down to
+320 px and 400 % zoom, 24 px touch targets (44 px in the "large buttons" mode), warnings with an
+option to extend before a session times out or a download window closes, passwords that
+paste and fill from password managers, and a glossary. Every page and state is checked with axe-core; the
+full WCAG 2.2 conformance report, criterion by criterion, is [docs/WCAG22.md](docs/WCAG22.md).
 
 - **Preferences button** (bottom corner of every page, in English and Hebrew): high contrast,
-  text size, readable font, stop animations, keyboard-focus highlight, and marking of headings
-  and links. The choices are saved in the browser and applied before the page paints. It is a
+  text size, readable font, text spacing, large buttons and links, stop animations,
+  keyboard-focus highlight, and marking of headings and links. The choices are saved in the browser and applied before the page paints. It is a
   convenience; the pages do not rely on it.
 - **Statement.** `/accessibility/` shows an accessibility statement that the owner edits under
   Admin → Settings → Accessibility: the title, commitment, standard and status, last review
   date, what has been done, known limitations, how to report a problem, and a coordinator if
   you must appoint one. It is plain text (one paragraph or list item per line). The default is
-  English only and claims **partial conformance**; you can add a second language (its code and
+  English only and states what the last review found (WCAG 2.2 A and AA met, most of AAA;
+  not yet tested with assistive technology by people: see [docs/WCAG22.md](docs/WCAG22.md)); you can add a second language (its code and
   direction, e.g. `he` right to left), shown below the first with its own `lang` and `dir`.
   Untranslated headings fall back to the main language's. Without JavaScript the page shows a
   short note instead. The statement is part of the Settings part of an export. "Restore the

@@ -563,6 +563,19 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   session version (bumped by password change/reset/disable), plus admin-configured idle and
   absolute timeouts. Missing/invalid `SIG`/`ENC` ⇒ login is unavailable (`503`), public links
   keep working.
+- **When a session ends in an open page** (public/dashboard/js/session-timeout.js): the page
+  warns two minutes before (WCAG 2.2.1), measuring its clock against the server's time (`now` in
+  `/api/private/me`'s `session`, and in the file-share open and extend answers), so a browser
+  clock that is off does not delay the warning. At the end the page locks: it stays in place but
+  hidden and inert behind the "signed out" dialog, the tab's Drive key slots are cleared (stored
+  or held in memory), an open Drive forgets its key and closes (its names and dialogs leave the
+  page), password fields are emptied and the toast is put away. What was typed in other fields
+  stays, hidden, so that signing in again in a new tab loses nothing (WCAG 2.2.5). Coming back,
+  the page unlocks only if the same user (in the same impersonation state) is signed in; for any
+  other account it stays locked and shows "session changed" with Reload, and never takes over
+  that session's times or token. Toasts (which may name decrypted items) have no time limit but
+  go, with their text, on the next key press or click, when the page is left or its history
+  moves, and when the session ends.
 - **Disabled accounts** are refused on every authenticated route, including the dashboard,
   My shares, account and share creation, even with a still-valid session cookie or API key.
   - The response is `403 account_disabled`, and the session cookie is cleared.
@@ -1520,7 +1533,28 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   - At most 2000 grants may be live per share; beyond that, opens get `429 busy` with
     `Retry-After`.
   - So repeated opens cannot break a share. Keeping one busy takes at least 100 distinct
-    networks, a residual risk for unlimited-view shares shared very widely.
+    networks, a residual risk for unlimited-view shares shared very widely. Extensions do not
+    make it cheaper: when the table is full, a grant past its first window (one living on an
+    extension) gives way to a new open, so a busy share still needs a fresh open for every slot
+    in every window, as before extensions existed.
+  - The viewer's tab may extend a live grant's download window (`POST /api/file/:id/extend`,
+    for WCAG 2.2.1). The grant is the only credential (a custom header; cross-site requests are
+    refused). Each extension ends the window the role's download window from now, at most 10
+    times per grant, never past the share's expiry, and spends no view.
+  - Every extend call counts towards the route's own per-network limit (`download-extend`: 120
+    calls per 10 minutes, then `429 rate_limited` with `Retry-After` for 10 minutes), checked
+    first, so a loop is refused before the Directory is asked. What a guesser produces also counts
+    as invalid, as on the chunk route: a bad grant, and an id that was never a share (answered
+    from the share index without creating a FileShare object). The right credential arriving late
+    or once too often is never counted as invalid: a share that has ended (`410`) and a grant past
+    its tenth extension (`409 extend_limit`; the viewer stops asking after the first). The owner
+    sees and lifts `download-extend` blocks with the others.
+  - After a file share's last view its ciphertext is purged when the last live grant ends. So
+    extensions keep a one-view share's encrypted data in R2, and downloadable with that grant,
+    for up to 10 more windows after the only view, never past the share's expiry. The sender is
+    told so when the share is created, and every extension is recorded in the share owner's
+    activity log (`share.download_extended`: the share id, which extension of that window, and
+    the new end; never the grant or an address). Revoking the share ends it at once.
 - A missing or invalid binding (KV, R2, a Durable Object namespace) answers a generic
   `503 not_configured`. The binding's name goes to the Worker logs, not to the caller.
   - Uploads, revokes and deletes of file shares check the R2 binding first.

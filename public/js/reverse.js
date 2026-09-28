@@ -12,6 +12,11 @@
 // check page first (public/js/pagekey.js), and comes back with a grant; each
 // grant starts one upload session (a wrong password or a second batch of
 // files needs the CAPTCHA again).
+//
+// Accessibility (docs/WCAG22.md): the page title names the state; the drop
+// zone is a named group (not a Tab stop: its two buttons are the keyboard way,
+// as in the composer); "Sent …" appears inside a status line that is in the
+// page from the start; after a send, focus goes to "Choose files", not the page.
 
 import { h, clear, showMsg, formatBytes, formatDate, friendlyError, nameEl } from './common.js';
 import { ApiError } from './api.js';
@@ -41,6 +46,7 @@ const PAUSED_TITLE = 'This link is not accepting files right now';
 const PAUSED_TEXT = 'Nothing you send can be received at the moment. Try again later, or ask the person who shared it.';
 
 function errorCard(title, text) {
+  document.title = `${title} · secbin`; // the page title names the state (WCAG 2.4.2)
   return h('div.card.stack', { id: 'reverse-error' },
     h('h1.title', { text: title }),
     h('p.subtitle', { role: 'alert', text }));
@@ -101,7 +107,7 @@ function buildApp(root, up, { storage, toCheck }) {
   const folderIn = h('input', { type: 'file', id: 'reverse-folder-input', multiple: true, webkitdirectory: true, hidden: true });
   const pickFiles = h('button.btn', { type: 'button', id: 'reverse-pick-files', text: 'Choose files', on: { click: () => fileIn.click() } });
   const pickFolder = h('button.btn', { type: 'button', id: 'reverse-pick-folder', text: 'Choose a folder', on: { click: () => folderIn.click() } });
-  const drop = h('div.dropzone', { id: 'reverse-drop', tabindex: '0', role: 'group', 'aria-labelledby': 'reverse-drop-title', 'aria-describedby': 'reverse-drop-hint' },
+  const drop = h('div.dropzone', { id: 'reverse-drop', role: 'group', 'aria-labelledby': 'reverse-drop-title', 'aria-describedby': 'reverse-drop-hint' },
     h('p.dropzone-title', { id: 'reverse-drop-title', text: 'Drop files or folders here' }),
     h('p.mono.dropzone-hint', { id: 'reverse-drop-hint', text: 'Names, folders, types and contents are encrypted in your browser before they are sent.' }),
     h('div.btn-row.center', {}, pickFiles, pickFolder));
@@ -127,7 +133,9 @@ function buildApp(root, up, { storage, toCheck }) {
   const bar = progressBar();
   const cancel = h('button.btn', { type: 'button', id: 'reverse-cancel', text: 'Cancel', hidden: true });
   const msg = h('p.msg.error', { id: 'reverse-msg', role: 'alert', hidden: true });
-  const done = h('p.msg', { id: 'reverse-done', role: 'status', hidden: true });
+  // Inside a status line that is in the page from the start (a live region shown with its text is often not read).
+  const done = h('p.msg', { id: 'reverse-done', hidden: true });
+  const doneLive = h('div', { id: 'reverse-done-live', role: 'status' }, done);
 
   const note = up.note ? h('div.card.reverse-note', { id: 'reverse-note' },
     h('p.field-label', { text: 'A note from the person who shared this link' }),
@@ -144,7 +152,7 @@ function buildApp(root, up, { storage, toCheck }) {
     pwBox,
     send,
     h('div.drive-transfer', {}, bar.el, cancel),
-    msg, recheck, done));
+    msg, recheck, doneLive));
   const needCheck = (text) => {
     showMsg(msg, `${text} Your chosen files are not kept: choose them again after the CAPTCHA.`);
     recheck.hidden = false;
@@ -168,8 +176,7 @@ function buildApp(root, up, { storage, toCheck }) {
   };
   fileIn.addEventListener('change', () => { const f = [...fileIn.files]; fileIn.value = ''; add(f.map((file) => ({ path: file.name, file }))); });
   folderIn.addEventListener('change', () => { const f = [...folderIn.files]; folderIn.value = ''; add(f.map((file) => ({ path: file.webkitRelativePath || file.name, file }))); });
-  clearBtn.addEventListener('click', () => { entries = []; render(); drop.focus(); });
-  drop.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === drop) { e.preventDefault(); fileIn.click(); } });
+  clearBtn.addEventListener('click', () => { entries = []; render(); pickFiles.focus(); });
   drop.addEventListener('dragover', (e) => { if (!busy) { e.preventDefault(); drop.classList.add('over'); } });
   drop.addEventListener('dragleave', (e) => { if (!drop.contains(e.relatedTarget)) drop.classList.remove('over'); });
   drop.addEventListener('drop', async (e) => {
@@ -190,6 +197,7 @@ function buildApp(root, up, { storage, toCheck }) {
   });
 
   let ctl = null;
+  let sent = false;
   cancel.addEventListener('click', () => { if (ctl) ctl.abort(); });
   send.addEventListener('click', async () => {
     if (busy || !entries.length) return;
@@ -210,6 +218,8 @@ function buildApp(root, up, { storage, toCheck }) {
       if (captcha) spendGrant(); // used by this session start, whatever its answer
       await up.begin({ password: pw ? pw.value : '', humanGrant });
       cancel.hidden = false;
+      // "Send files" is disabled while it runs: focus goes to "Cancel", not the page (2.4.3).
+      if (!document.activeElement || document.activeElement === document.body || document.activeElement === send) cancel.focus();
       const label = c.count === 1 ? `Sending ${entries[0].path}` : `Sending ${c.count} files`;
       const r = await up.upload(entries, { signal: ctl.signal, onProgress: (d, t) => bar.set(`${label}…`, t > 0 ? d / t : 1) });
       await up.done().catch(() => {});
@@ -221,6 +231,7 @@ function buildApp(root, up, { storage, toCheck }) {
       showMsg(done, `Sent ${r.files} file${r.files === 1 ? '' : 's'} (${formatBytes(r.bytes)}), encrypted. The person who shared this link will find ${r.files === 1 ? 'it' : 'them'} in their Drive.${captcha ? ' To send more, complete the CAPTCHA again.' : ''}`, false);
       recheck.hidden = !captcha;
       if (pw) pw.value = '';
+      sent = true;
     } catch (e) {
       bar.hide();
       await up.done().catch(() => {});
@@ -241,6 +252,11 @@ function buildApp(root, up, { storage, toCheck }) {
       ctl = null;
       cancel.hidden = true;
       render();
+      // Focus that fell to the page (the busy "Send files", a hidden "Cancel") goes back: to "Choose
+      // files" after a send (the list is empty, "Send files" disabled), else to "Send files" (2.4.3).
+      const lost = !document.activeElement || document.activeElement === document.body || document.activeElement === cancel || document.activeElement === send;
+      if (sent) pickFiles.focus(); else if (lost) (send.disabled ? pickFiles : send).focus();
+      sent = false;
     }
   });
   render();

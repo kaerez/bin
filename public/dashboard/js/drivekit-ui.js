@@ -13,6 +13,12 @@
 // - Verify kit / Restore from kit: a kit FILE the owner selects (never a copy
 //   kept by this page), its passphrase; the file and passphrase are cleared
 //   once done. Failed attempts are throttled here.
+//
+// Accessibility (docs/WCAG22.md): each form's message sits in a status line
+// that is in the page from the start (a live region that appears together
+// with its text is often not read); the passphrase warning describes the
+// passphrase field while it shows; a check's verdict takes focus; statuses
+// are words, not only colours.
 
 import { prelogin } from '../../js/api.js';
 import { stretch } from '../../js/pwauth.js';
@@ -43,6 +49,8 @@ const kitFailure = (e) => e && e.name === 'DriveKitError' && ['auth', 'format', 
 const field = (label, control) => h('label.field', {}, h('span.field-label', { text: label }), control);
 const secret = (id, autocomplete) => h('input.input', { id, type: 'password', autocomplete, maxlength: '1024' });
 const fileInput = (id) => h('input.input', { id, type: 'file', accept: '.json,application/json' });
+/** A form's message, inside a status line that is in the page from the start (WCAG 4.1.3). */
+const liveMsg = (id) => { const msg = h('p.msg', { id, hidden: true }); return { msg, live: h('div.kit-live', { role: 'status' }, msg) }; };
 const userOf = (profile) => ({ id: profile.user.id, role: profile.user.role, impersonating: !!profile.impersonatedBy });
 
 function saveFile(text, name) {
@@ -123,6 +131,8 @@ export function kitDownload({ profile, drive, onDone = () => {} }) {
   const syncWeak = () => {
     const n = [...pass1.value].length;
     weak.hidden = n >= SHORT_PASSPHRASE;
+    // The warning describes the passphrase field while it shows (and only then).
+    if (weak.hidden) pass1.removeAttribute('aria-describedby'); else pass1.setAttribute('aria-describedby', 'kit-pass-warn');
     weak.textContent = n === 0
       ? 'No passphrase: the kit is still encrypted, but with a key anyone can derive. It opens every user’s Drive: store it offline, like the AUTHN secret.'
       : `A short passphrase (under ${SHORT_PASSPHRASE} characters) is easy to guess offline. The kit opens every user’s Drive: store it offline, like the AUTHN secret.`;
@@ -131,7 +141,7 @@ export function kitDownload({ profile, drive, onDone = () => {} }) {
   syncWeak();
   const mine = secret('kit-confirm', 'current-password');
   const go = h('button.btn', { type: 'button', id: 'kit-download', text: 'Download kit' });
-  const msg = h('p.msg', { id: 'kit-download-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('kit-download-msg');
   go.addEventListener('click', async () => {
     if (pass1.value !== pass2.value) return showMsg(msg, 'The two passphrases differ.');
     go.disabled = true;
@@ -157,7 +167,7 @@ export function kitDownload({ profile, drive, onDone = () => {} }) {
     h('p.type-hint', { text: 'Each download is a new file with your Drive key and the whole current snapshot of escrow keys. Your Drive must be unlocked in this tab.' }),
     h('div.toolbar', {}, field('Kit passphrase (optional)', pass1), field('Repeat the kit passphrase', pass2)), weak,
     field('Your password (or leave it empty to confirm with a passkey)', mine),
-    h('div.btn-row', {}, go), msg);
+    h('div.btn-row', {}, go), live);
   el.focusFirst = () => pass1.focus();
   return el;
 }
@@ -169,7 +179,7 @@ export function kitVerify({ profile, drive }) {
   const pass = secret('kit-verify-pass', 'off');
   const go = h('button.btn', { type: 'button', id: 'kit-verify', text: 'Verify kit', disabled: true, 'aria-describedby': 'kit-verify-hint' });
   const hint = h('p.type-hint', { id: 'kit-verify-hint', text: 'Choose the kit file you saved (from your disk or backup) to check it. Nothing is changed and the file is not uploaded.' });
-  const msg = h('p.msg', { id: 'kit-verify-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('kit-verify-msg');
   const out = h('div', { id: 'kit-verify-out' });
   const sync = () => { go.disabled = !file.files || !file.files.length; };
   file.addEventListener('change', sync);
@@ -195,7 +205,7 @@ export function kitVerify({ profile, drive }) {
   });
   return h('fieldset.range', { id: 'kit-verify-set' }, h('legend', { text: 'Verify kit' }),
     field('Kit file to verify', file), field('Passphrase of the kit to verify', pass), hint,
-    h('div.btn-row', {}, go), msg, out);
+    h('div.btn-row', {}, go), live, out);
 }
 
 /**
@@ -211,7 +221,7 @@ export function kitRestore({ profile, drive, onRestored = () => {} }) {
   const mine = secret('kit-restore-pw', 'current-password');
   const go = h('button.btn', { type: 'button', id: 'kit-restore', text: 'Restore from kit', disabled: true, 'aria-describedby': 'kit-restore-hint' });
   const hint = h('p.type-hint', { id: 'kit-restore-hint', text: 'Choose the kit file you saved. Your account password confirms it is you and makes the Drive’s new password key.' });
-  const msg = h('p.msg', { id: 'kit-restore-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('kit-restore-msg');
   const sync = () => { go.disabled = !file.files || !file.files.length; };
   file.addEventListener('change', sync);
   go.addEventListener('click', async () => {
@@ -242,7 +252,7 @@ export function kitRestore({ profile, drive, onRestored = () => {} }) {
   });
   return h('fieldset.range', { id: 'kit-restore-set' }, h('legend', { text: 'Restore from kit' }),
     field('Kit file to restore from', file), field('Passphrase of the kit to restore from', pass), field('Your account password', mine), hint,
-    h('div.btn-row', {}, go), msg);
+    h('div.btn-row', {}, go), live);
 }
 
 const INTRO = 'A file with your Drive key and every escrow key, sealed with a passphrase in this browser: it is never sent to the server. If you lose your password and passkeys (for example after recovery with the AUTHN secret), the kit gives you back your Drive and access to every user’s Drive; after a start over, it also brings back your earlier Drive. It opens every user’s Drive, so store it offline, like the AUTHN secret; losing both your credentials and every kit loses the escrow. It is not part of the export file, and Drive content never is.';
@@ -268,7 +278,8 @@ export function kitCard({ profile, drive, status = null, alert = false, place = 
     try { render(await drive.ownerKitStatus({ user: userOf(profile) }), false); } catch (e) { slot.replaceChildren(h('p.msg.error', { text: `The kit status is unavailable: ${friendlyError(e)}` })); }
   }
   if (status) render(status, alert); else refresh();
-  return h(`div.card.stack${place === 'drive' ? '.drive-notice' : ''}`, { id: place === 'drive' ? 'drive-kit' : KIT_ANCHOR, tabindex: '-1', 'aria-labelledby': 'kit-title' },
+  // A section named by its heading (a region): a name on a plain <div> is not allowed (ARIA 1.2).
+  return h(`section.card.stack${place === 'drive' ? '.drive-notice' : ''}`, { id: place === 'drive' ? 'drive-kit' : KIT_ANCHOR, tabindex: '-1', 'aria-labelledby': 'kit-title' },
     h('h2.section-title', { id: 'kit-title', text: 'Owner recovery kit' }),
     h('p.subtitle', { text: INTRO }),
     slot,

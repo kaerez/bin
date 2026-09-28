@@ -17,7 +17,7 @@
 // point (public/dashboard/js/drive.js passes the client module); it is
 // separate from the boot so it can be tested.
 
-import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, viewsText, nameEl } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, viewsText, nameEl, shareLifetimeNote } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { createTree, crumbTrail } from '../../js/tree.js';
 import { progressBar } from '../../js/progress.js';
@@ -155,11 +155,8 @@ const dirsOf = (r) => sortChildren(r.children.filter((c) => c.kind === 'dir')).m
 
 /** The text under a new link — the composer's wording. */
 export function successNote({ views, expiryText, what }) {
-  return (views === null
-    ? `Anyone with this link can open ${what} any number of times until it self-destructs in ${expiryText}.`
-    : views === 1
-      ? `Anyone with this link can open ${what} once. Unopened, it self-destructs in ${expiryText}.`
-      : `Anyone with this link can open ${what} up to ${views} times. It self-destructs after the last view or in ${expiryText}, whichever comes first.`)
+  // A Drive share is a file share: its download window can outlive the last view.
+  return shareLifetimeNote({ what, views, expiryText, files: true })
     + ' Keep the whole link private — the key that unlocks it is inside the link. Deleting the item from your Drive ends the link at once; ending the link keeps the item. Manage it later under “my shares”.';
 }
 
@@ -171,6 +168,9 @@ let dlgSeq = 0;
  * in and trapped, Escape or the scrim closes, the rest of the page inert, and
  * focus back on the opener (or `fallback()`) when it closes.
  */
+// The Drive dialogs open now (closed all at once when the session ends).
+const openDialogs = new Set();
+
 export function openDialog({ title, sub = '', body = [], wide = false, fallback = null, onClose = null }) {
   const id = `dlg-${++dlgSeq}`;
   const titleEl = h('h2.modal-title', { id: `${id}-t`, text: title });
@@ -183,6 +183,10 @@ export function openDialog({ title, sub = '', body = [], wide = false, fallback 
   const scrim = h('div.modal-scrim.drive-dialog', {}, box);
   const opener = document.activeElement;
   const inerted = [...document.body.children].filter((el) => el.id !== 'toast' && el.tagName !== 'SCRIPT' && !el.inert);
+  // A toast from before the dialog (already said) is about the page behind it: put away, so that
+  // nothing outside the modal dialog is shown or read (a toast raised while it is open still is).
+  const oldToast = document.getElementById('toast');
+  if (oldToast && oldToast.classList.contains('show')) { oldToast.classList.remove('show'); oldToast.textContent = ''; }
   let open = true;
   const onKey = (e) => {
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
@@ -195,6 +199,7 @@ export function openDialog({ title, sub = '', body = [], wide = false, fallback 
   function close() {
     if (!open) return;
     open = false;
+    openDialogs.delete(close);
     scrim.remove();
     for (const el of inerted) el.inert = false;
     document.removeEventListener('keydown', onKey, true);
@@ -202,10 +207,15 @@ export function openDialog({ title, sub = '', body = [], wide = false, fallback 
     else if (fallback) fallback();
     if (onClose) onClose();
   }
-  scrim.addEventListener('mousedown', (e) => { if (e.target === scrim) close(); });
+  // A click on the scrim closes it, on the up-event and only when the press
+  // also began there (WCAG 2.5.2): a drag out of a field never closes it.
+  let downOnScrim = false;
+  scrim.addEventListener('pointerdown', (e) => { downOnScrim = e.target === scrim; });
+  scrim.addEventListener('click', (e) => { if (e.target === scrim && downOnScrim) close(); downOnScrim = false; });
   document.body.appendChild(scrim);
   for (const el of inerted) el.inert = true;
   document.addEventListener('keydown', onKey, true);
+  openDialogs.add(close);
   const first = bodyEl.querySelector('input:not([type="checkbox"]):not([hidden]), select, textarea');
   (first || box).focus();
   return {
@@ -271,17 +281,30 @@ function nameDialog({ title, sub, value = '', action, submit, fallback }) {
  * app once unlocked).
  */
 export async function startDrive(mount, deps) {
-  mount.replaceChildren(h('p.msg', { role: 'status', text: 'Opening your Drive…' }));
+  // The page's status line (in the page from the start: a live region that
+  // appears together with its text is often not read) says "Opening…", then,
+  // when the page shows a notice instead of the Drive, that notice's title
+  // (WCAG 4.1.3); the notice itself is content, with its heading.
+  const status = pageStatus(mount) || mount.querySelector(':scope > p.msg[role="status"]') || h('p.msg', { role: 'status' });
+  status.dataset.driveStatus = '';
+  status.textContent = 'Opening your Drive…';
+  if (status.parentNode !== mount || mount.children.length !== 1) mount.replaceChildren(status);
+  const notice = (card) => {
+    status.className = 'sr-only';
+    mount.append(card);
+    const t = card.querySelector('h2');
+    status.textContent = t ? t.textContent : '';
+  };
   let client;
   try {
     client = await deps.drive.openDrive({ user: deps.user });
   } catch (e) {
-    if (deps.drive.DriveDisabled && e instanceof deps.drive.DriveDisabled) { mount.replaceChildren(disabledNotice()); return { state: 'disabled' }; }
+    if (deps.drive.DriveDisabled && e instanceof deps.drive.DriveDisabled) { notice(disabledNotice()); return { state: 'disabled' }; }
     if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
       // The owner acting as a user: what is missing to open their Drive.
-      if (deps.user && deps.user.impersonating) { mount.replaceChildren(impersonatingNotice(e.reason, deps)); return { state: 'impersonating', reason: e.reason }; }
+      if (deps.user && deps.user.impersonating) { notice(impersonatingNotice(e.reason, deps)); return { state: 'impersonating', reason: e.reason }; }
       // No owner escrow key yet: the Drive is set up (at sign-in) once there is one.
-      if (e.reason === 'not_ready') { mount.replaceChildren(notReadyNotice()); return { state: 'not_ready' }; }
+      if (e.reason === 'not_ready') { notice(notReadyNotice()); return { state: 'not_ready' }; }
       return { state: 'locked', unlocked: unlockView(mount, deps, e) };
     }
     mount.replaceChildren(h('div.card.drive-notice', {}, h('p.msg.error', { role: 'alert', text: `The Drive could not be opened: ${friendlyError(e)}` })));
@@ -315,7 +338,9 @@ function impersonatingNotice(reason, deps) {
 }
 
 function notReadyNotice() {
-  return h('div.card.drive-notice', { id: 'drive-not-ready', role: 'status' },
+  // Content, not a live region: the page's status line announces its title.
+  // "The administrator", as in every other notice a user sees.
+  return h('div.card.drive-notice', { id: 'drive-not-ready' },
     h('h2.section-title', { text: 'Drive is not ready yet' }),
     h('p.modal-sub', { text: 'The administrator must sign in once before Drives can be set up. Your Drive is then set up the next time you sign in (or open this page).' }));
 }
@@ -340,7 +365,7 @@ function unlockView(mount, deps, lockedErr) {
   return new Promise((resolve) => {
     const msg = h('p.msg.error', { id: 'drive-unlock-msg', role: 'alert', hidden: true });
     const pw = h('input.input', { id: 'drive-unlock-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false' });
-    const code = h('input.input.mono', { id: 'drive-unlock-code', autocomplete: 'off', spellcheck: 'false', maxlength: '64', placeholder: 'xxxx-xxxx-xxxx' });
+    const code = h('input.input.mono', { id: 'drive-unlock-code', autocomplete: 'one-time-code', spellcheck: 'false', autocapitalize: 'characters', maxlength: '64', placeholder: 'xxxx-xxxx-xxxx' });
     const pwBtn = h('button.cta', { type: 'submit', id: 'drive-unlock-btn', text: setup ? 'Set up with password' : 'Unlock with password' });
     const codeBtn = h('button.cta', { type: 'submit', id: 'drive-unlock-code-btn', text: 'Unlock with recovery code' });
     const pkBtn = h('button.btn', { type: 'button', id: 'drive-unlock-passkey', text: 'Unlock with a passkey', hidden: !withPasskey || !passkeysSupported() });
@@ -362,7 +387,7 @@ function unlockView(mount, deps, lockedErr) {
           : await deps.drive.unlockDrive(creds, { user: deps.user });
         pw.value = '';
         code.value = '';
-        resolve(mountApp(mount, client, deps));
+        resolve(mountApp(mount, client, { ...deps, focusTitle: true }));
       } catch (e) {
         inFlight = false;
         for (const b of all) b.disabled = false;
@@ -388,13 +413,15 @@ function unlockView(mount, deps, lockedErr) {
       if (show) code.focus();
     });
     const waiting = !setup && lockedErr && Number(lockedErr.received) > 0 ? Number(lockedErr.received) : 0;
+    const waitingText = waiting ? `${waiting} new received file${waiting === 1 ? '' : 's'}: unlock your Drive to add ${waiting === 1 ? 'it' : 'them'} to your folders.` : '';
     // The owner can always restore from the recovery kit here; starting over
     // is offered only when nothing the owner signs in with opens the Drive.
     const recovery = !setup && deps.user && deps.user.role === 'owner' && !deps.user.impersonating
       ? (lockedErr && lockedErr.ownerRecovery ? ownerRecoveryView(mount, deps, resolve) : ownerKitRestoreView(mount, deps, resolve)) : null;
-    mount.replaceChildren(h('div.card.drive-unlock', { id: 'drive-unlock' },
+    const said = swap(mount, h('div.card.drive-unlock', { id: 'drive-unlock' },
       h('h2.section-title', { text: setup ? 'Set up your Drive' : 'Unlock your Drive' }),
-      waiting ? h('p.msg', { id: 'drive-received-waiting', role: 'status', text: `${waiting} new received file${waiting === 1 ? '' : 's'}: unlock your Drive to add ${waiting === 1 ? 'it' : 'them'} to your folders.` }) : null,
+      // Content: the page's status line says it with the title (below).
+      waiting ? h('p.msg', { id: 'drive-received-waiting', text: waitingText }) : null,
       h('p.modal-sub', {
         text: setup
           ? 'Your Drive is encrypted with a key that only you can open. Enter your account password to create it: the key is made here, in your browser, and kept only until you sign out or close the tab.'
@@ -404,15 +431,33 @@ function unlockView(mount, deps, lockedErr) {
       h('div.login-alt', {}, pkBtn, codeToggle),
       codeForm,
       msg), ...(recovery ? [recovery] : []));
+    if (said) said.textContent = setup ? 'Set up your Drive' : `Unlock your Drive${waitingText ? `. ${waitingText}` : ''}`;
     pw.focus();
   });
+}
+
+/** The page's status line (startDrive), when there is one. */
+const pageStatus = (mount) => mount.querySelector(':scope > [data-drive-status]');
+
+/**
+ * Show `nodes` in the mount instead of what is there, keeping the page's
+ * status line in place (never removed and put back: it must be in the page
+ * before what it says changes, WCAG 4.1.3); it is then visually hidden.
+ */
+function swap(mount, ...nodes) {
+  const s = pageStatus(mount);
+  if (!s) { mount.replaceChildren(...nodes); return null; }
+  for (const c of [...mount.childNodes]) if (c !== s) c.remove();
+  s.className = 'sr-only';
+  mount.append(...nodes.filter(Boolean));
+  return s;
 }
 
 /** The owner's Drive is locked in this tab: it can also be restored from the owner recovery kit. */
 function ownerKitRestoreView(mount, deps, resolve) {
   return h('details.card.drive-notice', { id: 'drive-kit-unlock' },
     h('summary', { text: 'Restore from your owner recovery kit' }),
-    kitRestore({ profile: deps.profile, drive: deps.drive, onRestored: (r) => resolve(mountApp(mount, r.client, deps)) }));
+    kitRestore({ profile: deps.profile, drive: deps.drive, onRestored: (r) => resolve(mountApp(mount, r.client, { ...deps, focusTitle: true })) }));
 }
 
 /**
@@ -434,9 +479,11 @@ function ownerRecoveryView(mount, deps, resolve) {
     e.preventDefault();
     if (busy) return;
     msg.hidden = true;
-    who.removeAttribute('aria-invalid');
-    if (who.value.trim() !== username) { showMsg(msg, 'Type your username exactly to confirm.'); who.setAttribute('aria-invalid', 'true'); who.setAttribute('aria-describedby', 'drive-reset-msg'); who.focus(); return; }
-    if (!pw.value) { showMsg(msg, 'Enter your account password.'); pw.focus(); return; }
+    for (const f of [who, pw]) { f.removeAttribute('aria-invalid'); f.removeAttribute('aria-describedby'); }
+    // The field at fault is marked invalid and described by the error (WCAG 3.3.1).
+    const bad = (f, text) => { showMsg(msg, text); f.setAttribute('aria-invalid', 'true'); f.setAttribute('aria-describedby', 'drive-reset-msg'); f.focus(); };
+    if (who.value.trim() !== username) return bad(who, 'Type your username exactly to confirm.');
+    if (!pw.value) return bad(pw, 'Enter your account password.');
     busy = true;
     go.disabled = true;
     const password = pw.value;
@@ -447,14 +494,14 @@ function ownerRecoveryView(mount, deps, resolve) {
       const r = await deps.drive.startOverOwnerDrive({ user: deps.user, confirm: who.value.trim(), password, step: { current: await stretch(password, salt, t) } });
       who.value = '';
       toast('Your Drive was started over with new keys. Download a fresh owner recovery kit.');
-      resolve(mountApp(mount, r.client, { ...deps, kitAlert: true }));
+      resolve(mountApp(mount, r.client, { ...deps, kitAlert: true, focusTitle: true }));
     } catch (err) {
       busy = false;
       go.disabled = false;
       showMsg(msg, friendlyError(err));
     }
   });
-  const restore = kitRestore({ profile: deps.profile, drive: deps.drive, onRestored: (r) => resolve(mountApp(mount, r.client, deps)) });
+  const restore = kitRestore({ profile: deps.profile, drive: deps.drive, onRestored: (r) => resolve(mountApp(mount, r.client, { ...deps, focusTitle: true })) });
   return h('div.card.drive-notice', { id: 'drive-owner-recovery' },
     h('h2.section-title', { text: 'Can’t unlock your Drive?' }),
     h('p', { text: 'Nothing you can sign in with now opens your Drive (for example after recovery with the AUTHN secret, which removes your passkeys and recovery codes). Your owner recovery kit, if you saved one, brings back everything: your Drive and the escrow access to every user’s Drive.' }),
@@ -492,7 +539,8 @@ function banners(client, deps) {
   if (!n) return out;
   if (n.kind === 'escrow_rotated') {
     // The Drive moved to the owner's new escrow key by itself (after an owner reset): said once.
-    out.push(h('div.card.drive-notice', { id: 'drive-escrow-rotated', role: 'status' }, h('p', { text: n.text })));
+    // Content: the page's status line says it (mountApp; a live region drawn with its text is often not read).
+    out.push(h('div.card.drive-notice', { id: 'drive-escrow-rotated', dataset: { say: n.text } }, h('p', { text: n.text })));
     return out;
   }
   const msg = h('p.msg.error', { id: 'drive-notice-msg', role: 'alert', hidden: true });
@@ -571,17 +619,20 @@ function ownerKitBox(client, deps, alert = false) {
  */
 function archiveBox(client, deps) {
   const username = deps.profile && deps.profile.user ? deps.profile.user.username : '';
-  const box = h('div.card.drive-notice', { id: 'drive-archive' }, h('h2.section-title', { text: 'Your Drive from before you started over' }));
+  const heading = h('h2.section-title', { id: 'drive-archive-title', tabindex: '-1', text: 'Your Drive from before you started over' });
+  const box = h('section.card.drive-notice', { id: 'drive-archive', 'aria-labelledby': 'drive-archive-title' }, heading);
   for (const a of client.archives) {
     const who = h('input.input', { id: `drive-archive-user-${a.gen}`, autocomplete: 'off', spellcheck: 'false', maxlength: '64' });
     const pw = h('input.input', { id: `drive-archive-pw-${a.gen}`, type: 'password', autocomplete: 'current-password', maxlength: '1024' });
-    const go = h('button.btn.danger', { type: 'submit', id: `drive-archive-delete-${a.gen}`, text: 'Delete the old Drive archive' });
+    // Several archives: each button is described by what its archive holds.
+    const go = h('button.btn.danger', { type: 'submit', id: `drive-archive-delete-${a.gen}`, text: 'Delete the old Drive archive', 'aria-describedby': `drive-archive-info-${a.gen}${a.paused ? ` drive-archive-links-${a.gen}` : ''}` });
     const msg = h('p.msg.error', { id: `drive-archive-msg-${a.gen}`, role: 'alert', hidden: true });
     const form = h('form.form.drive-unlock-form', { novalidate: true }, field(`Type your username (${username}) to confirm`, who), field('Your password (or leave it empty to confirm with a passkey)', pw), go);
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       msg.hidden = true;
-      if (who.value.trim() !== username) { showMsg(msg, 'Type your username exactly to confirm.'); who.focus(); return; }
+      who.removeAttribute('aria-invalid'); who.removeAttribute('aria-describedby');
+      if (who.value.trim() !== username) { showMsg(msg, 'Type your username exactly to confirm.'); who.setAttribute('aria-invalid', 'true'); who.setAttribute('aria-describedby', msg.id); who.focus(); return; }
       go.disabled = true;
       try {
         const { confirmStep, canUsePasskey } = await import('./confirm.js');
@@ -589,14 +640,15 @@ function archiveBox(client, deps) {
         await deps.drive.deleteOwnerArchive({ user: deps.user, gen: a.gen, confirm: who.value.trim(), step });
         client.archives = client.archives.filter((x) => x.gen !== a.gen);
         toast('The old Drive archive was deleted.');
-        if (client.archives.length) section.remove(); else box.remove();
+        // Focus does not fall to the page (WCAG 2.4.3): to the box's heading, or with no archive left, to the folder's heading.
+        if (client.archives.length) { section.remove(); heading.focus(); } else { box.remove(); document.getElementById('drive-pane-title')?.focus(); }
       } catch (err) {
         go.disabled = false;
         showMsg(msg, friendlyError(err));
       }
     });
     const section = h('div.stack', { dataset: { gen: String(a.gen) } },
-      h('p', { text: `Archived ${formatDate(a.at)}: ${a.items} item${a.items === 1 ? '' : 's'}, ${formatBytes(a.bytes)}. It is kept exactly as it was, sealed under your old Drive key, and counts towards your storage. It comes back if you restore from a recovery kit made for it (Restore from kit).` }),
+      h('p', { id: `drive-archive-info-${a.gen}`, text: `Archived ${formatDate(a.at)}: ${a.items} item${a.items === 1 ? '' : 's'}, ${formatBytes(a.bytes)}. It is kept exactly as it was, sealed under your old Drive key, and counts towards your storage. It comes back if you restore from a recovery kit made for it (Restore from kit).` }),
       a.paused ? h('p', { id: `drive-archive-links-${a.gen}`, text: `${a.paused} of your upload links (Receive files) ${a.paused === 1 ? 'is' : 'are'} paused: ${a.paused === 1 ? 'its key is' : 'their keys are'} in this archive. ${a.paused === 1 ? 'It accepts' : 'They accept'} files again once the archive is restored; the files already received are kept in it.` }) : null,
       h('details', {}, h('summary', { text: 'Delete the old Drive archive' }),
         h('p.msg.warn', { text: `Deleting it removes its files for good: a recovery kit found later could no longer bring them back.${a.paused ? ` Its ${a.paused} paused upload link${a.paused === 1 ? ' is' : 's are'} revoked, and the files ${a.paused === 1 ? 'it' : 'they'} received are deleted with it.` : ''}` }),
@@ -644,11 +696,31 @@ function rotateTool(client, deps) {
 function mountApp(mount, client, deps) {
   const L = (deps.profile && deps.profile.limits) || {};
   let current = ROOT;
+  // The folder being opened (current until it has loaded) and whether that open was asked to move
+  // focus: a refresh in the background (received files taken in) re-lists where the person is
+  // going, not where they were, and a superseded open's focus is not lost (WCAG 3.2.5, 2.4.3).
+  let target = ROOT;
+  let focusDue = false;
   let listing = null;
   let busy = false;
   let openSeq = 0;
   const selected = new Set();
   const recent = new Map(); // id → { at, promise }: one fetch serves the tree and the pane
+
+  // The session ended (session-timeout.js, which also clears the tab's key slots): the Drive
+  // closes. Its key goes from the client, and what it showed (decrypted names, open dialogs) from
+  // the page; opening it again takes a reload after signing in.
+  const onSessionEnded = () => {
+    window.removeEventListener('secbin:session-ended', onSessionEnded);
+    if (typeof client.forget === 'function') client.forget();
+    for (const close of [...openDialogs]) close();
+    const said = swap(mount, h('div.card.drive-notice', { id: 'drive-closed' },
+      h('h2.section-title', { text: 'Your Drive was closed' }),
+      h('p', { text: 'Your session ended, so this page closed your Drive and removed its key from this tab. Sign in again, then reload this page to open your Drive.' }),
+      h('div.btn-row', {}, h('button.btn', { type: 'button', id: 'drive-closed-reload', text: 'Reload', on: { click: () => location.reload() } }))));
+    if (said) said.textContent = 'Your Drive was closed';
+  };
+  window.addEventListener('secbin:session-ended', onSessionEnded);
 
   const fetchList = (id) => {
     const r = recent.get(id);
@@ -709,7 +781,9 @@ function mountApp(mount, client, deps) {
   const bar = progressBar();
   const cancelBtn = h('button.btn', { type: 'button', id: 'drive-cancel', text: 'Cancel', hidden: true });
   const msg = h('p.msg.error.drive-msg', { id: 'drive-msg', role: 'alert', hidden: true });
-  const receivedMsg = h('p.msg.drive-received', { id: 'drive-received', role: 'status', hidden: true });
+  // Inside a status line that is in the page from the start (a live region shown with its text is often not read).
+  const receivedMsg = h('p.msg.drive-received', { id: 'drive-received', hidden: true });
+  const receivedLive = h('div', { id: 'drive-received-live', role: 'status' }, receivedMsg);
   const transferBox = h('div.drive-transfer', {}, bar.el, cancelBtn);
 
   // the folder tree
@@ -727,12 +801,15 @@ function mountApp(mount, client, deps) {
   // the right pane
   const crumbs = h('nav.crumbs', { 'aria-label': 'Folder path' });
   const title = h('h2.drive-pane-title', { id: 'drive-pane-title', tabindex: '-1' });
-  const selAll = h('input', { type: 'checkbox', id: 'drive-select-all', 'aria-label': 'Select everything in this folder' });
+  // The <label> around each box is its pointer target (at least 24×24 CSS px,
+  // 44×44 on narrow screens: WCAG 2.5.8). "Select all" shows its text where the
+  // table turns into cards (below 640px); its name is that text (2.5.3).
+  const selAll = h('input', { type: 'checkbox', id: 'drive-select-all' });
   const caption = h('caption.sr-only', { id: 'drive-caption' });
   const tbody = h('tbody', { id: 'drive-rows' });
   const table = h('table.table.drive-table', { id: 'drive-table' }, caption,
     h('thead', {}, h('tr', {},
-      h('th.cell-check', { scope: 'col' }, selAll),
+      h('th.cell-check', { scope: 'col' }, h('label.check-hit.drive-selall', {}, selAll, h('span.drive-selall-text', { text: 'Select all in this folder' }))),
       h('th', { scope: 'col', text: 'Name' }), h('th', { scope: 'col', text: 'Size' }), h('th', { scope: 'col', text: 'Modified' }),
       h('th', { scope: 'col' }, h('span.sr-only', { text: 'Shares' })))),
     tbody);
@@ -751,8 +828,15 @@ function mountApp(mount, client, deps) {
   });
 
   // A restore from the kit card (on this page) mounts the Drive again with its client.
-  const withRemount = { ...deps, remount: (c) => mountApp(mount, c, { ...deps, kitAlert: false }) };
-  mount.replaceChildren(h('div.drive', { id: 'drive-app' }, ...banners(client, withRemount), cap, toolbar, fileIn, folderIn, transferBox, msg, receivedMsg, layout));
+  const withRemount = { ...deps, remount: (c) => mountApp(mount, c, { ...deps, kitAlert: false, focusTitle: true }) };
+  // After an unlock, a restore or a start over (`focusTitle`; its button was disabled while it ran,
+  // so focus may already have fallen to the page) or when focus is in what this replaces, focus
+  // goes to the folder's heading, not the page (WCAG 2.4.3), unless the person moved it meanwhile.
+  const hadFocus = !!deps.focusTitle || (mount.contains(document.activeElement) && document.activeElement !== mount);
+  const app = h('div.drive', { id: 'drive-app' }, ...banners(client, withRemount), cap, toolbar, fileIn, folderIn, transferBox, msg, receivedLive, layout);
+  const said = swap(mount, app);
+  // A notice above the Drive is said by the page's status line (its title), once.
+  if (said) said.textContent = app.querySelector('[data-say]')?.dataset.say || '';
 
   // drag and drop onto the right pane
   pane.addEventListener('dragover', (e) => { if (!busy) { e.preventDefault(); pane.classList.add('over'); } });
@@ -778,12 +862,16 @@ function mountApp(mount, client, deps) {
   // ── listing ────────────────────────────────────────────────────────────
   async function open(id, { focus = false } = {}) {
     const n = ++openSeq;
+    target = id;
+    if (focus) focusDue = true;
     paneMsg.hidden = true;
     let r;
     try {
       r = await fetchList(id);
     } catch (e) {
       if (n !== openSeq) return false;
+      target = current; // nothing opened: a refresh stays where the person is
+      focusDue = false;
       // The tab's key does not open this Drive (the client dropped it): ask again.
       if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
         if (deps.user && deps.user.impersonating) mount.replaceChildren(impersonatingNotice('escrow_failed', deps));
@@ -802,7 +890,7 @@ function mountApp(mount, client, deps) {
     if (tree.has(id)) tree.setChildren(id, dirsOf(r));
     await tree.reveal(path.map((p) => p.id));
     render();
-    if (focus) title.focus();
+    if (focusDue) { focusDue = false; title.focus(); }
     return true;
   }
 
@@ -834,7 +922,7 @@ function mountApp(mount, client, deps) {
         c.renamed ? h('span.tree-sub.mono.renamed-note', { text: ' renamed: hidden characters removed' }) : null);
     const sharesBtn = h('button.btn.tree-btn', { type: 'button', text: 'Shares', 'aria-label': `Shares of ${name}`, on: { click: () => sharesDialog(c) } });
     return h('tr', { dataset: { id: c.id, kind: c.kind } },
-      h('td.cell-check', {}, check),
+      h('td.cell-check', {}, h('label.check-hit', {}, check)),
       h('td', { dataset: { label: 'Name' } }, nameCell),
       h('td.mono', { dataset: { label: 'Size' }, text: c.kind === 'dir' ? '—' : formatBytes(Number(c.size) || 0) }),
       h('td.mono', { dataset: { label: 'Modified' }, text: formatDate(modifiedOf(c)) }),
@@ -868,7 +956,7 @@ function mountApp(mount, client, deps) {
   /** Re-read the shown folder (and `also` folders in the tree) after a change. */
   async function refresh(also = []) {
     recent.clear();
-    await open(current);
+    await open(target);
     for (const id of also) if (id !== current) await tree.refresh(id);
     refreshUsage();
   }
@@ -1054,7 +1142,7 @@ function mountApp(mount, client, deps) {
     const inf = h('button.opt-toggle', { type: 'button', id: 'drive-share-unlimited', 'aria-pressed': 'false', 'aria-label': 'Unlimited views', title: 'Unlimited views', text: '∞', disabled: !L.allowUnlimitedViews });
     inf.addEventListener('click', () => { const on = inf.getAttribute('aria-pressed') !== 'true'; inf.setAttribute('aria-pressed', String(on)); views.disabled = on; });
     const expN = h('input.input.opt-num', { id: 'drive-share-expire', type: 'number', min: '1', step: '1', value: '24', inputmode: 'numeric' });
-    const expU = h('select.input.opt-sel', { id: 'drive-share-unit', 'aria-label': 'Expiry unit' },
+    const expU = h('select.input.opt-sel', { id: 'drive-share-unit', 'aria-label': 'Expires in: unit' },
       h('option', { value: 'm', text: 'minutes' }), h('option', { value: 'h', text: 'hours', selected: true }), h('option', { value: 'd', text: 'days' }));
     const pwOn = h('input', { type: 'checkbox', id: 'drive-share-pw-on' });
     const pw1 = h('input.input', { id: 'drive-share-pw', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
@@ -1152,7 +1240,7 @@ function mountApp(mount, client, deps) {
     const hint = unencryptedHint('drive-rev-label-hint', labelIn);
     const noteIn = h('textarea.input', { id: 'drive-rev-note', maxlength: '1000', rows: '3', placeholder: 'e.g. Please send the signed contract and your ID.' });
     const expN = h('input.input.opt-num', { id: 'drive-rev-expire', type: 'number', min: '1', step: '1', value: '7', inputmode: 'numeric' });
-    const expU = h('select.input.opt-sel', { id: 'drive-rev-unit', 'aria-label': 'Expiry unit' },
+    const expU = h('select.input.opt-sel', { id: 'drive-rev-unit', 'aria-label': 'Accept files for: unit' },
       h('option', { value: 'm', text: 'minutes' }), h('option', { value: 'h', text: 'hours' }), h('option', { value: 'd', text: 'days', selected: true }));
     expU.value = 'd';
     const files = h('input.input', { id: 'drive-rev-files', type: 'number', min: '1', max: '10000', step: '1', inputmode: 'numeric', placeholder: 'no limit' });
@@ -1161,8 +1249,11 @@ function mountApp(mount, client, deps) {
     const fileMb = h('input.input', { id: 'drive-rev-filesize', inputmode: 'decimal', placeholder: 'no limit' });
     const typeMode = h('select.input', { id: 'drive-rev-types' },
       h('option', { value: 'any', text: 'any type' }), h('option', { value: 'allow', text: 'only the listed types' }), h('option', { value: 'block', text: 'all but the listed types' }));
-    const typeRules = h('textarea.input.rules-in', { id: 'drive-rev-rules', rows: '2', placeholder: 'ext:pdf\next:docx\nmime:image/*', hidden: true, 'aria-label': 'File types (one per line: ext:pdf, mime:image/*)' });
-    typeMode.addEventListener('change', () => { typeRules.hidden = typeMode.value === 'any'; if (!typeRules.hidden) typeRules.focus(); });
+    const typeRules = h('textarea.input.rules-in', { id: 'drive-rev-rules', rows: '2', placeholder: 'ext:pdf\next:docx\nmime:image/*' });
+    // Its label is shown with it (WCAG 3.3.2), and both are hidden for "any type".
+    const typeBox = field('The file types (one per line: ext:pdf, mime:image/*)', typeRules);
+    typeBox.hidden = true;
+    typeMode.addEventListener('change', () => { typeBox.hidden = typeMode.value === 'any'; if (!typeBox.hidden) typeRules.focus(); });
     const pwOn = h('input', { type: 'checkbox', id: 'drive-rev-pw-on' });
     const pw1 = h('input.input', { id: 'drive-rev-pw', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
     const pw2 = h('input.input', { id: 'drive-rev-pw2', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
@@ -1186,7 +1277,7 @@ function mountApp(mount, client, deps) {
         field('Most files (empty: no limit)', files),
         field('Most in total, MB (empty: no limit)', maxMb),
         field('Largest file, MB (empty: no limit)', fileMb)),
-      field('File types', typeMode), typeRules,
+      field('File types', typeMode), typeBox,
       h('label.viewer-opt', {}, pwOn, 'Ask uploaders for a password (it only lets them in; you never need it, and it does not encrypt anything)'),
       pwBox,
       cap.el,
@@ -1281,7 +1372,7 @@ function mountApp(mount, client, deps) {
         const cell = h('td.cell-actions');
         const row = h('div.btn-row');
         if (s.url && active) {
-          row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Copy link', 'aria-label': `Copy the link ${s.label || ''}`.trim(), on: { click: async (e) => flashCopied(e.currentTarget, (await copyText(s.url)) ? 'copied' : 'failed') } }));
+          row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Copy link', 'aria-label': `Copy link${s.label ? ` ${s.label}` : ''}`, on: { click: async (e) => flashCopied(e.currentTarget, (await copyText(s.url)) ? 'copied' : 'failed') } }));
         }
         // A paused link (the owner started over) has not ended: it can be revoked too.
         const live = active || s.status === 'paused';
@@ -1326,7 +1417,10 @@ function mountApp(mount, client, deps) {
       return;
     }
     if (r.added) {
-      toast(`Added ${r.added} received file${r.added === 1 ? '' : 's'}.`);
+      // The take-in runs in the background: a modal dialog opened meanwhile gets no toast about the
+      // page behind it (nothing outside a modal dialog is shown or read); the status line below
+      // says the same and stays.
+      if (!document.querySelector('[aria-modal="true"]')) toast(`Added ${r.added} received file${r.added === 1 ? '' : 's'}.`);
       await refresh();
     }
     const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
@@ -1412,7 +1506,16 @@ function mountApp(mount, client, deps) {
         h('thead', {}, h('tr', {}, ...['Link', 'Size', 'Received', 'Why'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
         tb))];
       if (more) {
-        rows.push(h('button.btn', { type: 'button', id: 'drive-failed-more', text: 'Show more', on: { click: async (e) => { e.currentTarget.disabled = true; try { await load(); draw(); } catch (err) { d.error(friendlyError(err)); } } } }));
+        rows.push(h('button.btn', { type: 'button', id: 'drive-failed-more', text: 'Show more', on: { click: async (e) => {
+          e.currentTarget.disabled = true;
+          const before = items.length;
+          try {
+            await load();
+            draw();
+            // The button is drawn again: focus goes to the first row just loaded, not the page (2.4.3).
+            d.box.querySelector(`#drive-failed-table tbody tr:nth-child(${before + 1}) button`)?.focus();
+          } catch (err) { d.error(friendlyError(err)); }
+        } } }));
       }
       d.setBody(...rows);
     };
@@ -1470,10 +1573,10 @@ function mountApp(mount, client, deps) {
 
   // ── start ──────────────────────────────────────────────────────────────
   refreshUsage();
-  const ready = tree.ready.then(() => open(ROOT));
+  const ready = tree.ready.then(() => open(ROOT, { focus: hadFocus && (!document.activeElement || document.activeElement === document.body) }));
   const received = ready.then(() => takeInReceived());
   return {
-    el: mount.firstChild,
+    el: app,
     ready,
     received,
     tree,

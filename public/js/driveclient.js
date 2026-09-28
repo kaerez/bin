@@ -1056,6 +1056,18 @@ export class DriveClient {
   }
 
   /**
+   * The session ended (session-timeout.js): drop the Drive key and its sub-keys
+   * from this client. The key's bytes are overwritten; every later call that
+   * needs a key fails, so nothing more is opened or sealed with it.
+   */
+  forget() {
+    if (this.dk instanceof Uint8Array) this.dk.fill(0);
+    this.dk = null;
+    this.keys = null;
+    this.forgotten = true;
+  }
+
+  /**
    * `dk` must be a key this page generated (a first set-up), unwrapped (a
    * password, recovery code, passkey or the owner escrow) or read from the
    * tab's storage and proven (provenKey): never a stored key taken as it is.

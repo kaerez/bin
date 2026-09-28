@@ -23,6 +23,19 @@ async function readJson(res) {
   try { return await res.json(); } catch { return null; }
 }
 
+// Signed-in activity: every successful /api/private request may slide the
+// session's idle window (src/lib/auth.js), so the session-timeout warning
+// (public/dashboard/js/session-timeout.js) restarts its clock on each one.
+const activity = new Set();
+/** Call `fn(path)` after each successful /api/private request; returns the unsubscribe. */
+export function onPrivateActivity(fn) {
+  activity.add(fn);
+  return () => activity.delete(fn);
+}
+const touched = (path, res) => {
+  if (res.ok && path.startsWith('/api/private/')) for (const fn of activity) { try { fn(path); } catch { /* a listener's bug is not the request's */ } }
+};
+
 // CAPTCHA grants (src/lib/human.js) for shares that have the CAPTCHA, by share
 // id: sent with every call about that share, renewed from the responses.
 const humanGrants = new Map();
@@ -102,6 +115,20 @@ export function bindSession(profile) {
 /** Stop acting for any session: every later change from this page is refused here, without a request. */
 export function forgetSession() { page = { ended: true }; }
 
+/**
+ * Whether `profile` (a /api/private/me answer) is the session this page acts
+ * for: the same user in the same impersonation state. False once the page has
+ * stopped acting for any session, or before it has recorded one.
+ */
+export function isPageSession(profile) {
+  if (!page || page.ended) return false;
+  const w = who(profile);
+  return !!w.userId && w.userId === page.userId && w.impersonatedBy === page.impersonatedBy;
+}
+
+/** The browser is now signed in as someone else: stop acting for any session and say so (onSessionChanged). */
+export function endPageSession() { sessionChanged(); }
+
 /** `fn()` runs when the page finds that the browser is now signed in as someone else. */
 export function onSessionChanged(fn) { sessionChangedHandler = typeof fn === 'function' ? fn : () => {}; }
 
@@ -163,6 +190,7 @@ async function request(path, { method = 'GET', body, headers = {}, raw = false, 
   }
   const res = await send(path, init);
   if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
+  touched(path, res);
   if (humanId) renewedHuman(humanId, res);
   if (raw && res.ok) return res;
   const data = await readJson(res);
@@ -200,6 +228,13 @@ export async function shareHuman(kind, id, token = null) {
   const d = await request(`/api/${kind}/${enc(id)}/human`, { method: 'POST', headers: { ...INTENT, ...human(token) }, human: token ? null : id });
   if (d.grant !== null && typeof d.grant !== 'string') throw malformed();
   if (d.grant) setHumanGrant(id, d.grant);
+  return d;
+}
+
+/** Keep a file share's download window open longer (at most ten times; spends no view). */
+export async function extendDownloads(id, grant) {
+  const d = await request(`/api/file/${enc(id)}/extend`, { method: 'POST', headers: { 'x-download-grant': grant }, human: id });
+  if (!Number.isFinite(d.grantExpires) || !Number.isInteger(d.extensionsLeft)) throw malformed();
   return d;
 }
 

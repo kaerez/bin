@@ -100,25 +100,28 @@
                 <p class="msg" id="reverse-fallback">This page needs JavaScript: your files are encrypted in your browser before they are sent.</p>
             </div>
 
-            <footer class="foot reveal d4">
-                <nav class="foot-links" id="foot-links" aria-label="Project">
-                    <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
-                    <span class="foot-sep" aria-hidden="true">·</span>
-                    <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
-                    <span class="foot-sep" aria-hidden="true">·</span>
-                    <a href="/accessibility/">Accessibility</a>
-                </nav>
-                <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
-                    <span class="feat" role="listitem">Private</span>
-                    <span class="feat" role="listitem">End-to-end encrypted</span>
-                    <span class="feat" role="listitem">Notes &amp; files</span>
-                </div>
-                <p class="foot-crypto mono" aria-label="Cryptography">
-                    AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
-                    <span class="foot-frag">#fragment</span>
-                </p>
-            </footer>
         </main>
+
+        <footer class="foot reveal d4">
+            <nav class="foot-links" id="foot-links" aria-label="Project">
+                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source code<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat model<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="/accessibility/">Accessibility statement</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="/accessibility/#glossary">Glossary</a>
+            </nav>
+            <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
+                <span class="feat" role="listitem">Private</span>
+                <span class="feat" role="listitem">End-to-end encrypted</span>
+                <span class="feat" role="listitem">Notes &amp; files</span>
+            </div>
+            <p class="foot-crypto mono">
+                AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                <span class="foot-frag">#fragment</span>
+            </p>
+        </footer>
 
         <div id="toast" role="status" aria-live="polite"></div>
     </body>

@@ -109,6 +109,8 @@ describe('Admin → Users: a new user’s Drive', () => {
     expect(SO.adminKeys).toEqual([]);
     expect(note().textContent).toBe('nodrive: Drive is not enabled for this role, so no Drive was created.');
     expect(note().getAttribute('role')).toBe('status');
+    // Also said through the page's toast, a status line in the page from the start (WCAG 4.1.3).
+    await until(() => document.getElementById('toast').textContent === note().textContent);
     expect(consoleError).not.toHaveBeenCalled();
   }, T);
 
@@ -149,6 +151,10 @@ describe('Admin → Users: a new user’s Drive', () => {
     [...row.querySelectorAll('button')].find((b) => b.textContent === 'Manage').click();
     await until(() => document.querySelector('#user-detail [aria-label="New password"]'));
     expect(document.getElementById('reset-unlock').hidden).toBe(true);
+    // The unlock field has a visible label that is its name (WCAG 3.3.2, 2.5.3); the checkbox is described by its warning.
+    const own = document.getElementById('reset-own-pw');
+    expect(own.closest('label').querySelector('.field-label').textContent).toBe(own.getAttribute('aria-label'));
+    expect(document.getElementById('reset-skip-drive').getAttribute('aria-describedby')).toBe('reset-skip-warn');
     const from = SO.requests.length;
     document.querySelector('#user-detail [aria-label="New password"]').value = 'reset password';
     document.querySelector('#user-detail [aria-label="Repeat new password"]').value = 'reset password';
