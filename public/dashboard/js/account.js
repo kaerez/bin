@@ -1,5 +1,6 @@
 // account.js — my limits and quotas, username, password, passkeys and
-// recovery codes, API keys (if allowed), and my activity log. Every change
+// recovery codes, API keys (if allowed), the Drive personal kit (when the
+// role has a Drive: userkit.js), and my activity log. Every change
 // is confirmed with the password (stretched locally) or, for an account with
 // a passkey, a fresh passkey check; the password is asked again every time.
 // The owner acting as the user ("Log in as") can change everything here with
@@ -10,9 +11,7 @@
 
 import '../../js/kdf-progress.js';
 import { changePassword, listKeys, createKey, updateKey, revokeKey, myActivity, ApiError, myPasskeys, passkeyRegisterOptions, addPasskey, removePasskey, regenerateRecoveryCodes, setSecondFactor, changeUsername } from '../../js/api.js';
-import { passkeysSupported, createPasskeyPrf } from '../../js/passkeys.js';
-import { DRIVE_PRF_SALT } from '../../js/drivekeys.js';
-import { updatePasswordWrap, replaceRecoveryWraps, addPasskeyWrap } from '../../js/driveclient.js';
+import { passkeysSupported, createPasskey } from '../../js/passkeys.js';
 import { confirmStep as confirmWith, confirmLabel } from './confirm.js';
 import { newCredential, checkNewPassword, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
 import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatDate, formatBytes, formatCoarse, friendlyError, spellDuration } from '../../js/common.js';
@@ -20,10 +19,12 @@ import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
 import { humanCheck } from '../../js/turnstile.js';
-// With the human check on, loading its script moves the tab's Drive keys out of
-// sessionStorage into memory (turnstile.js → drivekeys.js holdSessionKeys): the
-// changes below still use them, and the Drive page asks to unlock again after a
-// visit here (SECURITY.md, Drive keys in the tab).
+// The Drive keys are never in the tab's storage (each page asks the server);
+// with the human check on, loading its script also moves the old Drive key of
+// the release before, if the tab has one, out of sessionStorage into memory
+// (turnstile.js → drivekeys.js holdSessionKeys; SECURITY.md, Drive keys in the
+// tab). The personal kit's content is on this page while it is made
+// (SECURITY.md, Cloudflare Turnstile).
 
 const $ = (s) => document.querySelector(s);
 let profile;
@@ -70,14 +71,6 @@ const confirmStep = async (input, opts) => {
   return {};
 };
 
-/**
- * Keep the Drive's key wraps in step with a change (docs/DRIVE.md §3). Best
- * effort: it needs the Drive key in this tab, and never fails the change.
- */
-async function driveUpkeep(fn) {
-  try { return await fn(); } catch { return false; }
-}
-
 const refusal = (e) => (e instanceof ApiError && e.code === 'wrong_password' ? 'The password is incorrect.'
   : e instanceof ApiError && e.code === 'reauth_failed' ? 'The passkey could not be verified.' : friendlyError(e));
 
@@ -91,9 +84,23 @@ const refusal = (e) => (e instanceof ApiError && e.code === 'wrong_password' ? '
   wirePasskeys();
   wireKeys();
   renderApiExamples();
+  renderDriveKit();
   loadActivity(true);
   $('#activity-more').onclick = () => loadActivity(false);
 })();
+
+/** The Drive personal kit (docs/DRIVE.md §3.1), when the role has a Drive. */
+async function renderDriveKit() {
+  const slot = $('#drive-kit-slot');
+  if (!slot || !(profile.caps && profile.caps.driveEnabled === true)) return;
+  try {
+    const [{ personalKitCard, USER_KIT_ANCHOR }, drive] = await Promise.all([import('./userkit.js'), import('../../js/driveclient.js')]);
+    slot.replaceWith(personalKitCard({ profile, drive, confirm: (input) => confirmStep(input) }));
+    if (location.hash === `#${USER_KIT_ANCHOR}`) document.getElementById(USER_KIT_ANCHOR)?.focus();
+  } catch (e) {
+    showMsg(slot.appendChild(h('p.msg')), `The Drive personal kit is unavailable: ${friendlyError(e)}`);
+  }
+}
 
 function renderSub() {
   const name = profile.user.username;
@@ -197,22 +204,13 @@ function wirePassword() {
     btn.disabled = true;
     btn.textContent = 'Changing…';
     try {
-      const oldPassword = $('#pw-current').value;
       const newPassword = $('#pw-new').value;
-      // A passkey confirmation also opens the Drive key (PRF), so the Drive keeps its key.
-      const prf = {};
-      const step = await confirmStep($('#pw-current'), { prfSalt: DRIVE_PRF_SALT, onPrf: (x) => Object.assign(prf, x) });
+      // The Drive's keys do not depend on the password (docs/DRIVE.md §3).
+      const step = await confirmStep($('#pw-current'));
       const token = await (await check).take();
       const cred = await newCredential(newPassword);
       const r = await changePassword({ ...step, ...cred }, token);
       form.reset();
-      // The Drive opens with the new password from now on.
-      const drive = await driveUpkeep(() => updatePasswordWrap({ userId: profile.user.id, newPassword, oldPassword, prfOutput: prf.prf, credentialId: prf.credentialId, impersonating: acting() }));
-      if (drive === 'locked' || drive === 'kept') {
-        toast(acting()
-          ? `${profile.user.username}’s Drive was not re-keyed for the new password (${drive === 'kept' ? 'it has no other key, so its old password wrap stays' : 'unlock your own Drive in this tab first'}): they open it with a recovery code or a passkey.`
-          : 'Your Drive was locked in this tab, so it still opens with your old password (or a recovery code or passkey), not the new one.', { error: true });
-      }
       // Passkeys and recovery codes are not tied to the password.
       const still = r.passkeys ? ` Your ${r.passkeys} passkey${r.passkeys === 1 ? '' : 's'} and ${r.recoveryLeft} recovery code${r.recoveryLeft === 1 ? '' : 's'} still work: if someone else may have had access, remove any passkey you do not recognise and create new recovery codes below.` : '';
       // Impersonating: the user's sessions end; the owner's carries on.
@@ -375,18 +373,15 @@ function showCodes(codes) {
 }
 
 /**
- * One passkey/recovery change: `fn(step, token, password)` gets the
- * confirmation, a function that returns a fresh human-check token (asked for
- * right before the request, after any passkey prompt) and the password typed
- * to confirm (if any), which can unlock the Drive for its wrap upkeep.
+ * One passkey/recovery change: `fn(step, token)` gets the confirmation and a
+ * function that returns a fresh human-check token (asked for right before
+ * the request, after any passkey prompt).
  */
 async function passkeyAction(fn, done) {
   const msg = $('#passkeys-msg');
   msg.hidden = true;
   try {
-    // The password (when confirming with it) can also unlock the Drive for its upkeep.
-    const password = $('#passkey-current').value;
-    const r = await fn(await confirmStep($('#passkey-current')), () => human(passkeyCheck), password);
+    const r = await fn(await confirmStep($('#passkey-current')), () => human(passkeyCheck));
     if (done) done(r);
     await renderPasskeys();
   } catch (e) {
@@ -404,7 +399,6 @@ async function renderPasskeys() {
   for (const p of st.passkeys) {
     const rm = h('button.btn.danger', { type: 'button', text: 'Remove' });
     armConfirm(rm, st.passkeys.length === 1 ? 'Remove (and its recovery codes)?' : 'Remove?', () => passkeyAction(
-      // The server drops its Drive wrap (and, with the last passkey, the recovery codes' wraps).
       async (step, token) => removePasskey(p.id, step, await token()), () => toast('Passkey removed.'),
     ));
     passkeyCheck?.gate(rm);
@@ -453,14 +447,10 @@ function wirePasskeys() {
   $('#passkey-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const name = $('#passkey-name').value.trim() || 'Passkey';
-    passkeyAction(async (step, token, password) => {
+    passkeyAction(async (step, token) => {
       const o = await passkeyRegisterOptions();
-      // PRF (where the authenticator supports it) lets this passkey unlock the Drive.
-      const { credential, prf } = await createPasskeyPrf(o.publicKey, DRIVE_PRF_SALT);
-      const r = await addPasskey({ challengeId: o.challengeId, credential, name, ...step }, await token());
-      if (prf) await driveUpkeep(() => addPasskeyWrap(profile.user.id, prf, typeof r.id === 'string' ? r.id : credential.rawId, { password, impersonating: acting() }));
-      if (r.codes) await driveUpkeep(() => replaceRecoveryWraps(profile.user.id, r.codes, { password, impersonating: acting() }));
-      return r;
+      const credential = await createPasskey(o.publicKey);
+      return addPasskey({ challengeId: o.challengeId, credential, name, ...step }, await token());
     }, (r) => {
       $('#passkey-name').value = '';
       toast('Passkey added.');
@@ -476,11 +466,7 @@ function wirePasskeys() {
     });
   }
   armConfirm($('#recovery-regen'), 'Replace all codes?', () => passkeyAction(
-    async (step, token, password) => {
-      const r = await regenerateRecoveryCodes(step, await token());
-      await driveUpkeep(() => replaceRecoveryWraps(profile.user.id, r.codes, { password, impersonating: acting() })); // the new codes unlock the Drive; the old ones no longer do
-      return r;
-    }, (r) => { toast('New recovery codes created; the old ones no longer work.'); showCodes(r.codes); },
+    async (step, token) => regenerateRecoveryCodes(step, await token()), (r) => { toast('New recovery codes created; the old ones no longer work.'); showCodes(r.codes); },
   ));
   return renderPasskeys();
 }

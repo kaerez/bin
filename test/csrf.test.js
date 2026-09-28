@@ -16,14 +16,15 @@ import { encryptPaste } from '../public/js/crypto.js';
 import {
   ORIGIN, owner, makeUser, login, fetchJson, cookieOf, csrfFor, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16,
 } from './helpers.js';
-import { driveLimits, KCV, enc } from './drive-helpers.js';
-import { receiver, newReverse, received } from './reverse-helpers.js';
+import { driveLimits, sealed } from './drive-helpers.js';
+import { receiver, newReverse, received, sealLinkPriv } from './reverse-helpers.js';
 import { linkProof, sealUpload, newNodeId as newReverseNode } from '../public/js/reversekeys.js';
 import { randomBytes, utf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, encryptChunk, importFileKey } from '../public/js/files.js';
 import driveSrc from '../src/routes/drive.js?raw';
 import adminSrc from '../src/routes/admin.js?raw';
 import reverseSrc from '../src/routes/reverse.js?raw';
+import keysSrc from '../src/routes/keys.js?raw';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -50,29 +51,61 @@ const DRIVE_USER = 'uAAAAAAAAAAAAAAA';
 const dj = (method, path) => ({ method, path, body: {}, headers: intent });
 const da = (method, path) => ({ method, path, headers: intent });
 const DRIVE_ROUTES = [
-  dj('PUT', '/api/private/drive/keys'),
-  dj('POST', '/api/private/drive/kit'), dj('POST', '/api/private/drive/kit/probe'), dj('PUT', '/api/private/drive/kit/keys'),
-  dj('POST', '/api/private/drive/start-over'),
-  dj('PUT', '/api/private/drive/archive/1/nodes'), dj('POST', '/api/private/drive/archive/1/finish'), dj('DELETE', '/api/private/drive/archive/1'),
-  dj('POST', '/api/private/drive/escrow'),
+  dj('POST', '/api/private/drive/keys'), // the session's KEKs: it may make the salt, and is audited for the owner acting as the user
+  dj('POST', '/api/private/drive/kit'), dj('POST', '/api/private/drive/kit/verify'), dj('POST', '/api/private/drive/kit/restore'), dj('PUT', '/api/private/drive/kit/items'),
+  dj('PUT', '/api/private/drive/migrate'), dj('POST', '/api/private/drive/migrate/finish'), dj('POST', '/api/private/drive/migrate/retire'),
   dj('POST', '/api/private/drive/folders'), dj('POST', '/api/private/drive/files'),
   { method: 'PUT', path: `/api/private/drive/files/${DRIVE_ID}/chunk/0`, raw: true },
   { method: 'POST', path: `/api/private/drive/files/${DRIVE_ID}/finalize`, headers: { ...intent, 'x-upload-token': 'A'.repeat(43) } },
   dj('PATCH', `/api/private/drive/nodes/${DRIVE_ID}`), da('DELETE', `/api/private/drive/nodes/${DRIVE_ID}`),
   dj('POST', '/api/private/drive/shares'),
-  dj('POST', `/api/private/admin/drive/escrow/${DRIVE_USER}`), dj('PUT', `/api/private/admin/drive/keys/${DRIVE_USER}`),
+  dj('PUT', `/api/private/admin/drive/migrate/${DRIVE_USER}`), dj('POST', `/api/private/admin/drive/migrate/${DRIVE_USER}/finish`),
+  dj('POST', `/api/private/admin/drive/migrate/${DRIVE_USER}/escrow`), dj('POST', `/api/private/admin/drive/migrate/${DRIVE_USER}/retire`),
+  dj('DELETE', '/api/private/admin/drive/archive'),
 ];
 /**
  * Every Drive path the routers name, one concrete path each (the reads too:
  * a state-changing method on them must be refused for its token as well).
  */
 const DRIVE_PATHS = [
-  '/api/private/drive', '/api/private/drive/keys', '/api/private/drive/kit', '/api/private/drive/kit/probe', '/api/private/drive/kit/keys',
-  '/api/private/drive/start-over', '/api/private/drive/archive/1', '/api/private/drive/archive/1/nodes', '/api/private/drive/archive/1/finish',
-  '/api/private/drive/escrow', '/api/private/drive/folders', '/api/private/drive/files', `/api/private/drive/files/${DRIVE_ID}/chunk/0`,
+  '/api/private/drive', '/api/private/drive/keys', '/api/private/drive/kit', '/api/private/drive/kit/verify', '/api/private/drive/kit/restore',
+  '/api/private/drive/kit/items', '/api/private/drive/migrate', '/api/private/drive/migrate/items', '/api/private/drive/migrate/finish',
+  '/api/private/drive/folders', '/api/private/drive/files', `/api/private/drive/files/${DRIVE_ID}/chunk/0`,
   `/api/private/drive/files/${DRIVE_ID}/finalize`, `/api/private/drive/nodes/${DRIVE_ID}`, `/api/private/drive/nodes/${DRIVE_ID}/shares`,
-  '/api/private/drive/shares', `/api/private/admin/drive/escrow/${DRIVE_USER}`, `/api/private/admin/drive/keys/${DRIVE_USER}`,
+  '/api/private/drive/shares', '/api/private/admin/drive/migration', `/api/private/admin/drive/migrate/${DRIVE_USER}`,
+  `/api/private/admin/drive/migrate/${DRIVE_USER}/items`, `/api/private/admin/drive/migrate/${DRIVE_USER}/finish`,
+  `/api/private/admin/drive/migrate/${DRIVE_USER}/escrow`, '/api/private/drive/migrate/retire', `/api/private/admin/drive/migrate/${DRIVE_USER}/retire`,
+  '/api/private/admin/drive/archive',
 ];
+/** The Drive paths that only read (GET): every other one takes a change the sweep sends. */
+const DRIVE_READS = [
+  '/api/private/drive', `/api/private/drive/nodes/${DRIVE_ID}/shares`, '/api/private/drive/migrate/items',
+  '/api/private/admin/drive/migration', `/api/private/admin/drive/migrate/${DRIVE_USER}/items`,
+];
+// (The archive's GET is a read too, but its path also takes a DELETE: it stays in the sweep.)
+
+// ── the Drive keyring (src/routes/keys.js: Admin → Security → Keys) ──
+// The owner's key actions, with the method and shape the browser uses (public/js/api.js `keysApi`).
+const KEYS_MEK = 'mAAAAAAAAAAA';
+const KEYS_ROUTES = [
+  dj('POST', '/api/private/admin/keys/candidate'), dj('POST', '/api/private/admin/keys/subs'),
+  dj('PATCH', `/api/private/admin/keys/subs/${KEYS_MEK}`), dj('DELETE', `/api/private/admin/keys/subs/${KEYS_MEK}`),
+  dj('POST', `/api/private/admin/keys/subs/${KEYS_MEK}/current`), dj('POST', `/api/private/admin/keys/subs/${KEYS_MEK}/show`),
+  dj('POST', '/api/private/admin/keys/root'), dj('POST', '/api/private/admin/keys/root/show'),
+  dj('POST', '/api/private/admin/keys/root/undo'), dj('POST', '/api/private/admin/keys/root/drop-old'),
+  dj('POST', '/api/private/admin/keys/jobs'), dj('DELETE', '/api/private/admin/keys/jobs'), dj('POST', '/api/private/admin/keys/jobs/step'),
+  dj('POST', '/api/private/admin/keys/kit'), dj('POST', '/api/private/admin/keys/verify'), dj('POST', '/api/private/admin/keys/restore'),
+  dj('POST', '/api/private/admin/keys/export'), dj('POST', '/api/private/admin/keys/import'),
+  dj('POST', `/api/private/admin/keys/users/${DRIVE_USER}/view`),
+];
+const KEYS_PATHS = [
+  '/api/private/admin/keys', '/api/private/admin/keys/usage', '/api/private/admin/keys/candidate', '/api/private/admin/keys/subs',
+  `/api/private/admin/keys/subs/${KEYS_MEK}`, `/api/private/admin/keys/subs/${KEYS_MEK}/current`, `/api/private/admin/keys/subs/${KEYS_MEK}/show`,
+  '/api/private/admin/keys/root', '/api/private/admin/keys/root/show', '/api/private/admin/keys/root/undo', '/api/private/admin/keys/root/drop-old', '/api/private/admin/keys/jobs', '/api/private/admin/keys/jobs/step',
+  '/api/private/admin/keys/kit', '/api/private/admin/keys/verify', '/api/private/admin/keys/restore', '/api/private/admin/keys/export',
+  '/api/private/admin/keys/import', `/api/private/admin/keys/users/${DRIVE_USER}/view`,
+];
+const KEYS_READS = ['/api/private/admin/keys', '/api/private/admin/keys/usage'];
 
 // ── reverse shares (src/routes/reverse.js, docs/REVERSE.md) ──
 // The user's routes are cookie-authenticated (reached through the Drive router,
@@ -264,7 +297,7 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
       json('PATCH', `/api/private/admin/users/${id}/keys/${id}`), act('DELETE', `/api/private/admin/users/${id}/keys/${id}`),
       json('POST', '/api/private/admin/logs/clear'), json('POST', '/api/private/admin/ip-rules'), act('DELETE', `/api/private/admin/ip-rules/${id}`),
       json('POST', '/api/private/admin/guard/unblock'), json('POST', '/api/private/admin/guard/block'),
-      ...DRIVE_ROUTES,
+      ...DRIVE_ROUTES, ...KEYS_ROUTES,
       ...REVERSE_ROUTES, ...REVERSE_SHARE_ROUTES,
       act('POST', '/api/auth/logout'),
     ];
@@ -294,7 +327,7 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
       for (const [, re] of src.matchAll(/\.match\(\/(\^\\\/api\\\/private\\\/(?:admin\\\/)?drive.*?\$)\/\)/g)) patterns.push(new RegExp(re));
     }
     expect(paths.size).toBeGreaterThan(10);
-    expect(patterns.length).toBe(4); // files/…/chunk|finalize, nodes/…(/shares), archive/…(/nodes|/finish), admin/drive/(escrow|keys)/…
+    expect(patterns.length).toBe(3); // files/…/chunk|finalize, nodes/…(/shares), admin/drive/migrate/<uid>(/escrow|/items|/finish)
     // The Drive router also dispatches the reverse-share paths (to reverse.js): the reverse sweep names those.
     const known = [...DRIVE_PATHS, ...REVERSE_PATHS];
     for (const lit of paths) {
@@ -305,12 +338,24 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
     // Every change the sweep sends is on one of those paths, and every path
     // that takes a change is in the sweep.
     for (const r of DRIVE_ROUTES) expect(DRIVE_PATHS, r.path).toContain(r.path);
-    const reads = ['/api/private/drive', `/api/private/drive/nodes/${DRIVE_ID}/shares`];
-    for (const x of DRIVE_PATHS) if (!reads.includes(x)) expect(DRIVE_ROUTES.some((r) => r.path === x), x).toBe(true);
+    for (const x of DRIVE_PATHS) if (!DRIVE_READS.includes(x)) expect(DRIVE_ROUTES.some((r) => r.path === x), x).toBe(true);
   });
 
-  it('every state-changing method on every Drive path is refused for its token before routing (no 404 / 405 / 403 of the route first)', { timeout: 60000 }, async () => {
-    for (const path of [...DRIVE_PATHS, '/api/private/drive/no-such-route', `/api/private/admin/drive/other/${DRIVE_USER}`]) {
+  it('the sweep names every keyring route (src/routes/keys.js)', () => {
+    const lits = new Set([...keysSrc.matchAll(/'(\/api\/private\/admin\/keys[^']*)'/g)].map((m) => m[1]));
+    const pats = [...keysSrc.matchAll(/\.match\(\/(\^\\\/api\\\/private\\\/admin\\\/keys.*?\$)\/\)/g)].map((m) => new RegExp(m[1]));
+    expect(lits.size).toBeGreaterThan(10);
+    expect(pats.length).toBe(2); // subs/<id>(/current|/show), users/<uid>/view
+    for (const lit of lits) expect(KEYS_PATHS, lit).toContain(lit);
+    for (const re of pats) expect(KEYS_PATHS.some((x) => re.test(x)), String(re)).toBe(true);
+    for (const r of KEYS_ROUTES) expect(KEYS_PATHS, r.path).toContain(r.path);
+    for (const x of KEYS_PATHS) if (!KEYS_READS.includes(x)) expect(KEYS_ROUTES.some((r) => r.path === x), x).toBe(true);
+    // The admin router hands /api/private/admin/keys… to keys.js.
+    expect(adminSrc).toMatch(/'\/api\/private\/admin\/keys'/);
+  });
+
+  it('every state-changing method on every Drive and keyring path is refused for its token before routing (no 404 / 405 / 403 of the route first)', { timeout: 60000 }, async () => {
+    for (const path of [...DRIVE_PATHS, ...KEYS_PATHS, '/api/private/drive/no-such-route', `/api/private/admin/drive/other/${DRIVE_USER}`, '/api/private/admin/keys/no-such-route']) {
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
         const res = await send(method, path, { body: {}, headers: intent });
         expect(`${method} ${path} → ${res.status} ${await errorOf(res)}`).toBe(`${method} ${path} → 403 csrf_mismatch`);
@@ -318,7 +363,7 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
     }
     // A user without the Drive, and while impersonating: the token first too.
     const u = await makeUser('csrf-drive-none');
-    for (const r of DRIVE_ROUTES) {
+    for (const r of [...DRIVE_ROUTES, ...KEYS_ROUTES]) {
       const res = r.raw
         ? await fetchJson(r.path, { method: r.method, cookie: u.cookie, csrf: false, headers: { 'content-type': 'application/octet-stream', 'x-upload-token': 'A'.repeat(43) } })
         : await send(r.method, r.path, { cookie: u.cookie, body: r.body, headers: r.headers });
@@ -330,12 +375,13 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
     const u = await makeUser('csrf-drive-ok');
     await driveLimits(u.id, { driveEnabled: true });
     const token = await csrfFor(u.cookie);
-    const folder = { parent: 'root', name: { iv: 'A'.repeat(16), ct: 'B'.repeat(40) } };
+    const fs = await sealed(u.cookie); // sealed under the user's current KEK, as the page does
+    const folder = { parent: 'root', name: fs.name, ks: fs.ks, mek: fs.mek };
     // Refused without the token: no folder.
     expect(await errorOf(await send('POST', '/api/private/drive/folders', { cookie: u.cookie, body: folder }))).toBe('csrf_mismatch');
     const children = async () => (await (await fetchJson('/api/private/drive/nodes/root', { cookie: u.cookie })).json()).children?.length ?? 0;
     const before = await children();
-    // The Drive has no keys yet (a folder needs none on the server): with the token it is created.
+    // With the token it is created.
     const ok = await send('POST', '/api/private/drive/folders', { cookie: u.cookie, token, body: folder });
     expect(ok.status).toBe(201);
     expect(await children()).toBe(before + 1);
@@ -676,17 +722,6 @@ describe('audit I5: POST /api/auth/passkey/options has the same guards as the ot
 
 // ── reverse shares (src/routes/reverse.js; docs/REVERSE.md, SECURITY.md "CSRF") ──
 describe('reverse shares: the user’s routes need the token; the anonymous uploader’s are exempt', () => {
-  beforeAll(async () => {
-    // The owner's Drive, set up as the owner's browser does at the first
-    // sign-in (stand-ins; the server only checks their form), before any
-    // user's Drive needs the escrow key (as in test/reverse.test.js).
-    const escrowPub = { kty: 'EC', crv: 'P-256', x: b64urlFromBytes(randomBytes(32)), y: b64urlFromBytes(randomBytes(32)) };
-    const escrowPriv = `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(150))}`;
-    const pw = { kind: 'pw', ref: 'pw', data: `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}` };
-    const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [pw], kcv: KCV, escrowPub, escrowPriv } });
-    expect(r.status).toBe(200);
-  });
-
   it('the sweep names every cookie-authenticated route reverse.js has, and its anonymous router has only the exempt actions', () => {
     const lits = [...new Set([...reverseSrc.matchAll(/'(\/api\/[^']*)'/g)].map((m) => m[1]))];
     const pats = [...reverseSrc.matchAll(/\.match\(\/(\^\\\/api\\\/.*?\$)\/\)/g)].map((m) => m[1]);
@@ -752,7 +787,8 @@ describe('reverse shares: the user’s routes need the token; the anonymous uplo
     expect((await links()).length).toBe(before + 1);
     // Another link's body without the token (or with a wrong one, or another
     // account's): refused, nothing is claimed or created; with it, 201.
-    const again = { ...link.body, id: `r${b64urlFromBytes(randomBytes(16))}` };
+    const againId = `r${b64urlFromBytes(randomBytes(16))}`;
+    const again = { ...link.body, id: againId, ...(await sealLinkPriv(rec.cookie, againId, link.privateKey)) }; // the private key is bound to the link id
     for (const t of [undefined, 'A'.repeat(43), await csrfFor(u.cookie)]) {
       const r = await send('POST', '/api/private/drive/reverse', { cookie: rec.cookie, token: t, body: again, headers: intent });
       expect(`${r.status} ${await errorOf(r)}`).toBe('403 csrf_mismatch');
@@ -814,7 +850,8 @@ describe('reverse shares: the user’s routes need the token; the anonymous uplo
     // Take in, mark failed, retry: refused without the token (the item stays where it was), done with it.
     const queued = async () => (await received(rec.cookie)).items.map((i) => i.id);
     expect(await queued()).toEqual([f.node]);
-    const takeIn = { parent: 'root', name: enc(), meta: enc(), fk: enc(32) };
+    const tf = await sealed(rec.cookie, 'file'); // sealed under the receiver's current KEK, as the page does
+    const takeIn = { parent: 'root', name: tf.name, meta: tf.meta, dek: tf.dek, ks: tf.ks, mek: tf.mek };
     expect(await errorOf(await send('POST', `/api/private/drive/received/${f.node}`, { cookie: rec.cookie, body: takeIn, headers: intent }))).toBe('csrf_mismatch');
     expect(await errorOf(await send('POST', `/api/private/drive/received/${f.node}/failed`, { cookie: rec.cookie, body: { reason: 'unreadable' }, headers: intent }))).toBe('csrf_mismatch');
     expect(await queued()).toEqual([f.node]);

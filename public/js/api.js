@@ -134,10 +134,15 @@ export function onSessionChanged(fn) { sessionChangedHandler = typeof fn === 'fu
 
 /** The error for a page whose session is gone (the message pages show, with a Reload button). */
 export const isSessionChanged = (e) => e instanceof ApiError && e.extra.sessionChanged === true;
+/** The event a page's other modules listen for (the Drive drops its keys): `secbin:session-changed` on window. */
+export const SESSION_CHANGED_EVENT = 'secbin:session-changed';
 function sessionChanged() {
   const first = !page?.ended;
   forgetSession();
-  if (first) { try { sessionChangedHandler(); } catch { /* the error below still reaches the page */ } }
+  if (first) {
+    try { sessionChangedHandler(); } catch { /* the error below still reaches the page */ }
+    try { globalThis.dispatchEvent?.(new Event(SESSION_CHANGED_EVENT)); } catch { /* no window (a worker, a test) */ }
+  }
   return new ApiError(SESSION_CHANGED, 403, 'csrf_mismatch', { sessionChanged: true });
 }
 
@@ -355,7 +360,8 @@ export const admin = {
 const D = '/api/private/drive';
 export const drive = {
   state: () => request(D),
-  setKeys: (body) => request(`${D}/keys`, { method: 'PUT', headers: INTENT, body }),
+  // The user's KEKs for this session (the server derives them; docs/DRIVE.md §3).
+  keys: () => request(`${D}/keys`, { method: 'POST', headers: INTENT, body: {} }),
   node: (id) => request(`${D}/nodes/${enc(id)}`),
   mkdir: (body) => request(`${D}/folders`, { method: 'POST', headers: INTENT, body }),
   createFile: (body) => request(`${D}/files`, { method: 'POST', headers: INTENT, body }),
@@ -378,24 +384,50 @@ export const drive = {
   receivedFailed: (id, reason) => request(`${D}/received/${enc(id)}/failed`, { method: 'POST', headers: INTENT, body: { reason } }),
   receivedFailedList: (after = null) => request(`${D}/received?failed=1${after ? `&after=${enc(after)}` : ''}`),
   receivedRetry: (id) => request(`${D}/received/${enc(id)}/failed`, { method: 'DELETE', headers: INTENT }),
-  // The owner acting as this user: their escrow wrap and the owner's sealed escrow key (admin audit).
-  impersonationEscrow: () => request(`${D}/escrow`, { method: 'POST', headers: INTENT, body: {} }),
-  // The owner's recovery kit (made and read in the browser only): record a
-  // download / use / check (admin audit), a check's live escrow wraps, and
-  // sealed escrow keys put back from the kit.
-  kit: (body) => request(`${D}/kit`, { method: 'POST', headers: INTENT, body }),
-  kitProbe: () => request(`${D}/kit/probe`, { method: 'POST', headers: INTENT, body: {} }),
-  kitKeys: (body) => request(`${D}/kit/keys`, { method: 'PUT', headers: INTENT, body }),
-  // The owner, with no kit and no way to open their Drive: start it over (new keys).
-  startOver: (body) => request(`${D}/start-over`, { method: 'POST', headers: INTENT, body }),
-  // The Drive the owner had before starting over (an archive, sealed under the old DK).
-  archive: (gen, after) => request(`${D}/archive/${enc(gen)}${after ? `?after=${enc(after)}` : ''}`),
-  archiveNodes: (gen, body) => request(`${D}/archive/${enc(gen)}/nodes`, { method: 'PUT', headers: INTENT, body }),
-  archiveFinish: (gen, body) => request(`${D}/archive/${enc(gen)}/finish`, { method: 'POST', headers: INTENT, body }),
-  archiveDelete: (gen, body) => request(`${D}/archive/${enc(gen)}`, { method: 'DELETE', headers: INTENT, body }),
-  // The owner, for a user: open their escrow wrap (admin audit) / write their `pw` wrap after a reset.
-  escrow: (userId, reason) => request(`${A}/drive/escrow/${enc(userId)}`, { method: 'POST', headers: INTENT, body: { reason } }),
-  setUserKeys: (userId, body) => request(`${A}/drive/keys/${enc(userId)}`, { method: 'PUT', headers: INTENT, body }),
+  // The personal kit (docs/DRIVE.md §3.1): its content (with the step-up), a read-only check, a restore.
+  kit: (step) => request(`${D}/kit`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  kitVerify: (body) => request(`${D}/kit/verify`, { method: 'POST', headers: INTENT, body }),
+  kitRestore: (body) => request(`${D}/kit/restore`, { method: 'POST', headers: INTENT, body }),
+  kitItems: (mek, after = null) => request(`${D}/kit/items?mek=${enc(mek)}${after ? `&after=${enc(after)}` : ''}`),
+  kitItemsPut: (body) => request(`${D}/kit/items`, { method: 'PUT', headers: INTENT, body }),
+  // The upgrade of a Drive made before the key model v2 (docs/DRIVE.md §3.3): own, or (the owner) a user's.
+  migrate: (uid = null) => request(uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`),
+  migrateItems: (after = null, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/items${after ? `?after=${enc(after)}` : ''}`),
+  migratePut: (body, uid = null) => request(uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`, { method: 'PUT', headers: INTENT, body }),
+  migrateFinish: (uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/finish`, { method: 'POST', headers: INTENT, body: {} }),
+  migrateEscrow: (uid, step) => request(`${A}/drive/migrate/${enc(uid)}/escrow`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  // Links of the release before that the old key does not open: ended, their keys removed (the step-up).
+  migrateRetire: (ids, step, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/retire`, { method: 'POST', headers: INTENT, body: { ids, ...step } }),
+  migration: () => request(`${A}/drive/migration`),
+  // The owner's archive of the release before (a start over): what it holds; deleted (the step-up, the username typed).
+  archive: () => request(`${A}/drive/archive`),
+  deleteArchive: (body) => request(`${A}/drive/archive`, { method: 'DELETE', headers: INTENT, body }),
+};
+
+// ── the Drive keyring (Admin → Security → Keys; docs/DRIVE.md §3, §3.1) ───────
+const K = `${A}/keys`;
+export const keysApi = {
+  status: () => request(K),
+  usage: () => request(`${K}/usage`),
+  candidate: (purpose, step) => request(`${K}/candidate`, { method: 'POST', headers: INTENT, body: { purpose, ...step } }),
+  add: (body) => request(`${K}/subs`, { method: 'POST', headers: INTENT, body }),
+  edit: (id, body) => request(`${K}/subs/${enc(id)}`, { method: 'PATCH', headers: INTENT, body }),
+  setCurrent: (id, step) => request(`${K}/subs/${enc(id)}/current`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  show: (id, step) => request(id ? `${K}/subs/${enc(id)}/show` : `${K}/root/show`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  remove: (id, step) => request(`${K}/subs/${enc(id)}`, { method: 'DELETE', headers: INTENT, body: { ...step } }),
+  changeRoot: (body) => request(`${K}/root`, { method: 'POST', headers: INTENT, body }),
+  startJob: (body) => request(`${K}/jobs`, { method: 'POST', headers: INTENT, body }),
+  stepJob: () => request(`${K}/jobs/step`, { method: 'POST', headers: INTENT, body: {} }),
+  cancelJob: (step) => request(`${K}/jobs`, { method: 'DELETE', headers: INTENT, body: { ...step } }),
+  // A root change that could not finish: go back to the previous root, or drop it (the typed fingerprint).
+  undoRoot: (step) => request(`${K}/root/undo`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  dropOldRoot: (body) => request(`${K}/root/drop-old`, { method: 'POST', headers: INTENT, body }),
+  kit: (step) => request(`${K}/kit`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  verify: (body) => request(`${K}/verify`, { method: 'POST', headers: INTENT, body }),
+  restore: (body) => request(`${K}/restore`, { method: 'POST', headers: INTENT, body }),
+  exportKeys: (body) => request(`${K}/export`, { method: 'POST', headers: INTENT, body }),
+  importKeys: (body) => request(`${K}/import`, { method: 'POST', headers: INTENT, body }),
+  userView: (uid, body) => request(`${K}/users/${enc(uid)}/view`, { method: 'POST', headers: INTENT, body }),
 };
 
 // ── reverse shares: the anonymous uploader (docs/REVERSE.md §6.2) ────────────

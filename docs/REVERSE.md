@@ -8,9 +8,14 @@ Status: the contract reverse shares are built against (task #24). It builds on t
 - A **user** whose role allows it creates a **reverse share** on one of their Drive folders: a
   link (`/r/<id>#<key>`) that lets anyone, with no account, upload files and folders to them.
 - Uploads land in the chosen Drive folder. The user sees them there like any other file, the next
-  time their Drive is unlocked (until then: "N new received files").
+  time their Drive page opens (it takes them in).
 - An optional **password** gates the anonymous uploader only. It never protects the data (always
-  encrypted to the user's key) and the user never needs it.
+  encrypted to the link's key) and the user never needs it.
+- An upload is encrypted in the uploader's browser to the link's key, until the user's browser
+  takes it into the Drive; from then on it is a Drive file, sealed under the user's KEK. It is
+  **not end-to-end against the server** at any point: the link's private key is sealed under
+  the user's KEK, which the server derives (docs/DRIVE.md §2), so the server can open an upload
+  before it is taken in too. A copy of R2 or of the Drive object alone cannot.
 - Revoking, expiring or using up a reverse share stops uploads; files already received stay in the
   Drive. Deleting the folder ends its reverse shares.
 - Reverse shares are listed in My shares and Admin → Shares with `kind = 'reverse'`, and in the
@@ -39,11 +44,14 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   also after its index row is pruned or its account deleted: the Directory keeps
   `SHA-256("secbin/reverse-id\0" ‖ id)` of every reverse share it activates (`reverse_ids`,
   nothing else), so an old link never opens a later share.
-- **Private key:** PKCS#8, sealed with DK's **`files`** sub-key (docs/DRIVE.md §3) as a sealed
-  field `{ iv, ct }` with field `reversePriv` and node id `<id>` (AAD
-  `secbin-drive/v1\nreversePriv\n<id>\n`). Only the user's unlocked Drive opens it. The user's
-  browser rebuilds the link from it (the public point is part of the private key), so the link
-  can be shown again later.
+- **Private key:** PKCS#8, sealed under `HKDF(KEK of the current sub-MEK, "",
+  "secbin-reverse-link/v1")` as `{ iv, ct }` with AAD
+  `"secbin-reverse-link/v1\n<userId>\n<mekId>\n<id>"` (docs/DRIVE.md §3), sent with `mek`; the
+  Worker checks it opens under the current KEK and stores it at rest under the user's field key
+  (field `linkKey`). The user's session gets it back without the field layer and opens it with
+  the KEK; the user's browser rebuilds the link from it (the public point is part of the private
+  key), so the link can be shown again later. The server re-seals it on its own with the rest of
+  the Drive (a sub-MEK re-seal, a root change).
 - **Link proof:** `HKDF(ikm = pub, salt = "", info = "secbin-reverse/v1 link-proof")`; the server
   stores only `lh = b64url(SHA-256(proof))`, sent by the uploader in `X-Link-Proof`. The id alone
   opens nothing and does not reveal the note or whether a password is set, but the status codes do
@@ -74,13 +82,15 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     kek")`, AES-GCM over the 64 bytes with AAD `secbin-reverse/v1\nwrap\n<id>\n<nodeId>\n`;
     `data = "1.<epk>.<iv>.<ct>"`. It is stored in the node's `fk` field in a new form:
     `{ kind: 'rs', data }` (a normal Drive file's `fk` is `{ iv, ct }`).
-- **The user's side:** when the Drive is unlocked, the browser lists the received items (page by
-  page, `next`), opens each reverse share's private key with DK, unwraps `fk ‖ mk`, opens the path
+- **The user's side:** when the Drive page opens, the browser lists the received items (page by
+  page, `next`; the Worker takes the field layer off), opens each reverse share's private key with
+  the KEK, unwraps `fk ‖ mk`, opens the path
   and metadata, creates (or reuses, by name) the upload's folders under the target folder (a file
   whose name the folder already has becomes "name (2).ext", as for the user's own uploads), and
-  **re-wraps** the file into the normal Drive format — `name` (the leaf name) and `meta` under
-  DK's `names` key, `fk` under DK's `files` key, all bound to the node id — then `POST`s it (§6).
-  From then on it is an ordinary Drive file; the content chunks are never re-encrypted.
+  **takes it in**: `name` (the leaf name), `meta` and `fk` (now the file's DEK) sealed under the
+  current KEK with a new per-item salt, exactly like a new Drive file — then `POST`s it (§6; the
+  Worker checks the seals). From then on it is an ordinary Drive file; the content chunks are
+  never re-encrypted.
   - **Names** are cleaned, not refused (`files.js` `cleanName`, shared with the Drive and file
     shares): the bidi overrides, embeddings and isolates (U+202A–U+202E, U+2066–U+2069), U+200B,
     U+FEFF, U+0085, U+2028 and U+2029 are removed, then NFC. Hebrew, Arabic and other scripts,
@@ -90,8 +100,8 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   - **Folders:** a path creates at most **8** folder levels below the link's folder (and never
     more than the Drive's 64 levels in all), and one take-in creates at most **200** new folders;
     past either, the file goes into the deepest of its folders that is allowed or exists. The
-    browser does this on its own at every unlock, so it flattens rather than asks: a confirmation
-    would interrupt every unlock, put names an anonymous uploader chose in front of the user, and
+    browser does this on its own every time the Drive opens, so it flattens rather than asks: a confirmation
+    would interrupt every opening, put names an anonymous uploader chose in front of the user, and
     hold the items behind it; flattening never drops a file, only folder levels, and bounds the
     folders an uploader can make the user's browser create.
   - **Failures:** an item that cannot be taken in (it does not open with the link's key, its name
@@ -99,7 +109,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     (`POST …/received/<id>/failed`, with a reason). It leaves the queue, so it never holds up the
     items behind it, and the Drive lists it ("Review them": the link's label, size, time and why)
     with **Delete** and **Try again**. A network or server error leaves the item for the next
-    unlock.
+    time the Drive opens.
 
 ## 4. Storage (server)
 
@@ -112,7 +122,9 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   - `rsessions(hash, rid, expires, files, bytes)`: upload sessions; `hash` = SHA-256 of the
     session grant (256 bits); `files` / `bytes` = finalized in the session, not yet logged.
   - `nodes.rs`: the reverse share of a **received** file that the user's browser has not yet
-    re-wrapped. Received files are left out of folder listings, shares and moves until then.
+    taken in. Received files are left out of folder listings, shares and moves until then. Their
+    uploader-sealed path, metadata and wrap are stored at rest under the user's field key (field
+    `received`, docs/DRIVE.md §3).
   - `nodes.rsess`: the session that reserved a received file, until it is finalized (its
     chunks keep that session open); only that session may finalize or cancel it.
   - `nodes.rfail` / `nodes.rwhy`: when and why the user's browser could not take it in
@@ -130,10 +142,10 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 - The share index row has `captcha` too (My shares and Admin → Shares show it).
 - Received files are ordinary `nodes` rows (kind `file`, parent = the target folder), R2 objects
   under `d/<userId>/<nodeId>/<i>`, counted in the Drive's capacity from the moment they are
-  reserved. Until it is re-wrapped, a received file also counts its sealed path, metadata and
-  wrap (the uploader chose them: at most 1400 + 1024 characters and the fixed-size wrap), so an
-  uploader cannot store data outside the capacity; once re-wrapped (name ≤ 512, meta ≤ 1024,
-  fk ≤ 128 characters) it counts like any Drive file. Upload tokens are stored hashed (`upload_hash`), and a pending upload with no chunk for
+  reserved. Until it is taken in, a received file also counts its sealed path, metadata and
+  wrap as stored (the uploader chose them: at most 1400 + 1024 characters and the fixed-size
+  wrap, plus the field layer), so an uploader cannot store data outside the capacity; once taken
+  in (name ≤ 512, meta ≤ 1024, DEK ≤ 128 characters, and its salt) it counts like any Drive file. Upload tokens are stored hashed (`upload_hash`), and a pending upload with no chunk for
   the role's `filePendingSec` is purged by the Drive's alarm, as for the user's own uploads.
 - A session with no unfinished file lapses **10 minutes** after its last activity; while it has a
   file reserved and not finished it lasts the role's `filePendingSec` from its last activity (the
@@ -143,7 +155,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   per-network slot back. A reserved file must be finished within 24 hours of its reservation, however
   often its chunks are re-sent; the alarm purges it after that and gives its reservation back.
 - Hard ceilings: 1 000 reverse shares per Drive (an ended one is dropped 30 days after it ended —
-  as long as the share index keeps its row — once all its received files are re-wrapped or
+  as long as the share index keeps its row — once all its received files are taken in or
   deleted), **5 open sessions per uploader network** and 100 per reverse share, 10 000 files
   per reverse share.
 
@@ -180,10 +192,10 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 drive_not_set_up` when the Drive has no key yet (the link's private key is sealed with it). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
-| `GET /api/private/drive/received` | received files waiting to be re-wrapped, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv }], more, next }`; `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
-| `POST /api/private/drive/received/<nodeId>` | re-wrapped: `{ parent, name, meta, fk }` (normal sealed fields; `parent` a folder) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
+| `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv, mek }], more, next }` (an item whose field layer does not open comes with `unreadable: true` and no fields: the browser records it as failed); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
+| `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek }` (sealed under the current KEK, checked; `parent` a folder) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
 | `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
 | `DELETE /api/private/drive/nodes/<nodeId>` | discard a received file (as any Drive item) |
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares); `PATCH /api/private/shares/<id>` changes the label or extends the expiry |
@@ -191,7 +203,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 A row: `{ id, folder, label, created, expires, status, locked, priv, password: bool, note: bool,
 captcha: bool, maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
 has it: `active`, `revoked`, `expired`, `ended`; `pending` = received files waiting to be
-re-wrapped, `failed` = those the browser could not take in). `GET /api/private/drive` adds
+taken in, `failed` = those the browser could not take in). `GET /api/private/drive` adds
 `received` (waiting) and `receivedFailed`.
 `GET /api/private/me` has `caps.reverseEnabled`. My shares and Admin → Shares rows of kind
 `reverse` carry `received: { files, bytes }`; `PATCH /api/private/shares/<id>` accepts `label`
@@ -217,8 +229,8 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 
 Errors: `404 not_found` (never a reverse share), `410 gone` (revoked, expired, its folder
 deleted, or the user's role no longer allows it; a late visitor with the right link proof is not
-counted by the Guard), `409 paused` (`open` / `begin` with the right link proof, while the
-owner's Drive is started over and the link's key is in the archive: §9), `423 share_locked` (the
+counted by the Guard), `409 paused` (`open` / `begin` with the right link proof, for a link an owner's start over paused
+in the previous release: §9), `423 share_locked` (the
 admin locked it),
 `403 bad_link`, `401 password_required` (the password is needed; `{ salt, t }` in the body),
 `403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 captcha_required`, `403 turnstile_*`, `413 file_too_large` /
@@ -233,20 +245,16 @@ counts as an invalid request), `429 blocked`.
 By the maintainer's rule, the owner impersonating a user can do everything the user can with
 reverse shares: create (without a confirmation, as for every other change to the account), list
 them with their sealed keys, take in received files, extend and revoke. In the Drive page this
-works exactly as for the user once the impersonating tab holds the user's Drive key (docs/DRIVE.md
-§3). The user's own activity shows these actions as theirs (`share.created`,
+works exactly as for the user, with the user's keys the server hands the owner's session
+(docs/DRIVE.md §3). The user's own activity shows these actions as theirs (`share.created`,
 `drive.received_taken_in`, `drive.received_failed`, `drive.received_retried`, `share.revoked`,
 no actor); the owner-only admin audit keeps the real
 actor (`imp = 1`, not `adm`), exactly as for the Drive actions taken while impersonating
 (docs/DRIVE.md §9).
 
-The server cannot tell whether a new link's `priv` is sealed with the user's Drive key. So the
-owner acting as the user (or anyone holding that impersonation session) can also create, through
-the API, a link in the user's name whose private key they keep: files sent to it are encrypted to
-that key and can be read by whoever holds it, without owner escrow and without the user's Drive
-key. The user's browser cannot open that link's private key: the Drive shows no link for it, and
-its received files are listed as failed (they do not open). The creation is in the admin audit
-with the real actor.
+The owner acting as the user (or anyone holding that impersonation session) can also create,
+through the API, a link in the user's name whose private key they also keep: files sent to it can
+be read by whoever holds that key. The creation is in the admin audit with the real actor.
 
 ## 7. Audit log
 
@@ -269,8 +277,8 @@ many files arrive.
   or hidden) and the account password (or, left empty, a passkey when the account has one;
   hidden while the owner acts as the user), then the link with copy and a QR code, and the folder's reverse shares (label,
   created, expiry, files and bytes received, status) with Show link and Revoke.
-- The unlock prompt says how many received files are waiting; once unlocked the browser
-  re-wraps them (a status line: added, renamed, placed higher up, and the ones that could not be
+- When the Drive page opens, the browser takes the received files in (a status line: added,
+  renamed, placed higher up, and the ones that could not be
   added with **Review them**, a dialog to delete them or try again; then the folder shows them).
 - **Uploader page** `/r/<id>#<key>` (`public/r/index.html`, `public/js/reverse.js`): the note,
   the limits, a password field when needed, a file picker, a folder picker, drag and drop of
@@ -287,34 +295,14 @@ many files arrive.
   files received; revoke, lock and extend (expiry only) as for other shares.
 - Empty folders in an upload are not sent (only files are received; their paths make the folders).
 
-## 9. The owner starting over (docs/DRIVE.md §3.2)
+## 9. Links of the previous release
 
-- The owner's links' private keys are sealed under the owner's DK. When the owner starts over
-  without a recovery kit, the old DK goes into the archive with the rest of the Drive, so every
-  link of the owner's Drive is tied to that archive (`reverse.agen = gen`; a link an earlier
-  archive already holds stays with it) and the active ones are **paused** (`status = 'paused'`),
-  in the same Drive-object step that archives the Drive and writes the new keys (a second start
-  over at the same moment gets `409 drive_unlockable` and pauses nothing):
-  - `open` and `begin` answer `409 paused` once the link proof matches (no session, no human
-    check, no password check); the uploader page shows "This link is not accepting files right
-    now"; any other uploader route answers as for an ended session (`403 bad_grant`, counted);
-  - the links' open sessions end at once (what they received is logged as `reverse.received`),
-    and their unfinished uploads are deleted, giving their allowance back;
-  - the items they received stay in the archive (`archive_nodes`, with `rs`, `rfail`, `rwhy`)
-    exactly as they arrived, sealed to the link's key; they are not offered for taking in;
-  - the share index keeps the link `active` (My shares shows it as paused); it can still be
-    revoked or extended; it is never dropped while its archive exists.
-- **Restore** (a kit for the old DK, "Restore from kit"): the archive's received items come back
-  as they are (`PUT …/archive/<gen>/nodes` with `{ id }` only; any sealed field for them is
-  refused, `400 received_as_is`), and `POST …/archive/<gen>/finish` carries every link's private
-  key re-sealed by the browser from the kit's DK to the Drive's DK now (`reverse`; one per link
-  of the archive, `409 reverse_keys_required` otherwise). The links leave the archive and the
-  paused ones resume; their kept items are taken in like any received file at the next unlock.
-  Until finish, a restored received item whose link is still tied to the archive is neither
-  listed nor accepted (`409 not_received`).
-- **Delete the old Drive archive**: its paused links are revoked (the share index too) and the
-  items they received are deleted with the archive (R2 included).
-- Logged, one entry per link, the owner as the actor (the owner's activity and the admin
-  audit): `reverse.paused`, `reverse.resumed`, `reverse.revoked` (`reason=archive_deleted`).
-- No other user's link, session or received item is touched by any of this.
-
+- A link made before the Drive key model v2 has its private key sealed under the old Drive key
+  (`reverse.mek` is null). The Drive's upgrade (docs/DRIVE.md §3.3) re-seals it under the user's
+  KEK in the browser that opens the old key, and the server checks it and stores it at rest under
+  the field layer; until then the Drive shows no link for it, and its received files wait (they
+  are not marked as failed).
+- A link an owner's start over paused in the previous release stays paused (`open` and `begin`
+  answer `409 paused`; the uploader page says it is not accepting files right now), with its
+  received items kept in that archive as they arrived; nothing opens or restores the archive any
+  more. It can still be revoked; revoking it ends it as any link.

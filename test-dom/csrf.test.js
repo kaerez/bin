@@ -200,7 +200,7 @@ describe('the Drive API: every call goes through the same token path', () => {
   // new Drive call cannot be added without being checked here.
   const CALLS = {
     state: () => api.drive.state(),
-    setKeys: () => api.drive.setKeys({ set: [] }),
+    keys: () => api.drive.keys(),
     node: () => api.drive.node(ID),
     mkdir: () => api.drive.mkdir({ parent: 'root' }),
     createFile: () => api.drive.createFile({ parent: 'root', size: 1 }),
@@ -211,17 +211,22 @@ describe('the Drive API: every call goes through the same token path', () => {
     remove: () => api.drive.remove(ID),
     share: () => api.drive.share({ nodes: [ID] }),
     shares: () => api.drive.shares(ID),
-    impersonationEscrow: () => api.drive.impersonationEscrow(),
-    kit: () => api.drive.kit({ event: 'verified', verdict: 'complete' }),
-    kitProbe: () => api.drive.kitProbe(),
-    kitKeys: () => api.drive.kitKeys({ escrowPriv: {} }),
-    startOver: () => api.drive.startOver({ confirm: 'alice' }),
-    archive: () => api.drive.archive(1),
-    archiveNodes: () => api.drive.archiveNodes(1, { nodes: [] }),
-    archiveFinish: () => api.drive.archiveFinish(1, {}),
-    archiveDelete: () => api.drive.archiveDelete(1, { confirm: 'alice' }),
-    escrow: () => api.drive.escrow(UID, 'a reason'),
-    setUserKeys: () => api.drive.setUserKeys(UID, { set: [] }),
+    // The personal kit, and the upgrade of a Drive made before the key model v2 (own, or the owner's for a user).
+    kit: () => api.drive.kit({ current: 'P'.repeat(43) }),
+    kitVerify: () => api.drive.kitVerify({ keks: {} }),
+    kitRestore: () => api.drive.kitRestore({ current: 'P'.repeat(43) }),
+    kitItems: () => api.drive.kitItems('mAAAAAAAAAAA'),
+    kitItemsPut: () => api.drive.kitItemsPut({ items: [] }),
+    migrate: () => api.drive.migrate(UID),
+    migrateItems: () => api.drive.migrateItems(null, UID),
+    migratePut: () => api.drive.migratePut({ items: [] }, UID),
+    migrateFinish: () => api.drive.migrateFinish(UID),
+    migrateEscrow: () => api.drive.migrateEscrow(UID, { current: 'P'.repeat(43) }),
+    migrateRetire: () => api.drive.migrateRetire(['rAAAAAAAAAAAAAAAAAAAAAA'], { current: 'P'.repeat(43) }, UID),
+    migration: () => api.drive.migration(),
+    // The owner's archive of the release before: what it holds; deleted.
+    archive: () => api.drive.archive(),
+    deleteArchive: () => api.drive.deleteArchive({ confirm: 'owner', current: 'P'.repeat(43) }),
     // Reverse shares (the Drive's "Receive files"): create a link, list, and the received files.
     createReverse: () => api.drive.createReverse({ id: 'rAAAAAAAAAAAAAAAAAAAAAA', folder: 'root' }),
     reverse: () => api.drive.reverse('root'),
@@ -242,7 +247,7 @@ describe('the Drive API: every call goes through the same token path', () => {
     expect(Object.keys(CALLS).sort()).toEqual(Object.keys(api.drive).sort());
   });
 
-  it('each change (the owner’s kit, keys, probe, start over, archive and escrow routes included) carries the page’s token and a shape the server accepts; reads carry none', async () => {
+  it('each change (the session’s keys, the personal kit and the upgrade included) carries the page’s token and a shape the server accepts; reads carry none', async () => {
     handler = () => json(200, { ok: true });
     jar = `__Host-secbin_csrf=${TOKEN_C}`; // the shared cookie is someone else's now
     const seen = [];
@@ -253,8 +258,8 @@ describe('the Drive API: every call goes through the same token path', () => {
     }
     const changes = seen.filter((c) => c.method !== 'GET');
     expect(changes.map((c) => c.name).sort()).toEqual([
-      'acceptReceived', 'archiveDelete', 'archiveFinish', 'archiveNodes', 'createFile', 'createReverse', 'escrow', 'finalize', 'impersonationEscrow', 'kit', 'kitKeys', 'kitProbe',
-      'mkdir', 'putChunk', 'receivedFailed', 'receivedRetry', 'remove', 'setKeys', 'setUserKeys', 'share', 'startOver', 'update',
+      'acceptReceived', 'createFile', 'createReverse', 'deleteArchive', 'finalize', 'keys', 'kit', 'kitItemsPut', 'kitRestore', 'kitVerify',
+      'migrateEscrow', 'migrateFinish', 'migratePut', 'migrateRetire', 'mkdir', 'putChunk', 'receivedFailed', 'receivedRetry', 'remove', 'share', 'update',
     ]);
     for (const c of changes) {
       expect(c.path, c.name).toMatch(/^\/api\/private\/(drive|admin\/drive)(\/|$)/);
@@ -262,8 +267,8 @@ describe('the Drive API: every call goes through the same token path', () => {
       expect(shapeOk(c), c.name).toBe(true);
     }
     for (const c of seen.filter((x) => x.method === 'GET')) expect(tokenOf(c), c.name).toBeUndefined();
-    // The kit check records escrow use: a POST with a JSON body.
-    expect(changes.find((c) => c.name === 'kitProbe')).toMatchObject({ method: 'POST', path: '/api/private/drive/kit/probe', body: '{}' });
+    // The session's keys may make the account's salt and are audited for the owner acting as the user: a POST with a JSON body.
+    expect(changes.find((c) => c.name === 'keys')).toMatchObject({ method: 'POST', path: '/api/private/drive/keys', body: '{}' });
   });
 
   it('a raw binary chunk passes the shape check through the chunk rule, and a refused token is refreshed and the same bytes sent again', async () => {
@@ -291,6 +296,61 @@ describe('the Drive API: every call goes through the same token path', () => {
     handler = (path) => (path === '/api/private/me' ? json(200, bob()) : mismatch());
     expect(api.isSessionChanged(await api.drive.remove(ID).catch((x) => x))).toBe(true);
     expect(trail()).toEqual([`DELETE /api/private/drive/nodes/${ID}`, 'GET /api/private/me']);
+  });
+});
+
+// ── the Drive keyring (Admin → Security → Keys) ────────────────────────────
+describe('the Drive keyring API: every call goes through the same token path', () => {
+  const MEK = 'mAAAAAAAAAAA';
+  const UID = 'uAAAAAAAAAAAAAAA';
+  const STEP = { current: 'P'.repeat(43) };
+  // One call per method of keysApi: a new keyring call cannot be added without being checked here.
+  const CALLS = {
+    status: () => api.keysApi.status(),
+    usage: () => api.keysApi.usage(),
+    candidate: () => api.keysApi.candidate('sub', STEP),
+    add: () => api.keysApi.add({ ...STEP }),
+    edit: () => api.keysApi.edit(MEK, { until: null, ...STEP }),
+    setCurrent: () => api.keysApi.setCurrent(MEK, STEP),
+    show: () => api.keysApi.show(MEK, STEP),
+    showRoot: () => api.keysApi.show(null, STEP),
+    remove: () => api.keysApi.remove(MEK, STEP),
+    changeRoot: () => api.keysApi.changeRoot({ ...STEP }),
+    startJob: () => api.keysApi.startJob({ kind: 'rotate', ...STEP }),
+    stepJob: () => api.keysApi.stepJob(),
+    cancelJob: () => api.keysApi.cancelJob(STEP),
+    undoRoot: () => api.keysApi.undoRoot(STEP),
+    dropOldRoot: () => api.keysApi.dropOldRoot({ confirm: 'x', ...STEP }),
+    kit: () => api.keysApi.kit(STEP),
+    verify: () => api.keysApi.verify({ root: 'x' }),
+    restore: () => api.keysApi.restore({ ...STEP }),
+    exportKeys: () => api.keysApi.exportKeys({ ...STEP }),
+    importKeys: () => api.keysApi.importKeys({ dryRun: true, ...STEP }),
+    userView: () => api.keysApi.userView(UID, STEP),
+  };
+  beforeEach(() => { api.bindSession(profile()); });
+
+  it('the test names every keyring method', () => {
+    expect(Object.keys(CALLS).filter((k) => k !== 'showRoot').sort()).toEqual(Object.keys(api.keysApi).sort());
+  });
+
+  it('each change carries the page’s token, JSON and the intent header; the two reads carry none', async () => {
+    handler = () => json(200, { ok: true });
+    jar = `__Host-secbin_csrf=${TOKEN_C}`; // the shared cookie is someone else's now
+    const seen = [];
+    for (const [name, call] of Object.entries(CALLS)) {
+      const from = calls.length;
+      await call();
+      for (const c of calls.slice(from)) seen.push({ name, ...c });
+    }
+    expect(seen.filter((c) => c.method === 'GET').map((c) => c.name).sort()).toEqual(['status', 'usage']);
+    for (const c of seen) {
+      expect(c.path, c.name).toMatch(/^\/api\/private\/admin\/keys(\/|$)/);
+      if (c.method === 'GET') { expect(tokenOf(c), c.name).toBeUndefined(); continue; }
+      expect(tokenOf(c), c.name).toBe(TOKEN_B);
+      expect(c.headers['x-secbin-intent'], c.name).toBe('1');
+      expect((c.headers['content-type'] || '').split(';')[0], c.name).toBe('application/json');
+    }
   });
 });
 

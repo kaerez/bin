@@ -7,11 +7,11 @@
         <meta name="color-scheme" content="dark light" />
         <meta name="theme-color" content="#0d1117" />
         <title>Accessibility statement · secbin</title>
-        <meta name="description" content="Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it." />
+        <meta name="description" content="Encrypted notes and file sharing. Notes and file shares are encrypted in your browser, end to end: the server never sees their keys." />
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="secbin" />
         <meta property="og:title" content="secbin · zero-knowledge sharing" />
-        <meta property="og:description" content="Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it." />
+        <meta property="og:description" content="Encrypted notes and file sharing. Notes and file shares are encrypted in your browser, end to end: the server never sees their keys." />
         <meta name="twitter:card" content="summary" />
         <link rel="icon" type="image/svg+xml" href="/img/favicon.svg" />
         <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png" />
@@ -132,12 +132,14 @@
                     <dd>Classless Inter-Domain Routing: a way to write a range of network addresses, such as 10.0.0.0/8.</dd>
                     <dt>CLI</dt>
                     <dd>Command-line interface: a program you run by typing commands in a terminal.</dd>
+                    <dt>DEK</dt>
+                    <dd>Data encryption key: the random key that encrypts one Drive file, in your browser. It is stored sealed under your KEK.</dd>
                     <dt>Drive</dt>
-                    <dd>Your encrypted file storage in secbin, with folders. It is set up in your browser when you sign in. You can read it, and so can the administrator, with the escrow key.</dd>
+                    <dd>Your file storage in secbin, with folders. Files, their names and folders are encrypted in your browser, but the Drive is not end-to-end encrypted: the server holds the keys your Drive key is made from (the MEKs), so the server, and the administrator, can open your Drive files. A copy of the stored files alone reveals nothing.</dd>
                     <dt>End-to-end encrypted</dt>
-                    <dd>Encrypted on the sender’s device and decrypted only on the recipient’s. The server stores only data it cannot read.</dd>
+                    <dd>Encrypted on the sender’s device and decrypted only on the recipient’s. The server stores only data it cannot read. Notes and file shares are; the Drive, shares of Drive files and files sent to you through a “Receive files” link are not.</dd>
                     <dt>Escrow key</dt>
-                    <dd>The administrator’s key that opens every user’s Drive. The server cannot use it: it opens only in the administrator’s browser. If it is replaced without the administrator’s signature, your Drive asks you before it trusts the new one.</dd>
+                    <dd>The administrator’s key of the previous release, which opened every user’s Drive in the administrator’s browser. It is used only to upgrade Drives made before this release, and removed once every Drive is upgraded.</dd>
                     <dt>Fragment (#fragment)</dt>
                     <dd>The part of a link after the # sign. Browsers never send it to the server, so the key kept there stays with you.</dd>
                     <dt>HKDF-SHA256</dt>
@@ -146,14 +148,20 @@
                     <dd>Internet Protocol address: the number that identifies a device or network on the internet.</dd>
                     <dt>KB, MB, GB</dt>
                     <dd>Kilobyte, megabyte, gigabyte: sizes of files (1 MB is about a million bytes).</dd>
+                    <dt>KEK</dt>
+                    <dd>Key-encryption key: your Drive key. The server makes it from the MEKs and your user salt, and gives it to your browser when you open your Drive. It seals each file’s DEK, name and details.</dd>
                     <dt>m, h, d</dt>
                     <dd>Minutes, hours, days, in short durations such as “2d 3h”.</dd>
+                    <dt>MEK</dt>
+                    <dd>Master encryption key: the keys the server keeps (a root MEK and dated sub-MEKs, managed by the administrator) that every user’s KEK is made from. Whoever holds them can open every Drive.</dd>
                     <dt>Passkey</dt>
                     <dd>A way to sign in with your device’s fingerprint, face or screen lock instead of a password. It cannot be phished or guessed.</dd>
                     <dt>PDF</dt>
                     <dd>Portable Document Format, a common type of document file.</dd>
                     <dt>QR code</dt>
                     <dd>A square pattern that a phone camera can scan to open a link.</dd>
+                    <dt>Receive files (link)</dt>
+                    <dd>A link that lets anyone send you files and folders into a Drive folder, without an account. What they send is encrypted in their browser, to a key the server keeps under your Drive keys: like the Drive, it is not end-to-end encrypted, before or after it is received.</dd>
                     <dt>Recovery code</dt>
                     <dd>A one-time code you save when you add a passkey. Each code signs you in once, instead of your password and passkey.</dd>
                     <dt>Share</dt>
@@ -167,7 +175,7 @@
                     <dt>WCAG</dt>
                     <dd>Web Content Accessibility Guidelines, the international guidelines secbin is built to.</dd>
                     <dt>Zero-knowledge</dt>
-                    <dd>The server never has the keys, so it cannot read what you store or share.</dd>
+                    <dd>The server never has the keys, so it cannot read what you store or share. This holds for notes and file shares; the Drive is the exception (see Drive).</dd>
                 </dl>
             </section>
 

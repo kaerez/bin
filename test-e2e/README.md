@@ -8,15 +8,15 @@ pick them up, and CI does not install a browser).
 
 What it covers ([docs/DRIVE.md](../docs/DRIVE.md)):
 
-- the sign-in setting up and unlocking the Drive (password, a passkey with PRF, a recovery
-  code);
-- Account keeping the wraps current;
-- the Drive page's unlock prompt;
+- the set-up page making the Drive keys; the Drive opening right after any sign-in (password,
+  passkey, recovery code) with no prompt, and no Drive key in the tab's storage;
+- a new tab with keys planted in `sessionStorage` / `localStorage`: the Drive opens with the
+  server's keys, the planted slots are removed, and what it seals opens in a clean tab;
 - the folder tree and right pane (mouse and keyboard), upload of files and folders (a clashing
   name gets " (2)"), new folder, rename, move, delete, download (file and folder ZIP);
 - Share… with a password, the recipient's view, the item's shares and revoke;
 - the capacity text, the phone layout, a role without a Drive;
-- no names, contents or secrets in any Drive request;
+- no names, contents or passwords in any Drive request, and the CSRF token on every change;
 - no page errors or CSP / Trusted Types violations, and axe (WCAG 2.2 A/AA) on every state.
 
 It creates the owner itself, so it needs a server with **no owner yet**: fresh local state.
@@ -37,46 +37,68 @@ WT=$PWD BASE=http://localhost:8787 node test-e2e/drive-int.mjs
 ```
 
 It prints one `PASS` / `FAIL` line per check and `N/M passed`, and exits non-zero on any
-failure. It takes a few minutes: Argon2id runs for every password unlock.
+failure.
 
 ## `drive-impersonate.mjs` — the owner in a user's Drive ("Log in as")
 
-What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3, §9): the owner, logged in as a user, opens
-the user's Drive through the owner escrow (the owner's own Drive unlocked in the tab), reads and
-downloads the user's file, uploads one and shares it (a recipient opens the link); the user's key
-sits in its own tab slot and goes when the impersonation ends; removing the user's password wrap
-is refused; a user who has not signed in since the Drive was enabled shows the notice and gets
-nothing created, and their first sign-in then sets the Drive up by itself (password and escrow
-wraps); the notice when the owner's Drive is locked; Hebrew and spoofing names in the Drive page;
-and the user's own activity listing the Drive actions done as them, as theirs and with no trace
-of the impersonation, while the admin audit names the owner. It also checks the create-user
-form: a user created with the owner's Drive unlocked gets a Drive at once; one created with it
-locked waits for their first sign-in. Same set-up as `drive-int.mjs` (a
-fresh server with no owner yet):
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3, §9): the owner, logged in as a user, gets
+the user's Drive keys from the server (`drive.keys_used` in the admin audit), in the page's memory
+only; reads and downloads the user's file, uploads one and shares it (a recipient opens the
+link); the personal kit and the upgrade are refused while acting as the user; a user who has never
+signed in has a Drive the owner can use at once; Hebrew and spoofing names in the Drive page; and
+the user's own activity listing the Drive actions done as them, as theirs and with no trace of the
+impersonation, while the admin audit names the owner. Same set-up as `drive-int.mjs` (a fresh
+server with no owner yet):
 
 ```sh
 WT=$PWD BASE=http://127.0.0.1:8787 node test-e2e/drive-impersonate.mjs
 ```
 
-## `owner-kit.mjs` — the owner recovery kit, starting over, the archive
+## `keys.mjs` — the Drive keys (set-up, Security → Keys, kits, Import / export)
 
-What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3.1, §3.2), in two phases on one server state:
-phase 1 — the kit status and the fresh-kit notice on the Drive page; Download kit on the export
-screen (refused without the step-up; again and again), the file saved to disk; after a reload,
-Verify kit with that saved file (`setInputFiles`), a tampered file, an older kit after a rotation
-(the notice announced, then static after a reload); Restore from kit; the create-user form setting
-the new user's Drive up now, or deferring it; phase 2 — after the server restarts with a new
-`AUTHN` value: AUTHN owner recovery (the Drive marked stale), the unlock screen (restore, start
-over), starting over (the typed username; the archive and the notice), and the archive brought
-back with the phase-1 kit. axe (WCAG 2.2 A/AA) on every state, and no page errors.
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3, §3.1, §3.2): the set-up page with keys
+entered by hand (a malformed one refused); Admin → Security → Keys — Show with the step-up (the
+values entered at set-up), a generated sub-MEK used only on "Use this key", rotation, a scheduled
+sub-MEK entered by hand, a re-seal with progress, deleting a sub-MEK (two steps), a root change;
+the key kit (download with the step-up, verify today and on a later date, a wrong passphrase, a
+restore preview that replaces nothing); a user's keys (masked, Show); the personal kit on Account
+(download, verify, restore); Import / export → Drive keys (parts, the user search, the masked view,
+the sealed file; an import previewed and applied that replaces nothing); every file still opening
+after each change; the admin audit holding the key actions and no key value; axe on every state.
+It needs a fresh server (no owner yet):
 
 ```sh
-rm -rf .wrangler/kit-state
-npx wrangler dev --port 8787 --persist-to .wrangler/kit-state
-WT=$PWD BASE=http://localhost:8787 OUT=/tmp/kit PHASE=1 node test-e2e/owner-kit.mjs
-# stop wrangler, then restart it on the same state with a new setup token:
-npx wrangler dev --port 8787 --persist-to .wrangler/kit-state --var AUTHN:<a new value of 32+ characters>
-WT=$PWD BASE=http://localhost:8787 OUT=/tmp/kit PHASE=2 AUTHN2=<that value> node test-e2e/owner-kit.mjs
+WT=$PWD BASE=http://localhost:8787 OUT=/tmp/keys node test-e2e/keys.mjs
+```
+
+## `drive-upgrade.mjs` — upgrading Drives made by the release before
+
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3.3), in two phases on one server state:
+phase 1, against the release before — the owner, alice and carol with Drives made the old way
+(files, a folder, alice's reverse link with one received file taken in and one waiting); phase 2,
+against this release on the same state — the owner's Drive upgraded by the owner's own Drive page,
+carol's from Admin → Security → Keys (through the escrow of the release before), alice's at her
+sign-in; every file reading back with the same bytes, the waiting file taken in, the old link
+still receiving; then no Drive left waiting, and the old wraps and escrow records gone.
+
+```sh
+# in a checkout of the release before (its own .dev.vars and node_modules), a fresh state
+rm -rf /tmp/upgrade-state
+npx wrangler dev --port 8787 --persist-to /tmp/upgrade-state
+PHASE=1 WT=<that checkout> BASE=http://localhost:8787 OUT=/tmp/upgrade node test-e2e/drive-upgrade.mjs
+# stop it, then start this release on the same state
+npx wrangler dev --port 8787 --persist-to /tmp/upgrade-state
+PHASE=2 WT=$PWD BASE=http://localhost:8787 OUT=/tmp/upgrade node test-e2e/drive-upgrade.mjs
+```
+
+## `csrf.mjs` — CSRF tokens
+
+What it covers is in the file's header (a page acting only for the session it was loaded for,
+across tabs, back / forward, reloads and impersonation, and the Admin switch). It needs a fresh
+server (no owner yet):
+
+```sh
+BASE=http://localhost:8787 WT=$PWD node test-e2e/csrf.mjs
 ```
 
 ## `captcha.mjs` — CAPTCHA on shares and reverse shares

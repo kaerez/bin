@@ -5,16 +5,16 @@
 // banner, and the warning before the session times out (session-timeout.js).
 // Every dashboard page awaits `ready`.
 
-import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, SESSION_CHANGED } from '../../js/api.js';
+import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, isPageSession, endPageSession, SESSION_CHANGED } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError, h } from '../../js/common.js';
-import { clearSessionKey, clearImpersonationKey } from '../../js/drivekeys.js';
+import { clearSessionKey, clearImpersonationKeys, purgeStaleSlots } from '../../js/drivekeys.js';
 import { watchSession } from './session-timeout.js';
 
 const $ = (s) => document.querySelector(s);
 
 function toLogin(reason) {
-  clearSessionKey(); // signed out: forget the tab's Drive key (docs/DRIVE.md §3)
+  clearSessionKey(); // signed out: forget the tab's Drive keys (docs/DRIVE.md §3)
   location.replace(reason === 'account_disabled' ? '/dashboard/login/?disabled=1' : '/dashboard/login/');
 }
 
@@ -53,8 +53,8 @@ export const ready = (async () => {
   bindSession(profile);
   // A warning before the session times out, with the option to stay signed in (WCAG 2.2.1).
   watchSession(profile.session);
-  // The Drive key of a user the owner acted as lives only while acting as them.
-  if (!profile.impersonatedBy) clearImpersonationKey();
+  // Drive keys are never kept in the tab (each page asks the server): remove what a release before left there.
+  purgeStaleSlots();
   const nav = $('#dash-nav');
   if (nav) {
     nav.hidden = false;
@@ -89,7 +89,7 @@ export const ready = (async () => {
     $('#imp-return').onclick = async () => {
       try {
         await admin.unimpersonate();
-        clearImpersonationKey();
+        clearImpersonationKeys();
         location.href = '/dashboard/admin/';
       } catch (e) {
         toast(friendlyError(e), { error: true });
@@ -111,4 +111,17 @@ addEventListener('pageshow', async (ev) => {
   let now;
   try { was = await ready; now = await loadMe(); } catch { return; /* offline: the next request says so */ }
   if (now.user.id !== was.user.id || (now.impersonatedBy ?? null) !== (was.impersonatedBy ?? null)) location.reload();
+});
+
+// A tab shown again: if the browser is now signed in as someone else (another
+// tab signed in, or started or ended impersonation), this page stops acting for
+// anyone at once — the Drive drops its keys (api.js, `secbin:session-changed`)
+// — without waiting for its next change. At most one check every few seconds.
+let lastCheck = 0;
+addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || Date.now() - lastCheck < 5000) return;
+  lastCheck = Date.now();
+  let now;
+  try { await ready; now = await me(); } catch { return; /* offline or signed out: the next request (or the session timeout) says so */ }
+  if (!isPageSession(now)) endPageSession();
 });

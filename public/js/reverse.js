@@ -145,7 +145,7 @@ function buildApp(root, up, { storage, toCheck }) {
     h('div.head', {},
       h('p.eyebrow', { text: 'encrypted upload' }),
       h('h1.title', { text: 'Send files' }),
-      h('p.subtitle', { text: 'What you send here is encrypted in your browser for the person who shared this link. The server cannot read the files, their names or their types. No account is needed.' })),
+      h('p.subtitle', { text: 'What you send here — the files, their names and their types — is encrypted in your browser before it is sent, to a key of the person who shared this link. The server keeps that key under their Drive keys, which it holds: the server can decrypt what you send, as it can their other Drive files. No account is needed.' })),
     note,
     h('p.mono.muted', { id: 'reverse-limits', text: `${limitsText(up.limits)} The link expires ${formatDate(up.head.expires)}.` }),
     drop, fileIn, folderIn, list, total, clearBtn,

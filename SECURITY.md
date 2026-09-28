@@ -2,7 +2,9 @@
 
 secbin is a **zero-knowledge sharing service** for notes and files: content — including file
 names, folder structure and MIME types — is encrypted and decrypted only on the client, and the
-decryption secret never leaves the client in normal operation. This document is the
+decryption secret never leaves the client in normal operation. **The one exception is the
+Drive**: its files are encrypted in the browser, but the server holds the keys that open them
+("Drive keys", §6). This document is the
 authoritative statement of what secbin does and does **not** protect. Read it alongside
 [`SPEC.md`](./SPEC.md).
 
@@ -19,7 +21,8 @@ Treat secbin as a **security-sensitive cryptographic application**, not a normal
 1. **Confidentiality of content from the server/storage layer.** The Worker, KV, R2, the
    Durable Objects and Cloudflare store only ciphertext and non-secret settings. They cannot
    read note text, file contents, file or folder names, MIME types or per-file sizes: all of
-   that is encrypted client-side; the key (`F`, the URL fragment) is never transmitted.
+   that is encrypted client-side; the key (`F`, the URL fragment) is never transmitted. (Drive
+   files are the exception: the server can open them, "Drive keys".)
 2. **Integrity.** AES-256-GCM authenticates ciphertext; the canonical AAD binds every
    security-relevant field (`SPEC.md` §4); file chunks bind their index and the chunk count, so
    reordering and truncation fail closed.
@@ -49,7 +52,9 @@ Treat secbin as a **security-sensitive cryptographic application**, not a normal
 - **Hiding account metadata from the operator.** Which account created which share, share
   labels, and the audit log are server-side and visible to the owner.
 - **Protection against a malicious owner.** The owner can impersonate users and change limits;
-  the owner still cannot decrypt shares.
+  the owner still cannot decrypt shares, but can decrypt every Drive file.
+- **Confidentiality of Drive files from the server.** The server, and anyone with a copy of the
+  Directory's storage, can decrypt every Drive file ("Drive keys", §6).
 - **DoS protection** beyond best-effort guards.
 
 ## 3. What the server can and cannot see
@@ -85,13 +90,17 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
 - Access-proof *hashes*, delete/upload/grant/API-key *hashes*, and password verifiers
   (`SHA-256("secbin-auth/v2" ‖ Argon2id(password))`).
 
-- **The Drive** (see the Drive section below): the shape of each user's folder tree (node
-  ids, parents, file or folder), each file's exact size and chunk count, times, and which shares
-  reference which items — never names, types, contents, file keys or the Drive key.
+- **The Drive** (see "Drive keys" and "Drive (server)" below): the shape of each user's folder
+  tree (node ids, parents, file or folder), each file's exact size, chunk count and ciphertext
+  hash, times, and which shares reference which items. Names, types, contents and file keys are
+  sealed, but **the server holds the keys that open them** (the root MEK, the sub-MEKs and the
+  user salts in the Directory): Drive files are not end-to-end encrypted.
 - **Reverse shares** (see "Reverse shares" below): which folder a link targets, its limits,
   label, times and counters, whether it has a password, and each received file's exact size,
-  chunk count and time — never the link key, the note to the uploader, the password, the files'
-  names, types, folders or contents.
+  chunk count and time. The link's private key is stored sealed under the user's KEK, which the
+  server derives (like every Drive key: "Drive keys"), so the server can open the files'
+  names, types, folders and contents, before and after they are taken in; a copy of R2 or of the
+  Drive object alone cannot. The note to the uploader and the password are never seen.
 
 Tokens (delete, upload, download grant) and proofs travel in request **headers**, never URLs,
 so they do not land in logged request URLs.
@@ -295,10 +304,9 @@ CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
 - **Trust trade-off.** On those pages a compromise of Cloudflare's Turnstile script could read
   the page:
   - on login and Account, the password being typed;
-  - on login and Account, the tab's Drive key while the page uses it (see "Drive keys", in the
-    tab): the key is kept out of `sessionStorage` on those pages, but the sign-in unlocks the
-    Drive there, and a change on Account that re-wraps it (password, passkey, recovery codes)
-    uses it there;
+  - on Account, the Drive keys while the personal kit is built there (see "Drive keys", in the
+    tab: they are never in the tab's storage); on login, while a Drive waits for its upgrade, the
+    old Drive key the sign-in opens there;
   - on the home page, what an anonymous sender types and the link, with its key, that it
     produces;
   - on a share's CAPTCHA page, the share's id, the link key sealed under a random key held in
@@ -761,19 +769,19 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     user's own, with no actor, and does not list the start or end of an impersonation. The
     owner-only admin audit records `impersonate.start`, `impersonate.end` and, for each action,
     the owner as the real actor (`imp`).
-  - **The Drive:** the owner has the user's whole Drive, opened with the owner escrow (see
-    "Drive keys"). What the owner does there while impersonating — reads, uploads, folders,
-    renames, moves, deletions, wraps added, Drive shares and their changes — is logged exactly
-    like the rest of the account: in the user's activity as the user's own (no actor, no trace
-    of the impersonation), and in the owner-only admin audit with the owner as the real actor
-    (`imp`). Opening the Drive with the escrow is the owner's own action (`drive.escrow_used`,
-    admin audit only). The user's own password, recovery-code and passkey wraps are never removed
-    or replaced then (only added, for credentials the owner gives the user), and a user who has
-    no Drive yet gets none: nothing is created while impersonating.
+  - **The Drive:** the owner has the user's whole Drive, opened with the user's keys, which the
+    server hands the owner's session (see "Drive keys"). What the owner does there while
+    impersonating — reads, uploads, folders, renames, moves, deletions, Drive shares and their
+    changes — is logged exactly like the rest of the account: in the user's activity as the
+    user's own (no actor, no trace of the impersonation), and in the owner-only admin audit with
+    the owner as the real actor (`imp`). Getting the user's keys is the owner's own action
+    (`drive.keys_used`, admin audit only). The personal kit and the upgrade are the user's own
+    (`403 impersonating`).
 - **Admin share management**: the owner sees every user's shares and can change a share's label, views
   and expiry, revoke it, or **lock** it.
-  - **Only metadata:** it never gains access to share content, which stays end-to-end
-    encrypted.
+  - **Only metadata:** share management never gains access to share content (notes and file
+    shares stay end-to-end; a Drive share's files open with the Drive keys, as any Drive file:
+    "Drive keys").
   - **Bounds:** admin changes are increase-only and bounded by the protocol maxima, not by the
     user's limits.
   - **Logging:** they are recorded in the audit log as direct admin actions, and they do not
@@ -911,9 +919,8 @@ codes as safe as the password.
     change keep the passkeys and recovery codes, and an import never changes an existing
     account's password, recovery codes or passkeys (it can only add passkeys). After a takeover, remove them as well. After a user's own change, Account
     says how many still work and asks the user to remove any passkey they do not recognise.
-  - Owner recovery through `AUTHN` also removes the owner's passkeys and recovery codes (and
-    their Drive wraps); the owner's Drive then opens with the owner recovery kit (see "Drive
-    keys"), or the owner starts it over.
+  - Owner recovery through `AUTHN` also removes the owner's passkeys and recovery codes; the
+    Drive keys are not tied to them and stay as they are (see "Drive keys").
 - Passkeys and recovery codes leave the server only in an export where the owner ticked
   "Passkeys" or "Recovery codes" (separate parts) for that account, the owner's own row
   included. The file carries the public keys (useless without the authenticator), each with the
@@ -922,222 +929,107 @@ codes as safe as the password.
 
 ### Drive keys
 
-The Drive (design and contract: [`docs/DRIVE.md`](./docs/DRIVE.md)) is encrypted in the browser
-under a per-user **Drive key** (DK, 32 random bytes; `public/js/drivekeys.js`). The server
-stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it cannot open.
+The Drive (design and contract: [`docs/DRIVE.md`](./docs/DRIVE.md) §2, §3) is encrypted in the
+browser, but **it is not end-to-end encrypted**: the server holds the keys that open it.
 
-- **Sub-keys and fields.** HKDF-SHA-256 from DK gives an AES-256-GCM key for names and
-  metadata and one for the per-file keys. Every sealed value (and every wrap) carries AAD naming
-  its field and node id (or wrap kind and ref), so the server cannot move a name, a file key or a
-  wrap to another node or kind; node ids are chosen by the browser for that reason. File content
-  uses the file-share chunk format under a random per-file key, with the chunk index and count in
-  the AAD, so reordering and truncation are detected; the encrypted metadata also carries the
-  size, checked against what the server reports.
-- **Wraps.** `pw`: a second Argon2id derivation of the password (64 MiB, t = 3, p = 1) with a
-  Drive-only salt; the login proof is a different Argon2 output and never unlocks the Drive.
-  `recovery`: HKDF over each recovery code (80 random bits, so no stretching is needed); a code
-  spent at sign-in loses its wrap on the server at once (the sign-in response carries it back
-  once, so that sign-in can still open the Drive with it). `passkey`: HKDF over the WebAuthn
-  PRF output for a fixed salt; the PRF output never leaves the browser (it is not part of the
-  assertion sent to the server). `escrow`: see below. There is no other kind of wrap. The
-  Argon2 cost is fixed in the client and never taken from the server.
-- **Zero knowledge.** The server never holds DK, a key that opens DK, or anything that opens a
-  wrap: each wrap opens only with a secret the server does not have (the password, a recovery
-  code, a passkey's PRF output, or the owner's escrow private key — itself sealed under the
-  owner's DK). The only party other than the user who can open a Drive is the owner, through the
-  owner escrow below; there is no exception for the server. A regression test
-  (`test/drive-escrow.test.js`) checks that no Drive's storage holds any other key material and
-  that DK appears nowhere in the server's storage.
-- **Set-up.** DK is created only in the user's own browser, at their first sign-in once the Drive
-  is enabled (automatically: a `pw` wrap, the `escrow` wrap and the pin, and a `passkey` wrap
-  with PRF), and only after the owner's escrow key exists (before that the server refuses,
-  `409 escrow_not_ready`, and the page says the Drive is not ready yet). Nobody else creates a
-  Drive for a user: the owner impersonating a user who has none gets a notice and the server
-  refuses a first set-up then.
-- **Old passwords.** After a password change or an admin reset the `pw` wrap still opens with the
-  old password (which may be the compromised one). The server marks it stale; the browser that
-  knows the new password replaces it (without a second confirmation, since it is stale); an
-  admin reset (or a password the owner sets while acting as the user) removes it at once when
-  another wrap that can open the Drive remains.
-- **In the tab.** After sign-in, DK is kept in the tab's `sessionStorage` (bound to the user id)
-  until sign-out, a session ending, or the tab closing. It is readable by script on the origin;
-  the CSP and Trusted Types (§4) keep other script out, as for the rest of the app. The pages
-  that may load Cloudflare's Turnstile script (the one third-party script, §4) handle it so
-  that the key is not left where that script can read it:
-  - the Account page moves the tab's keys out of `sessionStorage` into its own module's memory
-    before anything can load the script, uses them from there for its changes, and puts them
-    back only when the server has no human check; otherwise they are gone when the page is left
-    (the Drive page asks to unlock again);
-  - the sign-in page and the home page's public composer clear them before the script loads;
-  - a share's CAPTCHA page never has them: the share's page removes them from
-    `sessionStorage` before it goes there, and does not seal or carry them (*CAPTCHA on
-    shares*); after the check the Drive asks to be unlocked again.
-  - **A stored key is proven before it is used.** Any script of this origin can write the tab's
-    `sessionStorage` (a share's CAPTCHA page can), so a key found there is used only when its key
-    check value equals the Drive's, which `GET /api/private/drive` returns (`kcv`; it reveals
-    nothing about DK). That holds for the tab's own slot and the impersonation slot, when the
-    Drive opens and for the Account page's upkeep. A key that does not match, or any key while
-    the Drive has no check value, is removed, and the Drive asks to be unlocked the normal way
-    (password, passkey, recovery code or escrow). A Drive is never created from a stored key:
-    a first set-up always makes a new DK in the page. Writing a wrap with a wrong key was
-    already refused by the server (`409 kcv_mismatch`).
-
-  What remains: the sign-in unlocks the Drive on the login page and stores DK when it
-  succeeds, and a change on Account that re-wraps DK (a password change, a passkey, new
-  recovery codes) uses it there, so a compromised Turnstile script on those pages could obtain
-  DK — as it could obtain the password typed there, from which DK can be unwrapped anyway.
-  Without the human check, none of this applies.
-- **Owner escrow (a deliberate design choice).** Each user's DK is also wrapped to the owner's
-  escrow public key (ECDH P-256 with an ephemeral key); the owner's escrow private key is stored
-  sealed under the owner's own DK. The owner can therefore decrypt any user's Drive. It is used
-  to re-key a user's Drive after an admin password reset (the admin route; recorded in the
-  admin audit as `drive.escrow_used`, with the user and the reason) and to open the user's Drive
-  while the owner impersonates them (recorded in the admin audit only, see Impersonation).
-  Neither is ever shown in the user's own activity. **Every user's Drive has an escrow wrap for
-  the current escrow key:** a new Drive is accepted only with one (and with a wrap of the user's
-  own), a new escrow wrap must carry the current key's kid, and the user cannot remove it
-  (`403 escrow_required`). No change may leave a Drive with only the escrow wrap
-  (`409 last_own_wrap`).
-- **Escrow key integrity.** A swapped escrow public key would make every user's browser wrap DK
-  to someone else's key. So:
-  - any change of the owner's escrow key pair needs the owner's password or a passkey, except
-    the very first (no key yet);
-  - the owner's browser derives the public key from its escrow private key and compares it with
-    the one the server hands out; on a mismatch (or a private key that does not open, or none)
-    the Drive page shows an alert and nothing is created or wrapped silently; restoring the
-    public key or making a new pair needs the owner's confirmation;
-  - the owner has a signing key (ECDSA P-256, its private key sealed under the owner's DK) whose
-    signature over the escrow public key is published with it; once it exists, the server
-    accepts a new escrow public key only with a valid signature (a new signing key needs the
-    step-up too);
-  - each user's browser pins `{ escrow, sign }` at the Drive's first set-up (the kid of the
-    escrow key it wraps to and of the signing key that signed it, sealed under DK in the Drive's
-    `escrowPin`; the server requires the pin with every first set-up). It re-wraps to a new
-    escrow key by itself only when the pinned signing key signed it; otherwise the Drive page
-    shows the user a notice with the new key's fingerprint and a "Trust the new key" button. A
-    signing key is never added to a pin silently. The pin is trusted only at the genuine first
-    set-up in the browser that makes it: at a later unlock, a Drive without a pin (or with one
-    that does not open), without an escrow wrap, or whose escrow wrap is for another kid than
-    the pinned one gets a tamper notice and nothing is re-wrapped or re-pinned (the server can
-    delete a pin but cannot forge one);
-  - **rotation** (the owner replacing the pair) needs the step-up. The old private key is kept,
-    sealed under the owner's DK in the owner's Drive (`escrowPrivOld`), only while some user's
-    escrow wrap is still for it, and handed only to the owner's session; it opens only wraps
-    made before the rotation, and only in a browser with the owner's DK, so it gives no one
-    access they did not already have.
-- **The Drive key never changes.** A password change and an admin reset replace only the `pw`
-  wrap: the user's own change opens DK first (the current password through the old wrap, or the
-  step-up passkey's PRF) and writes the new wrap at once; an admin reset writes it through the
-  escrow when the owner unlocks their own Drive (inline on the reset form), else DK stays as it
-  is and the user opens it with a recovery code, a passkey or a kit. The browser proves a new
-  `pw` wrap is of the same DK with a key check value (HMAC-SHA-256 under DK's "files" sub-key
-  of a fixed label). It is required with every first set-up (the user's own, one the owner makes
-  for a user, the owner's own, and starting over), stored with the first wraps, and never taken
-  from a later change; every later wrap or pin written (a `pw`, passkey, recovery-code or escrow
-  wrap, the pin) must carry the same value, compared in constant time in the Worker and again in
-  the Drive object (`400 kcv_required`, `409 kcv_mismatch`); a Drive without one takes no key at
-  all (`409 kcv_missing`). It reveals nothing about DK. No route replaces or removes DK.
-- **Replacing a wrap.** Replacing an existing passkey or recovery-code wrap with other data, or
-  the escrow wrap with another wrap for the same escrow key, needs the step-up, as removing one
-  does (the `pw` wrap already did, except a stale one). A re-wrap to a new escrow key (a signed
-  rotation, an owner reset, "Trust the new key") is not a replacement. The owner's own Drive has
-  no escrow wrap (`400 escrow_own`): the escrow private key is sealed under the owner's DK, so it
-  would be of no use, and no kid of the owner's counts as "in use".
-- **Atomic set-up and start over.** Every first set-up is a compare-and-set in the Drive object
-  on "a new Drive" (no wrap, no content, no key check value, no sealed owner key), in one
-  transaction with the first wraps, the pin and the key check value: of two at once (two tabs,
-  or the owner setting up a new user's Drive while the user's own first sign-in does) one wins
-  and the other gets `409 drive_exists`, and the browser that lost opens the Drive that won with
-  its own password. The owner's first escrow key (which needs no step-up) is a compare-and-set in
-  the Drive object and in the Directory (`409 escrow_exists` once one exists). Starting over is
-  one step in the Drive object (it re-checks that nothing the owner signs in with opens the
-  Drive, archives, pauses the owner's reverse links, and writes the new keys and key check
-  value), then one in the Directory (the
-  new public keys and the reset record, a compare-and-set on the epoch the request read): one
-  archive, one key check value and one epoch per start over; a second one at the same moment
-  gets `409 drive_unlockable`. The two objects are separate, so a failure between the two steps
-  leaves the owner's Drive with the new keys and the Directory with the old public key: the
-  owner's next unlock shows the escrow-key alert (restore the public key, with the step-up), and
-  users get the notice rather than an automatic move.
-- **Drives the owner sets up.** When the owner creates an account (or resets the password of a
-  user with no Drive yet), the owner's browser, which knows that password, sets the user's Drive
-  up: a new DK, a `pw` wrap and the `escrow` wrap for the current key (after checking the
-  owner's own escrow key and signature), with the user's pin. The server accepts it only from
-  the owner (not impersonating), only for a Drive with no wrap, and only as exactly one `pw` and
-  one `escrow` wrap for the current key; it is in the admin audit and, as a system event, in the
-  user's activity. This is no new access: the owner already sets that password and holds the
-  escrow. Imported accounts and impersonation never create a Drive.
-- **Owner recovery kit.** A file with the owner's DK and a snapshot of the escrow keys (current,
-  signing, earlier), made and read only in the owner's browser (`public/js/drivekit.js`,
-  `secbin-owner-kit/1`), never sent to the server: Argon2id (the export's fixed parameters) over
-  an optional passphrase, AES-256-GCM, with the format, the owner's id and the origin in the AAD.
-  **It opens every user's Drive**: store it offline, like the AUTHN secret. Losing both the
-  owner's credentials (password, passkeys, recovery codes) and every kit loses the escrow: no
-  one can then open users' Drives through it. Downloading one needs the step-up and is
-  recorded (version, time) in the admin audit; the pages show the escrow key's version and the
-  latest kit, and ask for a fresh kit after a rotation. "Verify kit" checks a selected file in the
-  browser and writes nothing but its audit record (and the `drive.escrow_used` of the users'
-  wraps it opens as a live proof). A restore checks the password, confirms the kit's DK against
-  the server's sealed escrow key (or the snapshot against `escrowPub`), and puts back only
-  sealed keys that match the server's public keys and kids in use, always with the step-up;
-  it never changes a public key. AUTHN owner recovery marks the owner's Drive stale and changes
-  no key; no flow but an explicit, confirmed rotation (and the first creation, and starting
-  over) makes an escrow key or signing key. What these controls can and cannot enforce:
-  - the step-up on a kit download gates only the server's record of it (and the page's download
-    button): the browser seals the kit from the DK already in the tab before it asks the
-    server, so script running in the tab has DK anyway;
-  - the throttle on failed kit openings (restore and verify) is in the page's memory only and
-    starts again on a reload; guessing a kit's passphrase offline needs only the file, which is
-    why the passphrase and an offline copy matter;
-  - `PUT /api/private/drive/kit/keys` checks the public key the browser claims for each sealed
-    key (it must be the server's escrow or signing public key, or a kid in use), but it cannot
-    check that the sealed data behind it is that key: a wrong blob sent with the step-up
-    replaces a good sealed key, and the owner's next unlock then shows the escrow-key alert;
-  - the kit's live check (`POST /api/private/drive/kit/probe`) is limited to 30 calls per owner
-    session per 10 minutes (`429 rate_limited`), since each call records `drive.escrow_used`
-    per kid in use.
-- **Starting over without a kit (a maintainer-accepted exception to the signed-key pin).** Only
-  when nothing the owner signs in with opens the owner's Drive, with the typed username and the
-  step-up: new DK, escrow pair and signing key; the old Drive is archived exactly as it was
-  (sealed under the old DK, restorable with a kit for it, deleted only by the owner with the
-  typed username and the step-up). The Directory records the owner reset (an epoch, the new kid
-  and signing key), and **users' browsers accept the new escrow key automatically**: when the
-  server reports a reset whose epoch is one more than the pinned one and whose signing key
-  signed the escrow key. **This is not limited to a window after a real reset.** Nothing a
-  user's browser holds ties a reported reset to a genuine start over, so:
-  - anyone able to change the server's responses (a compromised Cloudflare account, a
-    malicious deploy or an insider) can report a fabricated reset at any time, with their own
-    signing and escrow keys, and receive users' Drive keys at their next unlock, and again at
-    each later epoch (their signing key is pinned after the first);
-  - so can anyone able to complete AUTHN owner recovery and then start over: anyone with access
-    to the Worker's `AUTHN` secret configuration (it is a real start over, through the API).
-
-  There is no time limit: by the maintainer's decision the move is automatic, with no user
-  approval, every time a reset meets these rules, however soon after the previous one. Each
-  epoch applies once (the epoch is sealed in the pin). The server records each user's move once
-  per epoch (`drive.escrow_rewrapped`; a repeated `escrowReset` for an epoch already applied
-  writes nothing) and accepts at most 5 `escrowReset` requests per user per 10 minutes. The signed-key
-  pin applies to every other unsigned change: no reset, a skipped or repeated epoch, or another
-  signature gets the notice and no re-wrap. The exception's rules are all in one function
-  (`resetApplies` in `public/js/driveclient.js`).
-- **Impersonation.** While the owner acts as a user, the owner's tab opens the user's escrow wrap
-  (handed out only by `POST /api/private/drive/escrow`, recorded in the admin audit) with the
-  owner's escrow private key (or the earlier one the wrap is for), which it opens with the
-  owner's own DK already in the tab. The user's DK is kept in its own tab slot (`secbin_dk_imp`,
-  bound to the user), never over the owner's, and is cleared when the impersonation ends. A
-  user who has no Drive yet gets none: the page says the user has not signed in since the Drive
-  was enabled, and nothing is created. The owner's tab never removes or replaces the user's
-  `pw`, recovery or passkey wraps (the server refuses it).
-- **Failure modes.** A sign-in never fails because the Drive cannot be unlocked; the Drive page
-  asks. A Drive that has content (or a key check value, or sealed owner keys) but no wraps is
-  never given a new key (that would make its content unreadable): the browser does not try, and
-  the server refuses a first set-up of it (`409 drive_keyless`); the only ways out are a kit
-  restore (the same DK, proven by the key check value, with the step-up) and, for the owner,
-  starting over (with the step-up). No change may leave such a Drive without a wrap. After an admin reset
-  without escrow (the owner's Drive locked), the user unlocks with a recovery code or passkey; a
-  sign-in with the new password plus a passkey (with PRF) or a recovery code as the second step
-  writes a fresh `pw` wrap. A file whose sealed metadata is missing, or whose size or chunk
-  count disagrees with it, is shown as unreadable, never as an empty or shorter file.
+- **What the server can open.** Every file's content is encrypted in the browser under its own
+  random DEK, and the DEK, the name and the metadata are sealed under the user's KEK. The KEK is
+  `HKDF(root MEK ‖ sub-MEK, user salt, "secbin-kek/v1\n<userId>")`, and the root MEK, the
+  sub-MEKs and the user salts are kept in the Directory Durable Object. So **the server — and
+  anyone with a copy of the Directory's storage (a compromised Cloudflare account, a malicious
+  deploy, an insider) — can decrypt every Drive file.** The owner can too: the key kit, a user's
+  keys in Admin → Security → Keys, and acting as the user.
+- **What a leak of the Drive's own storage reveals.** R2 and the user's Drive Durable Object hold
+  ciphertext, seals, per-item salts and the ciphertext hash only: **without the Directory they
+  reveal nothing** (sizes, times and the tree's shape as before, §3).
+- **What stays end-to-end.** Notes and file shares (the key is in the link). **Not** a Drive
+  share: its manifest is sealed like a file share's (the recipient gets the DEKs from the link),
+  but its content is the Drive's ciphertext and each DEK is also sealed in the Drive under the
+  user's KEK, so the server can open it as any Drive file. **Not** a reverse-share upload: it is
+  encrypted in the uploader's browser to the link's key, whose private key is sealed under the
+  user's KEK, so the server can open it before it is taken into the Drive as well as after.
+- **Seals.** Each seal is AES-256-GCM under a key derived from the KEK with the item's 32-byte
+  random salt, with AAD naming the user, the sub-MEK and the field; the item id is not in the AAD
+  (DRIVE.md §9). File content keeps the file-share chunk format (index and count in the AAD), and
+  the sealed metadata carries the size, checked against the server's.
+- **Keys handed out.** After sign-in the server hands the session the user's KEKs (no prompt;
+  the step-up rules for sensitive actions are unchanged). The owner acting as a user gets the
+  user's KEKs (`drive.keys_used`, in the admin audit only), in that page's memory only. The same
+  holds for a user's current KEK the escrow route hands the owner for an upgrade
+  (`drive.escrow_used`, with the step-up, as for Show). The root MEK and the sub-MEKs leave the Directory only for the owner,
+  after the step-up (Show, the key kit, an export), recorded by fingerprint; generated and
+  entered keys are never logged. The Worker opens DEKs and names only to check a new seal and to
+  re-seal (rotation, a sub-MEK deleted, a root change), in memory, never stored or logged.
+- **Every new seal is checked.** The Worker opens what a browser sends once with the current KEK
+  before storing it (`400 bad_seal`, `409 mek_not_current`; during a root change a rename sealed
+  under the previous root is `409 stale_keys`), so the server can always re-seal it later;
+  re-seals are compare-and-set writes on the stored keys and sealed fields, so a change made
+  meanwhile (a rename) is never overwritten.
+- **Key jobs cover every Drive.** A re-seal, a sub-MEK delete and a root change visit every
+  account with a user salt (a Drive whose only content is a reverse link included). A sub-MEK is
+  deleted only when a count over them finds nothing under it; a root change removes the
+  previous root only after a final check that everything opens under the new one, and waits
+  while a Drive still has something of the release before. One that cannot finish keeps the
+  previous root; the owner runs it again, goes back, or drops the previous root with its
+  fingerprint typed (the items listed stay unreadable, and their count, kept with the root
+  change, is in the admin audit), each with the step-up; the key kit made meanwhile holds both
+  roots. A previous root from a key kit is put back only when it opens something here, and "go
+  back" leads only to a root this server worked with or one that opens items here.
+- **The keyring.** Created on first need, and only if there never was one: a lost keyring is
+  never replaced silently (the Drive says the keys are missing and the key kit restores them).
+  Restores and imports never replace a working key, and add only what proved to belong: a
+  sub-MEK this server does not have only when it opens an item or link key sealed under its id
+  here, a user salt only when it opens something of that Drive's (a Drive that holds a link key
+  never gets a new random salt in place of a lost one). A generated key is used only for what it
+  was made for (a root MEK or a sub-MEK), and an unused one is deleted after 10 minutes. Every
+  keyring change, and the previews of a restore or an import, need the step-up.
+- **Kits.** The personal kit (every user) holds the user's salt and KEKs; the key kit (the
+  owner) the root MEK, every sub-MEK and every user salt. Each is sealed in the browser under an
+  optional passphrase (Argon2id, AES-256-GCM, bound to the account and the origin) and never sent
+  to the server; verify sends check values only. **A key kit opens every Drive** (with a copy of
+  the stored ciphertext): store it offline, like the AUTHN secret. Losing the Directory's keys
+  and every key kit loses every Drive file. What these controls can and cannot enforce: the
+  step-up on a kit download gates the server's handing out of the keys; the throttle on failed
+  kit openings is in the page's memory only (guessing a passphrase offline needs only the file);
+  kit checks are limited to 30 per session per 10 minutes.
+- **In the tab.** The KEKs are never written to browser storage (`sessionStorage`,
+  `localStorage`): each page asks the server for them (`POST /api/private/drive/keys`, cheap,
+  since the server derives them) and keeps them in its own memory, gone when the page is left. A
+  failed request is shown as an error; there is no stored key to fall back on. Nothing read from
+  storage is ever used as a key, so a value that other script on the origin plants there is
+  ignored: it can neither seal a new DEK nor stand in for a Drive's keys (a regression test plants
+  one). The one Drive key a tab may keep in `sessionStorage` is the old Drive key of the release
+  before, only while that Drive waits for its upgrade (the sign-in page opens it, the Drive page
+  and Admin use it); it is used only once its key check value matches the server's (a Drive
+  without one: once it opens one of the Drive's old items), and a key that fails is removed.
+  Every other slot a release before used is removed at each Drive open and dashboard load. The
+  old key leaves the tab when its Drive opens and nothing waits any more (the owner's once the
+  escrow clean-up is done). When the page stops acting for its session (the session ended; the
+  browser is now signed in as someone else — another tab signed in, impersonation started or
+  ended — found at the next change or when the tab is shown again), an open Drive closes: its
+  KEKs are overwritten and dropped, and what it showed leaves the page. A download checks the
+  file's chunks against the ciphertext hash the server recorded and refuses a file that does not
+  match (integrity metadata, not a seal: DRIVE.md §9). The
+  CSP and Trusted Types (§4) keep other script out, as for the rest of the app; the pages that
+  may load Cloudflare's Turnstile script (the one third-party script, §4) move that old key into
+  the page's memory before the script loads (the sign-in page writes it back as it leaves). What
+  remains: a compromised Turnstile script on the Account page could read the page's own memory
+  while the personal kit is being built there, as it could read the password typed there. A
+  share's CAPTCHA page never has a Drive key: the share's page removes every Drive key slot
+  (`secbin_dk…`, `secbin_kek…`) from `sessionStorage` before it goes there (*CAPTCHA on shares*);
+  a Drive still waiting for its upgrade then asks for the password once.
+- **The upgrade of Drives made before this model** (DRIVE.md §3.3) opens the old Drive key only
+  in a browser — at the user's sign-in, with a recovery kit of that release, or in the owner's
+  browser through the owner's escrow of that release (with the step-up; recorded,
+  `drive.escrow_used`) — re-seals every item under the user's KEK, and removes the old wraps only
+  after the server has verified that every item opens under the new keys (the owner's escrow
+  keys and records only once every Drive is upgraded, or the last account still waiting is
+  deleted). A link whose old key does not open is retired by its user (the step-up): it ends and
+  its key goes. A finished upgrade stays finished. While a Drive waits, its old key wraps are
+  kept current as before (spent recovery codes, removed passkeys and replaced codes lose theirs;
+  an admin reset drops the old password's wrap when another remains; the owner's own stay until
+  nothing waits, after an AUTHN owner recovery, regenerated codes or a removed passkey alike). The owner's archive of that release (a start over) is
+  deleted from Admin → Security → Keys (the step-up, the username typed; audited).
 
 ### Read receipts
 
@@ -1310,41 +1202,20 @@ Design and interface: [`docs/DRIVE.md`](./docs/DRIVE.md); the keys and wraps are
 under "Drive keys" above.
 
 - **What the server sees.** One Durable Object per user holds the tree: node ids (chosen by the
-  browser, 128 random bits), parent links, file or folder, each file's exact plaintext size and
-  chunk count, timestamps, and which shares reference which items. Names, file metadata and each
-  file's key arrive as `{iv, ct}` values sealed in the browser; the wraps of the Drive key are
-  opaque strings. The server stores them and cannot open any of them. Unlike file shares,
-  **Drive files are not padded**: the server learns each file's exact size.
-- **Key material.** Wraps are checked for form only (kind, ref, length, base64url); a `passkey`
-  or `recovery` wrap must name a credential the account has now, and the server drops the wraps of
-  passkeys and codes the account no longer has (a code spent at sign-in included). Removing a
-  wrap, replacing one (the `pw` wrap; a passkey or recovery-code wrap with other data; the
-  escrow wrap for the same escrow key) or replacing `driveSalt` needs the account's password or
-  a passkey (the Account page's `current` / `reauth`), except the Drive's first set-up and a
-  `pw` wrap the server marked stale after a password change; every wrap or pin written after
-  the first set-up carries the Drive's key check value; a change that would leave a Drive with
-  content and no wrap, or with no wrap of the user's own, is refused. Only the kinds `pw`,
-  `recovery`, `passkey` and `escrow` exist; a Drive's storage holds its wraps, its salt, its pin
-  and — for the owner only — the owner's sealed escrow and signing keys, nothing else. Key
-  material cannot be changed with an API key (the whole Drive refuses them). While the owner
-  impersonates the user, only wraps added for new credentials are accepted (never a first
-  set-up).
-- **Owner escrow.** The escrow public key is in the Directory and can be set by the owner only,
-  with the owner's password or a passkey once a key exists and with the signing key's signature
-  once a signing key exists (recorded as `drive.escrow_key_set`). A user's Drive is set up only
-  with an escrow wrap for the current key (`409 escrow_not_ready` before the owner has one). A user's escrow wrap is handed out only by
-  `POST /api/private/admin/drive/escrow/<userId>` (owner session, not impersonating), which needs
-  a reason, records `drive.escrow_used` with the reason and returns only the escrow wrap and the
-  number of wraps (never the user's own wraps), and by `POST /api/private/drive/escrow`
-  to the owner impersonating the user (recorded `drive.escrow_used`); while impersonating, the
-  summary (`GET /api/private/drive`) carries no escrow wrap data. After an admin password reset the
-  owner's browser writes the user's new password wrap with `PUT /api/private/admin/drive/keys/<userId>`
-  (a password wrap only; recorded `drive.pw_rewrapped`). All of these are in the owner-only admin
-  audit and never in the user's own activity. So **the owner can decrypt every user's Drive** —
-  a deliberate choice by the maintainer, and the only exception to zero knowledge.
-- **Activity.** Drive actions (keys changed, folders created, uploads, file reads, renames and
-  moves, deletions, Drive shares) are in the user's own activity like any other action; node ids
-  only, never names. A user's own file reads are throttled in the log (one row per file per
+  browser, 128 random bits), parent links, file or folder, each file's exact plaintext size,
+  chunk count and ciphertext hash, timestamps, and which shares reference which items. Names,
+  file metadata and each file's DEK arrive sealed under the user's KEK; the Worker checks each
+  opens (and keeps nothing it opened). Unlike file shares, **Drive files are not padded**: the
+  server learns each file's exact size.
+- **The keyring** (the root MEK, the sub-MEKs sealed under it, the user salts) is in the Directory
+  Durable Object, managed by the owner only (not while acting as a user), every change and view
+  with the step-up, in the admin audit by fingerprint. The Worker derives the KEKs and the field
+  keys there and uses them in memory only. A user's own KEKs go to the user's session; the
+  owner acting as the user gets the user's (`drive.keys_used`). Key material cannot be had with
+  an API key (the whole Drive refuses them).
+- **Activity.** Drive actions (folders created, uploads, file reads, renames and moves,
+  deletions, Drive shares, the personal kit) are in the user's own activity like any other
+  action; node ids only, never names. A user's own file reads are throttled in the log (one row per file per
   minute, at most 30 a minute) so they cannot flood it; rows of the owner acting as the user are
   never dropped.
 - **Access control.** Every route is session-only and scoped to the caller's own Drive object
@@ -1353,16 +1224,17 @@ under "Drive keys" above.
   (`driveEnabled`); the public account never has one.
 - **Uploads and limits.** Capacity (`driveMaxBytes`, at most 100 GiB) and the largest file
   (`driveMaxFileBytes`) are checked atomically in the Drive object when an upload starts, pending
-  uploads included; the sealed names (at most 512 characters), metadata (at most 1024) and file
-  keys of every item count towards the capacity too, so they cannot hold data outside it; chunk
+  uploads included; the sealed names (at most 512 characters), metadata (at most 1024), DEKs and
+  salts of every item count towards the capacity too, so they cannot hold data outside it; chunk
   sizes are checked exactly; finalize is refused (`409 busy`) while a chunk of the file is still
   being written, so a late retry never lands on (or removes a chunk of) a finished file; upload tokens are 256-bit and stored as
   hashes; unfinished uploads are purged after the role's `filePendingSec` without progress. The
   state-changing routes use the same CSRF guards as the rest of the API (JSON body or intent
   header, `Sec-Fetch-Site`, the upload token header), and the session's CSRF token, all checked
   in `authenticate()` before any Drive route runs (chunk uploads pass the shape check as
-  `application/octet-stream`; the kit check `kit/probe`, which writes to the admin audit, is a
-  `POST`). R2 keys are built from the server's user id
+  `application/octet-stream`; the session's keys, `POST /api/private/drive/keys`, which may make
+  the account's salt and writes to the admin audit for the owner acting as the user, are a `POST`
+  too). R2 keys are built from the server's user id
   and validated node ids only.
 - **Deletion.** Only the Drive object deletes Drive ciphertext in R2 (`d/<userId>/<nodeId>/<i>`):
   a recursive delete removes the objects first, then the rows, and ends every share that
@@ -1373,13 +1245,17 @@ under "Drive keys" above.
 - **Drive shares** reference the Drive's ciphertext (no copy): a FileShare record with `refs`,
   authorized like a file share (limits, file-policy declarations, quotas), whose expiry,
   revocation or deletion never touches the Drive's objects. Recipients get the share's own link
-  key; each file's key travels inside the share's encrypted manifest.
-- **Not exported.** Export / import carries the Drive role options (with the roles), never Drive
-  content or keys; the owner recovery kit is a separate file, never part of an export.
-- **Archives.** The owner's archived Drive (after starting over) is stored like the Drive
-  (`archive_nodes`, `archive_wraps`, `archive_meta` in the owner's Drive object; its R2 objects
-  untouched), sealed under the old DK, counted in the owner's capacity, and reachable only by
-  the owner's archive routes (never as Drive items).
+  key; each file's DEK travels inside the share's encrypted manifest, and stays sealed in the
+  Drive under the user's KEK too: a Drive share is not end-to-end against the server ("Drive
+  keys").
+- **Export.** The account export carries the Drive role options (with the roles), never Drive
+  content or keys. The Drive keys have a file of their own (Import / export → Drive keys), the
+  parts the owner picks, sealed in the browser; the key kit is another file.
+- **Archives** the owner's Drive kept after starting over in the release before stay in the
+  owner's Drive object as they were (sealed under that release's key, uploads received through
+  reverse shares included), not counted in the capacity; no route opens or restores them any
+  more. The owner deletes one in Admin → Security → Keys (the step-up and the username typed;
+  its R2 objects go, the links it paused end; admin audit `drive.archive_deleted`).
 
 ### Reverse shares ("Receive files")
 
@@ -1387,16 +1263,16 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 
 - **Keys.** Each reverse share has its own ECDH P-256 key pair, made in the user's browser. The
   raw public key is the link's `#fragment` (never sent to the server). The private key is stored
-  sealed with the user's Drive key (its `files` sub-key, bound to the share id), so only the
-  user's unlocked Drive can open it; the owner can open it through owner escrow of the user's
-  Drive key (in the admin audit, see above), including while acting as the user ("Log in as").
+  sealed under `HKDF(KEK, "reverse-link")` (bound to the user, the sub-MEK and the share id) and,
+  at rest, under the user's field key: like every Drive key it opens with keys the server holds,
+  so the server (and the owner) can open it; it is checked to open under the user's current KEK
+  when the link is created. The uploads are therefore **not end-to-end against the server**,
+  before or after they are taken in: the server does not keep the link's private key in the
+  clear, but it can unseal it; a leak of R2 or of the Drive object alone opens nothing.
 - **The owner acting as the user** can do everything the user can, reverse shares included (the
-  maintainer's rule), and the server cannot tell whether a new link's sealed private key was
-  sealed with the user's Drive key. So the owner acting as the user, or anyone holding that
-  impersonation session, can create through the API a link in the user's name whose private key
-  they keep: files sent to it are readable by whoever holds that key, without escrow and without
-  the user's Drive key. The user's browser cannot open that link's key (the Drive shows no link
-  for it, and its received files are listed as failed), and the admin audit records the creation
+  maintainer's rule), and the owner acting as the user, or anyone holding that impersonation
+  session, can create through the API a link in the user's name whose private key they also keep:
+  files sent to it are readable by whoever holds that key. The admin audit records the creation
   with the real actor.
 - **Link ids.** The browser chooses a link's id; the server claims it in the share index first,
   in one step with the role's checks and the count of active links (so `reverseMaxActive` holds
@@ -1430,8 +1306,9 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   browser declares each file's `{ extension, MIME type }`; the server checks it against the
   link's rules and does not store it (as for file shares: a modified client could lie).
 - **Taking files in.** The user's browser opens each received file with the link's private key
-  and re-wraps its name, metadata and file key under the Drive key; the content chunks are not
-  re-encrypted. Until then a received file is counted in the Drive's capacity (its content and
+  and seals its name, metadata and file key (its DEK) under the user's current KEK, like a new
+  Drive file (checked by the Worker); the content chunks are not re-encrypted. From then on it is
+  a Drive file (not end-to-end). Until then a received file is counted in the Drive's capacity (its content and
   its sealed path, metadata and wrap, which are capped at 1400, 1024 and a fixed size) but is not
   part of the tree (not listed, readable, movable or shareable). A file that cannot be taken in
   (it does not open, its name cannot be used, the Drive refuses its place) is recorded as failed
@@ -1449,7 +1326,7 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   is Argon2id (64 MiB, t = 3) → HKDF with the link's public key as salt, and the server stores the
   SHA-256 of the proof, the salt and the cost. Because the public key is only in the link, the
   server's data alone cannot be used to test password guesses offline. The password does not
-  protect the files: they are always encrypted to the user's key, and the user never needs it.
+  protect the files: they are always encrypted to the link's key, and the user never needs it.
 - **Guessing and abuse.** Unknown ids, wrong link proofs, wrong passwords, bad session grants and
   bad upload tokens count in the Guard's `invalid` scope and block the network like invalid share
   fetches; a late visitor to an ended link with the right link proof is not counted. Cross-site
@@ -1493,16 +1370,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - **Ending.** Revoking a link, its expiry, an admin lock (paused), the role losing the option, or
   deleting its folder stops uploads at once; unfinished uploads are deleted; files already
   received stay. Deleting the account deletes everything.
-- **The owner starting over** (docs/REVERSE.md §9): the owner's links' private keys stay sealed
-  under the old Drive key, in the archive; the links are paused (`409 paused` only after the link
-  proof matches, before the human check and the password; open sessions end; unfinished uploads
-  go) and their received items stay in the archive exactly as they arrived. Nothing new opens
-  them: a restore needs a kit for the old Drive key, the step-up, and re-seals each link's key in
-  the owner's browser (the server never sees a link's private key); received items come back
-  only as they were (no field of theirs can be replaced), and none is offered for taking in
-  until its link's key is re-sealed. Deleting the archive revokes the paused links and deletes
-  their items. `reverse.paused`, `reverse.resumed` and `reverse.revoked` are logged per link,
-  the owner as the actor. No other user's link is touched.
+- **Links of the release before.** A link whose key the old Drive key sealed is re-sealed under
+  the user's KEK by the Drive's upgrade (docs/DRIVE.md §3.3); until then the Drive shows no link
+  for it and its received files wait. Links an owner's start over paused in the release before
+  stay paused (`409 paused`).
 - **Audit.** `share.created` (`kind=reverse`) and `share.revoked`, `reverse.received` (count and
   bytes only; one entry per link per hour adding up that hour's sessions, so uploads cannot flood
   the user's log or the server-wide log limit), `reverse.bad_password`, and
@@ -1609,6 +1480,10 @@ The rule: **nothing the Worker returns is stored in the edge cache.**
 Per-share random CEK; AES-256-GCM with fresh IVs; Argon2id (m=64 MiB, p=1, t∈[1,10]) for
 passwords; HKDF-SHA256 for the KEK and the two access proofs; per-share FK for file chunks with
 index-bound AAD; canonical AAD; strict canonical base64url. Details and test vectors: `SPEC.md`.
+The Drive: a random DEK per file (the same chunk format); the DEK, name and metadata sealed with
+AES-256-GCM under HKDF of the user's KEK and a 32-byte per-item salt; the KEK is HKDF-SHA256 of
+the root MEK and a sub-MEK with the user salt, all held by the server (docs/DRIVE.md §3; fixed
+vectors in `test-node/drivekeys.test.js`).
 
 ## 8. Reporting a vulnerability
 

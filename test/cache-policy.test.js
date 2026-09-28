@@ -18,9 +18,9 @@ import { setSiteverify } from '../src/lib/turnstile.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk } from '../public/js/files.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { utf8 } from '../public/js/bytes.js';
-import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16, csrfHeaders, STATE_CHANGING } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, csrfHeaders, STATE_CHANGING } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
-import { enc, enableDrive, someBytes, escrowWrap, KCV } from './drive-helpers.js';
+import { enableDrive, someBytes, sealed as sealedItem } from './drive-helpers.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 
@@ -297,26 +297,26 @@ describe('cache policy (Workers Caching)', () => {
     }
 
     // ── the Drive (docs/DRIVE.md §6): the page, keys, tree, files, shares,
-    // the owner's escrow routes and the impersonation escrow route ────────
+    // the personal kit, the keyring (Admin → Security → Keys), impersonation
     const dv = await makeUser('cache-drive');
     const noDrive = await makeUser('cache-nodrive');
     await enableDrive(dv.id);
     const dc = dv.cookie;
-    const wrapData = () => `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(48))}`;
     const nid = () => b64urlFromBytes(randomBytes(16));
     record('GET /dashboard/drive/ (user)', await raw('/dashboard/drive/', { headers: { cookie: dc } }));
     record('GET /api/private/drive (no Drive, 200)', await get('/api/private/drive', { cookie: noDrive.cookie }));
     record('POST /api/private/drive/folders (no Drive, 403)', await get('/api/private/drive/folders', { method: 'POST', cookie: noDrive.cookie, body: {} }));
     record('GET /api/private/drive (user, 200)', await get('/api/private/drive', { cookie: dc }));
     record('GET /api/private/drive (key, 403)', await get('/api/private/drive', { headers: { authorization: `Bearer ${all}` } }));
-    record('PUT /api/private/drive/keys (first set-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }, await escrowWrap()], escrowPin: enc(40), kcv: KCV } }));
-    record('PUT /api/private/drive/keys (replace without step-up, 400)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }] } }));
-    record('PUT /api/private/drive/keys (step-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }], current: proofFor(USER_PW), kcv: KCV } }));
-    record('GET /api/private/drive/keys (405)', await get('/api/private/drive/keys', { cookie: dc }));
+    record('POST /api/private/drive/keys (200)', await get('/api/private/drive/keys', { method: 'POST', cookie: dc, body: {} }));
+    record('PUT /api/private/drive/keys (405)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: {} }));
     const folderId = nid();
-    record('POST /api/private/drive/folders (201)', await get('/api/private/drive/folders', { method: 'POST', cookie: dc, body: { id: folderId, parent: 'root', name: enc() } }));
+    const fd = await sealedItem(dc, 'dir');
+    record('POST /api/private/drive/folders (201)', await get('/api/private/drive/folders', { method: 'POST', cookie: dc, body: { id: folderId, parent: 'root', name: fd.name, ks: fd.ks, mek: fd.mek } }));
+    record('POST /api/private/drive/folders (bad seal, 400)', await get('/api/private/drive/folders', { method: 'POST', cookie: dc, body: { parent: 'root', name: fd.name, ks: (await sealedItem(dc, 'dir')).ks, mek: fd.mek } }));
     const fileId = nid();
-    const created = record('POST /api/private/drive/files (201)', await get('/api/private/drive/files', { method: 'POST', cookie: dc, body: { id: fileId, parent: folderId, name: enc(), meta: enc(), size: 40, fk: enc(32) } }));
+    const ff = await sealedItem(dc, 'file');
+    const created = record('POST /api/private/drive/files (201)', await get('/api/private/drive/files', { method: 'POST', cookie: dc, body: { id: fileId, parent: folderId, name: ff.name, meta: ff.meta, dek: ff.dek, ks: ff.ks, mek: ff.mek, size: 40 } }));
     const { uploadToken } = await created.json();
     record('GET /api/private/drive/files/<id>/chunk/0 (pending, 404)', await raw(`/api/private/drive/files/${fileId}/chunk/0`, { headers: { cookie: dc } }));
     record('POST /api/private/drive/files/<id>/finalize (incomplete, 409)', await get(`/api/private/drive/files/${fileId}/finalize`, { method: 'POST', cookie: dc, headers: { ...intent, 'x-upload-token': uploadToken } }));
@@ -327,7 +327,7 @@ describe('cache policy (Workers Caching)', () => {
     record('GET /api/private/drive/files/<id>/chunk/9 (404)', await raw(`/api/private/drive/files/${fileId}/chunk/9`, { headers: { cookie: dc } }));
     record('GET /api/private/drive/nodes/root (200)', await get('/api/private/drive/nodes/root', { cookie: dc }));
     record('GET /api/private/drive/nodes/<unknown> (404)', await get(`/api/private/drive/nodes/${nid()}`, { cookie: dc }));
-    record('PATCH /api/private/drive/nodes/<id> (200)', await get(`/api/private/drive/nodes/${fileId}`, { method: 'PATCH', cookie: dc, headers: intent, body: { name: enc() } }));
+    record('PATCH /api/private/drive/nodes/<id> (200)', await get(`/api/private/drive/nodes/${fileId}`, { method: 'PATCH', cookie: dc, headers: intent, body: { parent: 'root' } }));
     const manifest = { v: 3, kind: 'refs', entries: [{ path: 'a', size: 40, type: 'application/octet-stream', mtime: 0, ref: 0, fk: b64urlFromBytes(randomBytes(32)) }], dirs: [] };
     const sealed = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', bar: false, expire: '1h' });
     const ds = record('POST /api/private/drive/shares (201)', await get('/api/private/drive/shares', { method: 'POST', cookie: dc, body: { nodes: [fileId], views: null, expire: '1h', paste: sealed.body } }));
@@ -339,14 +339,24 @@ describe('cache policy (Workers Caching)', () => {
     const dopen = record('POST /api/file/<drive share>/open (grant)', await get(`/api/file/${driveShare}/open`, { method: 'POST', headers: dp.headers, ip }));
     const { grant: dgrant } = await dopen.json();
     record('GET /api/file/<drive share>/chunk/0/0', await raw(`/api/file/${driveShare}/chunk/0/0`, { headers: { 'x-download-grant': dgrant, 'cf-connecting-ip': ip } }));
-    record('POST /api/private/drive/escrow (not impersonating, 403)', await get('/api/private/drive/escrow', { method: 'POST', cookie: dc, body: {} }));
-    record('POST /api/private/admin/drive/escrow/<id> (owner, 200)', await get(`/api/private/admin/drive/escrow/${dv.id}`, { method: 'POST', cookie: oc, headers: intent, body: { reason: 'cache walk' } }));
-    record('PUT /api/private/admin/drive/keys/<id> (owner, 200)', await get(`/api/private/admin/drive/keys/${dv.id}`, { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }], kcv: KCV } }));
+    // The personal kit (the user's own).
+    record('POST /api/private/drive/kit (no step-up, 400)', await get('/api/private/drive/kit', { method: 'POST', cookie: dc, headers: intent, body: {} }));
+    record('POST /api/private/drive/kit (step-up, 200)', await get('/api/private/drive/kit', { method: 'POST', cookie: dc, headers: intent, body: { current: proofFor(USER_PW) } }));
+    record('POST /api/private/drive/kit/verify (200)', await get('/api/private/drive/kit/verify', { method: 'POST', cookie: dc, headers: intent, body: { keks: {} } }));
+    record('GET /api/private/drive/migrate (200)', await get('/api/private/drive/migrate', { cookie: dc }));
+    // The keyring (the owner's).
+    record('GET /api/private/admin/keys (owner, 200)', await get('/api/private/admin/keys', { cookie: oc }));
+    record('GET /api/private/admin/keys (user, 403)', await get('/api/private/admin/keys', { cookie: dc }));
+    record('POST /api/private/admin/keys/root/show (no step-up, 400)', await get('/api/private/admin/keys/root/show', { method: 'POST', cookie: oc, headers: intent, body: {} }));
+    record('POST /api/private/admin/keys/root/show (step-up, 200)', await get('/api/private/admin/keys/root/show', { method: 'POST', cookie: oc, headers: intent, body: { current: proofFor('owner-password') } }));
+    record('POST /api/private/admin/keys/kit (step-up, 200)', await get('/api/private/admin/keys/kit', { method: 'POST', cookie: oc, headers: intent, body: { current: proofFor('owner-password') } }));
+    record(`POST /api/private/admin/keys/users/<id>/view (step-up, 200)`, await get(`/api/private/admin/keys/users/${dv.id}/view`, { method: 'POST', cookie: oc, headers: intent, body: { what: 'keks', current: proofFor('owner-password') } }));
+    record('GET /api/private/admin/drive/migration (owner, 200)', await get('/api/private/admin/drive/migration', { cookie: oc }));
     const imp = await get(`/api/private/admin/users/${dv.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent });
     const ic = (imp.headers.get('set-cookie') || '').split(';')[0];
     record('GET /api/private/drive (impersonating, 200)', await get('/api/private/drive', { cookie: ic }));
-    record('POST /api/private/drive/escrow (impersonating, 200)', await get('/api/private/drive/escrow', { method: 'POST', cookie: ic, body: {} }));
-    record('PUT /api/private/drive/keys (impersonating, 403)', await get('/api/private/drive/keys', { method: 'PUT', cookie: ic, headers: intent, body: { remove: [{ kind: 'pw', ref: 'pw' }] } }));
+    record('POST /api/private/drive/keys (impersonating, 200)', await get('/api/private/drive/keys', { method: 'POST', cookie: ic, body: {} }));
+    record('POST /api/private/drive/kit (impersonating, 403)', await get('/api/private/drive/kit', { method: 'POST', cookie: ic, headers: intent, body: {} }));
     record('GET /api/private/drive/nodes/root (impersonating, 200)', await get('/api/private/drive/nodes/root', { cookie: ic }));
     record('DELETE /api/private/drive/nodes/<id> (200)', await get(`/api/private/drive/nodes/${folderId}`, { method: 'DELETE', cookie: dc, headers: intent }));
 

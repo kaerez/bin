@@ -3,12 +3,18 @@
 // re-wrap) and the anonymous uploader's routes under /api/reverse/<id>.
 //
 // The server stores what the browsers encrypted — the share's private key
-// sealed with the user's Drive key, the uploader's file names, metadata and
-// file keys sealed to the share's public key (which only the link holds) —
-// and checks only what it can see: the link proof, the password proof (both
-// as SHA-256 hashes), the human check, sizes and counts against the share's
-// limits and the Drive's capacity, and exact chunk sizes. The password only
-// gates the uploader; the data is always encrypted to the user's key.
+// sealed under HKDF(KEK, "reverse-link") (docs/DRIVE.md §3), the uploader's
+// file names, metadata and file keys sealed to the share's public key (which
+// only the link holds) — both also sealed at rest with the user's field key
+// (the field layer) — and checks only what it can see: the link proof, the
+// password proof (both as SHA-256 hashes), the human check, sizes and counts
+// against the share's limits and the Drive's capacity, and exact chunk sizes.
+// The password only gates the uploader. An upload is encrypted in the
+// uploader's browser to the link's key until the user's browser takes it into
+// the Drive (then it is sealed under the user's KEK like any Drive file). The
+// link's private key is sealed under the user's KEK, which the server derives:
+// the server can open an upload before it is taken in, as it can any Drive file
+// (SECURITY.md, "Drive keys"); a copy of R2 or of the Drive object alone cannot.
 
 import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
 import { actorId } from '../lib/auth.js';
@@ -26,6 +32,8 @@ import { normalizeRules, checkDeclaredTypes, refusedTypes, describeType } from '
 import { b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { NODE_ID_RE, ROOT, MAX_REVERSE_FILES, RECEIVED_FAIL_REASONS } from '../drive-do.js';
 import { encField } from './drive.js';
+import { KEY_RE, MEK_ID_RE } from '../../public/js/drivekeys.js';
+import { userKeys, checkNewItem, checkLinkKey, fieldKeys, toRest, fromRest } from '../lib/mek.js';
 
 export const REVERSE_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
 const B64_43 = /^[A-Za-z0-9_-]{43}$/;
@@ -39,7 +47,7 @@ const MAX_PRIV_CT = 256;
 const MAX_PATH_CT = 1400;
 const MAX_META_CT = 1024;
 const MAX_NAME_CT = 512;
-const MAX_FK_CT = 128;
+const MAX_DEK_CT = 128;
 /** Bound parameters per query stay well under the Durable Object SQLite limit (100). */
 const ID_BATCH = 80;
 const GONE = 'This link no longer accepts files: it has expired or was revoked.';
@@ -56,6 +64,12 @@ const fromDo = (r) => {
 const eqB64 = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
 async function proofHashOf(b64) {
   return b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', bytesFromB64url(b64))));
+}
+
+const parsed = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return null; } };
+/** A stored link key → its sealed {iv, ct} (the field layer removed), or null when it does not open. */
+async function linkPriv(fk, uid, id, stored) {
+  try { return parsed(await fromRest(fk, uid, 'linkKey', id, stored)); } catch { return null; }
 }
 
 /** A bound on a byte / file count: null (none) or an integer in [1, max]; undefined when invalid. */
@@ -90,6 +104,9 @@ export async function handleReverseOwner(request, env, url, a) {
       const folder = url.searchParams.get('folder');
       if (folder !== null && folder !== ROOT && !NODE_ID_RE.test(folder)) return invalid('folder must be a folder id.');
       const r = await drive().listReverse(uid, folder);
+      // Each link key without the field layer (the browser opens it with the KEK of its mek).
+      const fk = r.reverse.length ? await fieldKeys(env, uid) : null;
+      for (const x of r.reverse) x.priv = await linkPriv(fk, uid, x.id, x.priv);
       const rows = [];
       for (let i = 0; i < r.reverse.length; i += ID_BATCH) rows.push(...await dir.sharesByIds(uid, r.reverse.slice(i, i + ID_BATCH).map((x) => x.id)));
       const byId = new Map(rows.map((x) => [x.id, x]));
@@ -117,6 +134,21 @@ export async function handleReverseOwner(request, env, url, a) {
     }
     const failed = url.searchParams.get('failed') === '1';
     const r = await drive().received(uid, { after, failed });
+    if (!failed && (r.items.length || r.keys.length)) {
+      // The field layer comes off here: the browser gets the uploader's sealed fields and the link keys.
+      const fk = await fieldKeys(env, uid);
+      for (const it of r.items) {
+        try {
+          it.name = parsed(await fromRest(fk, uid, 'received', `name:${it.id}`, it.name));
+          it.meta = it.meta ? parsed(await fromRest(fk, uid, 'received', `meta:${it.id}`, it.meta)) : null;
+          it.fk = parsed(await fromRest(fk, uid, 'received', `wrap:${it.id}`, it.fk));
+        } catch {
+          // One item that does not open never holds up the rest: the browser records it as failed.
+          Object.assign(it, { name: null, meta: null, fk: null, unreadable: true });
+        }
+      }
+      for (const k of r.keys) k.priv = await linkPriv(fk, uid, k.id, k.priv);
+    }
     if (failed) {
       // With the link's label (the share index has it), for the user to recognise them.
       const ids = [...new Set(r.items.map((i) => i.rs))];
@@ -152,9 +184,12 @@ export async function handleReverseOwner(request, env, url, a) {
     const parent = typeof body.parent === 'string' && (body.parent === ROOT || NODE_ID_RE.test(body.parent)) ? body.parent : null;
     const name = encField(body.name, MAX_NAME_CT);
     const meta = encField(body.meta, MAX_META_CT);
-    const fk = encField(body.fk, MAX_FK_CT);
-    if (!parent || !name || !meta || !fk) return invalid('Send { parent, name, meta, fk } (encrypted fields as {iv, ct}).');
-    const r = await drive().acceptReceived(uid, node, { parent, name, meta, fk });
+    const dek = encField(body.dek, MAX_DEK_CT);
+    const kf = typeof body.ks === 'string' && KEY_RE.test(body.ks) && typeof body.mek === 'string' && MEK_ID_RE.test(body.mek) ? { ks: body.ks, mek: body.mek } : null;
+    if (!parent || !name || !meta || !dek || !kf) return invalid('Send { parent, name, meta, dek, ks, mek } (sealed fields as {iv, ct}).');
+    // Taken in: sealed under the current KEK like any Drive file (checked here).
+    const mfp = await checkNewItem(uid, await userKeys(env, uid), { kind: 'file', ...kf, name, meta, dek });
+    const r = await drive().acceptReceived(uid, node, { parent, name, meta, dek, ...kf, mfp });
     if (!r.ok) return fromDo(r);
     await dir.setDriveUsed(uid, r.used);
     await dir.driveLog(actorId(a), uid, 'drive.received_taken_in', `id=${r.rs} files=1`);
@@ -171,6 +206,7 @@ async function createReverse(request, env, dir, a) {
   if (!folder) return invalid('folder must be a folder id.');
   const priv = encField(body.priv, MAX_PRIV_CT);
   if (!priv) return invalid('priv must be the sealed private key {iv, ct}.');
+  if (typeof body.mek !== 'string' || !MEK_ID_RE.test(body.mek)) return invalid('mek must be the sub-MEK the key is sealed under.');
   if (typeof body.lh !== 'string' || !B64_43.test(body.lh)) return invalid('lh must be the link proof\'s hash.');
   const note = body.note === undefined || body.note === null ? null : encField(body.note, MAX_NOTE_CT);
   if (note === null && body.note !== undefined && body.note !== null) return invalid('note must be {iv, ct}.');
@@ -217,8 +253,11 @@ async function createReverse(request, env, dir, a) {
         return afterRefusal(env, g, v, fromDo(v));
       }
     }
+    // The link key opens under the user's current KEK (the server re-seals it later), and is kept at rest under the field layer.
+    await checkLinkKey(uid, await userKeys(env, uid), body.id, body.mek, priv);
+    const stored = await toRest(await fieldKeys(env, uid), uid, 'linkKey', body.id, priv);
     r = await driveStub(env, uid).createReverse(uid, {
-      id: body.id, folder, priv, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl, captcha: claim.captcha === true,
+      id: body.id, folder, priv: stored, mek: body.mek, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl, captcha: claim.captcha === true,
       opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types },
     });
   } catch (e) {
@@ -450,8 +489,11 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
     if (refused.length) return err(403, 'file_type_not_allowed', `This link does not accept ${refused.map(describeType).join(', ')} files.`, { refused });
   }
   const uploadToken = genToken();
+  // At rest, under the user's field layer (the Drive object sees only these).
+  const fk = await fieldKeys(env, uid);
   const r = await drive.reverseCreateFile(uid, id, await hashToken(grant), {
-    node, name, meta, size: body.size, wrap, uploadHash: await hashToken(uploadToken),
+    node, name: await toRest(fk, uid, 'received', `name:${node}`, name), meta: await toRest(fk, uid, 'received', `meta:${node}`, meta),
+    wrap: await toRest(fk, uid, 'received', `wrap:${node}`, JSON.stringify({ kind: 'rs', data: wrap })), size: body.size, uploadHash: await hashToken(uploadToken),
     capacity: tg.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: tg.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: tg.pendingSec,
     roleMaxBytes: tg.roleMaxBytes, // the role's current cap applies to existing links too
   });

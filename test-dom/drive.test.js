@@ -1,16 +1,16 @@
 // drive.test.js — the Drive page (public/dashboard/js/drive-app.js) with the
 // real Drive client (public/js/driveclient.js) against the in-memory §6 API
-// behind a mocked fetch (drive-fake-server.js): disabled / set-up / locked /
-// open states, the unlock (password, recovery code, passkey PRF), the tree +
-// right pane, the dialogs (new folder, rename, move, delete, share, an item's
-// shares with revoke), upload and download, plus the pure helpers and the
-// nav's Drive switch.
+// behind a mocked fetch (drive-fake-server.js): disabled / unavailable / open
+// states (the Drive opens with no prompt: the server hands the session its
+// keys), the owner acting as the user, the upgrade notice of a Drive made
+// before the key model v2, the tree + right pane, the dialogs (new folder,
+// rename, move, delete, share, an item's shares with revoke), upload and
+// download, plus the pure helpers and the nav's Drive switch.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startDrive, checkName, shareOptions, toFraction, modifiedOf, pathOf, sortChildren, successNote } from '../public/dashboard/js/drive-app.js';
 import * as drive from '../public/js/driveclient.js';
-import { createDriveKey, saveSessionKey, loadSessionKey, clearSessionKey, wrapRecovery, recoveryRef, wrapPrf, DRIVE_PRF_SALT, createEscrowKeyPair } from '../public/js/drivekeys.js';
+import { clearSessionKey } from '../public/js/drivekeys.js';
 import { deriveAccess, openPaste } from '../public/js/crypto.js';
-import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { TAG } from '../public/js/files.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
 import { revokeShare } from '../public/js/api.js';
@@ -32,7 +32,6 @@ const dialog = () => document.querySelector('.drive-dialog [role="dialog"]');
 const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === text);
 const LIMITS = { maxViews: 100, allowUnlimitedViews: true, maxExpireSec: null, openerDelete: true, files: true };
 const PROFILE = { limits: LIMITS, caps: { driveEnabled: true }, viewer: { enabled: true, rules: [], maxBytes: 1000 } };
-const CODE = 'ABCD-EFGH-JKMN-PQRS';
 const enc = (s) => new TextEncoder().encode(s);
 const TREE = {
   Documents: { Reports: { 'q1.txt': enc('Q1 numbers\n'), Archive: {} }, 'notes.md': enc('# Notes\nhello\n') },
@@ -42,18 +41,13 @@ const TREE = {
 };
 
 let S;
-let dk;
 let ids;
 
-/** A server holding TREE under a Drive key with a recovery-code wrap; the tab has the key unless `locked`. */
-async function server({ locked = false, capacity = 50 * 1024 * 1024 } = {}) {
+/** A server holding TREE, sealed under the user's current KEK. */
+async function server({ capacity = 50 * 1024 * 1024 } = {}) {
   S = fakeServer({ capacity });
   globalThis.fetch = S.fetch;
-  dk = createDriveKey();
-  const w = await wrapRecovery(dk, CODE, await recoveryRef(CODE));
-  S.wraps.set(`${w.kind}|${w.ref}`, w);
-  ids = await seedTree(S, dk, TREE);
-  if (!locked) saveSessionKey(dk, S.user.id);
+  ids = await seedTree(S, TREE);
   return S;
 }
 
@@ -131,7 +125,7 @@ describe('startDrive states', () => {
     expect(mount.textContent).toMatch(/Drive is not enabled for your account/);
   });
 
-  it('a notice instead of the Drive (not ready yet, a user with no Drive while impersonating, disabled): the page’s status line announces its title (WCAG 4.1.3); the notice is content with a heading', async () => {
+  it('a notice instead of the Drive (disabled, the keys cannot be had): the page’s status line announces its title (WCAG 4.1.3); the notice is content with a heading', async () => {
     const withStatusLine = () => {
       const mount = mountPoint();
       const live = document.createElement('p');
@@ -141,10 +135,11 @@ describe('startDrive states', () => {
       mount.append(live); // as in /dashboard/drive/: in the page from the start
       return { mount, live };
     };
+    // (The release before also had "not ready yet" and "no Drive while impersonating": the key model v2 has neither.)
     const cases = [
-      ['not_ready', () => { S = fakeServer(); }, {}, '#drive-not-ready', 'Drive is not ready yet'],
-      ['impersonating', () => { S = fakeServer(); S.impersonatedBy = 'owner'; }, { impersonating: true }, '#drive-impersonating', 'The user hasn’t signed in since the Drive was enabled'],
       ['disabled', () => { S = fakeServer({ enabled: false }); }, {}, '#drive-disabled', 'Drive is not enabled for your account'],
+      ['unavailable', () => { S = fakeServer(); S.keysError = 'salt_missing'; }, {}, '#drive-unavailable', 'Your Drive cannot be opened right now'],
+      ['unavailable', () => { S = fakeServer(); S.keysError = 'keys_missing'; S.impersonatedBy = 'owner'; }, { impersonating: true }, '#drive-unavailable', 'Your Drive cannot be opened right now'],
     ];
     for (const [state, make, user, sel, said] of cases) {
       make();
@@ -159,16 +154,18 @@ describe('startDrive states', () => {
       const card = mount.querySelector(sel);
       expect(card.getAttribute('role')).toBeNull();
       expect(card.querySelector('h2').textContent).toBe(said);
-      expect(S.requests.some((x) => x.method !== 'GET')).toBe(false); // nothing is created
+      // Nothing is created: the one change is the request for the session's keys (a POST, refused here).
+      expect(S.requests.filter((x) => x.method !== 'GET').map((x) => x.path).filter((x) => x !== '/api/private/drive/keys')).toEqual([]);
     }
     // What a user reads calls the owner "the administrator", as the other notices do.
     {
       S = fakeServer();
+      S.keysError = 'keys_missing';
       globalThis.fetch = S.fetch;
       const mount = mountPoint();
       await startDrive(mount, deps());
-      const text = mount.querySelector('#drive-not-ready').textContent;
-      expect(text).toMatch(/The administrator must sign in once/);
+      const text = mount.querySelector('#drive-unavailable').textContent;
+      expect(text).toMatch(/The administrator restores them/);
       expect(text).not.toMatch(/\bowner\b/);
     }
   });
@@ -182,110 +179,125 @@ describe('startDrive states', () => {
     expect(mount.querySelector('[role="alert"]').textContent).toMatch(/boom/);
   });
 
-  it('set-up (no key yet): only the password is offered', async () => {
-    S = fakeServer();
-    S.escrowPub = (await createEscrowKeyPair()).publicJwk; // the owner's escrow key exists
-    globalThis.fetch = S.fetch;
+  it('opens with no prompt: no password, no set-up, no unlock screen', async () => {
+    await server();
     const mount = mountPoint();
     const r = await startDrive(mount, deps());
-    expect(r.state).toBe('locked');
-    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Set up your Drive');
-    expect(mount.querySelector('#drive-unlock-btn').textContent).toBe('Set up with password');
-    expect(mount.querySelector('#drive-code-toggle').hidden).toBe(true);
-    expect(mount.querySelector('#drive-unlock-passkey').hidden).toBe(true);
+    expect(r.state).toBe('open');
+    await r.app.ready;
+    expect(mount.querySelector('#drive-unlock')).toBeNull();
+    expect(mount.querySelector('input[type="password"]')).toBeNull();
+    expect(names()).toEqual(['Documents', 'Empty', 'Photos', 'readme.txt']);
+    expect(sessionStorage.length).toBe(0); // the keys are in the page's memory only
+    // Nothing but the session's keys is asked for (a POST: it may make the salt and is audited).
+    expect(S.requests.filter((x) => x.method !== 'GET').map((x) => `${x.method} ${x.path}`)).toEqual(['POST /api/private/drive/keys']);
   });
 
-  it('locked: the unlock prompt; a wrong password is refused, a recovery code unlocks', async () => {
-    await server({ locked: true });
-    const mount = mountPoint();
-    const r = await startDrive(mount, deps());
-    expect(r.state).toBe('locked');
-    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Unlock your Drive');
-    expect(mount.querySelector('#drive-unlock-passkey').hidden).toBe(true); // no passkey has a Drive wrap
-    const pw = mount.querySelector('#drive-unlock-pw');
-    expect(pw.type).toBe('password');
-    expect(mount.querySelector('label[for="drive-unlock-pw"]')).not.toBeNull();
-    pw.value = 'wrong';
-    mount.querySelector('#drive-pw-form').dispatchEvent(new Event('submit', { cancelable: true }));
-    await until(() => !mount.querySelector('#drive-unlock-msg').hidden, 30000);
-    expect(mount.querySelector('#drive-unlock-msg').textContent).toMatch(/does not unlock your Drive/);
-    expect(pw.getAttribute('aria-invalid')).toBe('true');
-    mount.querySelector('#drive-code-toggle').click();
-    expect(mount.querySelector('#drive-code-form').hidden).toBe(false);
-    mount.querySelector('#drive-unlock-code').value = CODE.toLowerCase();
-    mount.querySelector('#drive-code-form').dispatchEvent(new Event('submit', { cancelable: true }));
-    const app = await r.unlocked;
-    await app.ready;
-    expect(mount.querySelector('#drive-app')).not.toBeNull();
-    expect(pw.value).toBe('');
-    expect(loadSessionKey(S.user.id)).toEqual(dk);
-    expect(names()).toEqual(['Documents', 'Empty', 'Photos', 'readme.txt']);
-  }, 60000);
+  it('keys that cannot be had: what happened and who fixes it (the salt: the personal kit; the keyring: the administrator)', async () => {
+    await server();
+    S.keysError = 'salt_missing';
+    let mount = mountPoint();
+    let r = await startDrive(mount, deps());
+    expect(r).toEqual({ state: 'unavailable', reason: 'salt_missing' });
+    expect(mount.querySelector('#drive-unavailable p.msg').textContent).toMatch(/user salt.*personal kit/);
+    expect(mount.querySelector('#drive-unavailable a[href="/dashboard/account/#drive-kit"]')).not.toBeNull();
+    S.keysError = 'keys_missing';
+    mount = mountPoint();
+    r = await startDrive(mount, deps({ user: { ...S.user, role: 'owner' } }));
+    expect(r.reason).toBe('keys_missing');
+    expect(mount.querySelector('#drive-unavailable').textContent).toMatch(/key kit/);
+    expect(mount.querySelector('#drive-unavailable a[href="/dashboard/admin/#keys"]')).not.toBeNull();
+  });
 
-  it('locked: a passkey with a Drive wrap unlocks through the shared PRF helper (passkeys.js)', async () => {
-    await server({ locked: true });
-    const rawId = randomBytes(16);
-    const credId = b64urlFromBytes(rawId);
-    const prf = randomBytes(32);
-    const w = await wrapPrf(dk, prf, credId);
-    S.wraps.set(`${w.kind}|${w.ref}`, w);
-    let asked = null;
-    vi.stubGlobal('PublicKeyCredential', function PublicKeyCredential() {});
-    const creds = {
-      create: async () => null,
-      get: async (o) => {
-        asked = o.publicKey;
-        return {
-          id: credId, rawId: rawId.slice().buffer, type: 'public-key',
-          response: { clientDataJSON: new ArrayBuffer(1), authenticatorData: new ArrayBuffer(1), signature: new ArrayBuffer(1), userHandle: null },
-          getClientExtensionResults: () => ({ prf: { results: { first: prf.slice().buffer } } }),
-        };
-      },
-    };
-    Object.defineProperty(navigator, 'credentials', { configurable: true, value: creds });
-    try {
+  it('the owner acting as the user: the user’s Drive opens as it is, with a note that the keys use is recorded', async () => {
+    await server();
+    S.impersonatedBy = 'owner';
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true }, profile: { ...PROFILE, user: { username: 'alice' } } }));
+    expect(r.state).toBe('open');
+    await r.app.ready;
+    expect(mount.querySelector('#drive-imp-note').textContent).toMatch(/alice’s Drive.*admin audit/);
+    expect(names()).toEqual(['Documents', 'Empty', 'Photos', 'readme.txt']);
+    expect(S.audit.some((x) => x.action === 'drive.keys_used')).toBe(true);
+  });
+
+  it('a Drive waiting for its upgrade with no usable old key in the tab (none, or not this Drive’s): the password form, once', async () => {
+    for (const reason of ['locked', 'wrong']) {
+      await server();
+      S.migration = { pending: true, v1Items: 1, v1Links: 0, legacy: true };
+      const calls = [];
+      const upgrade = {
+        upgradeOwnDrive: async () => { calls.push('upgrade'); const e = new Error('no key'); e.name = 'UpgradeBlocked'; e.reason = reason; throw e; },
+        legacyUnlock: async () => { calls.push('unlock'); },
+      };
       const mount = mountPoint();
-      const r = await startDrive(mount, deps());
-      const pk = mount.querySelector('#drive-unlock-passkey');
-      expect(pk.hidden).toBe(false);
-      pk.click();
-      const app = await r.unlocked;
-      await app.ready;
-      expect(Array.from(asked.extensions.prf.eval.first)).toEqual(Array.from(DRIVE_PRF_SALT));
-      expect(asked.allowCredentials.map((c) => b64urlFromBytes(new Uint8Array(c.id)))).toEqual([credId]);
-      expect(loadSessionKey(S.user.id)).toEqual(dk);
-      // Neither the PRF output nor the key went to the server.
-      const wire = JSON.stringify(S.requests.map((x) => x.body));
-      expect(wire).not.toContain(b64urlFromBytes(prf));
-      expect(wire).not.toContain(b64urlFromBytes(dk));
-    } finally {
-      delete navigator.credentials;
-      vi.unstubAllGlobals();
+      const r = await startDrive(mount, deps({ upgrade }));
+      await r.app.ready;
+      await until(() => mount.querySelector('#drive-upgrade-form'));
+      expect(mount.querySelector('#drive-upgrade-msg').hidden).toBe(true);
+      expect(calls).toEqual(['upgrade']);
     }
   });
 
-  it('impersonating without the owner’s own Drive unlocked in the tab: a notice saying what to do (no prompt, nothing sent)', async () => {
-    S = fakeServer();
-    globalThis.fetch = S.fetch;
-    const w = await wrapRecovery(createDriveKey(), CODE, await recoveryRef(CODE)); // the user's Drive exists
-    S.wraps.set(`${w.kind}|${w.ref}`, w);
-    S.impersonatedBy = 'owner';
+  // Audit B M2: links of the previous release the old key does not open are listed, and retired with the step-up.
+  it('a Drive waiting whose old links do not open: they are listed; "Retire" (the step-up) retires them and the upgrade finishes', async () => {
+    await server();
+    S.migration = { pending: true, v1Items: 1, v1Links: 1, legacy: true };
+    const calls = [];
+    const upgrade = {
+      upgradeOwnDrive: async () => { calls.push('upgrade'); return { upgraded: 1, damaged: 0, unopened: ['rAAAAAAAAAAAAAAAAAAAAAA'], done: false }; },
+      retireLinks: async (o) => { calls.push(['retire', o.ids, o.step]); return { retired: 1, failed: 0, done: true }; },
+    };
+    const confirm = async (input) => { const v = input.value; input.value = ''; if (!v) throw new Error('Enter your current password.'); return { current: `proof:${v}` }; };
     const mount = mountPoint();
-    const r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true } }));
-    expect(r).toMatchObject({ state: 'impersonating', reason: 'owner_locked' });
-    expect(mount.querySelector('#drive-impersonating').textContent).toMatch(/Unlock your own Drive first.*open Drive and unlock it/);
-    expect(mount.querySelector('#drive-unlock')).toBeNull();
-    expect(S.requests.some((x) => x.method !== 'GET')).toBe(false);
+    const r = await startDrive(mount, deps({ upgrade, confirm, canUsePasskey: async () => false }));
+    await r.app.ready;
+    await until(() => mount.querySelector('#drive-retire-form'));
+    expect(mount.querySelector('#drive-retire-form').textContent).toMatch(/rAAAAAAAAAAAAAAAAAAAAAA/);
+    mount.querySelector('#drive-retire-btn').click();
+    await until(() => !mount.querySelector('#drive-upgrade-msg').hidden);
+    expect(mount.querySelector('#drive-upgrade-msg').textContent).toMatch(/password/);
+    mount.querySelector('#drive-retire-pw').value = 'pw';
+    mount.querySelector('#drive-retire-btn').click();
+    await until(() => /Your Drive is upgraded/.test(mount.querySelector('#drive-upgrade').textContent));
+    expect(calls).toEqual(['upgrade', ['retire', ['rAAAAAAAAAAAAAAAAAAAAAA'], { current: 'proof:pw' }]]);
+    expect(mount.querySelector('#drive-upgrade').textContent).toMatch(/1 link whose key did not open was ended/);
   });
 
-  it('a tab key that is not this Drive\'s (its key check value differs) is refused and removed: the unlock prompt', async () => {
-    await server({ locked: true });
-    saveSessionKey(createDriveKey(), S.user.id);
+  // Audit B M4: a recovery kit of the previous release opens the old keys when nothing else does.
+  it('a Drive waiting with no usable old key: a recovery kit of the previous release opens it (the file stays in the browser)', async () => {
+    await server();
+    S.migration = { pending: true, v1Items: 1, v1Links: 0, legacy: true };
+    const calls = [];
+    let first = true;
+    const upgrade = {
+      upgradeOwnDrive: async () => {
+        calls.push('upgrade');
+        if (first) { first = false; const e = new Error('no key'); e.name = 'UpgradeBlocked'; e.reason = 'locked'; throw e; }
+        return { upgraded: 1, damaged: 0, unopened: [], done: true };
+      },
+      legacyUnlockWithKit: async (o) => { calls.push(['kit', o.text, o.passphrase]); },
+    };
     const mount = mountPoint();
-    const r = await startDrive(mount, deps());
-    expect(r.state).toBe('locked'); // never opened with it
-    await until(() => mount.querySelector('#drive-unlock'));
-    expect(loadSessionKey(S.user.id)).toBeNull();
+    const r = await startDrive(mount, deps({ upgrade }));
+    await r.app.ready;
+    await until(() => mount.querySelector('#drive-upgrade-kit-form'));
+    const f = mount.querySelector('#drive-upgrade-kit');
+    Object.defineProperty(f, 'files', { configurable: true, get: () => [new File(['{"format":"secbin-owner-kit/1"}'], 'kit.json')] });
+    mount.querySelector('#drive-upgrade-kit-pass').value = 'kit pass';
+    mount.querySelector('#drive-upgrade-kit-form').dispatchEvent(new Event('submit', { cancelable: true }));
+    await until(() => /Your Drive is upgraded/.test(mount.querySelector('#drive-upgrade').textContent));
+    expect(calls).toEqual(['upgrade', ['kit', '{"format":"secbin-owner-kit/1"}', 'kit pass'], 'upgrade']);
+    expect(mount.querySelector('#drive-upgrade-kit-pass')).toBeNull();
+  });
+
+  it('a Drive made before the key model v2: the upgrade notice; the owner acting as the user is sent to Admin', async () => {
+    await server();
+    S.migration = { pending: true, v1Items: 2, v1Links: 0, legacy: true };
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true } }));
+    await r.app.ready;
+    expect(mount.querySelector('#drive-upgrade').textContent).toMatch(/2 items of this Drive still use.*Admin → Security → Keys/);
   });
 });
 
@@ -304,93 +316,51 @@ function strayText(root) {
   return out;
 }
 
-describe('no stray "null" / "undefined" text on the unlock and set-up views', () => {
-  const start = async (extra = {}) => {
-    const mount = mountPoint();
-    const r = await startDrive(mount, deps(extra));
-    return { r, mount };
-  };
-  const ownerDeps = () => ({ profile: { ...PROFILE, user: { ...S.user } } });
-  const wrapCode = async () => {
-    const w = await wrapRecovery(createDriveKey(), CODE, await recoveryRef(CODE));
-    S.wraps.set(`${w.kind}|${w.ref}`, w);
-  };
-
-  it('a user: set-up and unlock', async () => {
-    S = fakeServer();
-    S.escrowPub = (await createEscrowKeyPair()).publicJwk;
-    globalThis.fetch = S.fetch;
-    let { r, mount } = await start();
-    expect(r.state).toBe('locked');
-    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Set up your Drive');
-    expect(children(mount)).toEqual(['status', 'drive-unlock']);
-    expect(strayText(document.body)).toEqual([]);
-
-    await server({ locked: true });
-    S.received = 2;
-    ({ r, mount } = await start());
-    expect(r.state).toBe('locked');
-    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Unlock your Drive');
-    expect(children(mount)).toEqual(['status', 'drive-unlock']);
-    expect(strayText(document.body)).toEqual([]);
-  });
-
-  it('the owner: set-up, unlock (with the kit restore) and nothing that opens the Drive (restore or start over)', async () => {
-    S = fakeServer({ role: 'owner' });
-    globalThis.fetch = S.fetch;
-    let { r, mount } = await start(ownerDeps());
-    expect(r.state).toBe('locked');
-    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Set up your Drive');
-    expect(children(mount)).toEqual(['status', 'drive-unlock']);
-    expect(strayText(document.body)).toEqual([]);
-
-    await wrapCode();
-    S.escrowPub = (await createEscrowKeyPair()).publicJwk;
-    ({ r, mount } = await start(ownerDeps()));
-    expect(r.state).toBe('locked');
-    expect(mount.querySelector('#drive-unlock h2').textContent).toBe('Unlock your Drive');
-    expect(children(mount)).toEqual(['status', 'drive-unlock', 'drive-kit-unlock']);
-    expect(strayText(document.body)).toEqual([]);
-
-    S.wraps.clear();
-    ({ r, mount } = await start(ownerDeps()));
-    expect(r.state).toBe('locked');
-    expect(children(mount)).toEqual(['status', 'drive-unlock', 'drive-owner-recovery']);
-    expect(strayText(document.body)).toEqual([]);
-  });
-
-  it('the owner acting as a user: the Drive notices in place of the unlock and set-up views', async () => {
-    S = fakeServer();
-    globalThis.fetch = S.fetch;
-    S.impersonatedBy = 'owner';
-    const acting = () => ({ user: { ...S.user, impersonating: true }, profile: { ...PROFILE, user: { ...S.user }, impersonatedBy: 'owner' } });
-    let { r, mount } = await start(acting()); // the user has no Drive yet
-    expect(r).toMatchObject({ state: 'impersonating', reason: 'no_drive' });
-    expect(mount.querySelector('#drive-unlock')).toBeNull();
-    expect(strayText(document.body)).toEqual([]);
-
-    await wrapCode(); // the user's Drive exists; the owner's own is not unlocked in this tab
-    ({ r, mount } = await start(acting()));
-    expect(r).toMatchObject({ state: 'impersonating', reason: 'owner_locked' });
-    expect(mount.querySelector('#drive-unlock')).toBeNull();
-    expect(strayText(document.body)).toEqual([]);
-  });
-
-  it('the open Drive, for a user and for the owner', async () => {
+describe('no stray "null" / "undefined" text in any state of the Drive page', () => {
+  it('a user and the owner: the open Drive', async () => {
     await openApp();
     expect(strayText(document.body)).toEqual([]);
-    S = fakeServer({ role: 'owner' });
-    globalThis.fetch = S.fetch;
-    const mount = mountPoint();
-    const r = await startDrive(mount, deps(ownerDeps()));
-    expect(r.state).toBe('locked');
-    mount.querySelector('#drive-unlock-pw').value = 'owner password';
-    mount.querySelector('#drive-pw-form').dispatchEvent(new Event('submit', { cancelable: true }));
-    const app = await r.unlocked;
-    await app.ready;
-    expect(mount.querySelector('#drive-app')).not.toBeNull();
+    await openApp({ user: { ...S.user, role: 'owner' }, profile: { ...PROFILE, user: { ...S.user } } });
     expect(strayText(document.body)).toEqual([]);
-  }, 60000);
+  });
+
+  it('the keys cannot be had (the salt, the keyring), for a user and for the owner', async () => {
+    for (const reason of ['salt_missing', 'keys_missing']) {
+      for (const role of ['user', 'owner']) {
+        await server();
+        S.keysError = reason;
+        const mount = mountPoint();
+        const r = await startDrive(mount, deps({ user: { ...S.user, role } }));
+        expect(r).toEqual({ state: 'unavailable', reason });
+        // The page's status line (in place from the start) says the notice's title; the notice is content.
+        expect(children(mount)).toEqual(['status', 'drive-unavailable']);
+        expect(mount.firstChild.textContent).toBe('Your Drive cannot be opened right now');
+        expect(strayText(document.body)).toEqual([]);
+      }
+    }
+  });
+
+  it('the owner acting as a user, a Drive waiting for its upgrade, and no Drive', async () => {
+    await server();
+    S.impersonatedBy = 'owner';
+    let mount = mountPoint();
+    let r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true }, profile: { ...PROFILE, user: { username: 'alice' } } }));
+    await r.app.ready;
+    expect(strayText(document.body)).toEqual([]);
+    await server();
+    S.migration = { pending: true, v1Items: 2, v1Links: 0, legacy: true };
+    mount = mountPoint();
+    r = await startDrive(mount, deps());
+    await r.app.ready;
+    expect(mount.querySelector('#drive-upgrade')).not.toBeNull();
+    expect(strayText(document.body)).toEqual([]);
+    S = fakeServer({ enabled: false });
+    globalThis.fetch = S.fetch;
+    mount = mountPoint();
+    r = await startDrive(mount, deps());
+    expect(r.state).toBe('disabled');
+    expect(strayText(document.body)).toEqual([]);
+  });
 });
 
 describe('the Drive', () => {
@@ -648,13 +618,6 @@ describe('the client\'s progress and cancel for downloads', () => {
     expect(top.children.find((x) => x.name === 'readme (2).txt').kind).toBe('dir');
     const docs = await c.list(ids.get('Documents'));
     expect(docs.children.map((x) => x.name)).toEqual(['Reports', 'new.txt', 'notes (2).md', 'notes.md']);
-  });
-
-  it('openDrive\'s DriveLocked names the passkeys that can unlock', async () => {
-    await server({ locked: true });
-    const w = await wrapPrf(dk, randomBytes(32), 'cred-9');
-    S.wraps.set(`${w.kind}|${w.ref}`, w);
-    await expect(drive.openDrive({ user: S.user })).rejects.toMatchObject({ name: 'DriveLocked', reason: 'locked', credentialIds: ['cred-9'] });
   });
 });
 

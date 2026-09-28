@@ -1,31 +1,31 @@
 // drive-fake-server.js — an in-memory stand-in for the Drive API (docs/DRIVE.md
 // §6) behind a mocked fetch, shared by the DOM suites of the Drive client
-// (driveclient.test.js) and the Drive page (drive.test.js). It keeps only what
-// the real server would: sealed names, sizes, chunks, wraps — and its key
-// rules (docs/DRIVE.md §6, src/routes/drive.js setKeys): a user's Drive is set
-// up only once the owner's escrow key exists, with an escrow wrap for it (never
-// removable) and a wrap of the user's own; the step-up for removing wraps,
-// replacing the pw wrap or the salt (unless stale or the first set-up) and for
-// changing the owner's escrow or signing key once one exists; a new escrow key
-// signed by the signing key; the old escrow key kept (`escrowPrivOld`); while
-// the owner impersonates (`impersonatedBy`), only added wraps and the logged
-// escrow route; the owner recovery kit's routes (the step-up for a download,
-// a use and a restore of keys; a restored key only for the server's own
-// public keys; the escrow key's version) and starting over; the key check
-// value with every first set-up and every later wrap or pin, the step-up for
-// replacing a wrap, no escrow wrap in the owner's own Drive, no first set-up
-// of a Drive with content or keys but no wrap, one `escrowReset` record per
-// epoch. Like the real server (src/lib/csrf.js), every signed-in change
-// (POST / PUT / PATCH / DELETE under /api/private/, and log-out) must carry the
-// session's CSRF token in X-Secbin-CSRF, the one GET /api/private/me hands out
-// (403 csrf_mismatch otherwise, before anything changes): the Drive client
-// sends it through public/js/api.js. Every fake server stands for the same
-// browser session, so they share the token (FAKE_CSRF). Not a test file itself
-// (vitest.dom.config.js picks up *.test.js only).
+// (driveclient.test.js), the Drive page (drive.test.js), reverse shares
+// (reverse.test.js), the kits and the keyring pages. It keeps what the real
+// server would and follows its key rules (the key model v2, docs/DRIVE.md
+// §3; src/routes/drive.js, src/lib/mek.js): it holds the root MEK and the
+// sub-MEKs and derives the user's KEKs (drivekeys.js deriveKek, the real
+// derivation) for POST /api/private/drive/keys; every item sealed by the
+// browser must open under the current KEK (409 mek_not_current for another
+// sub-MEK, 400 bad_seal otherwise); a rename is sealed under the item's own
+// sub-MEK and salt (409 stale_keys when they changed); the personal kit's
+// routes need the step-up and are refused while the owner acts as the user
+// (`impersonatedBy`); the key kit and the keyring routes of Admin → Security
+// → Keys are the owner's. Like the real server (src/lib/csrf.js), every
+// signed-in change (POST / PUT / PATCH / DELETE under /api/private/, and
+// log-out) must carry the session's CSRF token in X-Secbin-CSRF, the one GET
+// /api/private/me hands out (403 csrf_mismatch otherwise, before anything
+// changes): the Drive client sends it through public/js/api.js. Every fake
+// server stands for the same browser session, so they share the token
+// (FAKE_CSRF). Not a test file itself (vitest.dom.config.js picks up *.test.js
+// only).
 import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
-import { deriveSubkeys, sealField, escrowKeyId, escrowWrapKeyId, escrowKeyEndorsed, keyCheckValue } from '../public/js/drivekeys.js';
-import { randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
+import {
+  deriveKek, newKey, newSalt, newMekId, sealName, sealDek, openName, openDek, openLinkKey, keyFingerprint, keyCheckValue, saltCheckValue,
+  sameCheck, effectiveAt, mekStatus,
+} from '../public/js/drivekeys.js';
+import { randomBytes, b64urlFromBytes, bytesFromB64url, utf8 } from '../public/js/bytes.js';
 import { sealUpload, newNodeId } from '../public/js/reversekeys.js';
 
 /** The session's CSRF token (43 base64url characters, as the server's HMAC). */
@@ -44,66 +44,55 @@ export const headerOf = (headers, name) => {
 /** An in-memory Drive server for one user (plus an owner) and a fetch that talks to it. */
 export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 } = {}) {
   const S = {
-    user: { id: role === 'owner' ? 'owner1' : 'u1', role, username: role === 'owner' ? 'owner' : 'alice' },
+    user: { id: role === 'owner' ? 'owner1ownerowner' : 'u1useruseruser01', role, username: role === 'owner' ? 'owner' : 'alice' },
     enabled,
     capacity,
-    driveSalt: null,
-    wraps: new Map(),
-    escrowPub: null,
-    escrowPriv: null,
+    // The keyring (the server's): the root MEK, the sub-MEKs, this account's salt.
+    root: newKey(),
+    subs: [],
+    salt: newSalt(),
+    keysError: null, // 'keys_missing' | 'salt_missing': POST /drive/keys refuses
     nodes: new Map([['root', { id: 'root', parent: null, kind: 'dir', name: '', size: 0, chunks: 0, state: 'ready', created: 1, updated: 1 }]]),
     chunks: new Map(),
     shareBodies: [],
     shares: [], // { id, nodes, label, created, expires, views_total, left, status }
     revoked: [],
     requests: [],
-    userWraps: null, // the "other user" for the escrow route
-    adminKeys: [],
     reverse: [], // reverse shares: the create bodies plus { status, files, bytes, created, expires }
     receivedPage: 500, // received files per page (as the server)
-    pwStale: false,
-    escrowPin: null,
-    escrowSignPub: null,
-    escrowSig: null,
-    escrowSignPriv: null,
-    escrowPrivOld: {}, // the owner's earlier escrow keys (sealed, by kid)
     impersonatedBy: null, // the owner's username while the owner acts as this user
-    ownerId: 'owner1',
-    ownerEscrowPriv: null, // the owner's sealed escrow key (for the impersonation escrow route)
-    escrowUses: 0,
     busyFinalize: 0, // answer finalize "busy" this many times
-    escrowVer: null, // the owner's: { version, kid, created } of the current escrow key
-    kit: null, // the owner's latest recovery kit: { version, kid, at }
-    escrowKids: [], // the kids users' escrow wraps are made for (drive.escrowKid:*)
-    probes: [], // the kit check's live proof: [{ kid, wrap }] (one user's escrow wrap per kid)
-    audit: [], // the owner's recovery actions: { action, detail }
-    ownerReset: null, // { epoch, kid, signPub, at }: the latest owner start over (public)
-    archives: [], // the owner's archived Drives: { gen, at, nodes: Map, wraps, driveSalt, escrowPriv, escrowSignPriv, escrowPrivOld }
-    activity: [], // the user's own activity rows the fake records (drive.escrow_rewrapped)
-    kcv: null, // the Drive key's check value, kept from the first set-up
-    userDrives: {}, // other users' Drives the owner set up here: { [userId]: { wraps, driveSalt, escrowPin, kcv } }
-    driveOff: new Set(), // other users whose role has no Drive (the admin keys route answers 409 drive_disabled)
+    proof: null, // the password proof the step-up accepts (confirm.js stretches the password)
+    migration: null, // what GET /api/private/drive says of the upgrade (null: nothing to upgrade)
+    audit: [], // the owner's key actions: { action, detail }
+    activity: [], // the user's own activity rows the fake records
+    kitRecord: null, // the key kit's record (at, root, subs)
+    kitVerifyLeft: 30,
     meCalls: 0, // GET /api/private/me (the page recording its session)
   };
   let clock = 1700000000;
   const tick = () => ++clock;
-  /** AUTHN owner recovery: a new password (proof), passkeys and codes (and their wraps) gone, the pw wrap stale. */
-  S.authnRecovery = (proof) => {
-    for (const k of [...S.wraps.keys()]) if (k.startsWith('passkey|') || k.startsWith('recovery|')) S.wraps.delete(k);
-    S.pwStale = true;
-    S.proof = proof;
+  const now = () => Math.floor(Date.now() / 1000);
+  /** A sub-MEK: { id, key, fp, from, until, created, note }. */
+  S.addSub = async ({ from = now() - 3600, until = null, key = newKey(), note = '' } = {}) => {
+    const s = { id: newMekId(), key, fp: await keyFingerprint(key), from, until, created: tick(), note };
+    const open = S.subs.find((x) => x.until === null);
+    if (open && until === null) open.until = from;
+    S.subs.push(s);
+    return s;
   };
+  S.current = () => effectiveAt(S.subs, now());
+  S.kekOf = async (mekId, uid = S.user.id, salt = S.salt) => {
+    const s = S.subs.find((x) => x.id === mekId);
+    return s ? deriveKek(S.root, s.key, salt, uid) : null;
+  };
+  S.ready = S.addSub({ from: now() - 86400 });
+
   const stepFail = (body) => {
     if (!body.current && !body.reauth) return fail(400, 'reauth_required');
-    if (body.current && body.current !== S.proof) return fail(403, 'wrong_password');
+    if (body.current && S.proof && body.current !== S.proof) return fail(403, 'wrong_password');
     return null;
   };
-  const newVersion = async (pub) => {
-    const kid = await escrowKeyId(pub);
-    if (S.escrowVer && S.escrowVer.kid === kid) return;
-    S.escrowVer = { version: S.escrowVer ? S.escrowVer.version + 1 : 1, kid, created: tick() };
-  };
-  const sameKey = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y;
   const ok = (data, status = 200) => {
     const res = { ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) };
     res.clone = () => res; // api.js reads a 403's body twice (csrf_mismatch or not)
@@ -111,14 +100,43 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
   };
   const bin = (bytes) => ({ ok: true, status: 200, type: 'basic', json: async () => null, arrayBuffer: async () => bytes.slice().buffer });
   const fail = (status, error) => ok({ error, message: error }, status);
-  // Received files (reverse shares) are not in the tree until the browser re-wraps them.
+  // Received files (reverse shares) are not in the tree until the browser takes them in.
   const kids = (id) => [...S.nodes.values()].filter((n) => n.parent === id && !n.rs);
   const ancestors = (n) => { const out = []; let p = n.parent; while (p) { const a = S.nodes.get(p); out.unshift(a); p = a.parent; } return out; };
   const within = (id, anc) => { for (let x = S.nodes.get(id); x; x = S.nodes.get(x.parent)) if (x.id === anc) return true; return false; };
   const pub = (n) => ({ ...n });
   const used = () => [...S.nodes.values()].reduce((s, n) => s + n.size, 0);
   const shareRow = ({ nodes, ...row }) => { void nodes; return { ...row, kind: 'drive', locked: 0 }; };
+  const parsed = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+  /** As src/lib/mek.js checkNewItem: under the current KEK, or refused. */
+  const checkSeal = async ({ kind, ks, mek, name, meta, dek }) => {
+    const cur = S.current();
+    if (!cur || mek !== cur.id) return fail(409, 'mek_not_current');
+    if (typeof ks !== 'string' || !name) return fail(400, 'invalid');
+    const kek = await S.kekOf(mek);
+    const at = { userId: S.user.id, mekId: mek, salt: ks };
+    try {
+      await openName(kek, at, 'name', parsed(name));
+      if (meta) await openName(kek, at, 'meta', parsed(meta));
+      if (kind === 'file') await openDek(kek, at, parsed(dek));
+    } catch {
+      return fail(400, 'bad_seal');
+    }
+    return null;
+  };
+  const keysOut = async () => {
+    const cur = S.current();
+    const inUse = new Set([...S.nodes.values()].map((n) => n.mek).filter(Boolean));
+    const list = S.subs.filter((s) => s.id === cur?.id || inUse.has(s.id));
+    return {
+      userId: S.user.id, current: cur ? cur.id : null, changing: false,
+      keys: await Promise.all(list.map(async (s) => ({ mekId: s.id, fp: s.fp, from: s.from, until: s.until, kek: b64urlFromBytes(await S.kekOf(s.id)) }))),
+      missing: [], broken: [],
+    };
+  };
+
   S.fetch = vi.fn(async (url, init = {}) => {
+    await S.ready;
     const method = init.method || 'GET';
     const u = new URL(url, 'https://bin.example');
     const p = u.pathname;
@@ -132,238 +150,69 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (needsCsrf(method, p) && headerOf(init.headers, 'x-secbin-csrf') !== FAKE_CSRF) return fail(403, 'csrf_mismatch');
     let m;
     if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: S.impersonatedBy });
+    if (p === '/api/auth/prelogin' && method === 'POST') return ok({ salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3 });
     if (p === '/api/private/drive' && method === 'GET') {
       if (!S.enabled) return ok({ enabled: false });
       const received = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !n.rfail).length;
-      const wraps = [...S.wraps.values()].map((w) => (S.impersonatedBy && w.kind === 'escrow' ? { ...w, data: null } : w));
       return ok({
-        enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps, escrowPub: S.escrowPub, escrowSignPub: S.escrowSignPub, escrowSig: S.escrowSig,
-        escrowPin: S.escrowPin, pwStale: S.pwStale, ownerReset: S.ownerReset, kcv: S.kcv,
+        enabled: true, capacity: S.capacity, used: used(), current: S.current()?.id ?? null, migration: S.migration,
         received, receivedFailed: [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && n.rfail).length,
-        ...(role === 'owner' ? {
-          escrowPriv: S.escrowPriv, escrowSignPriv: S.escrowSignPriv, escrowPrivOld: S.escrowPrivOld, escrowKids: S.escrowKids, kit: S.kit,
-          archives: S.archives.map((a) => ({ gen: a.gen, at: a.at, items: a.nodes.size, bytes: [...a.nodes.values()].reduce((t, n) => t + n.size, 0), paused: S.reverse.filter((r) => r.agen === a.gen && r.status === 'paused').length })),
-          escrowVersion: S.escrowPub ? (S.escrowVer && S.escrowVer.kid === await escrowKeyId(S.escrowPub) ? S.escrowVer : { version: null, kid: await escrowKeyId(S.escrowPub), created: null }) : null,
-        } : {}),
       });
     }
-    if (p === '/api/private/drive/escrow' && method === 'POST') {
-      if (!S.impersonatedBy) return fail(403, 'not_impersonating');
-      const wrap = [...S.wraps.values()].find((w) => w.kind === 'escrow') || null;
-      if (wrap) S.escrowUses++;
-      return ok({ ownerId: S.ownerId, escrowPub: S.escrowPub, escrowPriv: S.ownerEscrowPriv, escrowPrivOld: S.escrowPrivOld, wrap, wraps: S.wraps.size });
+    if (!S.enabled && p.startsWith('/api/private/drive/')) return fail(403, 'drive_disabled');
+    if (p === '/api/private/drive/keys' && method === 'POST') {
+      if (S.keysError) return fail(S.keysError === 'keys_missing' ? 503 : 409, S.keysError);
+      if (S.impersonatedBy) S.audit.push({ action: 'drive.keys_used', detail: S.user.id });
+      return ok(await keysOut());
     }
-    if (p === '/api/private/drive/keys' && method === 'PUT') {
-      const has = (k, r) => S.wraps.has(`${k}|${r}`);
-      const OWN = ['pw', 'recovery', 'passkey'];
-      const keyless = S.wraps.size === 0 && ([...S.nodes.values()].some((n) => n.parent === 'root') || !!S.kcv || !!S.escrowPriv || !!S.escrowSignPriv);
-      const first = S.wraps.size === 0 && !keyless;
-      if (body.first === true && !S.impersonatedBy && (S.wraps.size || keyless)) return fail(409, S.wraps.size ? 'drive_exists' : 'drive_keyless');
-      const set = body.set || [];
-      const remove = body.remove || [];
-      const newPw = set.some((w) => w.kind === 'pw');
-      const ownerKeys = ['escrowPriv', 'escrowPub', 'escrowSignPriv', 'escrowSignPub', 'escrowSig'].filter((k) => body[k] !== undefined);
-      if (ownerKeys.length && role !== 'owner') return fail(403, 'owner_only');
-      if (role === 'owner' && set.some((w) => w.kind === 'escrow')) return fail(400, 'escrow_own');
-      if (role !== 'owner') {
-        if (remove.some((w) => w.kind === 'escrow')) return fail(403, 'escrow_required');
-        const escrow = set.find((w) => w.kind === 'escrow');
-        if (first && !S.impersonatedBy) {
-          if (!S.escrowPub) return fail(409, 'escrow_not_ready');
-          if (!escrow || !set.some((w) => OWN.includes(w.kind)) || !body.escrowPin) return fail(400, 'invalid');
-        }
-        if (escrow && (!S.escrowPub || escrowWrapKeyId(escrow) !== await escrowKeyId(S.escrowPub))) return fail(400, 'invalid');
-      }
-      if (S.impersonatedBy) {
-        if (first || keyless) return fail(403, 'impersonating');
-        const addOnly = set.length && set.every((w) => OWN.includes(w.kind) && !has(w.kind, w.ref)) && (!body.driveSalt || (newPw && !has('pw', 'pw'))) && !body.escrowPin && !ownerKeys.length;
-        if (remove.length || !addOnly) return fail(403, 'impersonating');
-      }
-      const signKey = body.escrowSignPub ?? S.escrowSignPub;
-      if ((body.escrowPub || body.escrowSignPub || body.escrowSig) && signKey && !(await escrowKeyEndorsed(signKey, body.escrowPub ?? S.escrowPub, body.escrowSig))) return fail(400, 'invalid');
-      // The key check value: with the first set-up; after it, with every wrap or pin written (the same value).
-      const touches = set.length > 0 || body.escrowPin !== undefined;
-      if (first && set.length && !body.kcv) return fail(400, 'kcv_required');
-      if (!first && touches) {
-        if (!body.kcv) return fail(keyless ? 409 : 400, keyless ? 'drive_keyless' : 'kcv_required');
-        if (!S.kcv) return fail(409, keyless ? 'drive_keyless' : 'kcv_missing');
-        if (body.kcv !== S.kcv) return fail(409, keyless ? 'drive_keyless' : 'kcv_mismatch');
-      }
-      const pwExempt = S.pwStale || !has('pw', 'pw');
-      // Replacing a wrap that is there (other data; the escrow wrap for the same key) is as a removal.
-      const replaces = set.some((w) => {
-        const x = S.wraps.get(`${w.kind}|${w.ref}`);
-        if (!x || x.data === w.data || w.kind === 'pw') return false;
-        return w.kind !== 'escrow' || escrowWrapKeyId(x) === escrowWrapKeyId(w);
-      });
-      const needs = (ownerKeys.length && (S.escrowPub || S.escrowPriv || S.escrowSignPub || S.escrowSignPriv)) || (keyless && touches)
-        || (!first && (remove.some((w) => has(w.kind, w.ref)) || replaces || (newPw && !pwExempt) || (body.driveSalt && S.driveSalt && !(newPw && pwExempt))));
-      if (needs && !body.current && !body.reauth) return fail(400, 'reauth_required');
-      if (needs && body.current && body.current !== S.proof) return fail(403, 'wrong_password');
-      const own = new Set([...S.wraps.values()].filter((w) => OWN.includes(w.kind)).map((w) => `${w.kind}|${w.ref}`));
-      for (const w of remove) own.delete(`${w.kind}|${w.ref}`);
-      for (const w of set) if (OWN.includes(w.kind)) own.add(`${w.kind}|${w.ref}`);
-      if (!first && own.size === 0) return fail(409, 'last_own_wrap');
-      if (body.kcv && S.kcv && body.kcv !== S.kcv) return fail(409, 'kcv_mismatch');
-      if (first && set.length) S.kcv = body.kcv; // with the first wraps; never replaced
-      if (body.driveSalt) S.driveSalt = body.driveSalt;
-      for (const w of remove) S.wraps.delete(`${w.kind}|${w.ref}`);
-      for (const w of set) S.wraps.set(`${w.kind}|${w.ref}`, w);
-      if (newPw) S.pwStale = false;
-      if (body.escrowPriv && S.escrowPriv && body.escrowPub && S.escrowPub) S.escrowPrivOld = { ...S.escrowPrivOld, [await escrowKeyId(S.escrowPub)]: S.escrowPriv };
-      if (body.escrowPriv && body.escrowPub) await newVersion(body.escrowPub);
-      if (body.escrowPriv) S.escrowPriv = body.escrowPriv;
-      if (body.escrowPub) S.escrowPub = body.escrowPub;
-      if (body.escrowSignPriv) S.escrowSignPriv = body.escrowSignPriv;
-      if (body.escrowSignPub) S.escrowSignPub = body.escrowSignPub;
-      if (body.escrowSig) S.escrowSig = body.escrowSig;
-      if (body.escrowPin) S.escrowPin = body.escrowPin;
-      if (body.escrowReset !== undefined) {
-        if (role === 'owner' || !S.ownerReset || body.escrowReset !== S.ownerReset.epoch) return fail(400, 'invalid');
-        if ((S.resetApplied || 0) >= body.escrowReset) return ok({ ok: true }); // once per epoch
-        S.resetApplied = body.escrowReset;
-        S.activity.push({ action: 'drive.escrow_rewrapped', detail: `new escrow key ${escrowWrapKeyId(set.find((w) => w.kind === 'escrow'))}` });
-        S.audit.push({ action: 'drive.escrow_rewrapped', detail: `user=${S.user.username}` });
-      }
-      return ok({ ok: true });
-    }
-    if (p === '/api/private/drive/kit' || p.startsWith('/api/private/drive/kit/') || p === '/api/private/drive/start-over' || p.startsWith('/api/private/drive/archive/')) {
+    // ── the personal kit ─────────────────────────────────────────────────
+    if (p === '/api/private/drive/kit' || p.startsWith('/api/private/drive/kit/')) {
       if (S.impersonatedBy) return fail(403, 'impersonating');
-      if (role !== 'owner') return fail(403, 'owner_only');
-      const kid = S.escrowPub ? await escrowKeyId(S.escrowPub) : null;
       if (p === '/api/private/drive/kit' && method === 'POST') {
-        if (body.event === 'exported') {
-          if (!kid) return fail(409, 'no_escrow');
-          const f = stepFail(body);
-          if (f) return f;
-          S.kit = { version: S.escrowVer && S.escrowVer.kid === kid ? S.escrowVer.version : null, kid, at: tick() };
-          S.audit.push({ action: 'drive.kit_exported', detail: `version=${S.kit.version}` });
-          return ok({ ok: true, kit: S.kit });
-        }
-        if (body.event === 'used') {
-          const f = stepFail(body);
-          if (f) return f;
-          S.audit.push({ action: 'drive.kit_used', detail: `kit version=${body.version}` });
-          return ok({ ok: true });
-        }
-        if (body.event === 'verified') {
-          if (!['complete', 'incomplete', 'failed'].includes(body.verdict)) return fail(400, 'invalid');
-          S.audit.push({ action: 'drive.kit_verified', detail: `verdict=${body.verdict} issues=${(body.issues || []).join(',')}` });
-          return ok({ ok: true });
-        }
-        return fail(400, 'invalid');
-      }
-      if (p === '/api/private/drive/kit/probe' && method === 'POST') {
-        S.escrowUses += S.probes.length;
-        return ok({ probes: S.probes });
-      }
-      if (p === '/api/private/drive/kit/keys' && method === 'PUT') {
-        if (body.escrowPriv && (!kid || !sameKey(body.escrowPriv.pub, S.escrowPub))) return fail(400, 'key_mismatch');
-        if (body.escrowSignPriv && !sameKey(body.escrowSignPriv.pub, S.escrowSignPub)) return fail(400, 'key_mismatch');
-        for (const [k, x] of Object.entries(body.escrowPrivOld || {})) {
-          if (k === kid || !S.escrowKids.includes(k) || await escrowKeyId(x.pub) !== k) return fail(400, 'key_mismatch');
-        }
         const f = stepFail(body);
         if (f) return f;
-        if (body.escrowPriv) S.escrowPriv = body.escrowPriv.data;
-        if (body.escrowSignPriv) S.escrowSignPriv = body.escrowSignPriv.data;
-        for (const [k, x] of Object.entries(body.escrowPrivOld || {})) S.escrowPrivOld = { ...S.escrowPrivOld, [k]: x.data };
-        S.audit.push({ action: 'drive.kit_keys_restored', detail: '' });
-        return ok({ ok: true });
+        const k = await keysOut();
+        S.activity.push({ action: 'drive.kit_exported', detail: `sub-MEKs: ${k.keys.length}` });
+        return ok({ kit: { id: S.user.id, username: S.user.username, userSalt: S.salt, current: k.current, keks: k.keys }, missing: [], broken: [] });
       }
-      if (p === '/api/private/drive/start-over' && method === 'POST') {
-        if (body.confirm !== S.user.username) return fail(400, 'confirm_required');
-        if ([...S.wraps.values()].some((w) => w.kind === 'passkey' || w.kind === 'recovery' || (w.kind === 'pw' && !S.pwStale))) return fail(409, 'drive_unlockable');
-        if (!(await escrowKeyEndorsed(body.escrowSignPub, body.escrowPub, body.escrowSig))) return fail(400, 'invalid');
+      if (p === '/api/private/drive/kit/verify' && method === 'POST') {
+        if (S.kitVerifyLeft-- <= 0) return fail(429, 'rate_limited');
+        const inUse = new Set([...S.nodes.values()].map((n) => n.mek).filter(Boolean));
+        const cur = S.current();
+        const keks = await Promise.all(S.subs.map(async (s) => {
+          const g = body.keks && typeof body.keks[s.id] === 'string' ? body.keks[s.id] : null;
+          const result = g === null ? 'absent' : sameCheck(g, await keyCheckValue(await S.kekOf(s.id), 'kek')) ? 'match' : 'mismatch';
+          return { mekId: s.id, fp: s.fp, from: s.from, until: s.until, inUse: inUse.has(s.id), current: s.id === cur?.id, result };
+        }));
+        const salt = typeof body.salt === 'string' ? (sameCheck(body.salt, await saltCheckValue(S.salt, S.user.id)) ? 'match' : 'mismatch') : 'absent';
+        S.activity.push({ action: 'drive.kit_verified', detail: salt });
+        return ok({ complete: salt === 'match' && keks.filter((x) => x.inUse || x.current).every((x) => x.result === 'match'), salt, keks, extra: [], now: now() });
+      }
+      if (p === '/api/private/drive/kit/restore' && method === 'POST') {
         const f = stepFail(body);
         if (f) return f;
-        // The Drive as it was becomes an archive (chunks untouched); the Drive starts empty.
-        const gen = (S.archives.reduce((g, a) => Math.max(g, a.gen), S.archiveGen || 0)) + 1;
-        S.archiveGen = gen;
-        const nodes = new Map([...S.nodes].filter(([id]) => id !== 'root'));
-        S.archives.push({ gen, at: tick(), nodes, wraps: [...S.wraps.values()], driveSalt: S.driveSalt, escrowPriv: S.escrowPriv, escrowSignPriv: S.escrowSignPriv, escrowPrivOld: S.escrowPrivOld });
-        for (const id of nodes.keys()) S.nodes.delete(id);
-        // As the server: the links' keys are in the archive; the active ones are paused.
-        for (const r of S.reverse) {
-          if (r.agen === undefined || r.agen === null) r.agen = gen;
-          if (r.agen === gen && r.status === 'active') r.status = 'paused';
-        }
-        S.wraps.clear();
-        for (const w of body.set) S.wraps.set(`${w.kind}|${w.ref}`, w);
-        S.archives.at(-1).kcv = S.kcv;
-        S.kcv = body.kcv;
-        Object.assign(S, { driveSalt: body.driveSalt, pwStale: false, escrowPriv: body.escrowPriv, escrowSignPriv: body.escrowSignPriv, escrowPub: body.escrowPub, escrowSignPub: body.escrowSignPub, escrowSig: body.escrowSig, escrowPrivOld: {}, kit: null, escrowPin: null });
-        await newVersion(body.escrowPub);
-        S.ownerReset = { epoch: (S.ownerReset ? S.ownerReset.epoch : 0) + 1, kid: await escrowKeyId(body.escrowPub), signPub: body.escrowSignPub, at: tick() };
-        S.audit.push({ action: 'drive.owner_reset', detail: `version=${S.escrowVer.version} archive ${gen}` });
-        return ok({ ok: true, escrowVersion: S.escrowVer, archive: gen, ownerReset: S.ownerReset });
-      }
-      if ((m = p.match(/^\/api\/private\/drive\/archive\/(\d+)(\/nodes|\/finish)?$/))) {
-        const a = S.archives.find((x) => x.gen === Number(m[1]));
-        if (!a) return fail(404, 'not_found');
-        if (!m[2] && method === 'GET') {
-          const after = u.searchParams.get('after') || '';
-          const all = [...a.nodes.values()].sort((x, y) => (x.id < y.id ? -1 : 1)).filter((n) => n.id > after);
-          const page = all.slice(0, S.archivePage || 500);
-          const out = (n) => ({ ...n, name: typeof n.name === 'string' ? JSON.parse(n.name) : n.name, meta: n.meta ? (typeof n.meta === 'string' ? JSON.parse(n.meta) : n.meta) : null, fk: n.fk ? (typeof n.fk === 'string' ? JSON.parse(n.fk) : n.fk) : null });
-          const links = after ? {} : { reverse: S.reverse.filter((r) => r.agen === a.gen).map((r) => ({ id: r.id, priv: r.priv, status: r.status })) };
-          return ok({ gen: a.gen, at: a.at, escrowPriv: a.escrowPriv, escrowSignPriv: a.escrowSignPriv, escrowPrivOld: a.escrowPrivOld, items: a.nodes.size, nodes: page.map(out), ...links, next: all.length > page.length ? page[page.length - 1].id : null });
-        }
-        const f = stepFail(body);
-        if (!m[2] && method === 'DELETE') {
-          if (body.confirm !== S.user.username) return fail(400, 'confirm_required');
-          if (f) return f;
-          for (const id of a.nodes.keys()) for (const k of [...S.chunks.keys()]) if (k.startsWith(`${id}/`)) S.chunks.delete(k);
-          for (const r of S.reverse) if (r.agen === a.gen && r.status === 'paused') { r.status = 'revoked'; S.audit.push({ action: 'reverse.revoked', detail: `id=${r.id} reason=archive_deleted` }); }
-          S.archives = S.archives.filter((x) => x !== a);
-          S.audit.push({ action: 'drive.archive_deleted', detail: `archive ${a.gen}` });
-          return ok({ ok: true });
-        }
-        if (f) return f;
-        if (m[2] === '/nodes' && method === 'PUT') {
-          for (const x of body.nodes) {
-            const n = a.nodes.get(x.id);
-            if (!n) return fail(404, 'not_found');
-            if (n.parent !== 'root' && !S.nodes.has(n.parent) && !body.nodes.some((y) => y.id === n.parent)) return fail(409, 'parent_first');
-            // A received item comes back as it is (its id only); any other item needs its name re-sealed.
-            if (n.rs ? (x.name !== undefined || x.meta !== undefined || x.fk !== undefined) : x.name === undefined) return fail(400, n.rs ? 'received_as_is' : 'invalid');
-          }
-          for (const x of body.nodes) {
-            const n = a.nodes.get(x.id);
-            if (n.rs) { S.nodes.set(x.id, { ...n }); a.nodes.delete(x.id); continue; }
-            S.nodes.set(x.id, { ...n, name: JSON.stringify(x.name), ...(x.meta !== undefined ? { meta: JSON.stringify(x.meta) } : {}), ...(x.fk !== undefined ? { fk: JSON.stringify(x.fk) } : {}) });
-            a.nodes.delete(x.id);
-          }
-          return ok({ ok: true, restored: body.nodes.length, left: a.nodes.size });
-        }
-        if (m[2] === '/finish' && method === 'POST') {
-          if (a.nodes.size) return fail(409, 'archive_not_empty');
-          for (const [k, x] of Object.entries(body.escrowPrivOld || {})) {
-            if (k === kid || !S.escrowKids.includes(k) || await escrowKeyId(x.pub) !== k) return fail(400, 'key_mismatch');
-          }
-          const links = S.reverse.filter((r) => r.agen === a.gen);
-          const given = body.reverse || {};
-          if (Object.keys(given).length !== links.length || links.some((r) => !given[r.id])) return fail(409, 'reverse_keys_required');
-          for (const [k, x] of Object.entries(body.escrowPrivOld || {})) S.escrowPrivOld = { ...S.escrowPrivOld, [k]: x.data };
-          for (const r of links) {
-            Object.assign(r, { priv: given[r.id], agen: null });
-            if (r.status === 'paused') { r.status = 'active'; S.audit.push({ action: 'reverse.resumed', detail: `id=${r.id}` }); }
-          }
-          S.archives = S.archives.filter((x) => x !== a);
-          S.audit.push({ action: 'drive.archive_restored', detail: `archive ${a.gen}` });
-          return ok({ ok: true });
-        }
-        return fail(405, 'method');
+        const salt = body.salt === S.salt ? 'same' : 'kept';
+        S.activity.push({ action: 'drive.kit_restored', detail: `salt ${salt}` });
+        return ok({ salt, unreadable: [] });
       }
       return fail(404, 'not_found');
     }
+    // ── the upgrade of a Drive made before the key model v2 ──────────────
+    if (p === '/api/private/drive/migrate' && method === 'GET') {
+      return ok(S.legacyState || { state: null, v1Items: 0, v1Links: 0, archived: 0, legacy: false, kcv: null, driveSalt: null, wraps: [] });
+    }
+    if (p === '/api/private/drive/migrate/items' && method === 'GET') return ok(S.legacyItems || { items: [], links: [], next: null });
     if ((m = p.match(/^\/api\/private\/drive\/nodes\/([^/]+)$/))) {
       const n = S.nodes.get(m[1]);
       if (!n) return fail(404, 'not_found');
       if (method === 'GET') return ok({ node: pub(n), children: kids(n.id).map(pub), path: ancestors(n).map(pub) });
       if (method === 'PATCH') {
         if (body.parent && (body.parent === n.id || within(body.parent, n.id))) return fail(409, 'cycle');
-        if (body.name) n.name = body.name;
+        if (body.name) {
+          if (body.ks !== n.ks || body.mek !== n.mek) return fail(409, 'stale_keys');
+          try { await openName(await S.kekOf(n.mek), { userId: S.user.id, mekId: n.mek, salt: n.ks }, 'name', parsed(body.name)); } catch { return fail(400, 'bad_seal'); }
+          n.name = body.name;
+        }
         if (body.parent) n.parent = body.parent;
         return ok({ ok: true });
       }
@@ -380,14 +229,16 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     }
     if (p === '/api/private/drive/reverse' && method === 'POST') {
       if (!/^r[A-Za-z0-9_-]{22}$/.test(body.id) || S.reverse.some((r) => r.id === body.id)) return fail(409, 'exists');
-      const now = Math.floor(Date.now() / 1000);
-      S.reverse.push({ ...body, status: 'active', files: 0, bytes: 0, created: now, expires: now + 7 * 86400 });
-      return ok({ id: body.id, expires: now + 7 * 86400 }, 201);
+      if (body.mek !== S.current()?.id) return fail(409, 'mek_not_current');
+      try { await openLinkKey(await S.kekOf(body.mek), { userId: S.user.id, mekId: body.mek, linkId: body.id }, body.priv); } catch { return fail(400, 'bad_seal'); }
+      const t = Math.floor(Date.now() / 1000);
+      S.reverse.push({ ...body, status: 'active', files: 0, bytes: 0, created: t, expires: t + 7 * 86400 });
+      return ok({ id: body.id, expires: t + 7 * 86400 }, 201);
     }
     if (p === '/api/private/drive/reverse' && method === 'GET') {
       const folder = u.searchParams.get('folder');
       const rows = S.reverse.filter((r) => !folder || r.folder === folder).map((r) => ({
-        id: r.id, folder: r.folder, label: r.label || '', created: r.created, expires: r.expires, status: r.status, locked: false, priv: r.priv,
+        id: r.id, folder: r.folder, label: r.label || '', created: r.created, expires: r.expires, status: r.status, locked: false, priv: r.priv, mek: r.mek ?? null,
         password: !!r.password, note: !!r.note, captcha: r.captcha === true, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
       }));
       return ok({ reverse: rows });
@@ -396,8 +247,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       // As the server: oldest first, pages of S.receivedPage with a cursor; `failed=1` lists the failed ones.
       const failed = u.searchParams.get('failed') === '1';
       const after = u.searchParams.get('after');
-      const archivedKey = (n) => S.reverse.some((r) => r.id === n.rs && r.agen !== undefined && r.agen !== null);
-      const all = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !!n.rfail === failed && !archivedKey(n))
+      const all = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !!n.rfail === failed)
         .sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : 1));
       const from = after ? all.findIndex((n) => `${n.created}.${n.id}` === after) + 1 : 0;
       const page = all.slice(from, from + S.receivedPage);
@@ -407,7 +257,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         return ok({ items: page.map((n) => ({ id: n.id, rs: n.rs, label: S.reverse.find((r) => r.id === n.rs)?.label || '', size: n.size, created: n.created, failed: n.rfail, reason: n.rwhy })), more, next });
       }
       const items = page.map((n) => ({ id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created }));
-      const keys = [...new Set(items.map((i) => i.rs))].map((id) => S.reverse.find((r) => r.id === id)).filter(Boolean).map((r) => ({ id: r.id, priv: r.priv }));
+      const keys = [...new Set(items.map((i) => i.rs))].map((id) => S.reverse.find((r) => r.id === id)).filter(Boolean).map((r) => ({ id: r.id, priv: r.priv, mek: r.mek ?? null }));
       return ok({ items, keys, more, next });
     }
     if ((m = p.match(/^\/api\/private\/drive\/received\/([^/]+)\/failed$/))) {
@@ -418,10 +268,12 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       return ok({ ok: true });
     }
     if ((m = p.match(/^\/api\/private\/drive\/received\/([^/]+)$/)) && method === 'POST') {
+      const f = await checkSeal({ kind: 'file', ...body });
+      if (f) return f;
       const n = S.nodes.get(m[1]);
       if (!n || !n.rs) return fail(409, 'not_received');
       if (!S.nodes.has(body.parent) || S.nodes.get(body.parent).kind !== 'dir') return fail(404, 'not_found');
-      Object.assign(n, { parent: body.parent, name: body.name, meta: body.meta, fk: body.fk, rs: null, rfail: null });
+      Object.assign(n, { parent: body.parent, name: body.name, meta: body.meta, dek: body.dek, ks: body.ks, mek: body.mek, fk: undefined, rs: null, rfail: null });
       S.accepted = (S.accepted || []).concat([{ id: n.id, body }]);
       return ok({ ok: true });
     }
@@ -436,15 +288,18 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     }
     if (p === '/api/private/drive/folders' && method === 'POST') {
       if (!/^[A-Za-z0-9_-]{22}$/.test(body.id) || S.nodes.has(body.id)) return fail(409, 'bad_id');
-      S.nodes.set(body.id, { id: body.id, parent: body.parent, kind: 'dir', name: body.name, size: 0, chunks: 0, state: 'ready', created: 2, updated: 2 });
+      const f = await checkSeal({ kind: 'dir', ...body });
+      if (f) return f;
+      S.nodes.set(body.id, { id: body.id, parent: body.parent, kind: 'dir', name: body.name, ks: body.ks, mek: body.mek, size: 0, chunks: 0, state: 'ready', created: 2, updated: 2 });
       return ok({ id: body.id });
     }
-    if (p === '/api/auth/prelogin' && method === 'POST') return ok({ salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3 });
     if (p === '/api/private/drive/files' && method === 'POST') {
       if (!/^[A-Za-z0-9_-]{22}$/.test(body.id) || S.nodes.has(body.id)) return fail(409, 'bad_id');
+      const f = await checkSeal({ kind: 'file', ...body });
+      if (f) return f;
       if (used() + body.size > S.capacity) return fail(413, 'drive_full');
       const chunks = Math.ceil(body.size / CHUNK);
-      S.nodes.set(body.id, { id: body.id, parent: body.parent, kind: 'file', name: body.name, meta: body.meta, fk: body.fk, size: body.size, chunks, state: 'pending', created: 3, updated: 3 });
+      S.nodes.set(body.id, { id: body.id, parent: body.parent, kind: 'file', name: body.name, meta: body.meta, dek: body.dek, ks: body.ks, mek: body.mek, size: body.size, chunks, state: 'pending', created: 3, updated: 3 });
       return ok({ id: body.id, uploadToken: `tok-${body.id}`, chunks });
     }
     if ((m = p.match(/^\/api\/private\/drive\/files\/([^/]+)\/chunk\/(\d+)$/))) {
@@ -464,70 +319,226 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (S.busyFinalize > 0) { S.busyFinalize--; return fail(409, 'busy'); } // a chunk write still in flight
       for (let i = 0; i < n.chunks; i++) if (!S.chunks.has(`${n.id}/${i}`)) return fail(409, 'incomplete');
       n.state = 'ready';
-      return ok({ ok: true });
+      return ok({ ok: true, ch: 'x'.repeat(43) });
     }
     if (p === '/api/private/drive/shares' && method === 'POST') {
       S.shareBodies.push(body);
       const id = `fSHARE${S.shareBodies.length}`;
-      const now = Math.floor(Date.now() / 1000);
-      S.shares.push({ id, nodes: [...body.nodes], label: body.label || '', created: now, expires: now + 86400, views_total: body.views, left: body.views, status: 'active' });
+      const t = Math.floor(Date.now() / 1000);
+      S.shares.push({ id, nodes: [...body.nodes], label: body.label || '', created: t, expires: t + 86400, views_total: body.views, left: body.views, status: 'active' });
       return ok({ id, deletetoken: `dt${S.shareBodies.length}` });
     }
-    if (/^\/api\/private\/admin\/drive\/escrow\/[^/]+$/.test(p)) {
-      const wraps = S.userWraps || [];
-      return ok({ wrap: wraps.find((w) => w.kind === 'escrow') || null, wraps: wraps.length });
-    }
-    if ((m = p.match(/^\/api\/private\/admin\/drive\/keys\/([^/]+)$/))) {
-      // The owner, for another user: a pw wrap after a reset (the key check value
-      // must be the Drive's), or the first set-up of a Drive that has no wrap.
-      S.adminKeys.push({ userId: m[1], body });
-      if (S.driveOff.has(m[1])) return fail(409, 'drive_disabled');
-      const d = S.userDrives[m[1]];
-      if (!body.kcv) return fail(400, 'kcv_required');
-      if (body.first) {
-        if (d && d.wraps.length) return fail(409, 'drive_exists');
-        if (!S.escrowPub) return fail(409, 'escrow_not_ready');
-        const kinds = (body.set || []).map((w) => w.kind).sort().join();
-        if (kinds !== 'escrow,pw' || escrowWrapKeyId(body.set.find((w) => w.kind === 'escrow')) !== await escrowKeyId(S.escrowPub) || !body.escrowPin) return fail(400, 'invalid');
-        S.userDrives[m[1]] = { wraps: body.set, driveSalt: body.driveSalt, escrowPin: body.escrowPin, kcv: body.kcv };
-        S.audit.push({ action: 'drive.created_by_owner', detail: m[1] });
-        return ok({ ok: true, created: true });
-      }
-      if (d && !d.kcv) return fail(409, 'kcv_missing');
-      if (d && d.kcv !== body.kcv) return fail(409, 'kcv_mismatch');
-      return ok({ ok: true });
+    // ── Admin → Security → Keys (the owner's) ──────────────────────────────
+    if (p.startsWith('/api/private/admin/keys')) return keysRoute(method, p, body);
+    if (p === '/api/private/admin/users' && method === 'GET') return ok({ users: [S.user, ...(S.otherUsers || [])] });
+    if (p === '/api/private/admin/drive/migration' && method === 'GET') return ok({ drives: S.migrationDrives || [], left: (S.migrationDrives || []).filter((d) => d.state !== 'done').length, legacyEscrow: false });
+    // The owner's archive of the release before (S.archive: { items, bytes, received, links }).
+    if (p === '/api/private/admin/drive/archive') {
+      if (method === 'GET') return ok({ ok: true, items: 0, bytes: 0, received: 0, links: [], ...(S.archive || {}) });
+      const f = stepFail(body || {});
+      if (f) return f;
+      if (body.confirm !== S.user.username) return fail(400, 'confirm');
+      const a = S.archive || { items: 0, links: [] };
+      S.archive = null;
+      S.audit.push({ action: 'drive.archive_deleted', detail: `items=${a.items}` });
+      return ok({ ok: true, items: a.items, bytes: a.bytes || 0, links: a.links.length });
     }
     return fail(404, `unrouted ${method} ${p}`);
   });
+
+  // The keyring routes, as src/routes/keys.js answers them (the parts the pages use).
+  S.candidates = new Map();
+  S.job = null;
+  const status = async () => {
+    const t = now();
+    return {
+      ok: true, ready: true, lost: false, root: { fp: await keyFingerprint(S.root), created: 1700000000, changing: !!S.rootOld, oldFp: S.rootOld ? await keyFingerprint(S.rootOld) : null, oldOrigin: S.rootOld ? (S.rootOldOrigin || 'changed') : null, check: S.rootOld ? (S.rootCheck || null) : null },
+      subs: S.subs.map((s) => ({ id: s.id, fp: s.fp, from: s.from, until: s.until, created: s.created, note: s.note, status: mekStatus(S.subs, s, t), opens: true })),
+      current: S.current()?.id ?? null, job: S.job, kit: S.kitRecord, kitFresh: !!S.kitRecord && S.kitRecord.subs === S.subs.length, users: 2, now: t,
+    };
+  };
+  async function keysRoute(method, p, body) {
+    if (role !== 'owner' || S.impersonatedBy) return fail(403, S.impersonatedBy ? 'impersonating' : 'owner_only');
+    let m;
+    if (p === '/api/private/admin/keys' && method === 'GET') return ok(await status());
+    if (p === '/api/private/admin/keys/usage') {
+      const counts = {};
+      for (const n of S.nodes.values()) if (n.mek) counts[n.mek] = (counts[n.mek] || 0) + 1;
+      return ok({ ok: true, counts, v1: 0, drives: 1 });
+    }
+    if (p === '/api/private/admin/keys/jobs/step') {
+      if (S.job && !S.job.finished && S.job.kind === 'root') {
+        S.rootOld = null;
+        Object.assign(S.job, { finished: true, result: { ok: true, message: 'Every item is re-sealed under the new root MEK and was checked; the old one was removed.' } });
+      }
+      if (S.job && !S.job.finished) {
+        const from = S.job.from;
+        const cur = S.current();
+        for (const n of S.nodes.values()) {
+          if (n.mek !== from || !cur) continue;
+          const kek = await S.kekOf(from);
+          const at = { userId: S.user.id, mekId: from, salt: n.ks };
+          const name = await openName(kek, at, 'name', parsed(n.name));
+          const meta = n.meta ? await openName(kek, at, 'meta', parsed(n.meta)) : null;
+          const dek = n.kind === 'file' ? await openDek(kek, at, parsed(n.dek)) : null;
+          const ks = newSalt();
+          const kek2 = await S.kekOf(cur.id);
+          const at2 = { userId: S.user.id, mekId: cur.id, salt: ks };
+          Object.assign(n, { ks, mek: cur.id, name: await sealName(kek2, at2, 'name', name), ...(meta ? { meta: await sealName(kek2, at2, 'meta', meta) } : {}), ...(dek ? { dek: await sealDek(kek2, at2, dek) } : {}) });
+          S.job.done++;
+        }
+        if (S.job.remove) S.subs = S.subs.filter((s) => s.id !== from);
+        Object.assign(S.job, { finished: true, drive: 1, drives: 1, result: { ok: true, message: `Nothing is sealed under ${from} any more.` } });
+      }
+      return ok({ job: S.job });
+    }
+    if (p === '/api/private/admin/keys/verify') {
+      // Check values only, compared here (read-only).
+      const t = now();
+      const subs = await Promise.all(S.subs.map(async (x) => ({ id: x.id, fp: x.fp, from: x.from, until: x.until, status: mekStatus(S.subs, x, t),
+        result: typeof body.subs?.[x.id] === 'string' ? (sameCheck(body.subs[x.id], await keyCheckValue(x.key, 'mek')) ? 'match' : 'mismatch') : 'absent' })));
+      const root = typeof body.root === 'string' ? (sameCheck(body.root, await keyCheckValue(S.root, 'mek')) ? 'match' : 'mismatch') : 'absent';
+      const given = body.salts?.[S.user.id];
+      const salts = { total: 1, match: 0, mismatch: 0, absent: 0, extra: 0 };
+      if (typeof given !== 'string') salts.absent++; else if (sameCheck(given, await saltCheckValue(S.salt, S.user.id))) salts.match++; else salts.mismatch++;
+      S.verifyBodies = (S.verifyBodies || []).concat([body]);
+      return ok({ ok: true, complete: root === 'match' && subs.every((x) => x.result === 'match') && salts.match === 1, now: t, root, subs, salts, extraSubs: [] });
+    }
+    if (p === '/api/private/admin/keys/import') {
+      { const f2 = stepFail(body); if (f2) return f2; } // the preview too (as the server: audit A F7)
+      S.importBodies = (S.importBodies || []).concat([body]);
+      return ok({ ok: true, dryRun: body.dryRun !== false, keys: { root: 'same', subs: [], salts: { restored: 0, same: 1, kept: 0, unknown: 0 } }, users: (body.document.users || []).map((u) => ({ id: u.id, username: u.username, keks: { match: (u.keks || []).length, mismatch: 0, unknown: 0 } })) });
+    }
+    const f = stepFail(body || {});
+    if (f) return f;
+    if (p === '/api/private/admin/keys/candidate') {
+      const key = newKey();
+      const id = b64urlFromBytes(randomBytes(12));
+      S.candidates.set(id, key);
+      return ok({ ok: true, id, key: b64urlFromBytes(key), fp: await keyFingerprint(key), expires: now() + 600 });
+    }
+    if (p === '/api/private/admin/keys/subs' && method === 'POST') {
+      const key = body.candidate ? S.candidates.get(body.candidate) : bytesFromB64url(body.key);
+      if (!key) return fail(410, 'candidate_expired');
+      S.candidates.delete(body.candidate);
+      const s = await S.addSub({ from: body.rotate || !body.from ? now() : body.from, key, note: body.note || '' });
+      S.audit.push({ action: body.rotate ? 'keys.rotated' : 'keys.added', detail: s.id });
+      return ok({ ok: true, id: s.id, fp: s.fp, from: s.from });
+    }
+    if ((m = p.match(/^\/api\/private\/admin\/keys\/subs\/([^/]+)(\/current|\/show)?$/))) {
+      const s = S.subs.find((x) => x.id === m[1]);
+      if (!s) return fail(404, 'not_found');
+      if (m[2] === '/show') { S.audit.push({ action: 'keys.viewed', detail: s.fp }); return ok({ ok: true, key: b64urlFromBytes(s.key), fp: s.fp }); }
+      if (m[2] === '/current') {
+        const t = now();
+        for (const x of S.subs) { if (x === s) { x.until = null; if (x.from > t) x.from = t; } else if (x.until === null || x.until > t) x.until = Math.max(x.from, t); }
+        return ok({ ok: true });
+      }
+      if (method === 'PATCH') { Object.assign(s, { from: body.from ?? s.from, until: body.until === undefined ? s.until : body.until, note: body.note ?? s.note }); return ok({ ok: true }); }
+      if (method === 'DELETE') {
+        if ([...S.nodes.values()].some((n) => n.mek === s.id)) return fail(409, 'in_use');
+        S.subs = S.subs.filter((x) => x !== s);
+        return ok({ ok: true });
+      }
+    }
+    if (p === '/api/private/admin/keys/root/show') return ok({ ok: true, key: b64urlFromBytes(S.root), fp: await keyFingerprint(S.root) });
+    // A root change that could not finish (S.rootOld set): run it again, go back, or drop the old root.
+    if (p === '/api/private/admin/keys/jobs' && method === 'POST' && body.kind === 'root') {
+      if (!S.rootOld) return fail(409, 'not_changing');
+      S.rootJobs = (S.rootJobs || 0) + 1;
+      S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'verify', done: 0, failed: S.stuckIds?.length || 0, failedIds: S.stuckIds || [], pass: 1, verifying: true, finished: true, result: S.stuckIds?.length ? { ok: false, message: 'Still does not open.' } : { ok: true, message: 'Every item is re-sealed.' } };
+      // The root change's check, kept with it (as the Directory's mek.rootCheck).
+      S.rootCheck = S.stuckIds?.length ? { failed: S.stuckIds.length, ids: S.stuckIds } : null;
+      if (!S.stuckIds?.length) S.rootOld = null;
+      return ok({ ok: true, job: S.job });
+    }
+    if (p === '/api/private/admin/keys/root/undo') {
+      if (!S.rootOld) return fail(409, 'not_changing');
+      if (S.rootOldOrigin === 'restored' && !S.rootOldProven) return fail(409, 'unproven_root');
+      [S.root, S.rootOld] = [S.rootOld, S.root];
+      S.rootOldOrigin = 'changed';
+      S.rootCheck = null;
+      S.audit.push({ action: 'keys.root_changed', detail: 'undone' });
+      S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'items', done: 0, failed: 0, failedIds: [], pass: 1, finished: false, result: null };
+      return ok({ ok: true, job: S.job });
+    }
+    if (p === '/api/private/admin/keys/root/drop-old') {
+      if (!S.rootOld) return fail(409, 'not_changing');
+      const fp = await keyFingerprint(S.rootOld);
+      if (![fp, `${fp.slice(0, 4)}-${fp.slice(4, 8)}-${fp.slice(8)}`].includes(String(body.confirm || '').trim())) return fail(400, 'confirm');
+      if (!S.rootCheck) return fail(409, 'not_checked');
+      const lost = S.rootCheck.failed;
+      S.rootOld = null;
+      S.rootCheck = null;
+      S.audit.push({ action: 'keys.root_old_dropped', detail: `items left unreadable: ${lost}` });
+      return ok({ ok: true, lost, ids: [] });
+    }
+    if (p === '/api/private/admin/keys/jobs' && method === 'POST') {
+      S.job = { kind: 'reseal', from: body.from, remove: !!body.remove, drives: 1, drive: 1, phase: 'items', done: 0, failed: 0, failedIds: [], pass: 1, finished: false, result: null };
+      return ok({ ok: true, job: S.job });
+    }
+    if (p === '/api/private/admin/keys/kit') {
+      S.kitRecord = { at: now(), root: await keyFingerprint(S.root), subs: S.subs.length };
+      S.audit.push({ action: 'keys.kit_exported', detail: '' });
+      return ok({ ok: true, kit: S.kitRecord, material: {
+        made: now(), current: S.current()?.id ?? null, root: { key: b64urlFromBytes(S.root), fp: await keyFingerprint(S.root), created: 1700000000 },
+        subs: S.subs.map((s) => ({ id: s.id, key: b64urlFromBytes(s.key), fp: s.fp, from: s.from, until: s.until, created: s.created, note: s.note })),
+        salts: { [S.user.id]: { salt: S.salt, username: S.user.username } },
+      } });
+    }
+    if (p === '/api/private/admin/keys/export') {
+      const doc = { format: 'secbin-keys-export/1', created: now(), origin: 'https://bin.example', users: [] };
+      if (body.root) doc.root = { key: b64urlFromBytes(S.root), fp: await keyFingerprint(S.root), created: 1700000000 };
+      const want = body.subs === 'all' ? S.subs : S.subs.filter((x) => (body.subs || []).includes(x.id));
+      if (want.length) doc.subs = want.map((x) => ({ id: x.id, key: b64urlFromBytes(x.key), fp: x.fp, from: x.from, until: x.until, created: x.created, note: x.note }));
+      if ((body.salts || []).length) doc.salts = Object.fromEntries(body.salts.filter((id) => id === S.user.id).map((id) => [id, S.salt]));
+      for (const x of body.users || []) {
+        const e = { id: x.id, username: x.id === S.user.id ? S.user.username : 'other' };
+        if (x.keks) e.keks = await Promise.all(S.subs.map(async (sub) => ({ mekId: sub.id, fp: sub.fp, from: sub.from, until: sub.until, kek: b64urlFromBytes(await S.kekOf(sub.id)) })));
+        if (x.deks) e.deks = [];
+        doc.users.push(e);
+      }
+      S.exportBodies = (S.exportBodies || []).concat([body]);
+      return ok({ document: doc });
+    }
+    if ((m = p.match(/^\/api\/private\/admin\/keys\/users\/([^/]+)\/view$/))) {
+      if (body.what === 'deks') return ok({ userId: m[1], username: S.user.username, files: [], next: null });
+      return ok({ userId: m[1], username: S.user.username, salt: S.salt, current: S.current()?.id, items: 0,
+        keks: await Promise.all(S.subs.map(async (sub) => ({ mekId: sub.id, fp: sub.fp, from: sub.from, until: sub.until, kek: b64urlFromBytes(await S.kekOf(sub.id)), inUse: false }))) });
+    }
+    return fail(404, `unrouted ${method} ${p}`);
+  }
   return S;
 }
 
 /**
- * Store a tree as the browser would have written it under `dk` (sealed names
- * and metadata, chunked content): `tree` = { name: bytes (a file) | { … } (a
- * folder) }. → Map(path → node id).
+ * Store a tree as the browser would have written it under the user's current
+ * KEK (sealed names and metadata, a DEK per file, chunked content): `tree` =
+ * { name: bytes (a file) | { … } (a folder) }. → Map(path → node id).
  */
-export async function seedTree(S, dk, tree, parent = 'root', prefix = '', ids = new Map()) {
-  // A real Drive has its key check value from its first set-up (the browser proves a tab key against it).
-  if (!S.kcv) S.kcv = await keyCheckValue(dk);
-  const keys = await deriveSubkeys(dk);
+export async function seedTree(S, tree, parent = 'root', prefix = '', ids = new Map()) {
+  await S.ready;
+  const cur = S.current();
+  const kek = await S.kekOf(cur.id);
   for (const [name, v] of Object.entries(tree)) {
     const id = b64urlFromBytes(randomBytes(16));
     const path = prefix + name;
-    const nameField = JSON.stringify(await sealField(keys.names, 'name', id, name));
+    const ks = newSalt();
+    const at = { userId: S.user.id, mekId: cur.id, salt: ks };
+    const nameField = JSON.stringify(await sealName(kek, at, 'name', utf8(name)));
     if (v instanceof Uint8Array) {
-      const fk = randomBytes(32);
+      const dek = randomBytes(32);
       const n = Math.ceil(v.length / CHUNK);
-      const key = await importFileKey(b64urlFromBytes(fk));
+      const key = await importFileKey(b64urlFromBytes(dek));
       for (let i = 0; i < n; i++) S.chunks.set(`${id}/${i}`, await encryptChunk(key, i, n, v.slice(i * CHUNK, (i + 1) * CHUNK)));
       S.nodes.set(id, {
-        id, parent, kind: 'file', name: nameField, size: v.length, chunks: n, state: 'ready', created: 1700000000, updated: 1700000000,
-        meta: JSON.stringify(await sealField(keys.names, 'meta', id, JSON.stringify({ type: 'text/plain', mtime: 1700000000000, size: v.length }))),
-        fk: JSON.stringify(await sealField(keys.files, 'fk', id, fk)),
+        id, parent, kind: 'file', name: nameField, size: v.length, chunks: n, state: 'ready', created: 1700000000, updated: 1700000000, ks, mek: cur.id,
+        meta: JSON.stringify(await sealName(kek, at, 'meta', utf8(JSON.stringify({ type: 'text/plain', mtime: 1700000000000, size: v.length })))),
+        dek: JSON.stringify(await sealDek(kek, at, dek)),
       });
     } else {
-      S.nodes.set(id, { id, parent, kind: 'dir', name: nameField, size: 0, chunks: 0, state: 'ready', created: 1700000000, updated: 1700000000 });
-      await seedTree(S, dk, v, id, `${path}/`, ids);
+      S.nodes.set(id, { id, parent, kind: 'dir', name: nameField, size: 0, chunks: 0, state: 'ready', created: 1700000000, updated: 1700000000, ks, mek: cur.id });
+      await seedTree(S, v, id, `${path}/`, ids);
     }
     ids.set(path, id);
   }

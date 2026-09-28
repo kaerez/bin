@@ -11,7 +11,9 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { owner, makeUser, login, fetchJson, cookieOf, salt16, proofFor, freshIp, ORIGIN, USER_PW, intent, createNote } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
-import { enableDrive, escrowWrap, mkdir, uploadFile, getChunk, enc, del, KCV } from './drive-helpers.js';
+import { enableDrive, mkdir, uploadFile, getChunk, del, driveKeys } from './drive-helpers.js';
+import { sealName } from '../public/js/drivekeys.js';
+import { utf8 } from '../public/js/bytes.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 
@@ -197,25 +199,23 @@ describe('the Drive while impersonating (docs/DRIVE.md §9)', () => {
     expect(r.status).toBe(201);
     return (await r.json()).id;
   }
-  const wrap = () => `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}`;
 
   it('folders, uploads, reads, renames, shares and deletes show in the user’s activity as theirs, exactly like their own', async () => {
     const u = await makeUser('imp-drive');
     await enableDrive(u.id);
-    const keys = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: u.cookie, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrap() }, await escrowWrap()], escrowPin: enc(40), kcv: KCV } });
-    expect(keys.status).toBe(200);
     // What the user does themselves, for comparison.
     const own = await uploadFile(u.cookie, 'root', 20);
     expect((await getChunk(u.cookie, own.id, 0)).status).toBe(200);
     const ownRows = await ownLog(u.cookie);
 
     const ic = await impersonate(u.id);
-    expect((await fetchJson('/api/private/drive/escrow', { method: 'POST', cookie: ic, body: {} })).status).toBe(200);
+    const k = await driveKeys(ic, { fresh: true }); // the user's keys, with no prompt (admin audit)
     const folder = await mkdir(ic);
     expect(folder.res.status).toBe(201);
     const up = await uploadFile(ic, folder.id, 30);
     expect((await getChunk(ic, own.id, 0)).status).toBe(200);
-    expect((await fetchJson(`/api/private/drive/nodes/${up.id}`, { method: 'PATCH', cookie: ic, headers: intent, body: { name: enc() } })).status).toBe(200);
+    const name = await sealName(k.keks.get(up.fields.mek), { userId: u.id, mekId: up.fields.mek, salt: up.fields.ks }, 'name', utf8('renamed'));
+    expect((await fetchJson(`/api/private/drive/nodes/${up.id}`, { method: 'PATCH', cookie: ic, headers: intent, body: { name, ks: up.fields.ks, mek: up.fields.mek } })).status).toBe(200);
     const sid = await driveShare(ic, [up.id]);
     expect((await call(ic)('PATCH', `/api/private/shares/${sid}`, { label: 'drive share' })).status).toBe(200);
     expect((await del(ic, folder.id)).status).toBe(200);
@@ -226,17 +226,17 @@ describe('the Drive while impersonating (docs/DRIVE.md §9)', () => {
     }
     await invisible(u.cookie);
     // Rows done as the user look exactly like the user's own: same actions,
-    // same detail format, no escrow use (the owner's key, admin audit only).
+    // same detail format, no use of the keys (admin audit only).
     const rows = (await ownLog(u.cookie)).filter((r) => !ownRows.some((x) => x.id === r.id));
-    expect(rows.some((r) => /escrow|owner/i.test(`${r.action} ${r.detail}`))).toBe(false);
+    expect(rows.some((r) => /escrow|owner|keys/i.test(`${r.action} ${r.detail}`))).toBe(false);
     const fmt = (r) => `${r.action} ${r.detail.replace(/[A-Za-z0-9_-]{22}/g, '<id>')}`;
     const byOwnerRead = rows.find((r) => r.action === 'drive.file_read');
     const byUserRead = ownRows.find((r) => r.action === 'drive.file_read');
     expect(fmt(byOwnerRead)).toBe(fmt(byUserRead));
     expect(fmt(rows.find((r) => r.action === 'drive.file_uploaded'))).toBe(fmt(ownRows.find((r) => r.action === 'drive.file_uploaded')));
-    const esc = (await audit(u.id)).filter((r) => r.action === 'drive.escrow_used');
-    expect(esc).toHaveLength(1);
-    expect(esc[0]).toMatchObject({ actor: 'owner', imp: 1, adm: 1 });
+    const used = (await audit(u.id)).filter((r) => r.action === 'drive.keys_used');
+    expect(used.length).toBeGreaterThanOrEqual(1);
+    for (const r of used) expect(r).toMatchObject({ actor: 'owner', imp: 1, adm: 1 });
   });
 });
 

@@ -84,8 +84,8 @@ never committed) and `node_modules`.
   requirement (accessibility, impersonation, convenience, access). No change may weaken an
   existing control: human check, step-up, CSRF / cross-site guards, rate limits and lockouts,
   session limits, token and grant scoping, CSP / Trusted Types, audit logging, and the
-  zero-knowledge design (the server never holds a key that opens user content; owner escrow is
-  the one documented exception). When two requirements conflict, keep the security control and
+  zero-knowledge design (the server never holds a key that opens user content; the Drive is the
+  one documented exception, below). When two requirements conflict, keep the security control and
   ask the maintainer.
 - **Recovery codes** always work instead of the password and/or passkey (a full override).
 - **Admin password resets never remove** an account's passkeys or recovery codes.
@@ -103,19 +103,20 @@ never committed) and `node_modules`.
   region or national standard.
 - **Reverse shares:** an optional password gates the anonymous uploader only; uploads land in the
   user's chosen drive folder; the user never needs that password.
-- **Starting over without a kit (an accepted exception to "Security first", this case only):**
-  when the server reports that the owner started their Drive over without a recovery kit, users'
-  browsers move their Drives to the new escrow key automatically, once per owner reset (the
-  reset's epoch one more than the pinned one, the escrow key signed by the reset's signing key),
-  every time and with no time limit, without the user's approval. This is not limited to a
-  window after a real reset: nothing in a user's browser ties a reported reset to a real one,
-  so anyone able to change the server's responses can fake an owner reset at any time, and
-  again at each later epoch, and so can anyone able to complete AUTHN owner recovery and then
-  start over (anyone with access to the Worker's `AUTHN` secret configuration). Every other unsigned escrow key change keeps the signed-key pin (the notice
-  and "Trust the new key"). The rules are in one function (`resetApplies`,
-  `public/js/driveclient.js`); the maintainer may change this design.
-- **The Drive key never changes** on a password change or an admin reset: only the `pw` wrap is
-  replaced, proven to be of the same DK by the key check value.
+- **The Drive is not end-to-end (an accepted exception to the zero-knowledge design, the Drive
+  only):** Drive files are encrypted in the browser, but the server derives every user's KEK
+  from keys it keeps (the root MEK and the sub-MEKs in the Directory, with the user salt), so the
+  server, the owner, and anyone with a copy of the Directory's storage can decrypt every Drive
+  file (docs/DRIVE.md §2, SECURITY.md "Drive keys"). A leak of R2 or of a Drive object without the
+  Directory reveals nothing. Notes and file shares stay end-to-end. Drive shares (their content
+  is Drive ciphertext whose DEK is also sealed under the KEK) and reverse-share uploads (the
+  link's private key is sealed under the KEK) are not end-to-end against the server, like the
+  Drive itself. Every other control stays: the step-up for every key action, keys in the admin
+  audit by fingerprint only, never a key in a log, and the Worker opening DEKs and names only in
+  memory.
+- **The Drive keys never change** on a password change, an admin reset or an AUTHN owner
+  recovery: they are not tied to any credential. Only the owner changes them (Admin → Security →
+  Keys), and restores and imports never replace a working key.
 - **Impersonation:** the owner can do everything the user can, the Drive included; it is
   invisible to the user (the user's activity shows the actions as theirs), and the owner-only
   admin audit keeps the start, end and real actor.

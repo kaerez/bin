@@ -18,7 +18,7 @@ try {
 }
 if (drive) {
   // The profile names the account, so the client needs no session lookup; while
-  // the owner acts as a user, the tab's key slot keeps the owner's own key.
+  // the owner acts as a user, the server hands this page the user's KEKs (in its memory only).
   const user = { id: profile.user.id, role: profile.user.role, impersonating: !!profile.impersonatedBy };
   startDrive(mount, { drive, profile, user, revoke: revokeShare });
 }

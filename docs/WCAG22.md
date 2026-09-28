@@ -25,6 +25,23 @@ covers how secbin presents it, not the content itself.
 Drive, with the owner recovery kit, start over and owner-created Drives), 3df2e6f (reverse
 shares) and 5ae4f93 (CSRF tokens, with their "session changed" banner; the stray-text fix).
 
+**The Drive key model v2** (after this report). It removes views this report checked: the
+Drive's unlock and set-up screens, "Drive is not ready yet" and the owner's notice for a user with
+no Drive, the owner recovery kit, starting over and its archive box on the Drive page, the
+create-user form's Drive note, the reset's "unlock your own Drive" box and the automatic move to a
+reset's escrow key. The rows below that name them describe the release before. Their
+replacements — the upgrade box of a Drive made before (with its password, recovery-kit and
+"Retire these links" forms), the Drive's notices when its keys cannot be had, the personal kit
+(Account), and Admin → Security → Keys (the keyring, a root change that could not finish, the key
+kit, the Drive upgrade and the archive of the release before) and Import / export → Drive keys —
+follow the same fixes: every form's message sits in a status line present from the start
+(`public/dashboard/js/kit-ui.js` `liveMsg`), a kit's passphrase warning describes its field while
+it shows, a notice in place of the Drive is said by the page's own status line, and an open Drive
+closes, with its keys and dialogs, when the session ends or the browser is signed in as someone
+else (`test-dom/drive-kits.test.js`, `test-dom/drive.test.js`, `test-dom/reverse.test.js`). The
+Playwright passes of this report (`axe-audit`, `a11y-tree`, `wcag22.mjs`) have not been run on
+those new views yet.
+
 **How it was checked** (all in Chromium, driven by Playwright, against `wrangler dev`):
 
 - *axe-core*, WCAG 2.0/2.1/2.2 A and AA rules, every page and state, both themes, desktop and
@@ -176,7 +193,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 2.4.13 Focus Appearance | 2.2 only | Supports | The focus indicator is a 2 px ring with a 2 px gap (`public/css/styles.css:119`, `public/css/styles.css:308`): at least a 2 px perimeter, ≥3:1 against the unfocused state (the ring is ≥7:1 on every surface). | All |
 | 2.5.5 Target Size (Enhanced) | AAA | Supports | **Added:** the widget's "Large buttons and links" mode makes every target at least 44×44 (`public/css/styles.css:1194`; inline links in text are exempt). Measured: `wcag22.mjs --aaa` "2.5.5": 0 on 23 states. The accessibility button itself is 44×44 on every page. | All |
 | 2.5.6 Concurrent Input Mechanisms | AAA | Supports | Keyboard, mouse, touch and pen all work together; nothing is restricted to one input. | All |
-| 3.1.3 Unusual Words | AAA | Supports | **Added:** a glossary of the technical words (`public/accessibility/index.html:120`), linked from every page's footer; its "Drive" and "Escrow key" say that the administrator can open every Drive with the escrow key. What a user reads in the Drive calls the owner "the administrator" everywhere ("Drive is not ready yet" included). | All |
+| 3.1.3 Unusual Words | AAA | Supports | **Added:** a glossary of the technical words (`public/accessibility/index.html:120`), linked from every page's footer; its "Drive", "KEK", "DEK" and "MEK" say that the server (and the administrator) can open every Drive, and "Receive files (link)" that uploads are not end-to-end either. What a user reads in the Drive calls the owner "the administrator" everywhere ("Drive is not ready yet" included). | All |
 | 3.1.4 Abbreviations | AAA | Supports | **Added:** the glossary expands every abbreviation the interface uses (AES-256-GCM, API, CAPTCHA, CIDR, CLI, HKDF, IP, KB/MB/GB, m/h/d, PDF, QR, TOTP, URL, WCAG). | All |
 | 3.1.5 Reading Level | AAA | Does not support | The interface text is short and plain, but its subject (encryption, access keys, administration) needs words beyond lower-secondary reading level, and there is no simplified version. The glossary explains the terms. Shared notes are the senders' own text. | All |
 | 3.1.6 Pronunciation | AAA | Not applicable | No words whose meaning depends on their pronunciation in context. | — |

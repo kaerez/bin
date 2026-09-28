@@ -13,12 +13,12 @@
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { owner, fetchJson, intent, freshIp, proofFor, USER_PW, cookieOf, login } from './helpers.js';
-import { enc, driveLimits, mkdir } from './drive-helpers.js';
+import { driveLimits, mkdir, driveKeys } from './drive-helpers.js';
 import { SESSION_IDLE_SEC, MAX_SESSIONS_PER_NET, MAX_SESSIONS, RECEIVE_MAX_SEC } from '../src/drive-do.js';
-import { createReverseKey, sealReversePriv, linkHash, sealNote } from '../public/js/reversekeys.js';
+import { createReverseKey, linkHash, sealNote } from '../public/js/reversekeys.js';
 import { randomBytes } from '../public/js/bytes.js';
 import {
-  DK, dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, reserve, send, received,
+  sealLinkPriv, takeInAny, dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, reserve, send, received,
 } from './reverse-helpers.js';
 
 let oc;
@@ -161,8 +161,9 @@ describe('R4-L3: the owner acting as the user is in the admin audit for take-in,
     expect(items).toHaveLength(2);
     const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
     expect(ic).toBeTruthy();
+    await driveKeys(ic); // the user's keys for this session (their own admin-audit row: drive.keys_used)
     const before = (await audit(u.id)).length;
-    const acc = await fetchJson(`/api/private/drive/received/${items[0].id}`, { method: 'POST', cookie: ic, body: { parent: 'root', name: enc(), meta: enc(), fk: enc(32) } });
+    const acc = await takeInAny(ic, items[0].id, 'root', {});
     expect(acc.status).toBe(200);
     expect((await fetchJson(`/api/private/drive/received/${items[1].id}/failed`, { method: 'POST', cookie: ic, body: { reason: 'name' } })).status).toBe(200);
     expect((await fetchJson(`/api/private/drive/received/${items[1].id}/failed`, { method: 'DELETE', cookie: ic, headers: intent })).status).toBe(200);
@@ -193,7 +194,7 @@ describe('R4-I1: a reverse-share id is never claimable again', () => {
   const reclaim = async (cookie, ra, note) => {
     const { privateKey } = await createReverseKey();
     const body = {
-      id: ra.id, folder: 'root', priv: await sealReversePriv(DK, ra.id, privateKey), lh: await linkHash(ra.pub),
+      id: ra.id, folder: 'root', ...(await sealLinkPriv(cookie, ra.id, privateKey)), lh: await linkHash(ra.pub),
       note: await sealNote(ra.pub, ra.id, note), expire: '7d', current: proofFor(USER_PW),
     };
     return fetchJson('/api/private/drive/reverse', { method: 'POST', cookie, body, headers: intent });

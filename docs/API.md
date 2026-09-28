@@ -6,9 +6,12 @@ and revoke** them. A key never signs in and never reaches the account itself (pr
 password, passkeys, API keys, activity) or the admin panel. The CLI
 ([`cli/`](../cli/README.md)) uses exactly this API.
 
-> The content of every share is **encrypted by the client before it is sent** (SPEC.md §2–§5).
-> The server stores ciphertext and never sees the key, which travels only in the link's
-> `#fragment`. So creating a note or a file share needs a client that encrypts — the
+> The content of every note and file share is **encrypted by the client before it is sent**
+> (SPEC.md §2–§5). The server stores ciphertext and never sees the key, which travels only in
+> the link's `#fragment`. Drive shares and "Receive files" links (made in the Drive page, not
+> with an API key) are different: the server holds the keys of Drive files, so it can decrypt
+> them and what those links receive ([DRIVE.md](DRIVE.md) §2). So creating a note or a file
+> share needs a client that encrypts — the
 > [`secbin` CLI](../cli/README.md) or the examples in [`examples/api/`](../examples/api/) —
 > while listing, receipts, labels, extensions, revocation and deletion work with plain `curl`.
 
@@ -499,34 +502,32 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 | Method & path | Body → result |
 | --- | --- |
-| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, kcv, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the `?` ones for the owner only; `capacity` / `maxFile` null = no limit) |
-| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, kcv?, escrowReset?, current? \| reauth? }` — key wraps (a later `pw` wrap only with the Drive key's check value `kcv`) (kinds `pw`, `recovery`, `passkey`, `escrow`); removing a wrap, replacing the password wrap or the salt, and changing the escrow or signing keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); a user's first set-up needs the owner's escrow key (`409 escrow_not_ready`), an escrow wrap for the current key and a wrap of the user's own; the escrow wrap cannot be removed (`403 escrow_required`); while impersonating, only added wraps (never a first set-up) |
-| `POST /api/private/drive/escrow` | the owner impersonating the user: `{}` → `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }` (in the admin audit) |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration }` (`current`: the current sub-MEK's id; `migration`: null, or what the upgrade of a Drive made before the key model v2 still has to do; `capacity` / `maxFile` null = no limit) |
+| `POST /api/private/drive/keys` | `{}` → `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — the session's KEKs, derived by the server (docs/DRIVE.md §3); the browser keeps them in the page's memory only. `503 keys_missing`, `409 salt_missing`; the owner acting as the user gets the user's (in the admin audit) |
+| `POST /api/private/drive/kit` · `…/kit/verify` · `…/kit/restore` | the personal kit: its content after `current` / `reauth`; a read-only check by check values; a restore of the user salt (`current` / `reauth`). Not while impersonating |
+| `GET`, `PUT /api/private/drive/kit/items` | items sealed under a sub-MEK the server can no longer open, re-sealed in the browser with the kit's KEK |
+| `GET /api/private/drive/migrate` · `GET …/migrate/items` · `PUT …/migrate` · `POST …/migrate/finish` · `POST …/migrate/retire` | the one-time upgrade of the user's own Drive made before the key model v2 (docs/DRIVE.md §3.3): `409 already_upgraded` once it is done; `retire` (`{ ids, current \| reauth }`) ends the links of the release before that the old key does not open. Not while impersonating |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
-| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta? }` — move / rename |
+| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta?, ks?, mek? }` — move / rename (a new name comes with the item's own `ks` and `mek`: `409 stale_keys`, `400 bad_seal`) |
 | `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
 | `GET /api/private/drive/nodes/:id/shares` | → `{ shares }` — the active shares of the item |
-| `POST /api/private/drive/folders` | `{ id?, parent, name, meta? }` → `201 { id }` |
-| `POST /api/private/drive/files` | `{ id?, parent, name, meta?, size, fk }` → `201 { id, uploadToken, chunks }` |
+| `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `201 { id }` |
+| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `201 { id, uploadToken, chunks }` |
 | `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
-| `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` (`409 busy` while a chunk is still being written) |
+| `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok, ch }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth?, captcha? }` → `201 { id, deletetoken, expires, captcha }` (`captcha` as above) |
-| `POST /api/private/drive/reverse` | `{ id, folder, priv, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above) |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above) |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
 | `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
-| `POST /api/private/drive/received/:id` | `{ parent, name, meta, fk }` → `{ ok }` — a received file re-wrapped into the Drive |
+| `POST /api/private/drive/received/:id` | `{ parent, name, meta, dek, ks, mek }` → `{ ok }` — a received file re-sealed into the Drive under the user's current KEK |
 | `POST /api/private/drive/received/:id/failed` | `{ reason }` → `{ ok, received, failed }` — the browser could not take it in (it leaves the queue); `DELETE` puts it back |
-| `POST /api/private/drive/kit` | the owner: `{ event: "exported" \| "used", current \| reauth }` or `{ event: "verified", verdict, issues?, version? }` — the owner recovery kit's download, use and check, recorded (the kit itself is never sent) |
-| `POST /api/private/drive/kit/probe` | the owner: one user's escrow wrap per kid in use (each in the admin audit), for "Verify kit" |
-| `PUT /api/private/drive/kit/keys` | the owner, with `current` / `reauth`: sealed escrow keys put back from a kit (only the server's own public keys and kids in use) |
-| `POST /api/private/drive/start-over` | the owner, when nothing they sign in with opens their Drive: `{ confirm, driveSalt, set, escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv, current \| reauth }` — new keys; the old Drive archived |
-| `GET`, `DELETE /api/private/drive/archive/:gen`; `PUT …/nodes`; `POST …/finish` | the owner: an archived Drive — read (for a kit restore; the first page lists its reverse links, `reverse: [{ id, priv, status }]`, and a received item carries `rs`), items back (a received item as `{ id }` only: `400 received_as_is` otherwise), finish (`reverse: { <linkId>: {iv, ct} }`, every link's private key re-sealed under the Drive key now: `409 reverse_keys_required` otherwise → `{ ok, resumed }`), or delete (`confirm` + `current` / `reauth`; its paused reverse links are revoked) |
-| `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (in the admin audit) |
-| `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }], kcv }` (the same Drive key); for a user with no Drive yet: `{ first: true, driveSalt, set: [pw, escrow], escrowPin, kcv }` (in the admin audit) |
+| `GET /api/private/admin/keys` · `…/usage`; `POST …/candidate`, `…/subs`, `PATCH`/`DELETE …/subs/:id`, `POST …/subs/:id/current`, `…/subs/:id/show`, `…/root`, `…/root/show`, `…/root/undo`, `…/root/drop-old`, `…/jobs`, `…/jobs/step`, `DELETE …/jobs`, `…/kit`, `…/verify`, `…/restore`, `…/export`, `…/import`, `…/users/:userId/view` | owner only: the Drive keyring (Admin → Security → Keys; docs/DRIVE.md §3, §3.2), every change (and the restore and import previews) with `current` / `reauth` and in the admin audit by fingerprint; `409 migration_pending` for a root change while a Drive still waits for its upgrade |
+| `GET /api/private/admin/drive/migration` · `POST …/drive/migrate/:userId/escrow` · `GET`, `PUT …/drive/migrate/:userId[/items]` · `POST …/finish` · `POST …/retire` | owner only: the Drives waiting for their upgrade (disabled accounts too), and the upgrade of a user's Drive through the escrow of the release before (the escrow with `current` / `reauth`; in the admin audit) |
+| `GET`, `DELETE /api/private/admin/drive/archive` | owner only: the owner's Drive archive of the release before (a start over); deleted with `{ confirm: <username>, current \| reauth }` (its R2 objects go, its paused links end; in the admin audit) |
 
-`name`, `meta` and `fk` are `{ iv, ct }` values encrypted in the browser; the server never sees
-names, types or keys. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
+`name`, `meta` and `dek` are sealed in the browser under the user's KEK (docs/DRIVE.md §3). The
+Drive is not end-to-end encrypted: the server derives every KEK, so it can open them. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
 then also returns `refs: [{ chunks, size }]`), and its chunks are read with
 `GET /api/file/:id/chunk/:ref/:i` and the download grant.
 

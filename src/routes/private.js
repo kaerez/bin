@@ -123,9 +123,10 @@ export async function handlePrivate(request, env, url, ctx) {
     if (!next) return err(400, 'invalid_credential', 'Invalid password proof.');
     const r = await dir.changePassword(a.user.id, { ...step, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
     if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
-    // The Drive's password wrap opens only with the old password now: stale
-    // (the user's browser writes the new one next), or — set by the owner
-    // acting as the user — handled like an admin reset (docs/DRIVE.md §3).
+    // A Drive still waiting for its upgrade: its password wrap of the release
+    // before opens only with the old password now, so it is marked stale (no
+    // new wrap is ever written), or — set by the owner acting as the user —
+    // handled like an admin reset (docs/DRIVE.md §3.3).
     await drivePasswordChanged(env, a.user.id, { reset: !!a.actor });
     // Impersonating: the user's sessions end, the owner's session (bound to
     // the owner's own session version) carries on unchanged.

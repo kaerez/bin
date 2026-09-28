@@ -34,17 +34,18 @@ const RECORD = (kind, id) => `secbin_pk:${kind}:${id}`;
 const GRANT = (kind, id) => `secbin_hg:${kind}:${id}`;
 const NONCE_RE = /^[A-Za-z0-9_-]{22}$/;
 const KEY_RE = /^[A-Za-z0-9_-]{43}$/;
-// The tab's Drive keys (public/js/drivekeys.js: secbin_dk, secbin_dk_uid,
-// secbin_dk_imp, secbin_dk_imp_uid, and any later slot of that family): they
-// must never be readable where the check page runs.
-const DRIVE_PREFIX = 'secbin_dk';
+// The tab's Drive key slots (public/js/drivekeys.js: secbin_dk, secbin_dk_uid
+// — the old Drive key of a Drive waiting for its upgrade — and the slots of
+// releases before, secbin_dk_imp*, secbin_kek*; the KEKs themselves are never
+// stored): they must never be readable where the check page runs.
+const DRIVE_PREFIXES = ['secbin_dk', 'secbin_kek'];
 
 /** Remove every Drive key slot of this tab from `storage`. */
 export function dropDriveKeys(storage) {
   const names = [];
   for (let i = 0; i < storage.length; i++) {
     const k = storage.key(i);
-    if (k !== null && k.startsWith(DRIVE_PREFIX)) names.push(k);
+    if (k !== null && DRIVE_PREFIXES.some((x) => k.startsWith(x))) names.push(k);
   }
   for (const k of names) storage.removeItem(k);
 }

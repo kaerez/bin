@@ -1,28 +1,24 @@
 // driveclient.test.js — the Drive client (public/js/driveclient.js) against an
 // in-memory stand-in for the §6 API (docs/DRIVE.md) behind a mocked fetch
-// (drive-fake-server.js):
-// first-time setup and unlock, the owner's escrow key, names decrypted on
-// list (and never sent in the clear), exact chunk sizes on upload, download
-// round trips, manifest v3 contents of a share (decrypted as a recipient
-// would), reading v3 shares in downloads.js, and the wrap upkeep helpers.
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+// (drive-fake-server.js): the Drive opens with the KEKs the server hands the
+// session (no prompt; kept in the page's memory only, the impersonated user's too), the
+// keys that cannot be had, a new sub-MEK picked up on the server's word, names
+// decrypted on list (and never sent in the clear), exact chunk sizes on upload,
+// download round trips, manifest v3 contents of a share (decrypted as a
+// recipient would), reading v3 shares in downloads.js, and the personal kit.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-  openDrive, unlockDrive, unlockAtSignIn, DriveLocked, DriveDisabled, escrowPasswordReset, updatePasswordWrap,
-  replaceRecoveryWraps, addPasskeyWrap, checkName,
+  openDrive, DriveDisabled, DriveUnavailable, checkName, buildPersonalKit, verifyPersonalKit, restorePersonalKit,
 } from '../public/js/driveclient.js';
-import {
-  loadSessionKey, clearSessionKey, saveSessionKey, createDriveKey, createEscrowKeyPair, sealEscrowPriv, wrapEscrow,
-  wrapPassword, unlockWithPassword, unlockWithRecovery, unlockWithPrf, recoveryRef, keyCheckValue,
-} from '../public/js/drivekeys.js';
+import { clearSessionKey, openName, openDek, chunkHash, ciphertextHash } from '../public/js/drivekeys.js';
+import { keyCheckValueV1, saveLegacyKey } from '../public/js/drivev1.js';
+import { parseDriveKit, openDriveKit, sealDriveKit } from '../public/js/drivekit.js';
 import { deriveAccess, openPaste } from '../public/js/crypto.js';
 import { validateRefsManifest } from '../public/js/refsmanifest.js';
 import { RefsReader } from '../public/js/downloads.js';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
-import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
+import { b64urlFromBytes, randomBytes, fromUtf8 } from '../public/js/bytes.js';
 import { fakeServer } from './drive-fake-server.js';
-
-const PASSWORD = 'drive password 1';
-const CODE = 'ABCD-EFGH-JKMN-PQRS';
 
 /** A File-like object over bytes (only what the client uses). */
 function fakeFile(name, bytes, type = 'text/plain') {
@@ -39,161 +35,210 @@ function pattern(n, seed = 1) {
 }
 
 let S;
-// The owner's escrow key exists before any user's Drive (docs/DRIVE.md §3): a user's fake server has one.
-let ESCROW;
-beforeAll(async () => { ESCROW = await createEscrowKeyPair(); });
 const install = (opts = {}) => {
   S = fakeServer(opts);
-  if ((opts.role || 'user') !== 'owner') S.escrowPub = ESCROW.publicJwk;
   globalThis.fetch = S.fetch;
   return S;
 };
 beforeEach(() => { clearSessionKey(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
-describe('unlock and set-up', () => {
-  it('sets up a new Drive with the password (pw wrap, escrow wrap), then opens from the tab', async () => {
+describe('opening the Drive', () => {
+  it('opens with the KEKs the server hands the session: no prompt, no password, nothing secret sent', async () => {
     install();
-    const owner = await createEscrowKeyPair();
-    S.escrowPub = owner.publicJwk;
-    const d = await unlockDrive({ password: PASSWORD });
-    expect(d.user.id).toBe('u1');
-    const wraps = [...S.wraps.values()];
-    expect(wraps.map((w) => w.kind).sort()).toEqual(['escrow', 'pw']);
-    const dk = loadSessionKey('u1');
-    expect(dk).toBeInstanceOf(Uint8Array);
-    expect(await unlockWithPassword(PASSWORD, S.driveSalt, wraps)).toEqual(dk);
-    // No secret material in any request body.
-    const all = JSON.stringify(S.requests.map((r) => r.body));
-    expect(all).not.toContain(PASSWORD);
-    expect(all).not.toContain(b64urlFromBytes(dk));
-    const again = await openDrive();
-    expect(again.dk).toEqual(dk);
-  }, 30000);
-
-  it('the owner\'s first unlock creates and publishes the escrow key pair', async () => {
-    install({ role: 'owner' });
-    await unlockDrive({ password: PASSWORD });
-    expect(S.escrowPub).toMatchObject({ kty: 'EC', crv: 'P-256' });
-    expect(S.escrowPriv).toMatch(/^1\./);
-    expect([...S.wraps.values()].map((w) => w.kind)).toEqual(['pw']);
-  }, 30000);
-
-  it('refuses a wrong password, a set-up without the password, and a disabled Drive', async () => {
-    install();
-    await expect(unlockDrive({ code: CODE })).rejects.toMatchObject({ name: 'DriveLocked', reason: 'setup' });
-    await unlockDrive({ password: PASSWORD });
-    clearSessionKey();
-    await expect(openDrive()).rejects.toBeInstanceOf(DriveLocked);
-    await expect(unlockDrive({ password: 'nope' })).rejects.toMatchObject({ reason: 'wrong' });
-    install({ enabled: false });
-    await expect(openDrive()).rejects.toBeInstanceOf(DriveDisabled);
-    await expect(unlockDrive({ password: PASSWORD })).rejects.toBeInstanceOf(DriveDisabled);
-  }, 30000);
-
-  it('never gives a Drive with content but no wraps a new key', async () => {
-    install();
-    S.nodes.set('x'.repeat(22), { id: 'x'.repeat(22), parent: 'root', kind: 'dir', name: '{}', size: 0, chunks: 0, state: 'ready' });
-    await expect(unlockDrive({ password: PASSWORD })).rejects.toMatchObject({ reason: 'wrong' });
-    expect(S.wraps.size).toBe(0);
+    const d = await openDrive();
+    expect(d.user.id).toBe(S.user.id);
+    const cur = S.current();
+    expect(d.keys.current).toBe(cur.id);
+    expect([...d.keys.keks.get(cur.id)[0]]).toEqual([...await S.kekOf(cur.id)]);
+    // In this page's memory only: nothing in the tab's storage.
+    expect(sessionStorage.length).toBe(0);
+    expect(localStorage.length).toBe(0);
+    expect(S.requests.map((r) => r.path)).toEqual(['/api/auth/session', '/api/private/drive', '/api/private/drive/keys']);
+    const docs = await d.mkdir('root', 'Docs');
+    const wire = JSON.stringify(S.requests.map((r) => r.body));
+    expect(wire).not.toContain(b64urlFromBytes(await S.kekOf(cur.id)));
+    expect(wire).not.toContain('Docs');
+    // The folder is sealed under the current KEK with its own salt.
+    const n = S.nodes.get(docs);
+    expect(n.mek).toBe(cur.id);
+    expect(fromUtf8(await openName(await S.kekOf(cur.id), { userId: S.user.id, mekId: cur.id, salt: n.ks }, 'name', n.name))).toBe('Docs');
   });
 
-  it('the tab key belongs to one user', async () => {
+  it('a disabled Drive, and keys that cannot be had (the keyring lost, the salt lost)', async () => {
+    install({ enabled: false });
+    await expect(openDrive()).rejects.toBeInstanceOf(DriveDisabled);
     install();
-    await unlockDrive({ password: PASSWORD });
-    S.user = { id: 'someone-else', role: 'user' };
-    await expect(openDrive()).rejects.toBeInstanceOf(DriveLocked);
-  }, 30000);
+    S.keysError = 'keys_missing';
+    await expect(openDrive()).rejects.toMatchObject({ name: 'DriveUnavailable', reason: 'keys_missing' });
+    S.keysError = 'salt_missing';
+    const e = await openDrive().catch((x) => x);
+    expect(e).toBeInstanceOf(DriveUnavailable);
+    expect(e.reason).toBe('salt_missing');
+  });
+
+  it('the owner acting as the user: the user’s keys, in the page’s memory only', async () => {
+    install();
+    S.impersonatedBy = 'owner';
+    const d = await openDrive();
+    expect(d.user).toMatchObject({ id: S.user.id, impersonating: true });
+    expect([...d.keys.keks.get(S.current().id)[0]]).toEqual([...await S.kekOf(S.current().id)]);
+    expect(sessionStorage.length).toBe(0);
+    expect(S.audit.some((x) => x.action === 'drive.keys_used')).toBe(true);
+    expect(await d.mkdir('root', 'by the owner')).toMatch(/^[A-Za-z0-9_-]{22}$/);
+  });
+
+  it('a key planted in the tab’s storage is never used: the KEKs come from the server, new items are sealed under them, the planted slots go', async () => {
+    install();
+    await openDrive(); // the keyring is made at the first request
+    const cur = S.current();
+    const planted = randomBytes(32);
+    const slot = JSON.stringify({ u: S.user.id, c: cur.id, k: { [cur.id]: b64urlFromBytes(planted) } });
+    sessionStorage.setItem('secbin_kek', slot);
+    sessionStorage.setItem('secbin_kek_imp', slot);
+    sessionStorage.setItem('secbin_dk_imp', b64urlFromBytes(randomBytes(32)));
+    sessionStorage.setItem('secbin_dk_imp_uid', S.user.id);
+    localStorage.setItem('secbin_kek', slot);
+    const d = await openDrive();
+    expect([...d.keys.keks.get(cur.id)[0]]).toEqual([...await S.kekOf(cur.id)]);
+    for (const k of ['secbin_kek', 'secbin_kek_imp', 'secbin_dk_imp', 'secbin_dk_imp_uid']) expect(sessionStorage.getItem(k), k).toBeNull();
+    // A new folder and a new file: sealed under the server's KEK (the fake server checks each seal), never the planted one.
+    const dir = await d.mkdir('root', 'after the plant');
+    const file = await d.upload('root', fakeFile('new.txt', pattern(10)));
+    for (const id of [dir, file]) {
+      const n = S.nodes.get(id);
+      const at = { userId: S.user.id, mekId: n.mek, salt: n.ks };
+      expect(fromUtf8(await openName(await S.kekOf(n.mek), at, 'name', n.name))).toMatch(/after the plant|new\.txt/);
+      await expect(openName(planted, at, 'name', n.name)).rejects.toThrow();
+      if (n.dek) await expect(openDek(planted, at, n.dek)).rejects.toThrow();
+    }
+    localStorage.clear();
+  });
+
+  it('when the server does not hand out the keys, the Drive does not open: no stored key to fall back on', async () => {
+    install();
+    await openDrive(); // the keyring is made at the first request
+    const cur = S.current();
+    sessionStorage.setItem('secbin_kek', JSON.stringify({ u: S.user.id, c: cur.id, k: { [cur.id]: b64urlFromBytes(randomBytes(32)) } }));
+    S.keysError = 'keys_missing';
+    await expect(openDrive()).rejects.toMatchObject({ name: 'DriveUnavailable', reason: 'keys_missing' });
+    S.keysError = null;
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (String(url).endsWith('/api/private/drive/keys') ? Promise.reject(new TypeError('network down')) : real(url, init));
+    await expect(openDrive()).rejects.toThrow(/network down/);
+    globalThis.fetch = real;
+  });
+
+  it('an old Drive key planted in the tab is used only once its check value is the server’s (a Drive waiting for its upgrade)', async () => {
+    install();
+    const dk = randomBytes(32);
+    S.migration = { pending: true, v1Items: 1, v1Links: 0, legacy: true };
+    S.legacyState = { state: 'pending', v1Items: 1, v1Links: 0, archived: 0, legacy: true, kcv: await keyCheckValueV1(dk), driveSalt: null, wraps: [] };
+    sessionStorage.setItem('secbin_dk', b64urlFromBytes(randomBytes(32))); // not this Drive's
+    sessionStorage.setItem('secbin_dk_uid', S.user.id);
+    let d = await openDrive();
+    expect(d.legacy).toBeNull();
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull(); // removed
+    saveLegacyKey(dk, S.user.id); // this Drive's (the sign-in opened it)
+    d = await openDrive();
+    expect([...d.legacy]).toEqual([...dk]);
+    // A Drive with no check value: the key must open one of its old items.
+    S.legacyState = { ...S.legacyState, kcv: null };
+    S.legacyItems = { items: [{ id: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'dir', name: JSON.stringify({ iv: b64urlFromBytes(randomBytes(12)), ct: b64urlFromBytes(randomBytes(40)) }) }], links: [], next: null };
+    d = await openDrive();
+    expect(d.legacy).toBeNull();
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
+  });
+
+  it('a new sub-MEK on the server: the next item is sealed under it after one retry; older items still open', async () => {
+    install();
+    const d = await openDrive();
+    const old = await d.upload('root', fakeFile('old.txt', pattern(10)));
+    const B = await S.addSub({ from: Math.floor(Date.now() / 1000) - 1 });
+    const fresh = await d.mkdir('root', 'after the rotation');
+    expect(S.nodes.get(fresh).mek).toBe(B.id);
+    expect(S.requests.filter((r) => r.path === '/api/private/drive/keys')).toHaveLength(2); // fetched again once
+    const kids = (await d.list('root')).children;
+    expect(kids.map((c) => c.name).sort()).toEqual(['after the rotation', 'old.txt']);
+    const dl = await d.download(old);
+    expect(new Uint8Array(await (await dl.blob()).arrayBuffer())).toEqual(pattern(10));
+  });
+
+  it('a rename is sealed under the item’s own sub-MEK and salt; re-sealed meanwhile, it is read again', async () => {
+    install();
+    const d = await openDrive();
+    const id = await d.mkdir('root', 'before');
+    await d.rename(id, 'after');
+    expect((await d.list('root')).children[0].name).toBe('after');
+    // The server re-seals the item (a new salt) between the read and the write: one more try.
+    const n = S.nodes.get(id);
+    const orig = S.fetch.getMockImplementation();
+    let once = true;
+    S.fetch.mockImplementation(async (url, init = {}) => {
+      if (once && init.method === 'PATCH') {
+        once = false;
+        return { ok: false, status: 409, type: 'basic', json: async () => ({ error: 'stale_keys', message: 'stale' }) };
+      }
+      return orig(url, init);
+    });
+    await d.rename(id, 'third');
+    expect(S.nodes.get(id).ks).toBe(n.ks);
+    expect((await d.list('root')).children[0].name).toBe('third');
+  });
+
+  it('an item of the release before (waiting for its upgrade) shows as waiting, never as broken data', async () => {
+    install();
+    const d = await openDrive();
+    S.nodes.set('v'.repeat(22), { id: 'v'.repeat(22), parent: 'root', kind: 'file', v1: true, name: { iv: 'A'.repeat(16), ct: 'B'.repeat(40) }, fk: { iv: 'A'.repeat(16), ct: 'B'.repeat(64) }, size: 3, chunks: 1, state: 'ready' });
+    const it = (await d.list('root')).children.find((c) => c.id === 'v'.repeat(22));
+    expect(it).toMatchObject({ upgrading: true, unreadable: true, name: null });
+    await expect(d.download(it.id)).rejects.toThrow(/upgrade/);
+  });
 });
 
-describe('sign-in upkeep', () => {
-  it('a spent recovery code unlocks with the wrap its sign-in returned; a verified password re-wraps a stale pw wrap', async () => {
+describe('the personal kit', () => {
+  it('download (the step-up), verify with a date (read-only, check values only), restore', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
-    await replaceRecoveryWraps('u1', [CODE, 'ZZZZ-YYYY-XXXX-WWWW']);
-    expect([...S.wraps.values()].filter((w) => w.kind === 'recovery')).toHaveLength(2);
-    // An admin reset without escrow: the pw wrap no longer matches the password (the server marks it stale).
-    const stale = await wrapPassword(d.dk, 'the old password');
-    S.driveSalt = stale.driveSalt;
-    S.wraps.set('pw|pw', stale.wrap);
-    S.pwStale = true;
-    // The recovery sign-in: the server removed the spent code's wrap and returned it once.
-    const spent = await recoveryRef(CODE);
-    const spentWrap = S.wraps.get(`recovery|${spent}`);
-    S.wraps.delete(`recovery|${spent}`);
-    expect(await unlockAtSignIn({ user: S.user, password: 'the new password', code: CODE, spentWraps: [spentWrap] })).toBe(true);
-    expect(loadSessionKey('u1')).toEqual(d.dk);
-    const wraps = [...S.wraps.values()];
-    expect(wraps.find((w) => w.kind === 'recovery' && w.ref === spent)).toBeUndefined();
-    expect(S.pwStale).toBe(false);
-    expect(await unlockWithRecovery('ZZZZ-YYYY-XXXX-WWWW', wraps)).toEqual(d.dk);
-    expect(await unlockWithPassword('the new password', S.driveSalt, wraps)).toEqual(d.dk);
-    // A failed unlock never throws.
-    clearSessionKey();
-    expect(await unlockAtSignIn({ user: S.user, password: 'wrong' })).toBe(false);
-    expect(loadSessionKey('u1')).toBeNull();
+    S.proof = 'proof-1';
+    const d = await openDrive();
+    await d.mkdir('root', 'x');
+    await expect(buildPersonalKit({ user: S.user, passphrase: 'pp', step: {} })).rejects.toMatchObject({ code: 'reauth_required' });
+    const kit = await buildPersonalKit({ user: S.user, passphrase: 'kit pass', step: { current: 'proof-1' } });
+    expect(kit.keks).toBe(1);
+    const env = parseDriveKit(kit.text);
+    expect(env).toMatchObject({ kind: 'user', accountId: S.user.id });
+    const payload = await openDriveKit(env, { kind: 'user', accountId: S.user.id, origin: location.origin, passphrase: 'kit pass' });
+    expect(payload).toMatchObject({ v: 2, id: S.user.id, username: 'alice', userSalt: S.salt, current: S.current().id });
+    expect(payload.keks[0].kek).toBe(b64urlFromBytes(await S.kekOf(S.current().id)));
+    // Verify: nothing but check values leaves the page.
+    const before = S.requests.length;
+    const v = await verifyPersonalKit({ user: S.user, text: kit.text, passphrase: 'kit pass' });
+    expect(v.verdict).toBe('complete');
+    expect(v.checks.map((c) => [c.id, c.status])).toEqual([['format', 'pass'], ['auth', 'pass'], ['salt', 'pass'], ['keks', 'pass'], ['date', 'pass']]);
+    const sent = JSON.stringify(S.requests.slice(before).map((r) => r.body));
+    expect(sent).not.toContain(payload.keks[0].kek);
+    expect(sent).not.toContain(S.salt);
+    // A date when a later sub-MEK (not in the kit) is in effect: a warning, and the fix.
+    const later = await S.addSub({ from: Math.floor(Date.now() / 1000) + 30 * 86400 });
+    const v2 = await verifyPersonalKit({ user: S.user, text: kit.text, passphrase: 'kit pass', date: Math.floor(Date.now() / 1000) + 40 * 86400 });
+    expect(v2.atDate).toMatchObject({ mekId: later.id, inKit: false });
+    expect(v2.checks.find((c) => c.id === 'date').status).toBe('warn');
+    // A wrong passphrase, another account's kit: failed before anything is sent.
+    expect((await verifyPersonalKit({ user: S.user, text: kit.text, passphrase: 'wrong' })).verdict).toBe('failed');
+    const other = await sealDriveKit('user', { ...payload }, { accountId: 'someoneelse00000', origin: location.origin, passphrase: '' });
+    expect((await verifyPersonalKit({ user: S.user, text: other, passphrase: '' })).checks[0]).toMatchObject({ id: 'format', status: 'fail' });
+    // Restore: the salt is there already, so nothing changes.
+    const r = await restorePersonalKit({ user: S.user, text: kit.text, passphrase: 'kit pass', step: { current: 'proof-1' } });
+    expect(r).toEqual({ salt: 'same', items: 0, links: 0, left: [] });
+    // Never while the owner acts as the user.
+    await expect(buildPersonalKit({ user: { ...S.user, impersonating: true }, step: { current: 'proof-1' } })).rejects.toMatchObject({ code: 'impersonating' });
   }, 60000);
-
-  it('passkey wraps: added with PRF output, used to unlock, removed; password change; recovery wraps removed', async () => {
-    install();
-    const d = await unlockDrive({ password: PASSWORD });
-    const prf = randomBytes(32);
-    expect(await addPasskeyWrap('u1', prf, 'cred-1')).toBe(true);
-    expect(await unlockWithPrf(prf, 'cred-1', [...S.wraps.values()])).toEqual(d.dk);
-    clearSessionKey();
-    await unlockDrive({ prfOutput: prf, credentialId: 'cred-1' });
-    expect(loadSessionKey('u1')).toEqual(d.dk);
-    // Password change (the server marks the old pw wrap stale): with the key in
-    // the tab, and without it (the old password unlocks first) — no second confirmation.
-    S.pwStale = true;
-    expect(await updatePasswordWrap({ userId: 'u1', newPassword: 'second password' })).toBe('ok');
-    clearSessionKey();
-    S.pwStale = true;
-    expect(await updatePasswordWrap({ userId: 'u1', newPassword: 'third password' })).toBe('locked');
-    expect(await updatePasswordWrap({ userId: 'u1', newPassword: 'third password', oldPassword: 'second password' })).toBe('ok');
-    expect(await unlockWithPassword('third password', S.driveSalt, [...S.wraps.values()])).toEqual(d.dk);
-    // New codes: a wrap each (the server dropped the old codes' wraps); none without the key here.
-    expect(await replaceRecoveryWraps('u1', [CODE])).toBe(true);
-    expect(await unlockWithRecovery(CODE, [...S.wraps.values()])).toEqual(d.dk);
-    clearSessionKey();
-    expect(await replaceRecoveryWraps('u1', ['ZZZZ-YYYY-XXXX-WWWW'])).toBe(false);
-    // The client never removes a wrap itself (the server does, and removing needs the step-up).
-    expect(S.requests.filter((r) => r.path === '/api/private/drive/keys').some((r) => (r.body.remove || []).length)).toBe(false);
-  }, 60000);
-
-  it('an owner password reset re-keys the user\'s Drive through the escrow', async () => {
-    install({ role: 'owner' });
-    const ownerDk = createDriveKey();
-    const kp = await createEscrowKeyPair();
-    S.escrowPriv = await sealEscrowPriv(ownerDk, kp.privateKey);
-    S.escrowPub = kp.publicJwk;
-    const userDk = createDriveKey();
-    S.userWraps = [await wrapEscrow(userDk, kp.publicJwk)];
-    expect(await escrowPasswordReset({ ownerId: 'owner1', userId: 'u9', newPassword: 'reset pw' })).toBe('locked');
-    saveSessionKey(ownerDk, 'owner1');
-    expect(await escrowPasswordReset({ ownerId: 'owner1', userId: 'u9', newPassword: 'reset pw' })).toBe('ok');
-    const call = S.requests.find((r) => r.path === '/api/private/admin/drive/escrow/u9');
-    expect(call.body).toEqual({ reason: 'password reset' });
-    const [{ userId, body }] = S.adminKeys;
-    expect(userId).toBe('u9');
-    expect(body.set.map((w) => w.kind)).toEqual(['pw']);
-    expect(await unlockWithPassword('reset pw', body.driveSalt, body.set)).toEqual(userDk);
-    // The same DK: the new wrap carries the Drive key's check value.
-    expect(body.kcv).toBe(await keyCheckValue(userDk));
-    // A Drive with wraps but no escrow wrap: nothing to open it with.
-    S.userWraps = [{ kind: 'pw', ref: 'pw', data: '1.a.b' }];
-    expect(await escrowPasswordReset({ ownerId: 'owner1', userId: 'u9', newPassword: 'x' })).toBe('no_wrap');
-    // No Drive at all: the owner, who knows the new password, sets it up now.
-    S.userWraps = [];
-    expect(await escrowPasswordReset({ ownerId: 'owner1', userId: 'u8', newPassword: 'x' })).toBe('created');
-    expect(S.userDrives.u8.wraps.map((w) => w.kind).sort()).toEqual(['escrow', 'pw']);
-  }, 30000);
 });
 
 describe('files and folders', () => {
   it('names are sealed on the wire, decrypted on list, sorted folders first, with the path', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
+    const d = await openDrive();
     const docs = await d.mkdir('root', 'Documents — private');
     const sub = await d.mkdir(docs, 'Sub');
     await d.upload(docs, fakeFile('b-notes.txt', pattern(10)));
@@ -216,20 +261,24 @@ describe('files and folders', () => {
     await expect(d.mkdir('root', 'x\u0000y')).rejects.toThrow();
   }, 30000);
 
-  it('a name moved by the server to another node does not decrypt (AAD)', async () => {
+  it('a sealed name moved to another item does not open with that item’s salt; the item id itself is not bound (docs/DRIVE.md §9)', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
+    const d = await openDrive();
     const a = await d.mkdir('root', 'alpha');
     const b = await d.mkdir('root', 'beta');
     S.nodes.get(b).name = S.nodes.get(a).name;
-    const kids = (await d.list('root')).children;
+    let kids = (await d.list('root')).children;
     expect(kids.find((c) => c.id === a).name).toBe('alpha');
     expect(kids.find((c) => c.id === b)).toMatchObject({ name: null, unreadable: true });
+    // With its salt moved too, it opens: a DEK or a name is bound to the user, the sub-MEK and the salt, not to the item id.
+    S.nodes.get(b).ks = S.nodes.get(a).ks;
+    kids = (await d.list('root')).children;
+    expect(kids.find((c) => c.id === b).name).toBe('alpha');
   }, 30000);
 
   it('uploads in exact chunks (8 MiB + tag, no padding) and downloads the same bytes', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
+    const d = await openDrive();
     const size = 2 * CHUNK + 12345;
     const bytes = pattern(size, 7);
     const progress = [];
@@ -250,9 +299,33 @@ describe('files and folders', () => {
     await expect((await d.download(id)).blob()).rejects.toThrow(/authentication/);
   }, 60000);
 
+  // Audit B I4: the ciphertext hash the server records (nodes.ch) is checked on download: a file whose
+  // stored chunks do not give it is refused, its last chunk never handed over.
+  it('a download checks the chunks against the recorded ciphertext hash, and refuses a file that does not match', async () => {
+    install();
+    const d = await openDrive();
+    const size = CHUNK + 999;
+    const bytes = pattern(size, 3);
+    const id = await d.upload('root', fakeFile('two.bin', bytes, 'application/octet-stream'));
+    const n = S.nodes.get(id);
+    const hs = [];
+    for (let i = 0; i < n.chunks; i++) hs.push(await chunkHash(S.chunks.get(`${id}/${i}`)));
+    n.ch = await ciphertextHash(n.chunks, (i) => hs[i]);
+    const got = new Uint8Array(await (await (await d.download(id)).blob()).arrayBuffer());
+    expect(Buffer.from(got).equals(Buffer.from(bytes))).toBe(true);
+    // A hash that is not the stored chunks' (the record or the chunks changed): refused before the end.
+    n.ch = await ciphertextHash(n.chunks, (i) => (i === 1 ? hs[0] : hs[i]));
+    const seen = [];
+    await expect((await d.download(id)).blob((k) => seen.push(k))).rejects.toThrow(/does not match the hash/);
+    expect(seen).toEqual([CHUNK]); // the first chunk only: the last one was never handed over
+    // No hash recorded yet (a file from before the chunk hashes): read as before.
+    n.ch = null;
+    expect(new Uint8Array(await (await (await d.download(id)).blob()).arrayBuffer()).length).toBe(size);
+  }, 60000);
+
   it('an empty file has no chunks; a failed upload deletes its node; uploadTree builds folders', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
+    const d = await openDrive();
     const empty = await d.upload('root', fakeFile('empty.txt', new Uint8Array(0)));
     expect(S.nodes.get(empty)).toMatchObject({ chunks: 0, state: 'ready' });
     expect(new Uint8Array(await (await (await d.download(empty)).blob()).arrayBuffer()).length).toBe(0);
@@ -283,7 +356,7 @@ describe('files and folders', () => {
 describe('folder download', () => {
   it('saves a folder as a ZIP of its content (downloads.js saveZip)', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
+    const d = await openDrive();
     await d.uploadTree('root', [
       { path: 'proj/src/a.js', file: fakeFile('a.js', new TextEncoder().encode('alpha-content')) },
       { path: 'proj/readme.md', file: fakeFile('readme.md', new TextEncoder().encode('readme-content')) },
@@ -305,7 +378,7 @@ describe('folder download', () => {
 describe('shares (manifest v3)', () => {
   it('flattens folders into a v3 manifest with per-file keys, sealed like a file share', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
+    const d = await openDrive();
     const photos = await d.mkdir('root', 'Photos');
     await d.mkdir(photos, 'Empty');
     const one = pattern(100, 3);
@@ -334,6 +407,9 @@ describe('shares (manifest v3)', () => {
     // refs[i] is nodes[i], and each entry's fk decrypts that node's chunks.
     expect(body.nodes).toEqual([f1, f2, solo]);
     const reader = new RefsReader({ manifest: m, fetch: (e, i) => Promise.resolve(S.chunks.get(`${body.nodes[e.ref]}/${i}`)), refs: body.nodes.map((id) => ({ chunks: S.nodes.get(id).chunks })) });
+    // Each entry's key is the file's DEK.
+    const n1 = S.nodes.get(f1);
+    expect(files[0].fk).toBe(b64urlFromBytes(await openDek(await S.kekOf(n1.mek), { userId: S.user.id, mekId: n1.mek, salt: n1.ks }, n1.dek)));
     expect(Buffer.from(await reader.bytes(files[1])).equals(Buffer.from(two))).toBe(true);
     expect(Buffer.from(await reader.bytes(files[0])).equals(Buffer.from(one))).toBe(true);
     expect((await d.shares(photos)).map((x) => x.id)).toEqual(['fSHARE1']); // a folder's shares: those of the files under it
@@ -341,7 +417,7 @@ describe('shares (manifest v3)', () => {
 
   it('a password share needs the password; policy limits are applied and declared', async () => {
     install();
-    const d = await unlockDrive({ password: PASSWORD });
+    const d = await openDrive();
     const f = await d.upload('root', fakeFile('run.exe', pattern(4), 'application/x-msdownload'));
     await expect(d.share([f], { views: null, expire: '1h', limits: { fileTypeMode: 'block', fileTypeRules: ['ext:exe'] } })).rejects.toThrow(/does not allow/);
     const r = await d.share([f], { views: null, expire: '1h', password: 'share pw', limits: { fileTypeMode: 'allow', fileTypeRules: ['ext:exe'], maxFolderDepth: 3 } });

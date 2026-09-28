@@ -8,11 +8,11 @@
         <meta name="color-scheme" content="dark light" />
         <meta name="theme-color" content="#0d1117" />
         <title>Setup · secbin</title>
-        <meta name="description" content="Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it." />
+        <meta name="description" content="Encrypted notes and file sharing. Notes and file shares are encrypted in your browser, end to end: the server never sees their keys." />
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="secbin" />
         <meta property="og:title" content="secbin · zero-knowledge sharing" />
-        <meta property="og:description" content="Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it." />
+        <meta property="og:description" content="Encrypted notes and file sharing. Notes and file shares are encrypted in your browser, end to end: the server never sees their keys." />
         <meta name="twitter:card" content="summary" />
         <link rel="icon" type="image/svg+xml" href="/img/favicon.svg" />
         <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png" />
@@ -223,6 +223,32 @@
                             </svg>
                         </button>
                     </div>
+                    <fieldset class="range stack" id="setup-keys">
+                        <legend>Drive keys</legend>
+                        <p class="type-hint" id="setup-keys-help">
+                            Drive files are encrypted with keys made from two server keys: the root MEK and a
+                            sub-MEK. The server keeps them (so it can open Drive files); losing them loses every
+                            Drive file. Generate them here (recommended), or enter keys you made yourself. After you
+                            log in, download the key kit (Admin → Security → Keys) and store it offline.
+                        </p>
+                        <label class="inline"><input type="radio" name="setup-keys-mode" id="setup-keys-generate" value="generate" checked aria-describedby="setup-keys-help" /> Generate them securely on the server</label>
+                        <label class="inline"><input type="radio" name="setup-keys-mode" id="setup-keys-manual" value="manual" aria-describedby="setup-keys-manual-help" /> Enter them manually</label>
+                        <div class="stack" id="setup-keys-fields" hidden>
+                            <p class="type-hint" id="setup-keys-manual-help">
+                                Make each key out of band, 32 random bytes as base64 or hex, for example
+                                <code class="mono">openssl rand -base64 32</code> — or in PowerShell
+                                <code class="mono">[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))</code>
+                                (not <code class="mono">Get-Random</code>, which is not a secure generator) — or take them from a
+                                hardware security module or a secrets manager. The two keys must differ. Keep a copy in a
+                                secrets manager.
+                            </p>
+                            <label class="field-label" for="setup-root">Root MEK</label>
+                            <input type="password" id="setup-root" class="input" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="setup-keys-manual-help" />
+                            <label class="field-label" for="setup-sub">First sub-MEK</label>
+                            <input type="password" id="setup-sub" class="input" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="setup-keys-manual-help" />
+                        </div>
+                    </fieldset>
+                    <p class="type-hint" id="setup-keys-kept" hidden>The Drive keys that exist are kept: recovering the owner account never changes them.</p>
                     <button type="submit" class="cta" id="setup-btn">Create / recover owner</button>
                     <p class="msg" id="setup-msg" role="alert" hidden></p>
                 </form>

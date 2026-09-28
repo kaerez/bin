@@ -29,7 +29,8 @@ import { createReverseKey, fragmentOf, newReverseId, linkProof, setReverseStretc
 import { hkdf32 } from '../public/js/crypto.js';
 import { startDrive } from '../public/dashboard/js/drive-app.js';
 import * as drive from '../public/js/driveclient.js';
-import { createDriveKey, saveSessionKey, clearSessionKey, wrapRecovery, recoveryRef, loadSessionKey, saveImpersonationKey, loadImpersonationKey, clearImpersonationKey } from '../public/js/drivekeys.js';
+import { clearSessionKey, openName } from '../public/js/drivekeys.js';
+import { keyCheckValueV1, saveLegacyKey, loadLegacyKey } from '../public/js/drivev1.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
 
 setReverseStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('dom-stretch')));
@@ -150,15 +151,10 @@ describe('the composer', () => {
 // ── the Drive's dialogs ────────────────────────────────────────────────────
 describe('the Drive: Share and Receive files', () => {
   let S;
-  const CODE = 'ABCD-EFGH-JKMN-PQRS';
   async function openDrive(limits) {
     S = fakeServer();
     globalThis.fetch = S.fetch;
-    const dk = createDriveKey();
-    const w = await wrapRecovery(dk, CODE, await recoveryRef(CODE));
-    S.wraps.set(`${w.kind}|${w.ref}`, w);
-    await seedTree(S, dk, { 'readme.txt': utf8('hi') });
-    saveSessionKey(dk, S.user.id);
+    await seedTree(S, { 'readme.txt': utf8('hi') }); // sealed under the user's KEK (the key model v2: no unlock)
     const mount = document.createElement('div');
     document.body.replaceChildren(document.createElement('main'), mount);
     document.body.firstChild.id = 'main';
@@ -255,9 +251,10 @@ describe('the viewer: a share with the CAPTCHA', () => {
     requests = [];
     globalThis.fetch = shareFetch;
     const replace = vi.spyOn(window.location, 'replace').mockImplementation(() => {});
-    // The tab also holds a Drive key (the user is signed in here).
+    // The tab also holds a Drive key slot (the old key of a Drive waiting for its upgrade), and a KEK slot of a release before.
     sessionStorage.setItem('secbin_dk', DK_B64);
     sessionStorage.setItem('secbin_dk_uid', 'u1');
+    sessionStorage.setItem('secbin_kek', JSON.stringify({ u: 'u1', c: 'mAAAAAAAAAAA', k: { mAAAAAAAAAAA: DK_B64 } }));
     const pk = pageKey();
 
     // 1. The strict page with the key: refused → the key leaves the URL and storage holds it sealed only.
@@ -268,7 +265,7 @@ describe('the viewer: a share with the CAPTCHA', () => {
     expect(location.href).not.toContain(K);
     expect(allStorage()).not.toContain(K);
     expect(allStorage()).not.toContain(DK_B64);
-    expect(Object.keys(JSON.parse(allStorage())).filter((k) => k.startsWith('secbin_dk'))).toEqual([]);
+    expect(Object.keys(JSON.parse(allStorage())).filter((k) => k.startsWith('secbin_dk') || k.startsWith('secbin_kek'))).toEqual([]);
     expect(stashedNonce({ kind: 'p', id: ID, storage: sessionStorage })).toBe(pk.n);
     // The sealed record holds the link's key and nothing else (no Drive key, sealed or not).
     expect(await openRecord('p', ID, pk)).toEqual({ k: K });
@@ -376,55 +373,63 @@ describe('the viewer: a share with the CAPTCHA', () => {
 
 // ── N1: a Drive key planted in the tab's storage ──────────────────────────
 describe('a Drive key planted in this tab\'s storage (as a script on the check page could) is never used', () => {
-  const CODE = 'ABCD-EFGH-JKMN-PQRS';
+  // The key model v2: the KEKs are never read from storage; the one key a tab
+  // may keep (the old Drive key of a Drive waiting for its upgrade) is used
+  // only once its check value is the server's.
   async function realDrive() {
     const S = fakeServer({ role: 'user' });
     globalThis.fetch = S.fetch;
-    const dk = createDriveKey();
-    const w = await wrapRecovery(dk, CODE, await recoveryRef(CODE));
-    S.wraps.set(`${w.kind}|${w.ref}`, w);
-    await seedTree(S, dk, { 'notes.txt': utf8('mine') }); // the Drive's key check value, as its first set-up stored it
-    return { S, dk };
+    await seedTree(S, { 'notes.txt': utf8('mine') });
+    return S;
   }
 
-  it('refused and removed (right user id, wrong key): the Drive asks to be unlocked; nothing is encrypted under it', async () => {
-    const { S } = await realDrive();
-    // What the check page could write: a key of the right shape, and the user's id (the session API gives it).
-    const planted = createDriveKey();
-    sessionStorage.setItem('secbin_dk', b64urlFromBytes(planted));
-    sessionStorage.setItem('secbin_dk_uid', S.user.id);
-    expect(loadSessionKey(S.user.id)).not.toBeNull(); // it looks like the tab's key…
-    const before = S.requests.length;
-    await expect(drive.openDrive({ user: S.user })).rejects.toMatchObject({ reason: 'locked' });
-    expect(loadSessionKey(S.user.id)).toBeNull(); // …and is gone
-    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
-    // Nothing was written with it (no upload, no key, no folder).
-    expect(S.requests.slice(before).filter((r) => r.method !== 'GET')).toEqual([]);
-  }, T);
-
-  it('the real key, proven against the Drive\'s key check value, opens it as before', async () => {
-    const { S, dk } = await realDrive();
-    saveSessionKey(dk, S.user.id);
+  it('a planted KEK (right user id) is ignored and removed; the Drive opens with the server\'s keys and seals nothing under the planted one', async () => {
+    const S = await realDrive();
+    const cur = S.current();
+    const planted = randomBytes(32);
+    const slot = JSON.stringify({ u: S.user.id, c: cur.id, k: { [cur.id]: b64urlFromBytes(planted) } });
+    sessionStorage.setItem('secbin_kek', slot);
+    sessionStorage.setItem('secbin_kek_imp', slot);
     const c = await drive.openDrive({ user: S.user });
     expect((await c.list('root')).children.map((n) => n.name)).toEqual(['notes.txt']);
-    expect(loadSessionKey(S.user.id)).not.toBeNull();
+    expect(sessionStorage.getItem('secbin_kek')).toBeNull();
+    expect(sessionStorage.getItem('secbin_kek_imp')).toBeNull();
+    const id = await c.mkdir('root', 'after the check page');
+    const n = S.nodes.get(id);
+    const at = { userId: S.user.id, mekId: n.mek, salt: n.ks };
+    await expect(openName(planted, at, 'name', n.name)).rejects.toThrow();
+    expect(fromUtf8(await openName(await S.kekOf(n.mek), at, 'name', n.name))).toBe('after the check page');
   }, T);
 
-  it('a Drive whose server holds no key check value never trusts a stored key', async () => {
-    const { S, dk } = await realDrive();
-    S.kcv = null;
-    saveSessionKey(dk, S.user.id);
-    await expect(drive.openDrive({ user: S.user })).rejects.toMatchObject({ reason: 'locked' });
-    expect(loadSessionKey(S.user.id)).toBeNull();
-  }, T);
-
-  it('the owner acting as the user: a planted key in the user\'s own slot is refused and removed too', async () => {
-    const { S } = await realDrive();
+  it('the owner acting as the user: a planted key in the user\'s slot is ignored and removed; the user\'s keys come from the server', async () => {
+    const S = await realDrive();
     S.impersonatedBy = 'owner';
-    saveImpersonationKey(createDriveKey(), S.user.id);
-    await expect(drive.openDrive({ user: { ...S.user, impersonating: true } })).rejects.toBeInstanceOf(drive.DriveLocked);
-    expect(loadImpersonationKey(S.user.id)).toBeNull();
-    clearImpersonationKey();
+    sessionStorage.setItem('secbin_dk_imp', b64urlFromBytes(randomBytes(32)));
+    sessionStorage.setItem('secbin_dk_imp_uid', S.user.id);
+    const c = await drive.openDrive({ user: { ...S.user, impersonating: true } });
+    expect((await c.list('root')).children.map((n) => n.name)).toEqual(['notes.txt']);
+    expect(sessionStorage.getItem('secbin_dk_imp')).toBeNull();
+    expect(c.legacy).toBeNull();
+  }, T);
+
+  it('the old Drive key of a Drive waiting for its upgrade: a planted one is removed, the real one (proven by its check value) is used', async () => {
+    const S = await realDrive();
+    const dk = randomBytes(32);
+    S.migration = { pending: true, v1Items: 1, v1Links: 0, legacy: true };
+    S.legacyState = { state: 'pending', v1Items: 1, v1Links: 0, archived: 0, legacy: true, kcv: await keyCheckValueV1(dk), driveSalt: null, wraps: [] };
+    saveLegacyKey(randomBytes(32), S.user.id);
+    let c = await drive.openDrive({ user: S.user });
+    expect(c.legacy).toBeNull();
+    expect(loadLegacyKey(S.user.id)).toBeNull();
+    saveLegacyKey(dk, S.user.id);
+    c = await drive.openDrive({ user: S.user });
+    expect([...c.legacy]).toEqual([...dk]);
+    // No check value on the server and nothing the key opens: never trusted.
+    S.legacyState = { ...S.legacyState, kcv: null };
+    S.legacyItems = { items: [{ id: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'dir', name: JSON.stringify({ iv: b64urlFromBytes(randomBytes(12)), ct: b64urlFromBytes(randomBytes(40)) }) }], links: [], next: null };
+    c = await drive.openDrive({ user: S.user });
+    expect(c.legacy).toBeNull();
+    expect(loadLegacyKey(S.user.id)).toBeNull();
   }, T);
 });
 

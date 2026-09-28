@@ -14,7 +14,8 @@ import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib
 import { shareInfo } from '../lib/ids.js';
 import { MAX_SHARE_FILTER_USERS } from '../directory-do.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
-import { escrowRoute, adminSetUserKeys, syncCredentialWraps, destroyDrive, drivePasswordChanged } from './drive.js';
+import { adminDriveRoute, syncCredentialWraps, destroyDrive, drivePasswordChanged, legacyCleanup } from './drive.js';
+import { handleKeys } from './keys.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
@@ -67,10 +68,11 @@ export async function handleAdmin(request, env, url) {
   if (a.user.role !== 'owner') return err(403, 'forbidden', 'Owner only.');
   const me = a.user.id;
 
-  // A user's Drive keys (docs/DRIVE.md §3, §6): open their escrow wrap (with a
-  // reason) / write their password wrap after a reset. Both logged.
-  const em = p.match(/^\/api\/private\/admin\/drive\/(escrow|keys)\/([A-Za-z0-9_-]{16})$/);
-  if (em) return em[1] === 'escrow' ? escrowRoute(request, env, me, em[2]) : adminSetUserKeys(request, env, me, em[2]);
+  // The Drive keys (docs/DRIVE.md §3): the keyring, the key kit, the keys
+  // parts of Import / export, one user's keys (Security → Keys); and the
+  // upgrade of Drives made before the key model v2.
+  if (p === '/api/private/admin/keys' || p.startsWith('/api/private/admin/keys/')) return handleKeys(request, env, url, a);
+  if (p === '/api/private/admin/drive/migration' || p === '/api/private/admin/drive/archive' || p.startsWith('/api/private/admin/drive/migrate/')) return adminDriveRoute(request, env, url, me);
 
   if (p === '/api/private/admin/shares') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -293,6 +295,8 @@ export async function handleAdmin(request, env, url) {
         }
         const r = await dir.deleteUser(uid, me);
         if (!r.ok) return fromDir(r);
+        // The last Drive waiting for its upgrade may have gone with the account: the old escrow records go too.
+        try { await legacyCleanup(env, dir); } catch (e) { console.warn('secbin: legacy Drive keys not cleaned up', e && e.message ? e.message : e); }
         if (url.searchParams.get('revokeShares') === '1') {
           for (const id of r.shares) await purgeShare(env, id);
         }

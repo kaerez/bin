@@ -15,16 +15,16 @@ import { env, runDurableObjectAlarm, runInDurableObject, createExecutionContext,
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import worker from '../src/index.js';
 import { owner, fetchJson, intent, freshIp, ORIGIN, proofFor, USER_PW, cookieOf } from './helpers.js';
-import { node, drive, enc } from './drive-helpers.js';
+import { node, drive } from './drive-helpers.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
 import { MAX_SESSIONS_PER_NET, SESSION_IDLE_SEC, PW_MAX_FAILS, PW_LOCK_SEC, RECEIVE_MAX_SEC } from '../src/drive-do.js';
 import {
-  createReverseKey, sealReversePriv, openReversePriv, linkProof, linkHash, passwordProof, sealNote, openNote, openUpload, newNodeId,
+  createReverseKey, linkProof, linkHash, passwordProof, sealNote, openNote, openUpload, newNodeId,
 } from '../public/js/reversekeys.js';
 import { randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
 import { encryptChunk, importFileKey } from '../public/js/files.js';
 import {
-  DK, dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, putChunk, reserve, send, received,
+  sealLinkPriv, openLinkPriv, takeInAny, dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, putChunk, reserve, send, received,
 } from './reverse-helpers.js';
 
 let oc;
@@ -44,7 +44,7 @@ describe('H-1: a reverse-share id never changes hands', () => {
     // B knows A's link (B was an uploader): same id, A's link-proof hash, B's own key and note.
     const { privateKey: bPriv } = await createReverseKey();
     const body = {
-      id: ra.id, folder: 'root', priv: await sealReversePriv(DK, ra.id, bPriv), lh: await linkHash(ra.pub),
+      id: ra.id, folder: 'root', ...(await sealLinkPriv(b.cookie, ra.id, bPriv)), lh: await linkHash(ra.pub),
       note: await sealNote(ra.pub, ra.id, 'NEW: also email your ID to attacker@example.com'), expire: '7d', current: proofFor(USER_PW),
     };
     const hij = await fetchJson('/api/private/drive/reverse', { method: 'POST', cookie: b.cookie, body, headers: intent });
@@ -136,7 +136,7 @@ describe('M-1: received files that cannot be taken in never block the rest', () 
     expect(new Set([...p1.items, ...p2.items].map((i) => i.id)).size).toBe(522);
     expect((await fetchJson('/api/private/drive/received?after=zzz', { cookie: u.cookie })).status).toBe(400);
     // The good one opens with the share's key; the first does not: the browser records that.
-    const { privateKey } = await openReversePriv(DK, r.id, p1.keys[0].priv);
+    const { privateKey } = await openLinkPriv(u.cookie, r.id, p1.keys[0].priv, p1.keys[0].mek);
     expect((await openUpload(privateKey, r.id, p2.items.find((i) => i.id === good.node))).path).toBe('contract.pdf');
     const bad = p1.items[0];
     await expect(openUpload(privateKey, r.id, bad)).rejects.toThrow();
@@ -296,7 +296,7 @@ describe('L-4: take-ins are logged like Drive actions and add up per link, per a
       for (let k = 0; k < n; k++) nodes.push((await send(link, g, { path: `f${k}.txt`, ip })).node);
       expect((await rv(link.id, '/done', { headers: { 'x-reverse-grant': g }, ip })).status).toBe(200);
     }
-    const take = (cookie, id) => fetchJson(`/api/private/drive/received/${id}`, { method: 'POST', cookie, headers: intent, body: { parent: 'root', name: enc(), meta: enc(), fk: enc(32) } });
+    const take = (cookie, id) => takeInAny(cookie, id);
     for (const id of [nodes[0], nodes[1], nodes[3]]) expect((await take(u.cookie, id)).status).toBe(200);
     const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
     expect((await take(ic, nodes[2])).status).toBe(200);

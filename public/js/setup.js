@@ -6,6 +6,7 @@ import './kdf-progress.js';
 import { setupStatus, setup } from './api.js';
 import { newCredential, checkOwnerPassword, randomHex } from './pwauth.js';
 import { showMsg, markInvalid, wirePeek, friendlyError } from './common.js';
+import { parseManualKey } from './drivekeys.js';
 import { copyText, flashCopied } from './ui.js';
 
 const $ = (s) => document.querySelector(s);
@@ -30,8 +31,19 @@ wirePeek(['#setup-pass', '#setup-pass-peek'], ['#setup-pass2', '#setup-pass2-pee
   $('#setup-unconfigured').hidden = st.configured !== false;
   if (!st.enabled) { $('#setup-disabled').hidden = false; return; }
   $('#setup-form').hidden = false;
-  if (st.ownerExists) $('#setup-btn').textContent = 'Recover owner account';
+  if (st.ownerExists) {
+    $('#setup-btn').textContent = 'Recover owner account';
+    // The keyring stays as it is on a recovery.
+    $('#setup-keys').hidden = true;
+    $('#setup-keys-kept').hidden = false;
+  }
 })();
+
+// The Drive keys (docs/DRIVE.md §3): generated on the server, or entered here.
+const manualKeys = () => !$('#setup-keys').hidden && $('#setup-keys-manual').checked;
+for (const r of document.querySelectorAll('input[name="setup-keys-mode"]')) {
+  r.addEventListener('change', () => { $('#setup-keys-fields').hidden = !manualKeys(); });
+}
 
 $('#setup-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -48,16 +60,27 @@ $('#setup-form').addEventListener('submit', async (e) => {
   if (!token) return fail(fields[0], 'Enter the setup token.');
   if (!username) return fail(fields[1], 'Choose an owner username.');
   if (bad) return fail(/match/i.test(bad) ? fields[3] : fields[2], bad);
+  let keys;
+  if (manualKeys()) {
+    const [root, sub] = ['#setup-root', '#setup-sub'].map((s) => $(s));
+    for (const f of [root, sub]) markInvalid(f, msg, false);
+    try { parseManualKey(root.value); } catch (e2) { return fail(root, `Root MEK: ${e2.message}`); }
+    try { parseManualKey(sub.value); } catch (e2) { return fail(sub, `Sub-MEK: ${e2.message}`); }
+    keys = { mode: 'manual', root: root.value.trim(), sub: sub.value.trim() };
+  }
   btn.disabled = true;
   const label = btn.textContent;
   btn.textContent = 'Working…';
   try {
     const cred = await newCredential(pw);
-    const r = await setup({ token, username, ...cred });
+    const r = await setup({ token, username, ...cred, ...(keys ? { keys } : {}) });
     $('#setup-form').reset();
-    showMsg(msg, `${r.recovered ? 'Owner account recovered' : 'Owner account created'}. Now delete the AUTHN secret, then log in.`, false);
+    $('#setup-keys-fields').hidden = true;
+    const kit = r.keys === 'created' ? ' The Drive keys were created: after you log in, download the key kit (Admin → Security → Keys) and store it offline.'
+      : r.keys === 'later' ? ' The Drive keys are made the first time a Drive is used.' : '';
+    showMsg(msg, `${r.recovered ? 'Owner account recovered' : 'Owner account created'}.${kit} Now delete the AUTHN secret, then log in.`, false);
     btn.hidden = true;
-    setTimeout(() => location.replace('/dashboard/login/'), 2500);
+    setTimeout(() => location.replace('/dashboard/login/'), r.keys === 'created' ? 6000 : 2500);
   } catch (err) {
     btn.disabled = false;
     btn.textContent = label;
