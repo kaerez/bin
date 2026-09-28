@@ -126,16 +126,26 @@ try {
     await kindSel('Receive: links may accept credentials (not end-to-end: the server can decrypt them, as all Drive content)').inputValue(),
   ];
   check('admin: the Default role — files and notes on, links and credentials off', vals.join() === 'true,true,false,false', vals.join());
-  const roleId = await op.evaluate(async () => {
+  const made = await op.evaluate(async (pw) => {
     const H = { 'content-type': 'application/json', 'x-secbin-intent': '1', 'x-secbin-csrf': (document.cookie.match(/__Host-secbin_csrf=([^;]+)/) || [])[1] || '' };
     const role = await (await fetch('/api/private/admin/roles', { method: 'POST', headers: H, body: JSON.stringify({ name: 'Receivers' }) })).json();
-    const lim = await fetch('/api/private/admin/limits', { method: 'PATCH', headers: H, body: JSON.stringify({ scope: `role:${role.id}`, channel: 'all',
-      patch: { driveEnabled: true, reverseEnabled: true, reverseUrl: true, reverseSecret: true, reverseCaptcha: 'off' } }) });
+    const patch = { driveEnabled: true, reverseEnabled: true, reverseUrl: true, reverseSecret: true, reverseCaptcha: 'off' };
+    // Allowing links and credentials (and no CAPTCHA) weakens a control: refused without the owner's step-up…
+    const bare = await fetch('/api/private/admin/limits', { method: 'PATCH', headers: H, body: JSON.stringify({ scope: `role:${role.id}`, channel: 'all', patch }) });
+    const refused = { status: bare.status, ...(await bare.json()) };
+    // …and saved with it (the password stretched as the admin page's confirm.js does).
+    const { prelogin } = await import('/js/api.js');
+    const { stretch } = await import('/js/pwauth.js');
+    const { salt, t } = await prelogin('owner');
+    const lim = await fetch('/api/private/admin/limits', { method: 'PATCH', headers: H, body: JSON.stringify({ scope: `role:${role.id}`, channel: 'all', patch, current: await stretch(pw, salt, t) }) });
     const users = (await (await fetch('/api/private/admin/users')).json()).users;
     const alice = users.find((u) => u.username === 'alice');
     const set = await fetch(`/api/private/admin/users/${alice.id}/role`, { method: 'PUT', headers: H, body: JSON.stringify({ roleId: role.id }) });
-    return lim.status === 200 && set.status === 200 ? role.id : null;
-  });
+    return { refused, roleId: lim.status === 200 && set.status === 200 ? role.id : null };
+  }, PW);
+  check('admin: allowing links and credentials needs the step-up (400 reauth_required naming reverseUrl, reverseSecret)', made.refused.status === 400 && made.refused.error === 'reauth_required'
+    && ['reverseUrl', 'reverseSecret'].every((k) => (made.refused.weakens || []).includes(k)), JSON.stringify(made.refused));
+  const roleId = made.roleId;
   check('admin: a role whose links may accept links and credentials too, given to alice', !!roleId);
 
   // ── alice: a link for a note, a link and a credential; and one for files only ──
@@ -213,7 +223,13 @@ try {
   await dc.close();
   // Back on before the take-in: a kind the role no longer allows fails there too (audit RT-1; the DOM and
   // workerd suites cover that), and the credential sent above is taken in below.
-  const back = await csrfFetch(op, '/api/private/admin/limits', 'PATCH', { scope: `role:${roleId}`, channel: 'all', patch: { reverseSecret: true } });
+  const ownerProof = await op.evaluate(async (pw) => {
+    const { prelogin } = await import('/js/api.js');
+    const { stretch } = await import('/js/pwauth.js');
+    const { salt, t } = await prelogin('owner');
+    return stretch(pw, salt, t);
+  }, PW);
+  const back = await csrfFetch(op, '/api/private/admin/limits', 'PATCH', { scope: `role:${roleId}`, channel: 'all', patch: { reverseSecret: true }, current: ownerProof });
   check('admin: credentials turned back on for the role', back.status === 200, JSON.stringify(back));
 
   // ── alice: the Drive takes them in; each opens in its viewer ──
