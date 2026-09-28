@@ -195,6 +195,7 @@ try {
     await p.waitForSelector('#keys-upgrade:not([hidden]) #keys-upgrade-table', { timeout: 60000 });
     const rows = await p.$$eval('#keys-upgrade-table tbody tr', (trs) => trs.map((tr) => `${tr.children[0].textContent}:${tr.dataset.state}`));
     check('upgrade: Admin lists the Drives and their state', rows.some((r) => r.startsWith('carol:')) && rows.some((r) => r.startsWith('alice:')), rows.join(', '));
+    await p.fill('#keys-upgrade-confirm', PW); // the escrow opens a user's old key: the step-up
     await p.click(`#keys-upgrade-table tr[data-id="${ids.carol}"] button`);
     await p.waitForFunction(() => /carol’s Drive is upgraded/.test(document.getElementById('toast').textContent), null, { timeout: 180000 });
     check('upgrade: carol\'s Drive upgraded from Admin (she has not signed in)', true);

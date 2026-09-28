@@ -273,6 +273,7 @@ try {
   await p.waitForTimeout(3000); // the throttle after a failed opening
   await p.setInputFiles('#kkit-restore-file', kit);
   await p.fill('#kkit-restore-pass', KIT_PASS);
+  await p.fill('#kkit-restore-confirm', PW); // the preview asks for the step-up too (it opens the kit)
   await p.click('#kkit-preview');
   await p.waitForFunction(() => /restore/i.test(document.querySelector('#kkit-restore-plan').textContent), null, { timeout: 120000 });
   check('key kit: a restore preview on a working server replaces nothing', /Nothing to restore/.test(await p.textContent('#kkit-restore-plan')) && await p.isDisabled('#kkit-restore'), await p.textContent('#kkit-restore-plan'));
@@ -334,6 +335,7 @@ try {
   await p.fill('#ki-pass', KIT_PASS);
   await p.click('#ki-open');
   await p.waitForSelector('#ki-preview', { timeout: 60000 });
+  await p.fill('#ki-confirm', PW); // the preview asks for the step-up too (it opens the file's keys)
   await p.click('#ki-preview');
   await p.waitForSelector('#ki-plan li', { timeout: 60000 });
   const plan = await p.textContent('#ki-plan');
@@ -355,7 +357,7 @@ try {
   await p.fill('#root-manual', ROOT2.toString('base64'));
   await confirmPw(p);
   await p.click('.key-chooser button:has-text("Use the key I entered")');
-  await waitToast(p, /Every item is re-sealed under the new root MEK; the old one was removed/);
+  await waitToast(p, /Every item is re-sealed under the new root MEK and was checked; the old one was removed/);
   const st2 = await status(p);
   check('root change: a new root; every item re-sealed; the old root gone', st2.root.fp !== before.root.fp && !st2.root.changing, JSON.stringify(st2.root));
   await keysPage(p);
