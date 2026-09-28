@@ -102,7 +102,13 @@ try {
   const role = await api(op, 'POST', '/api/private/admin/roles', { name: 'Limited' });
   const quinn = (await api(op, 'GET', '/api/private/admin/users')).body.users.find((u) => u.username === 'quinn');
   const assigned = await api(op, 'PUT', `/api/private/admin/users/${quinn.id}/role`, { roleId: role.body.id });
-  const opts = await api(op, 'PATCH', '/api/private/admin/limits', { scope: `role:${role.body.id}`, channel: 'all', patch: { driveEnabled: true, reverseEnabled: true, reverseCaptcha: 'off' } });
+  // Turning the Receive CAPTCHA off widens what the role's links may be: the owner's password confirms it.
+  const current = await op.evaluate(async (pw) => {
+    const { stretch } = await import('/js/pwauth.js');
+    const { salt, t } = await (await fetch('/api/auth/prelogin', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner' }) })).json();
+    return stretch(pw, salt, t);
+  }, PW);
+  const opts = await api(op, 'PATCH', '/api/private/admin/limits', { scope: `role:${role.body.id}`, channel: 'all', patch: { driveEnabled: true, reverseEnabled: true, reverseCaptcha: 'off' }, current });
   check('setup: role "Limited" with the Drive and Receive, given to quinn', role.status === 201 && assigned.status === 200 && opts.status === 200, JSON.stringify([role, assigned, opts]));
 
   // ── Admin → Roles → Limited → Quotas ─────────────────────────────────────
