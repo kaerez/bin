@@ -118,6 +118,15 @@ const fileOf = (name, text, type = 'text/plain') => new File([utf8(text)], name,
 const pick = (input, files) => { Object.defineProperty(input, 'files', { configurable: true, get: () => files }); input.dispatchEvent(new Event('change')); };
 
 describe('the uploader page', () => {
+  it('says that a send is recorded for the recipient, as a share page says an opening is', async () => {
+    const S = await reverseServer();
+    const r = await mountUploader(page(), { location: S.location });
+    expect(r.state).toBe('ready');
+    const note = $('#reverse-receipt-note');
+    expect(note.textContent).toBe('Sending is recorded for the recipient and the administrator: the time, and possibly your network address, approximate location, browser, system and languages.');
+    expect(note.classList.contains('receipt-note')).toBe(true);
+  });
+
   it('shows the note as text, the limits, and sends encrypted files (no Turnstile script on this page, even with the server\'s keys)', async () => {
     const S = await reverseServer({ note: 'Send the <b>contract</b>, please.\nThanks!', limits: { filesLeft: 5, bytesLeft: 1 << 20, maxFileBytes: 1 << 19 }, turnstile: '0x4AAAAAAAsitekey' });
     const w = fakeTurnstile();
@@ -483,6 +492,27 @@ describe('Drive: Receive…', () => {
 });
 
 describe('Drive: received files', () => {
+  it('an item whose link moved since the listing (409 folder_moved) waits for the next take-in, never marked failed', async () => {
+    await server();
+    const rs = await existingReverse(ids.get('Documents'));
+    await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'moved.txt', bytes: utf8('moved') });
+    const real = S.fetch;
+    let refusals = 0;
+    globalThis.fetch = async (url, init = {}) => {
+      if (refusals === 0 && init.method === 'POST' && /^\/api\/private\/drive\/received\/[^/]+$/.test(new URL(url, 'https://x').pathname)) {
+        refusals++;
+        return { ok: false, status: 409, type: 'basic', json: async () => ({ error: 'folder_moved', message: 'moved', folder: 'root' }) };
+      }
+      return real(url, init);
+    };
+    const client = await drive.openDrive({ user: S.user });
+    const first = await client.receivePending();
+    expect(first).toMatchObject({ added: 0, failed: 0, deferred: 1 });
+    expect(S.requests.some((x) => /\/failed$/.test(x.path))).toBe(false);
+    const again = await client.receivePending();
+    expect(again).toMatchObject({ added: 1, failed: 0, deferred: 0 });
+  });
+
   it('are taken into the Drive when it opens: folders made from their paths, sealed under the KEK, unreadable ones counted', async () => {
     await server();
     const rs = await existingReverse(ids.get('Documents'));

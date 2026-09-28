@@ -229,8 +229,11 @@ describe('files taken in from a Receive link follow the role\'s Drive rules (on 
     const [one, two] = (await received(u.cookie)).items;
     await driveLimits(u.id, { maxFolderDepth: 1 });
     expect(await errorBody(await takeInAny(u.cookie, one.id, b.id))).toMatchObject({ status: 403, error: 'folder_too_deep', max: 1 });
-    expect((await takeInAny(u.cookie, one.id, a.id)).status).toBe(200);
+    // A shallower folder outside the link's is no way around it: an item goes only into its link's
+    // folder as the server has it, or below it (docs/REVERSE.md §5).
+    expect(await errorBody(await takeInAny(u.cookie, one.id, a.id))).toMatchObject({ status: 409, error: 'folder_moved', folder: b.id });
     await driveLimits(u.id, { maxFolderDepth: null });
+    expect((await takeInAny(u.cookie, one.id, b.id)).status).toBe(200);
     expect((await takeInAny(u.cookie, two.id, b.id)).status).toBe(200);
   });
 });

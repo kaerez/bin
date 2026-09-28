@@ -551,3 +551,22 @@ describe('the Guard routes and the pass (review of #86)', () => {
     expect(row.net).not.toContain(ip);
   });
 });
+
+describe('Receive links (#87): an upload session is a read receipt too', () => {
+  it('stored sealed like a share\'s receipt, and the sender sees it opened as the admin allows', async () => {
+    const { receiver, newReverse, begin } = await import('./reverse-helpers.js');
+    const u = await receiver('rec-rcv');
+    const r = await newReverse(u.cookie);
+    const ip = '198.51.100.246';
+    expect((await begin(r, { ip })).status).toBe(200);
+    const stored = await rows(dirOf(), 'SELECT * FROM opens WHERE share_id = ?', r.id);
+    expect(stored).toHaveLength(1);
+    expect(JSON.stringify(stored[0])).not.toContain(ip);
+    for (const c of ['ip', 'country', 'region', 'city', 'browser', 'browser_ver', 'os', 'langs']) expect(isSealedRecord(stored[0][c])).toBe(true);
+    expect(stored[0].rn).toBeTruthy();
+    expect(stored[0].rk).toBeTruthy();
+    const adm = await (await fetchJson(`/api/private/admin/shares/${r.id}/opens`, { cookie: oc })).json();
+    expect(adm.rows[0]).toMatchObject({ ip });
+    expect(adm.rows[0].unreadable).toBeUndefined();
+  });
+});

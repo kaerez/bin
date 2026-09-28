@@ -38,6 +38,9 @@ const docPageKey = typeof document !== 'undefined' ? readPageKey(document) : nul
 /** When the link stops taking files: its expiry, or none (the user revokes it). */
 const expiryLine = (head) => (head.expires === null ? 'The link has no expiry: it takes files until it is revoked.' : `The link expires ${formatDate(head.expires)}.`);
 
+/** What the uploader page says about the receipt each send leaves (docs/REVERSE.md §5). */
+export const RECEIPT_NOTE = 'Sending is recorded for the recipient and the administrator: the time, and possibly your network address, approximate location, browser, system and languages.';
+
 /**
  * The limits as one sentence, e.g. "Up to 5 files · 1 GB in total · 100 MB per
  * file · only .pdf files". `accept`: what the link takes (a link that takes
@@ -272,6 +275,8 @@ function buildApp(root, up, { storage, toCheck }) {
         : 'What you send here — files with their names and types, notes, links and credentials — is encrypted in your browser before it is sent, to a key of the person who shared this link. The server keeps that key under their Drive keys, which it holds: the server can decrypt what you send, as it can their other Drive files. No account is needed.' })),
     note,
     h('p.mono.muted', { id: 'reverse-limits', text: `${limitsText(up.limits, accept)} ${expiryLine(up.head)}` }),
+    // Each send is recorded for the recipient, as an opening of a share is for its sender.
+    h('p.mono.muted.receipt-note', { id: 'reverse-receipt-note', text: RECEIPT_NOTE }),
     tablist,
     ...accept.map((k) => panels[k]),
     pwBox,

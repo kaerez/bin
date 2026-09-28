@@ -433,9 +433,11 @@ const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
 /** What the activity log may name when a reverse share's details change (the names only, never a value). */
-const REVERSE_DETAIL = ['password=set', 'password=removed', 'note=set', 'note=removed', 'limits'];
+const REVERSE_DETAIL = ['password=set', 'password=removed', 'note=set', 'note=removed', 'limits', 'paused', 'resumed'];
 /** What a changed Receive link accepts, as its log entry says it ("accept=files,note"): known kinds only. */
 const ACCEPT_DETAIL_RE = /^accept=(?:files|note|url|secret)(?:,(?:files|note|url|secret)){0,3}$/;
+/** The Drive folder a Receive link was moved to, by its node id (random; its name stays encrypted). */
+const FOLDER_DETAIL_RE = /^folder=(?:root|[A-Za-z0-9_-]{22})$/;
 /** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
 const PENDING_REVERSE_SEC = 600;
 /**
@@ -2121,14 +2123,15 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
-  async listShares(uid, { q = '', status = '', expiry = '', limit = 50, offset = 0 } = {}) {
+  async listShares(uid, { q = '', status = '', expiry = '', kind = '', limit = 50, offset = 0 } = {}) {
     const lim = Math.max(1, Math.min(100, limit | 0));
     const off = Math.max(0, offset | 0);
     const like = `%${String(q).replace(/[%_\\]/g, (c) => '\\' + c)}%`;
     // A reverse share being created (`pending`, below) is not listed yet.
     // `expiry`: 'none' — only reverse shares with no expiry; 'set' — only shares that expire.
-    const where = `WHERE user_id = ? AND status != 'pending' AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}${expiryFilter(expiry)}`;
-    const args = [uid, like, ...(status ? [String(status)] : []), ...(expiry === 'none' || expiry === 'set' ? [NO_EXPIRY] : [])];
+    // `kind`: only shares of that kind (the Receive links' API lists 'reverse').
+    const where = `WHERE user_id = ? AND status != 'pending' AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}${kind ? ' AND kind = ?' : ''}${expiryFilter(expiry)}`;
+    const args = [uid, like, ...(status ? [String(status)] : []), ...(kind ? [String(kind)] : []), ...(expiry === 'none' || expiry === 'set' ? [NO_EXPIRY] : [])];
     const rows = this.sql.exec(
       `SELECT id, kind, label, created, expires, views_total, status, locked, captcha,
         MAX(shares.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id)) AS opens FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
@@ -2605,7 +2608,7 @@ export class Directory extends DurableObject {
     // A reverse share's CAPTCHA (its uploaders pass it before a session starts: reverseTarget reads it here).
     if (captcha !== undefined && row.kind === 'reverse') { this.sql.exec('UPDATE shares SET captcha = ? WHERE id = ?', captcha ? 1 : 0, id); parts.push(`captcha=${captcha ? 'on' : 'off'}`); }
     // What else changed on a reverse share (names only: never a value the user typed).
-    for (const d of Array.isArray(detail) ? detail : []) if (REVERSE_DETAIL.includes(d) || (typeof d === 'string' && ACCEPT_DETAIL_RE.test(d))) parts.push(d);
+    for (const d of Array.isArray(detail) ? detail : []) if (REVERSE_DETAIL.includes(d) || (typeof d === 'string' && (ACCEPT_DETAIL_RE.test(d) || FOLDER_DETAIL_RE.test(d)))) parts.push(d);
     if (status !== undefined) {
       this.sql.exec("UPDATE shares SET status = ?, ended = CASE WHEN ? = 'active' THEN NULL ELSE COALESCE(ended, ?) END WHERE id = ?", status, status, now(), id);
       parts.push(`status=${status}`);
@@ -2614,6 +2617,20 @@ export class Directory extends DurableObject {
     if (keyId && !admin) parts.push(`apikey=${String(keyId).slice(0, 16)}`);
     this.#log(actor, subject, status === 'revoked' ? 'share.revoked' : 'share.updated', `id=${id} ${parts.join(' ')}`);
     if (status !== undefined && status !== 'active') await this.#dropDriveRefs([id]);
+    return { ok: true };
+  }
+
+  /**
+   * A Receive link's move to `folder` that stands although the index refused
+   * the rest of its change (a lock in between, and its old folder deleted
+   * meanwhile, so the Drive could not put it back): logged as a change of
+   * the link, whatever its lock — the log never misses where uploads land.
+   */
+  async reverseMoveKept(uid, id, folder, actorId = uid, { keyId = null } = {}) {
+    const row = this.sql.exec("SELECT user_id FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse'", id, uid).toArray()[0];
+    const d = `folder=${folder}`;
+    if (!row || !FOLDER_DETAIL_RE.test(d)) return fail(404, 'not_found', 'Share not found.');
+    this.#log(actorId, uid, 'share.updated', `id=${id} ${d} kept${keyId ? ` apikey=${String(keyId).slice(0, 16)}` : ''}`);
     return { ok: true };
   }
 
@@ -4045,7 +4062,8 @@ export class Directory extends DurableObject {
       return { ok: true };
     }
     if (!L.driveEnabled || !L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
-    const detail = Object.keys(change).some((k) => k !== 'label');
+    // The label, and pausing or resuming it (less than revoking, which is always allowed), need no reverseEdit.
+    const detail = Object.keys(change).some((k) => k !== 'label' && k !== 'pause');
     if (detail && !L.reverseEdit) return fail(403, 'reverse_edit_disabled', `Your role does not allow changing an upload link after it is made${via}.`);
     const lim = reverseLimits(L, { expireSec: change.expires === undefined ? undefined : change.expires === null ? null : change.expires - now(), views: change.views,
       kinds: change.accept === undefined ? undefined : Array.isArray(change.added) ? change.added : change.accept, via });
@@ -4064,7 +4082,27 @@ export class Directory extends DurableObject {
       const pw = checkReversePassword(L, change.password !== null);
       if (!pw.ok) return fail(403, pw.error, pw.message);
     }
-    return { ok: true, ...(change.maxBytes !== undefined ? { maxBytes: change.maxBytes ?? roleMax } : {}) };
+    // A new destination folder: the Drive holds it to the role's folder depth (for this channel), as on create.
+    return {
+      ok: true,
+      ...(change.maxBytes !== undefined ? { maxBytes: change.maxBytes ?? roleMax } : {}),
+      ...(change.folder !== undefined ? { maxFolderDepth: L.maxFolderDepth ?? null } : {}),
+    };
+  }
+
+  /**
+   * May `uid` use the Receive links' API (docs/API.md; a session or an API
+   * key, `channel`)? Their role must include the Drive and reverse shares
+   * (driveEnabled, reverseEnabled). → { ok } or a failure.
+   */
+  async reverseAccess(uid, channel = 'all') {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
+    const eff = this.#effective(u);
+    const L = channel === 'api' ? eff.api : eff.all;
+    if (!L.driveEnabled || !L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
+    return { ok: true };
   }
 
   /**

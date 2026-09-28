@@ -2,9 +2,9 @@
 // docs/REVERSE.md §5, §8) as the user changes them after making it: My
 // shares' Edit (the Drive's Receive dialog uses the pure helpers for a new
 // link). Its expiry (extend it, give it one, or none), views, limits, what it
-// accepts (files, notes, links, credentials), CAPTCHA, the uploader password
-// and the note, each shown as the role allows (profile.limits); the server
-// checks every value again.
+// accepts (files, notes, links, credentials), the Drive folder it receives
+// into, CAPTCHA, the uploader password and the note, each shown as the role
+// allows (profile.limits); the server checks every value again.
 //
 // The password and the note are sealed in this browser with the link's key
 // (driveclient.js updateReverse), which the Drive's keys open: the Drive
@@ -23,10 +23,16 @@ import { normalizeRules } from '../../js/filepolicy.js';
 import { captchaChoice } from '../../js/captcha.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { RECEIVE_KINDS, KIND_LABELS, KIND_OPTIONS, DEFAULT_ACCEPT, widening } from '../../js/receivekinds.js';
+import { createTree } from '../../js/tree.js';
 
 const MiB = 1024 * 1024;
 const MAX_FILES = 10000;
+const ROOT = 'root';
+const ROOT_NAME = 'My Drive';
 let seq = 0;
+
+/** A Drive path (root first) as text: "My Drive / Tax / 2026". */
+export const folderPathText = (path) => path.map((p) => (p.id === ROOT ? ROOT_NAME : p.name || '(unnamed)')).join(' / ');
 
 /**
  * A reverse link's views as typed → { views } (null: unlimited) or { error,
@@ -193,6 +199,15 @@ export function reverseEditPatch(v, cur, L = {}, now = Math.floor(Date.now() / 1
     if (!text) return { error: 'Write the new note, or keep the current one.', field: 'note' };
     patch.note = text;
   } else if (v.note === 'remove') patch.note = '';
+  // The folder it receives into: another folder of the Drive, no deeper than the role allows
+  // (`folderDepth`: its depth, the top folder 0 — a received file lands at its folder's level).
+  if (typeof v.folder === 'string' && v.folder !== cur.folder) {
+    const max = L.maxFolderDepth;
+    if (Number.isInteger(max) && Number.isInteger(v.folderDepth) && v.folderDepth > max) {
+      return { error: `Folders may be nested at most ${max} level${max === 1 ? '' : 's'} deep in your Drive: choose a folder higher up.`, field: 'folder' };
+    }
+    patch.folder = v.folder;
+  }
   if (!Object.keys(patch).length) return { error: 'Nothing to change.', field: null };
   return { patch };
 }
@@ -228,10 +243,14 @@ function choiceGroup(legend, name, choices, current) {
  * reverseEditPatch result, stepUp(patch) → the confirmation to send }.
  * `profile`: /api/private/me (its limits and the CAPTCHA's state; the owner
  * acting as the user confirms nothing). `confirm(input)`: a stand-in for
- * confirm.js confirmStep (tests). Every control has a visible label; the
+ * confirm.js confirmStep (tests). `folders`: where the form finds the Drive's
+ * folders to move the link to — { list(id) → { path: [{ id, name }] (the top
+ * folder first, ending with `id`), children: [{ id, kind, name }] } } (the
+ * Drive client's list: the names are opened in this browser); without it
+ * the form has no folder section. Every control has a visible label; the
  * error line is an alert, the note under each group says what it does.
  */
-export function reverseEditForm(cur, profile, { confirm = null, passkey = null, impersonating: acting = null } = {}) {
+export function reverseEditForm(cur, profile, { confirm = null, passkey = null, impersonating: acting = null, folders = null } = {}) {
   const n = ++seq;
   const id = (x) => `rev-edit-${n}-${x}`;
   const L = (profile && profile.limits) || {};
@@ -305,6 +324,9 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
   const noteBox = h('div', { hidden: true }, labelled('The new note', noteIn));
   for (const r of note.radios) r.addEventListener('change', () => { noteBox.hidden = note.value() !== 'change'; });
 
+  // The folder it receives into (another of the Drive's folders; what is waiting to be taken in moves too).
+  const folder = folders ? folderBox({ id, cur, folders }) : null;
+
   // "Confirm it's you": shown only while the change weakens the link (and never while the owner acts as the user).
   const impersonating = acting ?? !!(profile && (profile.impersonatedBy || profile.user?.impersonating));
   const confirmIn = h('input.input', { id: id('confirm'), type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false', 'aria-describedby': id('confirm-hint') });
@@ -320,11 +342,12 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
     accept.el,
     h('div.drive-reverse-grid', {}, labelled('Most files (empty: no limit)', files), labelled('Most in total, MB (empty: no limit)', maxMb), labelled('Largest file, MB (empty: no limit)', fileMb)),
     labelled('File types', typeMode), typeBox,
+    folder ? folder.el : null,
     capBox,
     pwEl, pwBox,
     note.el, noteBox,
     confirmBox);
-  const fields = { expire: expN, views: viewsIn.disabled ? inf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules, pw: pw1, pw2, note: noteIn, confirm: confirmIn };
+  const fields = { expire: expN, views: viewsIn.disabled ? inf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules, pw: pw1, pw2, note: noteIn, confirm: confirmIn, folder: folder ? folder.toggle : null };
   const acceptField = () => [...accept.boxes.values()].find((b) => !b.disabled) || null;
   const read = () => reverseEditPatch({
     expiry: expiry.value(), n: expN.value, unit: expU.value,
@@ -334,6 +357,7 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
     captcha: capBox ? capIn.checked : undefined,
     password: password.value(), pw1: pw1.value, pw2: pw2.value,
     note: note.value(), noteText: noteIn.value,
+    ...(folder && folder.chosen() ? { folder: folder.chosen().id, folderDepth: folder.chosen().depth } : {}),
   }, cur, L);
   const needsStepUp = (patch) => !impersonating && weakensLink(patch, cur);
   const sync = () => { confirmBox.hidden = !needsStepUp(read().patch); };
@@ -353,6 +377,92 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
       return (confirm || ((input) => confirmStep(input, profile?.user?.username, withPasskey)))(confirmIn);
     },
     clearSecrets: () => { pw1.value = pw2.value = confirmIn.value = ''; },
+  };
+}
+
+/**
+ * The Edit form's "Folder" group: where uploads land now (its path, once the
+ * Drive's folders are read), and "Choose another folder…", which shows the
+ * Drive's folder tree (tree.js: the tree pattern, keyboard and pointer) to
+ * pick the new one → { el, toggle, chosen() → { id, depth, path } or null }.
+ * The chosen path is announced (a polite live region; so is a folder list
+ * that could not be read); "Keep the current folder" undoes the choice.
+ */
+function folderBox({ id, cur, folders }) {
+  const now = h('p.type-hint', { id: id('folder-now'), text: 'Uploads go to the folder this link was made for.' });
+  const picked = h('p.mono.drive-move-target', { id: id('folder-new'), 'aria-live': 'polite', text: '' });
+  const pickBox = h('div.stack', { id: id('folder-pick'), hidden: true });
+  const toggle = h('button.btn', { type: 'button', id: id('folder-toggle'), text: 'Choose another folder…', 'aria-expanded': 'false', 'aria-controls': id('folder-pick'), 'aria-describedby': id('folder-now') });
+  const keep = h('button.btn', { type: 'button', id: id('folder-keep'), text: 'Keep the current folder', hidden: true });
+  let chosen = null;
+  let tree = null;
+  const dirs = (r) => (Array.isArray(r?.children) ? r.children : []).filter((c) => c && c.kind === 'dir')
+    .map((c) => ({ id: c.id, name: c.name || '(unnamed)' })).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const choose = (n) => {
+    const path = n.path.map((p) => ({ id: p.id, name: p.id === ROOT ? ROOT_NAME : p.name }));
+    chosen = n.id === cur.folder ? null : { id: n.id, depth: path.length - 1, path };
+    picked.textContent = chosen ? `New folder: ${folderPathText(path)}` : 'That is the folder it receives into now.';
+    keep.hidden = !chosen;
+    pickBox.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const showNow = async () => {
+    try {
+      const r = await folders.list(cur.folder || ROOT);
+      now.textContent = `Uploads go to: ${folderPathText(Array.isArray(r?.path) && r.path.length ? r.path : [{ id: ROOT }])}.`;
+    } catch { /* the folder's name is not needed to choose another */ }
+  };
+  toggle.addEventListener('click', async () => {
+    const open = pickBox.hidden;
+    pickBox.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+    if (!open || tree) return;
+    showNow();
+    tree = createTree({
+      label: 'Folder to receive into',
+      root: { id: ROOT, name: ROOT_NAME },
+      loadChildren: async (fid) => dirs(await folders.list(fid)),
+      onSelect: choose,
+      // Said in the choice's live line (the form's own error line is for what Save refuses).
+      onError: (e) => { picked.textContent = `The folders could not be read: ${(e && e.message) || 'try again'}`; },
+    });
+    pickBox.replaceChildren(h('div.drive-picker', {}, tree.el), picked);
+    tree.ready.then(() => tree.focus()).catch(() => {});
+  });
+  keep.addEventListener('click', () => {
+    chosen = null;
+    picked.textContent = '';
+    keep.hidden = true;
+    toggle.focus();
+    pickBox.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  const el = h('fieldset.rev-edit-folder', { id: id('folder') }, h('legend.field-label', { text: 'Folder it receives into' }), now,
+    h('div.btn-row', {}, toggle, keep), pickBox,
+    h('p.type-hint', { text: 'What this link has received and your Drive has not added yet moves with it, and is added to the new folder.' }));
+  return { el, toggle, chosen: () => chosen };
+}
+
+/**
+ * "Confirm it's you" for resuming a paused link (it reopens it to anonymous
+ * senders: a weakening change, docs/REVERSE.md §5) → { el, field, step() →
+ * { current } / { reauth } (throws with a reason), clear() }. The owner acting
+ * as the user confirms nothing (`el` hidden, step() → {}). `confirm(input)`:
+ * a stand-in for confirm.js confirmStep (tests).
+ */
+export function resumeConfirm(profile, { confirm = null, passkey = null, impersonating: acting = null } = {}) {
+  const n = ++seq;
+  const id = (x) => `rev-resume-${n}-${x}`;
+  const impersonating = acting ?? !!(profile && (profile.impersonatedBy || profile.user?.impersonating));
+  const input = h('input.input', { id: id('confirm'), type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false', 'aria-describedby': id('hint') });
+  const label = h('label.field-label', { for: id('confirm'), text: 'Your account password (to confirm it is you)' });
+  let withPasskey = passkey === true;
+  if (!impersonating && passkey === null) canUsePasskey().then((ok) => { withPasskey = !!ok; label.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
+  const el = h('div.dfield', { hidden: impersonating }, label, input,
+    h('p.type-hint', { id: id('hint'), text: 'Resuming opens the link to anyone who has it again, so it needs your password or a passkey, as making a link does.' }));
+  return {
+    el,
+    field: input,
+    step: async () => (impersonating ? {} : (confirm || ((i) => confirmStep(i, profile?.user?.username, withPasskey)))(input)),
+    clear: () => { input.value = ''; },
   };
 }
 
