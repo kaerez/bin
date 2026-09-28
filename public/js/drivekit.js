@@ -10,6 +10,12 @@
 //         key kit (Admin → Security → Keys): the root MEK, every sub-MEK
 //         with its dates, and every user salt. It restores everything.
 //
+// Both payloads also hold the keyring's version they were made at
+// (`keyVersion`: a number in a personal kit, { n, at } in the key kit; the
+// Directory counts every key change), which Verify compares with the
+// server's (versionCheck). A kit made before versions were kept has none and
+// still opens and verifies.
+//
 //   key  = Argon2id(UTF8(NFC(passphrase)), salt16, m = 64 MiB, t = 3, p = 1) → 32 B
 //   ct   = AES-256-GCM(key, iv12, UTF8(JSON(payload)), AAD)
 //   AAD  = "<format>\nargon2id\nm=65536\nt=3\np=1\nsalt=<b64url>\niv=<b64url>\n"
@@ -106,4 +112,19 @@ export async function openDriveKit(env, { kind, accountId, origin, passphrase })
   try { payload = JSON.parse(fromUtf8(new Uint8Array(pt))); } catch { payload = null; }
   if (!payload || typeof payload !== 'object' || payload.v !== PAYLOAD_V[kind]) throw new DriveKitError('The kit opened, but its content is not valid.', 'payload');
   return payload;
+}
+
+/**
+ * A kit file's key version against the server's → the Verify check (both
+ * kits): the same, older (the keys changed since it was made), or not
+ * recorded (a kit made before versions were kept). Never a failure by itself:
+ * the key checks say whether the kit opens the Drive.
+ */
+export function versionCheck(inFile, now, what = 'kit') {
+  const label = 'Key version';
+  if (!Number.isSafeInteger(now)) return { id: 'version', status: 'skip', label, detail: 'The server did not say its key version.' };
+  if (!Number.isSafeInteger(inFile)) return { id: 'version', status: 'warn', label, detail: `This ${what} does not record its key version (it was made before versions were kept); the keys are now version ${now}.` };
+  if (inFile === now) return { id: 'version', status: 'pass', label, detail: `Version ${inFile}: the keys as they are now.` };
+  if (inFile < now) return { id: 'version', status: 'warn', label, detail: `Version ${inFile}; the keys are now version ${now}: they changed after this ${what} was made. Download a new one.` };
+  return { id: 'version', status: 'warn', label, detail: `Version ${inFile}, later than the keys here (version ${now}): this ${what} may be of another server, or the keys were restored.` };
 }

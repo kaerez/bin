@@ -13,8 +13,9 @@
 // and the metadata under KEK(current sub-MEK). The Worker checks that what
 // is stored opens under that KEK (so it can re-seal it later) and never keeps
 // anything it opened. What the owner does in the Drive while impersonating is
-// recorded in the admin audit with the real actor and never in the user's own
-// activity (docs/DRIVE.md §9).
+// recorded as the user's own action: it shows in the user's activity as
+// theirs, with no trace of the impersonation, and the admin audit keeps the
+// owner as the real actor (docs/DRIVE.md §9).
 //
 // Drives made before the key model v2 are upgraded (docs/DRIVE.md §3.3): the
 // old Drive key is opened in a browser (the user's, or the owner's through
@@ -23,6 +24,7 @@
 
 import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, appendCookies, SECURITY_HEADERS } from '../lib/http.js';
 import { authenticate, actorId } from '../lib/auth.js';
+import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { directory, ipContext } from '../lib/guard.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { genId, genToken, genDeleteToken, hashToken } from '../lib/ids.js';
@@ -141,6 +143,8 @@ export async function handleDrive(request, env, url) {
     const out = {
       enabled: true, capacity: pol.capacity, maxFile: pol.maxFile, used: s.used,
       received: s.received, receivedFailed: s.receivedFailed, current: pol.current,
+      // The personal kit against the keys now: the page's "download a new kit" notice (no key detail).
+      kit: pol.kit,
       migration: pending || s.migration.v1Items || s.migration.v1Links ? { pending: true, v1Items: s.migration.v1Items, v1Links: s.migration.v1Links, legacy: s.migration.wraps > 0 } : null,
     };
     if (s.used !== pol.used) await dir.setDriveUsed(uid, s.used);
@@ -362,37 +366,58 @@ const uploadTokenOf = (request) => {
 // ── the personal kit (docs/DRIVE.md §3.1) ───────────────────────────────────
 /**
  * /api/private/drive/kit… (the user's own):
+ * - `GET …/kit` — the kit's state against the keys now: the key version and
+ *   its date, the last download (its date and version) and whether it is
+ *   stale (the keys changed since); no key detail;
  * - `POST …/kit` `{ current | reauth }` — the kit's content, for the browser
- *   to seal under a passphrase: the id, the username, the user salt and the
- *   KEK of every sub-MEK the Drive uses (and the current one), after the
- *   step-up (`drive.kit_exported`);
+ *   to seal under a passphrase: the id, the username, the user salt, the key
+ *   version and the KEK of every sub-MEK the Drive uses (and the current
+ *   one), after the step-up (`drive.kit_exported`); the download is recorded
+ *   against the key version, for the notice;
  * - `POST …/kit/verify` `{ keks: { mekId: check }, salt: check }` — read-only:
  *   each check value compared here in constant time → match / mismatch /
- *   absent per sub-MEK, with each one's dates (`drive.kit_verified`); at most
- *   KIT_VERIFY_MAX per session per KIT_VERIFY_WINDOW.
- * A restore from the kit is the owner's (src/routes/keys.js, Admin →
- * Security → Keys): `…/kit/restore` and `…/kit/items` answer 403 above.
+ *   absent per sub-MEK, with each one's dates, and the key version now
+ *   (`drive.kit_verified`); at most KIT_VERIFY_MAX per session per
+ *   KIT_VERIFY_WINDOW.
+ * Both POSTs are Account-page changes like the others: with Turnstile on,
+ * each needs a fresh CAPTCHA token for "account", checked after the body is
+ * read and before the step-up (so a password guess costs a token) and the
+ * rate limit. A restore from the kit is the owner's (src/routes/keys.js,
+ * Admin → Security → Keys): `…/kit/restore` and `…/kit/items` answer 403
+ * above.
  */
 async function kitRoute(request, env, url, dir, a, driveLog) {
   const p = url.pathname;
   const uid = a.user.id;
   const drive = driveStub(env, uid);
   if (p === '/api/private/drive/kit') {
-    if (request.method !== 'POST') return methodNotAllowed('POST');
+    if (request.method === 'GET') {
+      const st = await dir.userKitStatus(uid);
+      return st.ok ? json({ version: st.version, versionAt: st.versionAt, last: st.last, stale: st.stale }) : fromDir(st);
+    }
+    if (request.method !== 'POST') return methodNotAllowed('GET, POST');
     assertIntent(request);
     const body = await readJsonBody(request);
+    await requireTurnstile(env, request, TURNSTILE_ACTIONS.account);
     const refused = await stepUp(request, env, url, dir, uid, body);
     if (refused) return refused;
     const s = await drive.summary(uid);
     const k = await userKeys(env, uid, { meks: s.meks, createSalt: nothingSealed(s) });
     await driveLog('drive.kit_exported', `sub-MEKs: ${k.keks.size}`);
     const o = keysOut(k);
-    return json({ kit: { id: uid, username: a.user.username, userSalt: k.salt, current: k.current, keks: o.keys.map(({ kekOld, ...x }) => x) }, missing: k.missing, broken: k.broken }); // eslint-disable-line no-unused-vars
+    // What this kit holds, against the key version its KEKs were derived at.
+    const st = await dir.userKitDownloaded(uid, { version: k.version, meks: [...k.keks.keys()] });
+    return json({
+      kit: { id: uid, username: a.user.username, userSalt: k.salt, current: k.current, keyVersion: k.version, keks: o.keys.map(({ kekOld, ...x }) => x) }, // eslint-disable-line no-unused-vars
+      missing: k.missing, broken: k.broken,
+      status: st.ok ? { version: st.version, versionAt: st.versionAt, last: st.last, stale: st.stale } : null,
+    });
   }
   if (p === '/api/private/drive/kit/verify') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
     const body = await readJsonBody(request);
+    await requireTurnstile(env, request, TURNSTILE_ACTIONS.account);
     const rl = await drive.hit(uid, `kitcheck:${a.claims?.sid || 'none'}`, KIT_VERIFY_MAX, KIT_VERIFY_WINDOW);
     if (!rl.ok) return err(429, 'rate_limited', 'Too many kit checks: try again in a few minutes.', { retryAfter: rl.retryAfter });
     const given = isObj(body.keks) ? body.keks : {};
@@ -409,7 +434,7 @@ async function kitRoute(request, env, url, dir, a, driveLog) {
     const extra = Object.keys(given).filter((id) => !all.keks.has(id)).slice(0, 100);
     const complete = salt === 'match' && out.filter((x) => x.inUse || x.current).every((x) => x.result === 'match');
     await driveLog('drive.kit_verified', `${complete ? 'complete' : 'incomplete'}: salt ${salt}; KEKs ${out.filter((x) => x.result === 'match').length}/${out.length}`);
-    return json({ complete, salt, keks: out, extra, now: Math.floor(Date.now() / 1000) });
+    return json({ complete, salt, keks: out, extra, version: all.version, now: Math.floor(Date.now() / 1000) });
   }
   return err(404, 'not_found', 'Not found.');
 }

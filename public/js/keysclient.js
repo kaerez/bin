@@ -8,7 +8,7 @@
 // holds, and the server takes only what is missing or broken there.
 
 import { keysApi, ApiError } from './api.js';
-import { sealDriveKit, parseDriveKit, openDriveKit, DriveKitError } from './drivekit.js';
+import { sealDriveKit, parseDriveKit, openDriveKit, DriveKitError, versionCheck } from './drivekit.js';
 import { sealExport, openExport, ExportCryptError } from './exportcrypt.js';
 import { keyBytes, keyCheckValue, keyFingerprint, saltCheckValue, effectiveAt, KEY_RE, MEK_ID_RE } from './drivekeys.js';
 
@@ -81,6 +81,7 @@ export async function verifyKeyKit({ ownerId, text, passphrase = '', date = null
   add('date', atDate && atDate.inKit ? 'pass' : 'warn', 'The sub-MEK in effect on the chosen date', atDate
     ? `${atDate.id} (${fpText(atDate.fp)}) — ${atDate.inKit ? 'in this kit.' : 'not in this kit: download a fresh kit.'}`
     : 'No sub-MEK is in effect on that date.');
+  checks.push(versionCheck(kit.keyVersion?.n, r.version?.n, 'key kit'));
   return { verdict: checks.some((c) => c.status === 'fail') ? 'incomplete' : 'complete', checks, atDate, fixes: checks.some((c) => c.status !== 'pass') ? ['Download a fresh key kit and store it offline; then verify the new file.'] : [] };
 }
 

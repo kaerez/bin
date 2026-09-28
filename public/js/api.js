@@ -263,6 +263,8 @@ export const deleteShare = (kind, id, token) =>
 export const session = () => request('/api/auth/session');
 export const setupStatus = () => request('/api/auth/setup');
 export const setup = (body) => request('/api/auth/setup', { method: 'POST', body });
+/** Set-up's proposed Drive keys (a root MEK and a first sub-MEK, for the setup token's holder) → { root, sub, expires }. */
+export const setupCandidate = (token) => request('/api/auth/setup/candidate', { method: 'POST', headers: INTENT, body: { token } });
 export const prelogin = (username) => request('/api/auth/prelogin', { method: 'POST', body: { username } });
 export const login = (username, proof, turnstile) => request('/api/auth/login', { method: 'POST', headers: human(turnstile), body: { username, proof } });
 export const logout = () => request('/api/auth/logout', { method: 'POST', headers: INTENT });
@@ -385,9 +387,12 @@ export const drive = {
   receivedFailed: (id, reason) => request(`${D}/received/${enc(id)}/failed`, { method: 'POST', headers: INTENT, body: { reason } }),
   receivedFailedList: (after = null) => request(`${D}/received?failed=1${after ? `&after=${enc(after)}` : ''}`),
   receivedRetry: (id) => request(`${D}/received/${enc(id)}/failed`, { method: 'DELETE', headers: INTENT }),
-  // The personal kit (docs/DRIVE.md §3.1): its content (with the step-up) and a read-only check (a restore is the owner's: keysApi).
-  kit: (step) => request(`${D}/kit`, { method: 'POST', headers: INTENT, body: { ...step } }),
-  kitVerify: (body) => request(`${D}/kit/verify`, { method: 'POST', headers: INTENT, body }),
+  // The personal kit (docs/DRIVE.md §3.1): its state (the key version, the last download), its
+  // content (with the step-up) and a read-only check, each POST with the CAPTCHA token when the
+  // server has one (a restore is the owner's: keysApi).
+  kitStatus: () => request(`${D}/kit`),
+  kit: (step, turnstile) => request(`${D}/kit`, { method: 'POST', headers: { ...INTENT, ...human(turnstile) }, body: { ...step } }),
+  kitVerify: (body, turnstile) => request(`${D}/kit/verify`, { method: 'POST', headers: { ...INTENT, ...human(turnstile) }, body }),
   // The upgrade of a Drive made before the key model v2 (docs/DRIVE.md §3.3): own, or (the owner) a user's.
   migrate: (uid = null) => request(uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`),
   migrateItems: (after = null, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/items${after ? `?after=${enc(after)}` : ''}`),

@@ -170,6 +170,32 @@ describe('startDrive states', () => {
     }
   });
 
+  it('a personal kit out of date (the keys changed after the last download): a calm notice with no key detail, a link to Account; none while the owner acts as the user', async () => {
+    // Never downloaded, or downloaded with the keys as they are: no notice.
+    let { mount } = await openApp();
+    expect(mount.querySelector('#drive-kit-notice')).toBeNull();
+    S.userKit = { at: 1, v: S.keyVersion.n, meks: [S.current().id] };
+    mount = mountPoint();
+    await (await startDrive(mount, deps())).app.ready;
+    expect(mount.querySelector('#drive-kit-notice')).toBeNull();
+    // The owner rotates (the key version goes up): the notice.
+    await S.addSub({ from: Math.floor(Date.now() / 1000) - 10 });
+    mount = mountPoint();
+    await (await startDrive(mount, deps())).app.ready;
+    const n = mount.querySelector('#drive-kit-notice');
+    expect(n.getAttribute('role')).toBe('note');
+    expect(n.textContent).toMatch(/^Your Drive’s keys were updated\. Download a new personal kit and keep it safe\./);
+    expect(n.querySelector('a').getAttribute('href')).toBe('/dashboard/account/#drive-kit');
+    for (const sub of S.subs) expect(n.textContent).not.toContain(sub.fp);
+    expect(n.textContent).not.toMatch(/MEK|KEK|fingerprint|version \d/i);
+    // The owner acting as the user: the kit is the user's own, no notice (and nothing it could do).
+    S.impersonatedBy = 'owner';
+    mount = mountPoint();
+    await (await startDrive(mount, deps({ user: { ...S.user, impersonating: true } }))).app.ready;
+    expect(mount.querySelector('#drive-kit-notice')).toBeNull();
+    expect(mount.querySelector('#drive-imp-note')).not.toBeNull();
+  });
+
   it('other errors are shown as an alert', async () => {
     S = fakeServer();
     globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, type: 'basic', json: async () => ({ error: 'boom', message: 'boom' }) }));

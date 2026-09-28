@@ -152,7 +152,13 @@ export const PRELOGIN_USER = { max: 21, windowSec: 600, blockSec: 600 };
  * at most ENDED_CHUNKS.max − 1 per window before `429 rate_limited`.
  */
 export const ENDED_CHUNKS = { max: 601, windowSec: 600, blockSec: 600 };
+/**
+ * The set-up page's key proposals (POST /api/auth/setup/candidate, the setup
+ * token checked first): a network may ask SETUP_CANDIDATE.max − 1 times per
+ * window ("Generate again" a few times is plenty).
+ */
+export const SETUP_CANDIDATE = { max: 21, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
-export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'prelogin-user', 'public-trackers', 'ended-chunks'];
+export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'prelogin-user', 'public-trackers', 'ended-chunks', 'setup-candidate'];
 
 export { shard as guardShardFor };

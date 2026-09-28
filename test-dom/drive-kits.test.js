@@ -82,6 +82,8 @@ describe('Account → Drive personal kit', () => {
     const card = mount(personalKitCard({ profile: PROFILE(), drive, confirm }));
     expect(card.querySelector('.subtitle').textContent).toMatch(/store it offline/);
     const saves = captureSaves();
+    // The card's CAPTCHA (off here: the server has no site key) settles first; the buttons wait for it.
+    await until(() => !$('#ukit-download').disabled);
     // Without the password: refused, nothing downloaded.
     $('#ukit-download').click();
     await until(() => /password/.test($('#ukit-download-msg').textContent) && !$('#ukit-download').disabled);
@@ -136,6 +138,111 @@ describe('Account → Drive personal kit', () => {
     });
   }
 
+  it('the key version and date, the last download, and a notice once the keys changed after it (gone after a new download); no key detail', async () => {
+    S = fakeServer();
+    S.proof = 'account-pw';
+    globalThis.fetch = S.fetch;
+    await seedTree(S, { 'a.txt': new TextEncoder().encode('a') });
+    const { personalKitCard } = await import('../public/dashboard/js/userkit.js');
+    const seen = [];
+    const onStatus = (st) => seen.push(st);
+    mount(personalKitCard({ profile: PROFILE(), drive, confirm, onStatus }));
+    await until(() => /^Version 1, /.test($('#ukit-version').textContent));
+    expect($('#ukit-last').textContent).toMatch(/^Never/);
+    expect($('#ukit-stale').hidden).toBe(true);
+    expect(seen.at(-1)).toMatchObject({ version: 1, last: null, stale: false });
+    const saves = captureSaves();
+    const downloadNow = async (n) => {
+      await until(() => !$('#ukit-download').disabled);
+      $('#ukit-confirm').value = 'account-pw';
+      $('#ukit-download').click();
+      await until(() => saves.length === n, 60000);
+    };
+    await downloadNow(1);
+    await until(() => /\(version 1\)$/.test($('#ukit-last').textContent));
+    expect($('#ukit-download-msg').textContent).toMatch(/key version 1/);
+    expect(seen.at(-1)).toMatchObject({ last: { version: 1 }, stale: false });
+    // The owner rotates: the page (loaded again) says so, calmly and vaguely.
+    await S.addSub({ from: Math.floor(Date.now() / 1000) - 10 });
+    const card = mount(personalKitCard({ profile: PROFILE(), drive, confirm, onStatus }));
+    await until(() => /^Version 2, /.test($('#ukit-version').textContent));
+    expect($('#ukit-stale').hidden).toBe(false);
+    expect($('#ukit-stale').getAttribute('role')).toBe('note');
+    expect($('#ukit-stale').textContent).toBe('Your Drive’s keys were updated. Download a new personal kit and keep it safe.');
+    expect($('#ukit-last').textContent).toMatch(/\(version 1\)$/);
+    expect(seen.at(-1)).toMatchObject({ version: 2, stale: true });
+    for (const sub of S.subs) expect(card.querySelector('#ukit-status').textContent).not.toContain(sub.fp);
+    // A new download: the notice goes.
+    await downloadNow(2);
+    await until(() => $('#ukit-stale').hidden);
+    expect($('#ukit-last').textContent).toMatch(/\(version 2\)$/);
+    expect(seen.at(-1)).toMatchObject({ version: 2, last: { version: 2 }, stale: false });
+    // The kit file holds the version; Verify reports it against the server's.
+    const payload = await openDriveKit(parseDriveKit(await saves[1].blob.text()), { kind: 'user', accountId: S.user.id, origin: location.origin, passphrase: '' });
+    expect(payload.keyVersion).toBe(2);
+    pick($('#ukit-verify-file'), [new File([await saves[0].blob.text()], 'old.json', { type: 'application/json' })]);
+    await until(() => !$('#ukit-verify').disabled);
+    $('#ukit-verify').click();
+    await until(() => $('#ukit-verify-verdict'), 60000);
+    expect($('#ukit-verify-results [data-check="version"]').dataset.status).toBe('warn');
+    expect($('#ukit-verify-results [data-check="version"]').textContent).toMatch(/Version 1; the keys are now version 2/);
+  }, 180000);
+
+  it('the CAPTCHA (when the server has one): Download and Verify stay disabled until it has passed, and each request carries its own fresh token', async () => {
+    S = fakeServer();
+    S.proof = 'account-pw';
+    S.turnstile = '0x4AAAAAAAsitekey';
+    globalThis.fetch = S.fetch;
+    await seedTree(S, { 'a.txt': new TextEncoder().encode('a') });
+    const widgets = [];
+    globalThis.turnstile = {
+      render(el, opts) { widgets.push({ el, opts, resets: 0 }); return `w${widgets.length}`; },
+      reset(id) { widgets[Number(id.slice(1)) - 1].resets += 1; },
+      remove() {},
+    };
+    let seq = 0;
+    const solve = () => { const t = `tok-${++seq}`; widgets[0].opts.callback(t); return t; };
+    try {
+      const { personalKitCard } = await import('../public/dashboard/js/userkit.js');
+      mount(personalKitCard({ profile: PROFILE(), drive, confirm }));
+      await until(() => widgets.length === 1);
+      expect(widgets[0].el.id).toBe('ukit-turnstile');
+      expect(widgets[0].el.hidden).toBe(false);
+      expect(widgets[0].opts).toMatchObject({ sitekey: '0x4AAAAAAAsitekey', action: 'account' });
+      // Waiting for the check: both buttons disabled, whatever the page wants (a file chosen for Verify).
+      const saves = captureSaves();
+      pick($('#ukit-verify-file'), [new File(['{}'], 'kit.json', { type: 'application/json' })]);
+      expect($('#ukit-download').disabled).toBe(true);
+      expect($('#ukit-verify').disabled).toBe(true);
+      expect(document.querySelector('.human-wait').hidden).toBe(false);
+      expect($('#ukit-download').getAttribute('aria-describedby')).toContain(document.querySelector('.human-wait').id);
+      const t1 = solve();
+      expect($('#ukit-download').disabled).toBe(false);
+      expect($('#ukit-verify').disabled).toBe(false);
+      $('#ukit-confirm').value = 'account-pw';
+      $('#ukit-download').click();
+      await until(() => saves.length === 1, 60000);
+      const dl = S.requests.filter((r) => r.path === '/api/private/drive/kit' && r.method === 'POST');
+      expect(dl).toHaveLength(1);
+      expect(dl[0].headers['x-secbin-turnstile']).toBe(t1);
+      // The token is used up: disabled again until a fresh check passes.
+      expect(widgets[0].resets).toBe(1);
+      await until(() => $('#ukit-download').disabled && $('#ukit-verify').disabled);
+      // Verify: the kit opens here first; the token is taken only for the request.
+      pick($('#ukit-verify-file'), [new File([await saves[0].blob.text()], 'kit.json', { type: 'application/json' })]);
+      expect($('#ukit-verify').disabled).toBe(true);
+      const t2 = solve();
+      $('#ukit-verify').click();
+      await until(() => $('#ukit-verify-verdict'), 60000);
+      const vf = S.requests.filter((r) => r.path === '/api/private/drive/kit/verify');
+      expect(vf).toHaveLength(1);
+      expect(vf[0].headers['x-secbin-turnstile']).toBe(t2);
+      expect(t2).not.toBe(t1);
+    } finally {
+      delete globalThis.turnstile;
+    }
+  }, 180000);
+
   it('while the owner acts as the user: a note, no kit', async () => {
     S = fakeServer();
     globalThis.fetch = S.fetch;
@@ -143,6 +250,10 @@ describe('Account → Drive personal kit', () => {
     const card = mount(personalKitCard({ profile: { ...PROFILE(), impersonatedBy: 'owner' }, drive, confirm }));
     expect(card.textContent).toMatch(/the user’s own.*key kit/);
     expect(card.querySelector('#ukit-download')).toBeNull();
+    // Nothing is asked of the server for it (the user's notice stays the user's).
+    await new Promise((r) => setTimeout(r, 20));
+    expect(S.requests.some((r) => r.path.startsWith('/api/private/drive/kit'))).toBe(false);
+    expect(card.querySelector('#ukit-status')).toBeNull();
   });
 });
 
@@ -523,6 +634,7 @@ describe('WCAG 2.2 (docs/WCAG22.md): the kit forms', () => {
     // A message said after the page loaded goes into the same, already present, status line.
     const live = $('#ukit-download-msg').parentElement;
     $('#ukit-pass2').value = 'something else';
+    await until(() => !$('#ukit-download').disabled);
     $('#ukit-download').click();
     await until(() => !$('#ukit-download-msg').hidden);
     expect($('#ukit-download-msg').textContent).toMatch(/passphrases differ/);

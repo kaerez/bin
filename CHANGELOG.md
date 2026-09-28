@@ -93,6 +93,31 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   also saves and lists names cleaned (it kept the hidden characters on disk), reports how many
   were renamed, cleans `--path`, and refuses to write a name that still holds them.
 
+- **The Drive personal kit has the CAPTCHA, and says when it is out of date** (docs/DRIVE.md
+  §3.1). With Turnstile on, the Account page's personal kit card has its own widget: Download
+  and Verify stay disabled until it has passed, and `POST /api/private/drive/kit` and
+  `…/kit/verify` need a fresh token for `account` (checked before the step-up); without
+  Turnstile keys nothing changes. The Directory now counts every key change (the **key
+  version**: a sub-MEK added, rotated, deleted, made current or its dates edited, a root change
+  or its undo, a restore that writes a key); both kit files hold it, both kit cards show
+  "Version N, <date>", and Verify compares a file's version with the server's. Each
+  personal-kit download is recorded (its date, version and the sub-MEKs it holds; removed with
+  the account): after a key change, or once a scheduled sub-MEK the kit lacks has started, the
+  Account page and the Drive page say "Your Drive’s keys were updated. Download a new personal
+  kit and keep it safe.", with no key detail, until the user downloads a new one; the kit card
+  shows the last download. The owner acting as the user cannot download one, so cannot clear
+  the notice (`GET /api/private/drive/kit`; `kit` in `GET /api/private/drive`).
+- **Set-up proposes the Drive keys for the owner to choose.** The set-up page shows the root
+  MEK and first sub-MEK the server generated (`POST /api/auth/setup/candidate`, with the setup
+  token), masked until Show, with "Use these", "Generate again" and "Enter manually", as
+  Security → Keys' key chooser does (shared: `public/js/keychoice.js`). Nothing is stored until
+  the set-up sends the chosen pair; a pair no longer kept (10 minutes, or replaced) is refused
+  before the owner account is made. Proposals need an unspent token and no owner yet (`410
+  token_used`), are limited to 20 per network per 10 minutes, and are not logged (only the
+  adopted pair is, as `keys.created`). The chosen or entered keys are written in the same
+  transaction as the owner. Copying a key clears the clipboard after 60 s where the page may
+  read it back; this site's Permissions-Policy denies that, so the page says to clear it.
+
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left
   empty, a fresh passkey assertion (`POST /api/private/me/reauth`, then `{ reauth }`), verified
