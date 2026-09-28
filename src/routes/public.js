@@ -384,9 +384,13 @@ async function downloadChunk(request, env, g, id, i, ref = null, human = false) 
   const r = ref === null ? await stub.chunkAccess(await hashToken(grant), i, human) : await stub.chunkAccessRef(await hashToken(grant), ref, i, human);
   if (r.status === 'captcha') throw captchaRequired();
   if (r.status === 'bad_index') return err(404, 'not_found', 'No such chunk.');
-  if (r.status === 'gone' && !human) return failed(env, g, captchaRequired().toResponse()); // as a protected share (see goneFor)
-  if (r.status !== 'ok') return failed(env, g, err(r.status === 'bad_grant' ? 403 : 410, r.status === 'bad_grant' ? 'bad_grant' : 'gone',
-    r.status === 'bad_grant' ? 'The download window has expired — open the link again.' : GONE));
+  // A share that has ended (expired, used up, revoked, deleted) while a recipient was still
+  // downloading: its grants went with it, so the grant cannot be checked any more. As on the
+  // extend route, a share the index knows (or knew) is the right credential arriving late and is
+  // never counted as invalid (goneFor, without a link proof); an id that was never a share is.
+  // Without a CAPTCHA grant it answers as a protected share (see goneFor).
+  if (r.status === 'gone') return goneFor(env, g, id, err(410, 'gone', GONE), null, !human);
+  if (r.status !== 'ok') return failed(env, g, err(403, 'bad_grant', 'The download window has expired — open the link again.'));
   const obj = await binding(env, 'FILES').get(r.key);
   if (!obj) return err(410, 'gone', GONE);
   return new Response(obj.body, {

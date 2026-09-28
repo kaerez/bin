@@ -15,6 +15,35 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Per-network limits and the invalid-fetch rule, from the security audit of `main`:**
+  - **The share CAPTCHA page** (`/p|r/<id>?check`) is served and counted only for this site's
+    own document navigations (`Sec-Fetch-Dest: document`, `Sec-Fetch-Site: same-origin` or
+    `none`). Another site's `<img>`, `<iframe>` or link is redirected back to the share's page
+    uncounted. Before, such requests used up the network's 60 check pages per 10 minutes.
+  - **Chunk downloads of a share that ended mid-download** (revoked, deleted, used up, expired)
+    answer `410 gone` without counting as invalid requests when the share index knows the id,
+    as the extend route already did. Before, the recipient's correct grant was counted, and at
+    60 counts the whole network was blocked from every share.
+  - **Turnstile's siteverify** is behind a per-network limit on sign-in, account changes and
+    anonymous creation (`turnstile-verify`: 60 per 10 minutes, then `429 rate_limited` with
+    `Retry-After`, before any call to Cloudflare). A missing or over-long token and a cross-site
+    request are refused before they are counted. The share CAPTCHA routes keep
+    `captcha-verify`.
+  - **`POST /api/auth/prelogin`** is limited per network (`prelogin`: 120 per 10 minutes).
+    Only well-formed same-origin requests count, the refusal is the same for every username
+    (the fake salt stays), and only prelogin is refused: no account is locked.
+  - **Anonymous trackers:**
+    - A new id is kept only once it has created a share; a refused create gives the row and
+      the network's allowance back.
+    - New ids are also counted per IPv6 /48 (`public-trackers`: 16 × `public.newTrackersPerIp`
+      per window).
+    - A full table (200 000) removes its 1 000 least recently seen unblocked ids, with their
+      usage counters (`tracker.evicted`), instead of answering `429 busy` to every new sender.
+  - **HSTS and the Permissions-Policy** are on every Worker response (API answers, JSON, chunks,
+    errors and redirects), not only on pages.
+  - The owner sees and lifts the new `turnstile-verify`, `prelogin` and `public-trackers`
+    blocks with the others.
+
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left
   empty, a fresh passkey assertion (`POST /api/private/me/reauth`, then `{ reauth }`), verified

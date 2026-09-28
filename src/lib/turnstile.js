@@ -18,9 +18,12 @@
 //     password or create a share).
 // Cloudflare's published testing keys carry no hostname or action; their
 // results are accepted as they are (they always pass or always fail anyway).
+// A network may make at most TURNSTILE_VERIFY.max − 1 checks that reach
+// siteverify per window (the share grant routes count theirs under
+// CAPTCHA_VERIFY instead: human.js verifyCaptcha).
 
-import { HttpError } from './http.js';
-import { directory } from './guard.js';
+import { assertNotCrossSite, HttpError } from './http.js';
+import { directory, ipContext, rateLimit, TURNSTILE_VERIFY } from './guard.js';
 
 export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 const SITEVERIFY = `${TURNSTILE_ORIGIN}/turnstile/v0/siteverify`;
@@ -82,14 +85,26 @@ export function setSiteverify(fn) { const prev = siteverify; siteverify = fn; re
 
 /**
  * Throws HttpError unless the request carries a valid, unused token for
- * `action`. A no-op when Turnstile is not configured.
+ * `action`. A no-op when Turnstile is not configured. Every token that would
+ * reach siteverify first counts towards the network's "turnstile-verify"
+ * limit (TURNSTILE_VERIFY: `429 rate_limited` beyond, liftable by the owner
+ * like the other scopes), unless the caller counts it itself (`limited:
+ * false`: verifyCaptcha's "captcha-verify"). A cross-site request is refused
+ * before it is counted, so another site cannot use up a network's checks.
  */
-export async function requireTurnstile(env, request, action) {
+export async function requireTurnstile(env, request, action, { limited = true } = {}) {
   const cfg = await turnstileKeys(env);
   if (!cfg) return;
   const token = (request.headers.get('x-secbin-turnstile') || '').trim();
   if (!token) throw new HttpError(403, 'turnstile_required', 'Complete the CAPTCHA and try again.');
   if (token.length > TOKEN_MAX) throw failed();
+  if (limited) {
+    assertNotCrossSite(request);
+    const rl = await rateLimit(env, await ipContext(env, request), 'turnstile-verify', TURNSTILE_VERIFY);
+    if (!rl.ok) {
+      throw new HttpError(429, 'rate_limited', 'Too many CAPTCHA checks from your network. Try again later.', rl.until ? { until: rl.until } : undefined, { 'retry-after': String(TURNSTILE_VERIFY.blockSec) });
+    }
+  }
   const form = new FormData();
   form.append('secret', cfg.secret);
   form.append('response', token);

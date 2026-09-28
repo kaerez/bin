@@ -129,7 +129,20 @@ export const CAPTCHA_PAGE = { max: 61, windowSec: 600, blockSec: 600 };
  * a loop reaches it; it is refused before the Directory is asked.
  */
 export const EXTEND_DOWNLOADS = { max: 121, windowSec: 600, blockSec: 600 };
+/**
+ * The CAPTCHA on sign-in, account changes and anonymous creation
+ * (turnstile.js requireTurnstile): a network may send at most
+ * TURNSTILE_VERIFY.max − 1 tokens to Cloudflare's siteverify per window.
+ */
+export const TURNSTILE_VERIFY = { max: 61, windowSec: 600, blockSec: 600 };
+/**
+ * POST /api/auth/prelogin (anonymous; it reaches the Directory): a network may
+ * ask at most PRELOGIN.max − 1 times per window. Only prelogin itself is
+ * refused beyond it (the sign-in routes do not look at this scope), so it
+ * never locks an account; the answer never depends on the username.
+ */
+export const PRELOGIN = { max: 121, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
-export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend'];
+export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'public-trackers'];
 
 export { shard as guardShardFor };

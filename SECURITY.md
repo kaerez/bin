@@ -141,8 +141,9 @@ compromise. Defenses:
     make every page cross-origin isolated.
   - **Every response the Worker returns** — API answers, chunk downloads, errors, redirects and
     pages — carries COOP `same-origin` (a page's own COOP is kept: the check page's is
-    `same-origin-allow-popups`), CORP `same-origin`, `X-Frame-Options: DENY`, `nosniff` and
-    `no-referrer` (`withBaselineHeaders`, `src/lib/http.js`). Anything that is not HTML gets
+    `same-origin-allow-popups`), CORP `same-origin`, `X-Frame-Options: DENY`, `nosniff`,
+    `no-referrer`, the two-year HSTS and the Permissions-Policy below (`withBaselineHeaders`,
+    `src/lib/http.js`). Anything that is not HTML gets
     `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`: opened as a
     document it has an opaque origin and runs nothing, and a window opened to it (by a script on
     a share's CAPTCHA page, say) lands in its own browsing context group. HTML pages keep their
@@ -289,6 +290,14 @@ CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
   If siteverify cannot be reached the request is refused (`503`, fail closed). Cloudflare's
   published testing keys return no hostname or action, so their results are accepted as they
   come; never deploy with testing keys.
+- **Metering of these calls.** Every token that would reach siteverify from these forms (sign-in,
+  account changes, anonymous creation) first counts towards the network's `turnstile-verify`
+  limit: at most 60 per network (the Guard's key) per 10 minutes, then `429 rate_limited` with
+  `Retry-After` for 10 minutes, before any call to Cloudflare. A request without a token, with an
+  over-long one, or from another site (`Sec-Fetch-Site: cross-site` / `same-site`) is refused
+  before it is counted. The share and reverse-share CAPTCHA routes count theirs under
+  `captcha-verify` instead (below), never twice. The owner sees and lifts `turnstile-verify`
+  blocks with the others.
 - **The only third-party code, confined to those pages.** Login, Account, the home page
   (only while anonymous sharing is on) and the CAPTCHA page of a share that has one
   (`/p/<id>?check`, `/r/<id>?check`, only while Turnstile is on) get a CSP that adds
@@ -373,8 +382,12 @@ the Turnstile check above — before anything of it is served. It is a role opti
   for 10 minutes, before any call to Cloudflare. A missing or failed token counts as an invalid
   request, like a wrong link. Renewing a grant (an HMAC check) is not limited. The check page
   is behind the Guard's block and at most 60 loads per network per 10 minutes (`429`), and looks
-  nothing up. The owner sees and lifts these blocks with the others (scopes `captcha-verify`,
-  `captcha-page`).
+  nothing up. Only this site's own document navigations to it are served and counted
+  (`Sec-Fetch-Dest: document` with `Sec-Fetch-Site: same-origin` or `none`: the viewer's own
+  redirect, or a typed or bookmarked address). Any other request (another site's `<img>`,
+  `<iframe>` or link, or one without Fetch Metadata) is redirected back to the share's page
+  before the Guard is asked, so another site cannot use up a network's check pages. The owner
+  sees and lifts these blocks with the others (scopes `captcha-verify`, `captcha-page`).
 - **Grants** (`src/lib/human.js`): `h1.<claims>.<HMAC-SHA-256>` under a key derived from `SIG`;
   claims: the kind (share or reverse), the share id, a keyed hash of the caller's network (the
   Guard's key: an IPv4 address or an IPv6 prefix), when the check passed and when the grant
@@ -562,7 +575,12 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
 - **Passwords** never reach the server: the client sends `Argon2id(password, salt)`; the server
   stores `SHA-256("secbin-auth/v2" ‖ that)`. Prelogin returns a stable, secret-keyed fake salt
   for unknown usernames, and every account uses the same Argon2id time cost, so the response
-  never reveals whether an account exists. Minimum length (12) is enforced client-side — the
+  never reveals whether an account exists. Prelogin is limited per network (`prelogin`: at most
+  120 per 10 minutes, then `429 rate_limited` with `Retry-After` for 10 minutes), counted before
+  the Directory is asked and only for same-origin JSON requests (another site cannot send one).
+  The refusal is the same for every username, only prelogin itself is refused (no account is
+  locked, and the sign-in routes do not look at this scope), and the owner sees and lifts
+  `prelogin` blocks with the others. Minimum length (12) is enforced client-side — the
   server cannot see the password. Trade-off: the stretched value is password-equivalent in
   transit (TLS-protected), as with any client-side stretching scheme.
 - **Sessions**: `__Host-` cookie, HttpOnly, Secure, SameSite=Strict, containing a JWS (HS256,
@@ -803,6 +821,10 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     share's link-proof hash (the same value the share's own record held) for the 30 days it
     keeps ended shares, so a **wrong `#` key** for an ended share is still counted, as for a
     live one. The first metadata fetch carries no proof and is not counted for a known share.
+    Chunk downloads (`/api/file/<id>/chunk/…`) follow the same rule: a share that ended while a
+    recipient was still downloading has lost its grants, so a chunk fetch for a share the index
+    knows answers `410` uncounted (as the extend route does), and only an id that was never a
+    share is counted;
     Shares created before this change have no stored hash and are never counted;
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking;
@@ -1189,9 +1211,15 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
     unblocks it.
   - A creation must carry the id in both the cookie and the `X-Secbin-Aid` header, and they
     must match; a cross-site form can do neither (plus the usual `Sec-Fetch-Site` check).
-  - An id is stored on its first creation, at most `public.newTrackersPerIp` (default 5) new ids
-    per network per `public.newTrackersWindowSec` (default a day; `429 tracker_rate_limited`)
-    and at most 200 000 in all (`429 busy`). Clearing browser storage therefore yields a new id
+  - An id is stored on its first **successful** creation: a create that is refused after the id
+    was looked at (a malformed share, a quota) gives its new row, and the network's allowance,
+    back. At most `public.newTrackersPerIp` (default 5) new ids per network per
+    `public.newTrackersWindowSec` (default a day; `429 tracker_rate_limited`), and, for IPv6,
+    at most 16 times that per /48 (the Guard scope `public-trackers`, which the owner sees and
+    lifts with the others), so rotating /64s inside one allocation does not multiply it. At most
+    200 000 are stored: when the table is full, the 1 000 least recently seen ids that are not
+    blocked are removed with their usage counters (as if they had idled out; logged as
+    `tracker.evicted`), and only a table of blocked ids answers `429 busy`. Clearing browser storage therefore yields a new id
     and a fresh per-id quota, but only that many times per network per window: tracker mode
     allows up to *new ids × quota* shares per network per window. Use a `both-*` mode to cap the
     network as a whole.

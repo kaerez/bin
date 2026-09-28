@@ -9,6 +9,7 @@ import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent, csrf
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
 import { layout, buildManifest, importFileKey, encryptChunk, decryptChunk, readStreamChunk, validateManifest, CHUNK } from '../public/js/files.js';
 import { utf8, randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
+import { invalidateGuardCaches } from '../src/lib/guard.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -437,4 +438,38 @@ describe('"delete now" after a file share\'s last view', () => {
     expect((await fetchJson(`/api/file/${s.id}/expire`, { method: 'POST', headers })).status).toBe(410);
     expect(await env.FILES.get(`f/${s.id}/0`)).not.toBeNull();
   });
+});
+
+describe('C1: chunk fetches of a share that ended are never counted as invalid', () => {
+  const settings = (patch) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: patch });
+  it('revoked or deleted during a download: the recipient\'s correct grant gets 410, never a block; an id that was never a share is counted', async () => {
+    expect((await settings({ 'guard.invalid.max': 3 })).status).toBe(200);
+    invalidateGuardCaches();
+    try {
+      const recipient = freshIp();
+      const live = await upload(oc, [{ path: 'other.txt', bytes: utf8('unrelated, still live') }]);
+      for (const end of ['revoke', 'delete']) {
+        const s = await upload(oc, [{ path: 'a.txt', bytes: utf8('ends mid-download') }]);
+        const { grant } = await (await openShare(s.id, s.fragment, '', recipient)).res.json();
+        expect((await getChunk(s.id, 0, grant, recipient)).status).toBe(200);
+        if (end === 'revoke') expect((await fetchJson(`/api/private/shares/${s.id}/revoke`, { method: 'POST', cookie: oc, headers: intent })).status).toBe(200);
+        else expect((await fetchJson(`/api/file/${s.id}`, { method: 'DELETE', headers: { 'x-delete-token': s.deletetoken } })).status).toBe(200);
+        for (let i = 0; i < 8; i++) {
+          const r = await getChunk(s.id, 0, grant, recipient);
+          expect(r.status, `${end} #${i}`).toBe(410); // never 429
+          expect((await r.json()).error).toBe('gone');
+        }
+      }
+      // The recipient's network still opens other shares with their links.
+      expect((await openShare(live.id, live.fragment, '', recipient)).res.status).toBe(200);
+      // A made-up id (never a share) is a guess: counted, then blocked.
+      const prober = freshIp();
+      const codes = [];
+      for (let i = 0; i < 5; i++) codes.push((await getChunk(`f${b64urlFromBytes(randomBytes(16))}`, 0, 'A'.repeat(43), prober)).status);
+      expect(codes).toContain(429);
+    } finally {
+      await settings({ 'guard.invalid.max': 60 });
+      invalidateGuardCaches();
+    }
+  }, 30000);
 });

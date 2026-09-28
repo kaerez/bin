@@ -6,7 +6,7 @@
 import { json, err, readJsonBody, assertIntent, assertNotCrossSite, methodNotAllowed } from '../lib/http.js';
 import { authnToken, sessionKeys } from '../lib/config.js';
 import { readSession, issueSession, logoutCookie, unconfigured, checkCsrf } from '../lib/auth.js';
-import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, rateLimit, PRELOGIN } from '../lib/guard.js';
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { requestOptions } from '../lib/webauthn.js';
@@ -123,8 +123,17 @@ export async function handleAuth(request, env, url) {
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
-    const body = await readJsonBody(request);
+    const body = await readJsonBody(request); // same-origin JSON only: another site cannot count here
     if (typeof body.username !== 'string' || body.username.length > 64) return err(400, 'invalid_username', 'Enter your username.');
+    // Counted per network before the Directory is asked, whatever the username (the
+    // refusal says nothing about accounts). Only prelogin is refused beyond it: no
+    // account is ever locked, and the sign-in routes do not look at this scope.
+    const rl = await rateLimit(env, g, 'prelogin', PRELOGIN);
+    if (!rl.ok) {
+      const res = err(429, 'rate_limited', 'Too many sign-in attempts from your network. Try again later.', rl.until ? { until: rl.until } : undefined);
+      res.headers.set('retry-after', String(PRELOGIN.blockSec));
+      return res;
+    }
     return json(await directory(env).prelogin(body.username));
   }
 
