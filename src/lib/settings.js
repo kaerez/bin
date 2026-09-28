@@ -233,7 +233,17 @@ export const LIMITS = {
   driveEnabled:        { type: 'bool', def: false, owner: true },
   driveMaxBytes:       { type: 'int', min: 1, max: HARD_MAX_DRIVE_BYTES, nullable: true, def: GiB, owner: null },
   driveMaxFileBytes:   { type: 'int', min: 1, max: HARD_MAX_DRIVE_BYTES, nullable: true, def: null, owner: null },
+  // Reverse shares (docs/REVERSE.md): links that let anyone upload to a Drive
+  // folder of the user. Also needs driveEnabled. Active ones at once (null: up
+  // to MAX_REVERSE_ACTIVE) and the most bytes one may receive (null: only the
+  // Drive's capacity).
+  reverseEnabled:      { type: 'bool', def: false, owner: true },
+  reverseMaxActive:    { type: 'int', min: 1, max: 1000, nullable: true, def: 10, owner: null },
+  reverseMaxBytes:     { type: 'int', min: 1, max: HARD_MAX_DRIVE_BYTES, nullable: true, def: GiB, owner: null },
 };
+
+/** Hard ceiling on active reverse shares per account, whatever the role says. */
+export const MAX_REVERSE_ACTIVE = 1000;
 
 /** The password-policy keys of the limits (see public/js/pwauth.js). */
 export const PASSWORD_POLICY_KEYS = ['pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol'];

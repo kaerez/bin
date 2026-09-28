@@ -20,7 +20,7 @@ import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn
 import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
-  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES,
+  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES, MAX_REVERSE_ACTIVE,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEX
   exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -202,6 +203,14 @@ const MIGRATIONS = [
     m.sql.exec('CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL)');
     materializeDefaultRole(m.sql);
   },
+  // 14: reverse shares (docs/REVERSE.md): their role options join the Default
+  // role (reverseEnabled off, 10 active, 1 GiB each). The shares themselves
+  // live in the user's Drive DO; the index row is an ordinary shares row.
+  // reverse_ids: a hash of every reverse-share id ever created, kept for good.
+  (m) => {
+    m.sql.exec('CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY)');
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -266,7 +275,8 @@ export const MAX_SHARE_FILTER_USERS = 500; // ~19 bytes per id in the URL: stays
  */
 export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
   'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax',
-  'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes']);
+  'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes',
+  'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes']);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -276,6 +286,15 @@ const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
+/** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
+const PENDING_REVERSE_SEC = 600;
+/**
+ * The tombstone of a reverse-share id (reverse_ids): a hash, so the ids of
+ * links that ended and were pruned are not kept, only whether one existed.
+ */
+const reverseIdHash = async (id) => b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(`secbin/reverse-id\0${id}`))));
+/** `reverse.received` log entries of one link are added up over this long (one entry per link per hour). */
+const RECEIVED_LOG_SEC = 3600;
 /** Bound parameters per `IN (…)` query: SQLite in a Durable Object allows about 100. */
 const SQL_BATCH = 90;
 /**
@@ -285,7 +304,14 @@ const SQL_BATCH = 90;
  */
 /** The owner's own Drive recovery actions (admin audit only). */
 const OWNER_DRIVE_ACTIONS = ['drive.kit_exported', 'drive.kit_used', 'drive.kit_verified', 'drive.kit_keys_restored', 'drive.owner_reset', 'drive.archive_restored', 'drive.archive_deleted'];
-const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted'];
+// Received files (reverse shares, docs/REVERSE.md §7) taken in, marked as not
+// taken in, or put back to try again: one row per link, per actor, per
+// RECEIVED_LOG_SEC that adds up the files. Anonymous uploaders decide how many
+// files arrive, so one row per file could push the user's other entries out.
+const RECEIVED_ACTIONS = ['drive.received_taken_in', 'drive.received_failed', 'drive.received_retried'];
+const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted',
+  ...RECEIVED_ACTIONS];
+const RECEIVED_DETAIL_RE = /^(id=r[A-Za-z0-9_-]{22} )files=([1-9]\d{0,8})$/;
 // A user's own file reads (one row per opened file) are throttled so that they
 // cannot flood the log and push other entries out: one per file per minute, at
 // most DRIVE_READS_PER_MINUTE a minute. The owner's rows are never dropped.
@@ -718,6 +744,8 @@ export class Directory extends DurableObject {
         grantSec: caps.grantSec,
         // The Drive (docs/DRIVE.md): never for the public account.
         driveEnabled: u.role !== 'public' && !!eff.all.driveEnabled,
+        // Reverse shares (docs/REVERSE.md) need the Drive too.
+        reverseEnabled: u.role !== 'public' && !!eff.all.driveEnabled && !!eff.all.reverseEnabled,
       },
       viewer: {
         enabled: caps.viewerEnabled,
@@ -1654,17 +1682,20 @@ export class Directory extends DurableObject {
   }
 
   // ── shares index ("My shares") ───────────────────────────────────────────
+  /**
+   * Index a new share. An id already in the index stays with its user: a row
+   * is never moved to another account, and its link hash (`lh`) and lock
+   * columns are never changed here (re-recording must not unlock it or point
+   * it at another link) → { ok } or 409 `exists`.
+   */
   async recordShare({ id, uid, kind, label, created, expires, views, lh = null }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
-    // Upsert that never touches the lock columns (re-recording an id must not
-    // silently unlock it) and never moves an id to another user: a row that
-    // belongs to someone else stays theirs, and this call fails.
     const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
       ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, label = excluded.label, created = excluded.created,
-        expires = excluded.expires, views_total = excluded.views_total, status = 'active', lh = excluded.lh
-      WHERE shares.user_id = excluded.user_id`,
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active'
+      WHERE shares.user_id = excluded.user_id AND shares.kind != 'reverse'`,
       id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null).rowsWritten;
-    if (!w) return fail(409, 'exists', 'That share id belongs to another account.');
+    if (!w) return fail(409, 'exists', 'A share with this id already exists.');
     this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
     return { ok: true };
   }
@@ -1673,7 +1704,8 @@ export class Directory extends DurableObject {
     const lim = Math.max(1, Math.min(100, limit | 0));
     const off = Math.max(0, offset | 0);
     const like = `%${String(q).replace(/[%_\\]/g, (c) => '\\' + c)}%`;
-    const where = `WHERE user_id = ? AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}`;
+    // A reverse share being created (`pending`, below) is not listed yet.
+    const where = `WHERE user_id = ? AND status != 'pending' AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}`;
     const args = status ? [uid, like, String(status)] : [uid, like];
     const rows = this.sql.exec(
       `SELECT id, kind, label, created, expires, views_total, status, locked,
@@ -1846,7 +1878,7 @@ export class Directory extends DurableObject {
   async adminListShares({ users = [], kind = '', status = '', q = '', locked = null, createdFrom = null, createdTo = null, expiresFrom = null, expiresTo = null, limit = 50, offset = 0 } = {}) {
     const lim = Math.max(1, Math.min(200, limit | 0));
     const off = Math.max(0, offset | 0);
-    const where = [];
+    const where = ["s.status != 'pending'"];
     const args = [];
     const ids = (Array.isArray(users) ? users : []).filter((u) => typeof u === 'string').slice(0, MAX_SHARE_FILTER_USERS);
     // One JSON array parameter for any number of users (one `?` each would exceed the limit).
@@ -2082,6 +2114,18 @@ export class Directory extends DurableObject {
         WHERE action = 'drive.file_read' AND actor_id = ? AND imp = 0 AND ts >= ?`, userId, userId, now() - DRIVE_READ_DEDUPE_SEC).toArray();
       if (recent.length >= DRIVE_READS_PER_MINUTE || recent.some((r) => r.detail === d)) return { ok: true, logged: false };
     }
+    if (RECEIVED_ACTIONS.includes(action)) {
+      const m = RECEIVED_DETAIL_RE.exec(d);
+      if (!m) return fail(400, 'invalid', 'Invalid detail.');
+      const [, head, files] = m;
+      const open = this.sql.exec(`SELECT id, detail FROM activity WHERE subject_id = ? AND action = ? AND actor_id = ? AND imp = ? AND adm = 0
+        AND ts > ? AND substr(detail, 1, ?) = ? ORDER BY id DESC LIMIT 1`, userId, action, imp ? actor.id : userId, imp ? 1 : 0, now() - RECEIVED_LOG_SEC, head.length, head).toArray()[0];
+      const prev = open && RECEIVED_DETAIL_RE.exec(open.detail);
+      if (prev) {
+        this.sql.exec('UPDATE activity SET detail = ? WHERE id = ?', `${head}files=${Number(prev[2]) + Number(files)}`, open.id);
+        return { ok: true, logged: true };
+      }
+    }
     this.#log(imp ? { id: actor.id, imp: true } : userId, userId, action, d);
     return { ok: true, logged: true };
   }
@@ -2141,7 +2185,7 @@ export class Directory extends DurableObject {
     const out = [];
     for (let k = 0; k < list.length; k += SQL_BATCH) {
       const part = list.slice(k, k + SQL_BATCH);
-      out.push(...this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND id IN (${part.map(() => '?').join(', ')})`,
+      out.push(...this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND status != 'pending' AND id IN (${part.map(() => '?').join(', ')})`,
         uid, ...part).toArray());
     }
     return out.sort((x, y) => y.created - x.created || (x.id < y.id ? -1 : 1));
@@ -2156,6 +2200,156 @@ export class Directory extends DurableObject {
     }
     if (n) this.#log(actorId, uid, 'share.revoked', `${reason === 'account deleted' ? 'account deleted' : 'drive item deleted'}: ${n} share${n === 1 ? '' : 's'}`);
     return { ok: true, ended: n };
+  }
+
+  // ── reverse shares (docs/REVERSE.md; the shares live in the Drive DO) ───
+  /**
+   * Claim reverse-share id `id` for `uid` (the browser chose it), if the
+   * account may create one now with this expiry and byte limit. Atomic: the
+   * checks, the count of the account's active (and being-created) reverse
+   * shares against `reverseMaxActive`, and the insert run in one synchronous
+   * step, so concurrent creates cannot exceed the limit, and an id anyone
+   * holds (any kind, any account, any status) is refused with 409 `exists`.
+   * The row is `pending` (not listed, no uploads) until activateReverse; a
+   * claim the Worker never completes lapses after PENDING_REVERSE_SEC. An id
+   * that was ever a reverse share (reverse_ids, kept after its row is pruned
+   * or its account deleted) is refused too: an old link never opens a later
+   * share.
+   * → { ok, maxBytes (the share's effective limit, null: none) }.
+   */
+  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null }) {
+    if (typeof id !== 'string' || !/^r[A-Za-z0-9_-]{22}$/.test(id)) return fail(400, 'invalid', 'Invalid reverse-share id.');
+    const h = await reverseIdHash(id); // before any check: nothing below awaits
+    const u = this.#user(uid);
+    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
+    const L = this.#effective(u).all;
+    if (!L.driveEnabled) return fail(403, 'drive_disabled', 'Your role does not include a Drive.');
+    if (!L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
+    if (L.maxExpireSec !== null && expireSec > L.maxExpireSec) {
+      return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds.`, { max: L.maxExpireSec });
+    }
+    const roleMax = L.reverseMaxBytes ?? null;
+    if (roleMax !== null && maxBytes !== null && maxBytes > roleMax) {
+      return fail(403, 'reverse_too_large', `A reverse share may receive at most ${roleMax} bytes.`, { max: roleMax });
+    }
+    if (this.sql.exec('SELECT 1 FROM reverse_ids WHERE h = ?', h).toArray().length) return fail(409, 'exists', 'A share with this id already exists.');
+    const ts = now();
+    this.sql.exec("DELETE FROM shares WHERE status = 'pending' AND created < ?", ts - PENDING_REVERSE_SEC);
+    const active = this.sql.exec(`SELECT COUNT(*) AS c FROM shares WHERE user_id = ? AND kind = 'reverse'
+      AND ((status = 'active' AND expires > ?) OR status = 'pending')`, uid, ts).one().c;
+    const cap = Math.min(MAX_REVERSE_ACTIVE, L.reverseMaxActive ?? MAX_REVERSE_ACTIVE);
+    if (active >= cap) return fail(409, 'too_many_reverse', `At most ${cap} active reverse shares at once.`, { max: cap });
+    const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh)
+      VALUES (?, ?, 'reverse', ?, ?, ?, NULL, 'pending', ?) ON CONFLICT(id) DO NOTHING`,
+      id, uid, cleanLabel(label) ?? '', ts, ts + expireSec, typeof lh === 'string' && lh.length <= 64 ? lh : null).rowsWritten;
+    if (!w) return fail(409, 'exists', 'A share with this id already exists.');
+    return { ok: true, maxBytes: maxBytes ?? roleMax };
+  }
+
+  /**
+   * The Drive holds the claimed reverse share now: it is listed and takes
+   * uploads (logged as created), and its id can never be claimed again.
+   */
+  async activateReverse(uid, id, { created, expires }, actorId = uid) {
+    const h = typeof id === 'string' ? await reverseIdHash(id) : ''; // before the update: nothing below awaits
+    const w = this.sql.exec("UPDATE shares SET status = 'active', created = ?, expires = ? WHERE id = ? AND user_id = ? AND kind = 'reverse' AND status = 'pending'",
+      created, expires, id, uid).rowsWritten;
+    if (!w) return fail(409, 'exists', 'This reverse share is no longer being created.');
+    this.sql.exec('INSERT OR IGNORE INTO reverse_ids (h) VALUES (?)', h);
+    this.#log(actorId, uid, 'share.created', `id=${id} kind=reverse`);
+    return { ok: true };
+  }
+
+  /** A claim that did not complete (confirmation refused, the Drive refused): the id is free again. */
+  async releaseReverse(uid, id) {
+    this.sql.exec("DELETE FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse' AND status = 'pending'", id, uid);
+    return { ok: true };
+  }
+
+  /**
+   * The reverse share `id` as an anonymous upload sees it: whose it is, and
+   * whether uploads are allowed now (not ended, not locked, the account and
+   * its role still allow it), with the Drive limits that apply. A share that
+   * was one (in the index) but is gone: 'gone'; never one: 'unknown'.
+   */
+  async reverseTarget(id) {
+    const r = this.sql.exec("SELECT user_id, status, expires, locked, lh FROM shares WHERE id = ? AND kind = 'reverse'", id).toArray()[0];
+    if (!r) return { ok: false, state: 'unknown' };
+    const gone = { ok: false, state: 'gone', uid: r.user_id, lh: r.lh };
+    if (r.status !== 'active' || r.expires <= now()) return gone;
+    if (r.locked) return { ok: false, state: 'locked', uid: r.user_id, lh: r.lh };
+    const u = this.#user(r.user_id);
+    if (!u || u.disabled || u.role === 'public') return gone;
+    const L = this.#effective(u).all;
+    if (!L.driveEnabled || !L.reverseEnabled) return gone;
+    const cap = (v) => (v === null || v === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, v));
+    return {
+      ok: true, uid: r.user_id, lh: r.lh, expires: r.expires,
+      capacity: cap(L.driveMaxBytes), maxFile: cap(L.driveMaxFileBytes), roleMaxBytes: cap(L.reverseMaxBytes),
+      pendingSec: this.#caps(u, L, this.#settings()).pendingSec,
+    };
+  }
+
+  /** The user a share belongs to (the Worker needs it to reach a reverse share's Drive). */
+  async shareOwner(id) {
+    return this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0]?.user_id ?? null;
+  }
+
+  /**
+   * Log a reverse-share event for its user: `received` (files and bytes of a
+   * finished upload session — count and size only; one entry per link per
+   * hour, which adds up the sessions of that hour, so anonymous uploads
+   * cannot flood the log) or `bad_password` (at most one entry per share per
+   * minute; the Guard and the link's lockout limit the attempts).
+   */
+  async reverseEvent(id, event, { files = 0, bytes = 0 } = {}) {
+    const r = this.sql.exec("SELECT user_id FROM shares WHERE id = ? AND kind = 'reverse'", id).toArray()[0];
+    if (!r) return { ok: false };
+    if (event === 'received') {
+      if (!Number.isSafeInteger(files) || files <= 0 || !Number.isSafeInteger(bytes) || bytes < 0) return { ok: false };
+      const head = `id=${id} `;
+      const open = this.sql.exec(`SELECT id, detail FROM activity WHERE subject_id = ? AND action = 'reverse.received' AND actor_id IS NULL
+        AND ts > ? AND substr(detail, 1, ?) = ? ORDER BY id DESC LIMIT 1`, r.user_id, now() - RECEIVED_LOG_SEC, head.length, head).toArray()[0];
+      const m = open && /^id=\S+ files=(\d+) bytes=(\d+)$/.exec(open.detail);
+      if (m) {
+        this.sql.exec('UPDATE activity SET detail = ? WHERE id = ?', `${head}files=${Number(m[1]) + files} bytes=${Number(m[2]) + bytes}`, open.id);
+      } else {
+        this.#log(null, r.user_id, 'reverse.received', `${head}files=${files} bytes=${bytes}`);
+      }
+      return { ok: true };
+    }
+    if (event === 'bad_password') {
+      const recent = this.sql.exec("SELECT 1 FROM activity WHERE subject_id = ? AND action = 'reverse.bad_password' AND detail = ? AND ts > ? LIMIT 1",
+        r.user_id, `id=${id}`, now() - 60).toArray().length;
+      if (!recent) this.#log(null, r.user_id, 'reverse.bad_password', `id=${id}`);
+      return { ok: true };
+    }
+    return { ok: false };
+  }
+
+  /**
+   * The owner's reverse links after starting over (docs/DRIVE.md §3.2):
+   * `paused` (the owner started over: their keys are in the archive),
+   * `resumed` (the archive was restored with a kit) or `revoked` (the archive
+   * was deleted: the index rows end too). One entry per link, the owner as
+   * the actor: in the owner's activity and the admin audit. Only the owner's
+   * own links, only for the owner.
+   */
+  async reverseArchiveEvent(ownerId, event, ids) {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner starts over.');
+    if (!['paused', 'resumed', 'revoked'].includes(event)) return fail(400, 'invalid', 'Unknown reverse-link event.');
+    const list = [...new Set((Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string' && /^r[A-Za-z0-9_-]{22}$/.test(x)))].slice(0, 10000);
+    let n = 0;
+    for (const id of list) {
+      const row = this.sql.exec("SELECT status FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse'", id, ownerId).toArray()[0];
+      if (!row) continue;
+      if (event === 'revoked') this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, ownerId);
+      this.#log(ownerId, ownerId, `reverse.${event}`, event === 'revoked' ? `id=${id} reason=archive_deleted` : `id=${id}`);
+      n++;
+    }
+    return { ok: true, logged: n };
   }
 
   async createUser({ username, salt, t, verifier }, actorId) {
@@ -3219,6 +3413,7 @@ export class Directory extends DurableObject {
     this.sql.exec("UPDATE shares SET status = 'expired' WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
     await this.#dropDriveRefs(expiring);
     this.sql.exec("DELETE FROM shares WHERE status != 'active' AND locked = 0 AND expires < ?", ts - SHARE_PRUNE_SEC);
+    this.sql.exec("DELETE FROM shares WHERE status = 'pending' AND created < ?", ts - PENDING_REVERSE_SEC);
     // Receipts go with their share: once the share row is gone nobody can see them.
     this.sql.exec('DELETE FROM opens WHERE share_id NOT IN (SELECT id FROM shares)');
     await this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);

@@ -452,11 +452,16 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id |
+| `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
+| `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
+| `POST /api/private/drive/received/:id` | `{ parent, name, meta, fk }` → `{ ok }` — a received file re-wrapped into the Drive |
+| `POST /api/private/drive/received/:id/failed` | `{ reason }` → `{ ok, received, failed }` — the browser could not take it in (it leaves the queue); `DELETE` puts it back |
 | `POST /api/private/drive/kit` | the owner: `{ event: "exported" \| "used", current \| reauth }` or `{ event: "verified", verdict, issues?, version? }` — the owner recovery kit's download, use and check, recorded (the kit itself is never sent) |
 | `GET /api/private/drive/kit/probe` | the owner: one user's escrow wrap per kid in use (each in the admin audit), for "Verify kit" |
 | `PUT /api/private/drive/kit/keys` | the owner, with `current` / `reauth`: sealed escrow keys put back from a kit (only the server's own public keys and kids in use) |
 | `POST /api/private/drive/start-over` | the owner, when nothing they sign in with opens their Drive: `{ confirm, driveSalt, set, escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv, current \| reauth }` — new keys; the old Drive archived |
-| `GET`, `DELETE /api/private/drive/archive/:gen`; `PUT …/nodes`; `POST …/finish` | the owner: an archived Drive — read (for a kit restore), items back, finish, or delete (`confirm` + `current` / `reauth`) |
+| `GET`, `DELETE /api/private/drive/archive/:gen`; `PUT …/nodes`; `POST …/finish` | the owner: an archived Drive — read (for a kit restore; the first page lists its reverse links, `reverse: [{ id, priv, status }]`, and a received item carries `rs`), items back (a received item as `{ id }` only: `400 received_as_is` otherwise), finish (`reverse: { <linkId>: {iv, ct} }`, every link's private key re-sealed under the Drive key now: `409 reverse_keys_required` otherwise → `{ ok, resumed }`), or delete (`confirm` + `current` / `reauth`; its paused reverse links are revoked) |
 | `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (in the admin audit) |
 | `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }], kcv }` (the same Drive key); for a user with no Drive yet: `{ first: true, driveSalt, set: [pw, escrow], escrowPin, kcv }` (in the admin audit) |
 
@@ -464,6 +469,11 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 names, types or keys. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
 then also returns `refs: [{ chunks, size }]`), and its chunks are read with
 `GET /api/file/:id/chunk/:ref/:i` and the download grant.
+
+Reverse shares are listed, extended (a later `expires`) and revoked with the share routes above
+(kind `reverse`; an API key with `read` / `manage` can do that, not create one). The anonymous
+uploader's routes (`/api/reverse/:id/open`, `begin`, `files`, chunks, `finalize`, `done`) take no
+account at all: see [`REVERSE.md`](./REVERSE.md) §6.2.
 
 ## Security notes
 

@@ -66,6 +66,14 @@ describe('service worker request policy', () => {
     }
   });
 
+  it('never handles /r/* reverse-share upload pages, even as navigations', () => {
+    for (const p of ['/r', '/r/', '/r/rAbCdEfGhIjKlMnOpQrStUv', '/r/rAbCdEfGhIjKlMnOpQrStUv/', '/r/x#key-material']) {
+      expect(ctx.requestPolicy(req(p, { mode: 'navigate' }), ORIGIN)).toBeNull();
+      expect(ctx.requestPolicy(req(p), ORIGIN)).toBeNull();
+      expect(intercepts(req(p, { mode: 'navigate' }))).toBe(false);
+    }
+  });
+
   it('never handles URLs with a query string', () => {
     for (const p of ['/?token=secret', '/js/view.js?v=1', '/css/styles.css?x', '/dashboard/login/?disabled=1', '/img/icon-192.png?']) {
       expect(ctx.requestPolicy(req(p, { mode: p.startsWith('/?') ? 'navigate' : 'no-cors' }), ORIGIN)).toBeNull();

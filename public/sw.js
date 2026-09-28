@@ -7,8 +7,8 @@
 //     Everything else (other origins, POST/PUT/DELETE, anything with "?…",
 //     Range requests) goes straight to the network — the worker does not even
 //     call respondWith(), so it can never answer from cache.
-//   • /api/* (share ciphertext, grants, accounts) and /p/* (the share viewer)
-//     are never intercepted and never cached. A share's key lives in the URL
+//   • /api/* (share ciphertext, grants, accounts), /p/* (the share viewer) and
+//     /r/* (the reverse-share uploader) are never intercepted and never cached. A share's key lives in the URL
 //     fragment, which is never part of a request, but even the viewer page for
 //     a share id stays network-only so nothing about a share lands on disk.
 //   • Static assets (/css, /js, /fonts, /img, the manifest, the favicon) are
@@ -37,7 +37,7 @@ const STATIC_FILES = ['/manifest.webmanifest', '/favicon.ico'];
 // The only HTML that may be served from cache when offline.
 const SHELL_PAGES = ['/'];
 // Never intercepted, never cached.
-const NETWORK_ONLY_PREFIXES = ['/api/', '/p/'];
+const NETWORK_ONLY_PREFIXES = ['/api/', '/p/', '/r/'];
 
 // Warmed on install (best effort) so the offline landing page has its assets.
 const PRECACHE = [
@@ -68,7 +68,7 @@ function requestPolicy(request, origin) {
   // Query strings may carry anything (tokens, ids); such URLs are never stored.
   if (url.search || url.href.includes('?')) return null;
   const path = url.pathname;
-  if (path === '/api' || path === '/p') return null;
+  if (path === '/api' || path === '/p' || path === '/r') return null;
   for (const p of NETWORK_ONLY_PREFIXES) if (path.startsWith(p)) return null;
   if (/%2e|%2f|%5c|\/\.\.?(\/|$)|\\/i.test(path)) return null; // no encoded or dot segments
   if (request.headers && typeof request.headers.has === 'function' && request.headers.has('range')) return null;

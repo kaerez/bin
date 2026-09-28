@@ -17,7 +17,7 @@
 // point (public/dashboard/js/drive.js passes the client module); it is
 // separate from the boot so it can be tested.
 
-import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, nameEl } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, viewsText, nameEl } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { createTree, crumbTrail } from '../../js/tree.js';
 import { progressBar } from '../../js/progress.js';
@@ -25,6 +25,8 @@ import { walkEntry } from '../../js/walk.js';
 import { expireSeconds, MAX_VIEWS } from '../../js/format.js';
 import { passkeysSupported } from '../../js/passkeys.js';
 import { utf8 } from '../../js/bytes.js';
+import { normalizeRules } from '../../js/filepolicy.js';
+import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { kitCard, kitRestore, KIT_HREF } from './drivekit-ui.js';
 
@@ -79,6 +81,49 @@ export function shareOptions({ views, unlimited, n, unit }, L = {}) {
   if (L.maxExpireSec !== null && L.maxExpireSec !== undefined && sec > L.maxExpireSec) return { error: `Your account allows an expiry of at most ${Math.floor(L.maxExpireSec / 60)} minutes.`, field: 'expire' };
   const k = Number(nRaw);
   return { views: v, expire, expiryText: `${k} ${UNIT_WORDS[unit][k === 1 ? 0 : 1]}` };
+}
+
+const MiB = 1024 * 1024;
+/** A size typed in MB ('' = no limit) → bytes, null, or undefined when invalid. */
+function mbToBytes(raw) {
+  const v = String(raw ?? '').trim();
+  if (!v) return null;
+  if (!/^\d{1,9}(\.\d{1,3})?$/.test(v) || Number(v) <= 0) return undefined;
+  return Math.max(1, Math.round(Number(v) * MiB));
+}
+
+/**
+ * The "Receive files…" options → { expire, maxFiles, maxBytes, maxFileBytes,
+ * types } or { error, field }. `L` is the profile's limits (maxExpireSec,
+ * reverseMaxBytes); the server checks them again.
+ */
+export function reverseOptions({ n, unit, maxFiles, maxMb, fileMb, typeMode, typeRules }, L = {}) {
+  const nRaw = String(n ?? '').trim();
+  const expire = nRaw + unit;
+  const sec = /^[1-9][0-9]{0,6}$/.test(nRaw) && Object.prototype.hasOwnProperty.call(UNIT_WORDS, unit) ? expireSeconds(expire) : null;
+  if (sec === null) return { error: 'Expiry must be a whole number between 1 minute and 365 days.', field: 'expire' };
+  if (L.maxExpireSec !== null && L.maxExpireSec !== undefined && sec > L.maxExpireSec) return { error: `Your account allows an expiry of at most ${Math.floor(L.maxExpireSec / 60)} minutes.`, field: 'expire' };
+  const fRaw = String(maxFiles ?? '').trim();
+  let files = null;
+  if (fRaw) {
+    if (!/^[1-9][0-9]{0,4}$/.test(fRaw) || Number(fRaw) > 10000) return { error: 'Files must be a whole number from 1 to 10,000, or empty for no limit.', field: 'files' };
+    files = Number(fRaw);
+  }
+  const maxBytes = mbToBytes(maxMb);
+  if (maxBytes === undefined) return { error: 'The total size must be a number of MB, or empty.', field: 'bytes' };
+  const roleMax = L.reverseMaxBytes ?? null;
+  if (roleMax !== null && maxBytes !== null && maxBytes > roleMax) return { error: `Your account allows at most ${formatBytes(roleMax)} per link.`, field: 'bytes' };
+  const maxFileBytes = mbToBytes(fileMb);
+  if (maxFileBytes === undefined) return { error: 'The file size must be a number of MB, or empty.', field: 'file' };
+  let types = null;
+  if (typeMode === 'allow' || typeMode === 'block') {
+    let rules;
+    try { rules = normalizeRules(String(typeRules ?? '').split(/[\n,]+/).map((x) => x.trim()).filter(Boolean)); } catch (e) { return { error: e.message, field: 'types' }; }
+    if (!rules.length) return { error: 'List at least one file type (for example ext:pdf), or accept any type.', field: 'types' };
+    types = { mode: typeMode, rules };
+  }
+  const k = Number(nRaw);
+  return { expire, maxFiles: files, maxBytes: maxBytes ?? roleMax, maxFileBytes, types, expiryText: `${k} ${UNIT_WORDS[unit][k === 1 ? 0 : 1]}` };
 }
 
 /** The client's progress, onProgress(bytesDone, total) → a fraction in [0, 1]. */
@@ -341,12 +386,14 @@ function unlockView(mount, deps, lockedErr) {
       codeToggle.setAttribute('aria-expanded', String(show));
       if (show) code.focus();
     });
+    const waiting = !setup && lockedErr && Number(lockedErr.received) > 0 ? Number(lockedErr.received) : 0;
     // The owner can always restore from the recovery kit here; starting over
     // is offered only when nothing the owner signs in with opens the Drive.
     const recovery = !setup && deps.user && deps.user.role === 'owner' && !deps.user.impersonating
       ? (lockedErr && lockedErr.ownerRecovery ? ownerRecoveryView(mount, deps, resolve) : ownerKitRestoreView(mount, deps, resolve)) : null;
     mount.replaceChildren(h('div.card.drive-unlock', { id: 'drive-unlock' },
       h('h2.section-title', { text: setup ? 'Set up your Drive' : 'Unlock your Drive' }),
+      waiting ? h('p.msg', { id: 'drive-received-waiting', role: 'status', text: `${waiting} new received file${waiting === 1 ? '' : 's'}: unlock your Drive to add ${waiting === 1 ? 'it' : 'them'} to your folders.` }) : null,
       h('p.modal-sub', {
         text: setup
           ? 'Your Drive is encrypted with a key that only you can open. Enter your account password to create it: the key is made here, in your browser, and kept only until you sign out or close the tab.'
@@ -549,8 +596,9 @@ function archiveBox(client, deps) {
     });
     const section = h('div.stack', { dataset: { gen: String(a.gen) } },
       h('p', { text: `Archived ${formatDate(a.at)}: ${a.items} item${a.items === 1 ? '' : 's'}, ${formatBytes(a.bytes)}. It is kept exactly as it was, sealed under your old Drive key, and counts towards your storage. It comes back if you restore from a recovery kit made for it (Restore from kit).` }),
+      a.paused ? h('p', { id: `drive-archive-links-${a.gen}`, text: `${a.paused} of your upload links (Receive files) ${a.paused === 1 ? 'is' : 'are'} paused: ${a.paused === 1 ? 'its key is' : 'their keys are'} in this archive. ${a.paused === 1 ? 'It accepts' : 'They accept'} files again once the archive is restored; the files already received are kept in it.` }) : null,
       h('details', {}, h('summary', { text: 'Delete the old Drive archive' }),
-        h('p.msg.warn', { text: 'Deleting it removes its files for good: a recovery kit found later could no longer bring them back.' }),
+        h('p.msg.warn', { text: `Deleting it removes its files for good: a recovery kit found later could no longer bring them back.${a.paused ? ` Its ${a.paused} paused upload link${a.paused === 1 ? ' is' : 's are'} revoked, and the files ${a.paused === 1 ? 'it' : 'they'} received are deleted with it.` : ''}` }),
         form, msg));
     box.appendChild(section);
   }
@@ -639,13 +687,16 @@ function mountApp(mount, client, deps) {
     move: btn('Move…', moveSel),
     download: btn('Download', downloadSel),
     share: btn('Share…', shareSel),
+    receive: btn('Receive files…', receiveSel),
     del: btn('Delete', deleteSel, 'danger'),
   };
+  const canReceive = !!(deps.profile && deps.profile.caps && deps.profile.caps.reverseEnabled === true);
+  B.receive.hidden = !canReceive;
   for (const [k, b] of Object.entries(B)) b.id = `drive-${k}`;
   const selInfo = h('span.mono.muted.drive-selinfo', { id: 'drive-selinfo' });
   const toolbar = h('div.drive-toolbar', { role: 'group', 'aria-label': 'Drive actions' },
     h('div.btn-row', {}, B.upload, B.uploadDir, B.mkdir),
-    h('div.btn-row', {}, B.rename, B.move, B.download, B.share, B.del), selInfo);
+    h('div.btn-row', {}, B.rename, B.move, B.download, B.share, B.receive, B.del), selInfo);
   fileIn.addEventListener('change', () => { const f = [...fileIn.files]; fileIn.value = ''; uploadFiles(f); });
   folderIn.addEventListener('change', () => {
     const f = [...folderIn.files];
@@ -657,6 +708,7 @@ function mountApp(mount, client, deps) {
   const bar = progressBar();
   const cancelBtn = h('button.btn', { type: 'button', id: 'drive-cancel', text: 'Cancel', hidden: true });
   const msg = h('p.msg.error.drive-msg', { id: 'drive-msg', role: 'alert', hidden: true });
+  const receivedMsg = h('p.msg.drive-received', { id: 'drive-received', role: 'status', hidden: true });
   const transferBox = h('div.drive-transfer', {}, bar.el, cancelBtn);
 
   // the folder tree
@@ -699,7 +751,7 @@ function mountApp(mount, client, deps) {
 
   // A restore from the kit card (on this page) mounts the Drive again with its client.
   const withRemount = { ...deps, remount: (c) => mountApp(mount, c, { ...deps, kitAlert: false }) };
-  mount.replaceChildren(h('div.drive', { id: 'drive-app' }, ...banners(client, withRemount), cap, toolbar, fileIn, folderIn, transferBox, msg, layout));
+  mount.replaceChildren(h('div.drive', { id: 'drive-app' }, ...banners(client, withRemount), cap, toolbar, fileIn, folderIn, transferBox, msg, receivedMsg, layout));
 
   // drag and drop onto the right pane
   pane.addEventListener('dragover', (e) => { if (!busy) { e.preventDefault(); pane.classList.add('over'); } });
@@ -776,7 +828,9 @@ function mountApp(mount, client, deps) {
     check.addEventListener('change', () => { if (check.checked) selected.add(c.id); else selected.delete(c.id); updateButtons(); });
     const nameCell = c.kind === 'dir'
       ? h('button.tree-open.drive-open', { type: 'button', title: `Open ${name}`, on: { click: () => open(c.id, { focus: true }) } }, h('span.tree-icon', { 'aria-hidden': 'true' }), c.name ? nameEl(name) : h('span', { text: name }))
-      : h('span.drive-fname', {}, c.name ? nameEl(name) : h('span', { text: name }));
+      : h('span.drive-fname', {}, c.name ? nameEl(name) : h('span', { text: name }),
+        // A received file whose name was cleaned when it was taken in (or an older name with such characters).
+        c.renamed ? h('span.tree-sub.mono.renamed-note', { text: ' renamed: hidden characters removed' }) : null);
     const sharesBtn = h('button.btn.tree-btn', { type: 'button', text: 'Shares', 'aria-label': `Shares of ${name}`, on: { click: () => sharesDialog(c) } });
     return h('tr', { dataset: { id: c.id, kind: c.kind } },
       h('td.cell-check', {}, check),
@@ -795,6 +849,7 @@ function mountApp(mount, client, deps) {
     B.share.disabled = busy || n === 0;
     B.download.disabled = busy || !one;
     B.download.textContent = one && one.kind === 'dir' ? 'Download (.zip)' : 'Download';
+    B.receive.disabled = busy || n > 1 || (n === 1 && (!one || one.kind !== 'dir'));
     for (const b of [B.upload, B.uploadDir, B.mkdir]) b.disabled = busy;
     const total = kids().length;
     selAll.checked = total > 0 && n === total;
@@ -1078,6 +1133,286 @@ function mountApp(mount, client, deps) {
     copy.focus();
   }
 
+  // ── receive files (reverse shares, docs/REVERSE.md) ────────────────────
+  /** The folder "Receive files…" acts on: the selected folder, else the open one. */
+  function receiveTarget() {
+    const [it] = selectedItems();
+    if (it && it.kind === 'dir') return { id: it.id, name: it.name || '(unnamed)' };
+    return { id: current, name: title.textContent };
+  }
+
+  function receiveSel() {
+    if (!canReceive) return;
+    const folder = receiveTarget();
+    const labelIn = h('input.input', { id: 'drive-rev-label', maxlength: '100', placeholder: 'e.g. Tax documents 2026' });
+    const hint = unencryptedHint('drive-rev-label-hint', labelIn);
+    const noteIn = h('textarea.input', { id: 'drive-rev-note', maxlength: '1000', rows: '3', placeholder: 'e.g. Please send the signed contract and your ID.' });
+    const expN = h('input.input.opt-num', { id: 'drive-rev-expire', type: 'number', min: '1', step: '1', value: '7', inputmode: 'numeric' });
+    const expU = h('select.input.opt-sel', { id: 'drive-rev-unit', 'aria-label': 'Expiry unit' },
+      h('option', { value: 'm', text: 'minutes' }), h('option', { value: 'h', text: 'hours' }), h('option', { value: 'd', text: 'days', selected: true }));
+    expU.value = 'd';
+    const files = h('input.input', { id: 'drive-rev-files', type: 'number', min: '1', max: '10000', step: '1', inputmode: 'numeric', placeholder: 'no limit' });
+    const roleMax = L.reverseMaxBytes ?? null;
+    const maxMb = h('input.input', { id: 'drive-rev-bytes', inputmode: 'decimal', placeholder: roleMax ? `up to ${formatBytes(roleMax)}` : 'no limit' });
+    const fileMb = h('input.input', { id: 'drive-rev-filesize', inputmode: 'decimal', placeholder: 'no limit' });
+    const typeMode = h('select.input', { id: 'drive-rev-types' },
+      h('option', { value: 'any', text: 'any type' }), h('option', { value: 'allow', text: 'only the listed types' }), h('option', { value: 'block', text: 'all but the listed types' }));
+    const typeRules = h('textarea.input.rules-in', { id: 'drive-rev-rules', rows: '2', placeholder: 'ext:pdf\next:docx\nmime:image/*', hidden: true, 'aria-label': 'File types (one per line: ext:pdf, mime:image/*)' });
+    typeMode.addEventListener('change', () => { typeRules.hidden = typeMode.value === 'any'; if (!typeRules.hidden) typeRules.focus(); });
+    const pwOn = h('input', { type: 'checkbox', id: 'drive-rev-pw-on' });
+    const pw1 = h('input.input', { id: 'drive-rev-pw', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
+    const pw2 = h('input.input', { id: 'drive-rev-pw2', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
+    const pwBox = h('div.drive-share-pw', { hidden: true }, field('Password', pw1), field('Repeat the password', pw2));
+    pwOn.addEventListener('change', () => { pwBox.hidden = !pwOn.checked; if (pwOn.checked) pw1.focus(); });
+    // A link adds key material to the Drive: the user confirms it like an API
+    // key (password, or a passkey). The owner acting as the user confirms nothing.
+    const impersonating = !!(deps.user?.impersonating || deps.profile?.impersonatedBy);
+    const confirmIn = h('input.input', { id: 'drive-rev-confirm', type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false' });
+    const confirmText = h('label.field-label', { for: 'drive-rev-confirm', text: 'Your account password (to confirm it is you)' });
+    let withPasskey = false;
+    if (!impersonating) (deps.canUsePasskey || canUsePasskey)().then((ok) => { withPasskey = !!ok; confirmText.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
+    const confirm = impersonating ? async () => ({}) : deps.confirm || ((input) => confirmStep(input, deps.profile?.user?.username, withPasskey));
+    const listBox = h('div.drive-reverse-list', { id: 'drive-rev-list' }, h('p.msg', { role: 'status', text: 'Loading this folder’s links…' }));
+    const form = h('div.drive-reverse-form', { id: 'drive-rev-form' },
+      h('div.label-row', {}, h('label.field-label', { for: 'drive-rev-label', text: 'Label (optional, for your own reference)' }), labelIn, hint),
+      field('Note to the people who upload (optional; encrypted, only link holders can read it)', noteIn),
+      h('div.drive-reverse-grid', {},
+        h('div.opt', { role: 'group', 'aria-labelledby': 'drive-rev-expire-l' }, h('label.opt-label', { id: 'drive-rev-expire-l', for: 'drive-rev-expire', text: 'Accept files for' }), expN, expU),
+        field('Most files (empty: no limit)', files),
+        field('Most in total, MB (empty: no limit)', maxMb),
+        field('Largest file, MB (empty: no limit)', fileMb)),
+      field('File types', typeMode), typeRules,
+      h('label.viewer-opt', {}, pwOn, 'Ask uploaders for a password (it only lets them in; you never need it, and it does not encrypt anything)'),
+      pwBox,
+      h('div.dfield', { hidden: impersonating }, confirmText, confirmIn));
+    const d = openDialog({
+      title: `Receive files into “${folder.name}”`,
+      sub: 'Anyone with the link can upload files and folders into this folder, without an account. They are encrypted in the uploader’s browser for you alone; you see them here the next time your Drive is unlocked. Uploads count towards your Drive’s storage.',
+      body: [form, listBox],
+      wide: true,
+      fallback: focusPane,
+    });
+    const create = primary('Create link', async () => {
+      d.clearError();
+      const o = reverseOptions({ n: expN.value, unit: expU.value, maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value }, L);
+      if (o.error) { d.error(o.error, { expire: expN, files, bytes: maxMb, file: fileMb, types: typeRules }[o.field] || null); return; }
+      let password = '';
+      if (pwOn.checked) {
+        if (!pw1.value) { d.error('Enter a password, or turn the password off.', pw1); return; }
+        if (pw1.value !== pw2.value) { d.error('Passwords do not match — repeat the same password in both fields.', pw2); return; }
+        password = pw1.value;
+      }
+      create.disabled = true;
+      create.querySelector('.send-txt').textContent = 'Creating…';
+      confirmIn.removeAttribute('aria-invalid');
+      const failed = (text, el = null) => {
+        d.error(text, el);
+        create.disabled = false;
+        create.querySelector('.send-txt').textContent = 'Create link';
+      };
+      let step;
+      try {
+        step = await confirm(confirmIn);
+      } catch (e) {
+        failed(e && e.code ? friendlyError(e) : (e && e.message) || 'Enter your account password.', confirmIn);
+        return;
+      }
+      try {
+        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, step });
+        pw1.value = pw2.value = '';
+        reverseResult(d, r, o, folder);
+      } catch (e) {
+        const confirmFailed = e && ['wrong_password', 'reauth_failed', 'reauth_required', 'invalid_credential'].includes(e.code);
+        failed(confirmFailed ? 'That did not confirm it is you — enter your account password again.' : friendlyError(e), confirmFailed ? confirmIn : null);
+      }
+    });
+    d.setActions(btn('Cancel', () => d.close(), 'modal-btn'), create);
+    labelIn.focus();
+    reverseList(d, listBox, folder);
+  }
+
+  /** The link, a copy button and a QR code. */
+  function linkBlock(url, idBase) {
+    const u = h('div.url.mono', { id: `${idBase}-url`, text: url });
+    const copy = h('button.copy-btn', { type: 'button', id: `${idBase}-copy`, text: 'copy link' });
+    copy.addEventListener('click', async () => flashCopied(copy, (await copyText(url)) ? 'copied' : 'failed'));
+    const nodes = [h('div.linkrow', {}, u, copy)];
+    try {
+      if (typeof window.qrcode !== 'function') throw new Error('qr unavailable');
+      const qr = window.qrcode(0, 'M');
+      qr.addData(url);
+      qr.make();
+      nodes.push(h('div.card.qr.drive-qr', {}, h('img', { src: qr.createDataURL(4, 10), alt: 'QR code for the upload link' })));
+    } catch { /* no QR on this page */ }
+    return { nodes, copy };
+  }
+
+  function reverseResult(d, r, o, folder) {
+    d.setTitle('Your upload link');
+    d.subEl.textContent = `Anyone with this link can send files into “${folder.name}” for ${o.expiryText}, within the limits you chose. Keep it to the people you want files from — the key that encrypts their uploads for you is inside the link. Revoke it any time here or under “my shares”; files already received stay.`;
+    d.subEl.hidden = false;
+    const { nodes, copy } = linkBlock(r.url, 'drive-rev');
+    d.setBody(...nodes);
+    d.setActions(primary('Done', () => d.close()));
+    copy.focus();
+  }
+
+  async function reverseList(d, box, folder) {
+    let rows;
+    try {
+      rows = await client.reverseShares(folder.id);
+    } catch (e) {
+      box.replaceChildren(h('p.msg.error', { text: `This folder’s links could not be loaded: ${friendlyError(e)}` }));
+      return;
+    }
+    if (!d.open) return;
+    const draw = () => {
+      if (!rows.length) { box.replaceChildren(h('p.mono.muted', { id: 'drive-rev-none', text: 'No upload links for this folder yet.' })); return; }
+      const now = Math.floor(Date.now() / 1000);
+      const tb = h('tbody');
+      for (const s of rows) {
+        const active = s.status === 'active';
+        const cell = h('td.cell-actions');
+        const row = h('div.btn-row');
+        if (s.url && active) {
+          row.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Copy link', 'aria-label': `Copy the link ${s.label || ''}`.trim(), on: { click: async (e) => flashCopied(e.currentTarget, (await copyText(s.url)) ? 'copied' : 'failed') } }));
+        }
+        // A paused link (the owner started over) has not ended: it can be revoked too.
+        const live = active || s.status === 'paused';
+        if (live && s.locked) row.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
+        else if (live) {
+          const rv = h('button.btn.danger.tree-btn', { type: 'button', text: 'Revoke', 'aria-label': `Revoke ${s.label || 'this link'}` });
+          armConfirm(rv, 'Revoke now', async () => {
+            rv.disabled = true;
+            try { await deps.revoke(s.id); s.status = 'revoked'; toast('Link revoked. Files already received stay.'); draw(); d.box.focus(); } catch (e) { rv.disabled = false; d.error(friendlyError(e)); }
+          });
+          row.appendChild(rv);
+        }
+        cell.appendChild(row);
+        tb.appendChild(h('tr', { dataset: { status: s.status || '' } },
+          h('td', { dataset: { label: 'Label' }, text: s.label || '(no label)' }),
+          h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),
+          h('td.mono', { dataset: { label: 'Expires' }, text: s.expires ? (active && s.expires > now ? `in ${formatCoarse(s.expires - now)}` : formatDate(s.expires)) : '—' }),
+          h('td.mono', { dataset: { label: 'Received' }, text: `${s.files} file${s.files === 1 ? '' : 's'}, ${formatBytes(s.bytes)}` }),
+          h('td.mono', { dataset: { label: 'Status' }, text: `${s.status}${s.password ? ' · password' : ''}` }),
+          cell));
+      }
+      box.replaceChildren(h('h3.field-label', { id: 'drive-rev-list-h', text: 'Upload links of this folder' }),
+        h('div.table-wrap', {}, h('table.table', { id: 'drive-rev-table', 'aria-labelledby': 'drive-rev-list-h' },
+          h('thead', {}, h('tr', {}, ...['Label', 'Created', 'Expires', 'Received', 'Status'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
+          tb)));
+    };
+    draw();
+  }
+
+  /**
+   * Take in what reverse shares have received (re-wrapped into this Drive's
+   * own format), then say what happened: added, renamed (hidden characters
+   * removed), placed higher up (folders nested too deeply), and the files
+   * that could not be added, with a way to review, delete or retry them.
+   */
+  async function takeInReceived() {
+    let r;
+    try {
+      r = await client.receivePending();
+    } catch (e) {
+      showMsg(receivedMsg, `Received files could not be added now: ${friendlyError(e)}`);
+      return;
+    }
+    if (r.added) {
+      toast(`Added ${r.added} received file${r.added === 1 ? '' : 's'}.`);
+      await refresh();
+    }
+    const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+    const parts = [];
+    if (r.added) parts.push(`${n(r.added, 'new received file was', 'new received files were')} added to your folders.`);
+    if (r.renamed) parts.push(`${n(r.renamed, 'name had', 'names had')} hidden direction or spacing characters, removed.`);
+    if (r.flattened) parts.push(`${n(r.flattened, 'file was', 'files were')} in folders nested too deeply (or in too many new folders at once) and ${r.flattened === 1 ? 'was' : 'were'} put in the deepest folder allowed.`);
+    if (r.deferred) parts.push(`${n(r.deferred, 'file', 'files')} could not be added now; ${r.deferred === 1 ? 'it is' : 'they are'} tried again the next time your Drive opens.`);
+    await showReceived(parts);
+  }
+
+  /** The status line under the toolbar: `parts`, and the files that could not be added (with a Review button). */
+  async function showReceived(parts) {
+    let failed = { items: [], total: 0 };
+    try { failed = await client.failedReceived(); } catch { /* the line says what it can */ }
+    const count = Math.max(failed.items.length, failed.total || 0);
+    const nodes = parts.length ? [h('span', { text: parts.join(' ') })] : [];
+    if (count) {
+      nodes.push(h('span', { text: `${nodes.length ? ' ' : ''}${count} received file${count === 1 ? '' : 's'} could not be added. ` }),
+        h('button.linkbtn', { type: 'button', id: 'drive-received-review', text: 'Review them', on: { click: () => failedDialog() } }));
+    }
+    if (!nodes.length) { receivedMsg.hidden = true; receivedMsg.replaceChildren(); return; }
+    receivedMsg.classList.remove('error');
+    receivedMsg.replaceChildren(...nodes);
+    receivedMsg.hidden = false;
+  }
+
+  const FAIL_TEXT = {
+    unreadable: 'does not open with this Drive’s key (damaged, or not sent for this link)',
+    name: 'its name or folder path cannot be used',
+    place: 'your Drive refused it (full, or its folder is full)',
+  };
+
+  /** The received files that could not be added: link, size, time, why; delete or try again. */
+  async function failedDialog() {
+    const status = h('p.msg', { role: 'status', text: 'Loading…' });
+    const d = openDialog({
+      title: 'Received files that could not be added',
+      sub: 'These uploads reached your Drive but could not be opened or placed. Their names are encrypted, so only the link, size and time are shown. Delete them to free the space, or try again (for example after making room).',
+      body: [status], wide: true, fallback: focusPane,
+    });
+    d.setActions(btn('Close', () => d.close(), 'modal-btn'));
+    let items = [];
+    let more = false;
+    let next = null;
+    const load = async () => {
+      const r = await client.failedReceived(next);
+      items = items.concat(r.items);
+      more = r.more;
+      next = r.next;
+    };
+    try { await load(); } catch (e) { status.textContent = ''; d.error(friendlyError(e)); return; }
+    const done = async (msgText) => { toast(msgText); await showReceived([]); };
+    const draw = () => {
+      if (!items.length) { d.setBody(h('p.msg', { id: 'drive-failed-none', text: 'Nothing left to review.' })); return; }
+      const tb = h('tbody');
+      for (const it of items) {
+        const del = h('button.btn.danger.tree-btn', { type: 'button', text: 'Delete', 'aria-label': `Delete the ${formatBytes(it.size)} file received ${formatDate(it.created)}` });
+        armConfirm(del, 'Delete now', async () => {
+          del.disabled = true;
+          try { await client.remove(it.id); items = items.filter((x) => x !== it); draw(); d.box.focus(); await done('Received file deleted.'); refreshUsage(); } catch (e) { del.disabled = false; d.error(friendlyError(e)); }
+        });
+        const again = h('button.btn.tree-btn', { type: 'button', text: 'Try again', 'aria-label': `Try again the ${formatBytes(it.size)} file received ${formatDate(it.created)}` });
+        again.addEventListener('click', async () => {
+          again.disabled = true;
+          try {
+            await client.retryReceived(it.id);
+            items = items.filter((x) => x !== it);
+            draw();
+            d.box.focus();
+            await takeInReceived();
+          } catch (e) { again.disabled = false; d.error(friendlyError(e)); }
+        });
+        tb.appendChild(h('tr', { dataset: { id: it.id } },
+          h('td', { dataset: { label: 'Link' }, text: it.label || '(no label)' }),
+          h('td.mono', { dataset: { label: 'Size' }, text: formatBytes(Number(it.size) || 0) }),
+          h('td.mono', { dataset: { label: 'Received' }, text: formatDate(it.created) }),
+          h('td', { dataset: { label: 'Why' }, text: FAIL_TEXT[it.reason] || FAIL_TEXT.unreadable }),
+          h('td.cell-actions', {}, h('div.btn-row', {}, again, del))));
+      }
+      const rows = [h('div.table-wrap', {}, h('table.table', { id: 'drive-failed-table' },
+        h('caption.sr-only', { text: 'Received files that could not be added' }),
+        h('thead', {}, h('tr', {}, ...['Link', 'Size', 'Received', 'Why'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
+        tb))];
+      if (more) {
+        rows.push(h('button.btn', { type: 'button', id: 'drive-failed-more', text: 'Show more', on: { click: async (e) => { e.currentTarget.disabled = true; try { await load(); draw(); } catch (err) { d.error(friendlyError(err)); } } } }));
+      }
+      d.setBody(...rows);
+    };
+    draw();
+  }
+
   // ── an item's shares ───────────────────────────────────────────────────
   async function sharesDialog(it) {
     const status = h('p.msg', { role: 'status', text: 'Loading…' });
@@ -1098,7 +1433,7 @@ function mountApp(mount, client, deps) {
       const tb = h('tbody');
       for (const s of rows) {
         const active = s.status === 'active';
-        const views = s.views_total === null || s.views_total === undefined ? 'unlimited' : `${s.left ?? '—'} left of ${s.views_total}`;
+        const views = viewsText(s);
         const expires = s.expires ? (active && s.expires > now ? `in ${formatCoarse(s.expires - now)}` : formatDate(s.expires)) : '—';
         const cell = h('td.cell-actions');
         if (active && s.locked) cell.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
@@ -1130,9 +1465,11 @@ function mountApp(mount, client, deps) {
   // ── start ──────────────────────────────────────────────────────────────
   refreshUsage();
   const ready = tree.ready.then(() => open(ROOT));
+  const received = ready.then(() => takeInReceived());
   return {
     el: mount.firstChild,
     ready,
+    received,
     tree,
     open,
     refresh,
