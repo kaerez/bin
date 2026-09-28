@@ -249,17 +249,25 @@ try {
     // PoC F1: an outside client with the navigation's Fetch Metadata, but no cookie, gets no page key.
     const raw = (u, headers) => new Promise((res, rej) => http.get(u, { headers }, (x) => { let d = ''; x.on('data', (c) => { d += c; }); x.on('end', () => res({ body: d, cookie: x.headers['set-cookie'] || null })); }).on('error', rej));
     const nav = { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin' };
+    // The page key a served page carries, parsed as a document (a scratch page without the app's CSP): '' when none.
+    const scratch = await ctx.newPage();
+    const pageKeyIn = async (html) => {
+      await scratch.setContent(html, { waitUntil: 'domcontentloaded' });
+      return scratch.evaluate(() => document.querySelector('meta[name="secbin-page-key"]')?.getAttribute('content') || '');
+    };
     const forged = await raw(`${BASE}/p/${id}?n=${n}`, nav);
-    check('PoC F1: forged navigation headers without the cookie get no page key (and no cookie)', !/secbin-page-key/.test(forged.body) && forged.cookie === null);
+    check('PoC F1: forged navigation headers without the cookie get no page key (and no cookie)', (await pageKeyIn(forged.body)) === '' && forged.cookie === null);
     // PoC F1: a same-origin fetch() from the check document (it sends the cookie) gets no key either.
-    const fetched = await p.evaluate(async (u) => (await (await fetch(u, { credentials: 'same-origin' })).text()).includes('secbin-page-key'), `/p/${id}?n=${n}`);
-    check('PoC F1: fetch() from the check document gets no page key', fetched === false);
+    const fetched = await p.evaluate(async (u) => (await fetch(u, { credentials: 'same-origin' })).text(), `/p/${id}?n=${n}`);
+    check('PoC F1: fetch() from the check document gets no page key', (await pageKeyIn(fetched)) === '');
+    await scratch.close();
     // What the record holds (opened here with the browser's own cookie, as only the strict page could).
-    const pk = (await ctx.cookies(BASE)).find((c) => c.name === '__Secure-secbin_pk');
+    // All of the context's cookies: this one is scoped to the share's path, so a lookup for the origin's "/" would not list it.
+    const pk = (await ctx.cookies()).find((c) => c.name === '__Secure-secbin_pk');
     check('the page key cookie: HttpOnly, Secure, SameSite=Strict, scoped to the share\'s path, 15 minutes',
       pk && pk.httpOnly && pk.secure && pk.sameSite === 'Strict' && pk.path === `/p/${id}` && pk.expires > Date.now() / 1000 && pk.expires <= Date.now() / 1000 + 900 + 5, JSON.stringify(pk));
-    const [cn, ckey] = pk.value.split('.');
-    const b64 = (x) => Buffer.from(x.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    const [cn, ckey] = (pk ? pk.value : '.').split('.');
+    const b64 = (x) => Buffer.from(x, 'base64url');
     const aesKey = await webcrypto.subtle.importKey('raw', b64(ckey), { name: 'AES-GCM' }, false, ['decrypt']);
     const plain = JSON.parse(new TextDecoder().decode(await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(iv), additionalData: new TextEncoder().encode(`secbin-page/v1\np\n${id}\n${n}\n`) }, aesKey, b64(ct))));
     check('the sealed record holds the link\'s key and nothing else', cn === n && JSON.stringify(Object.keys(plain)) === '["k"]' && plain.k === K, JSON.stringify(Object.keys(plain)));
@@ -285,7 +293,7 @@ try {
     for (const pg of ctx.pages()) if (pg !== p) await pg.close();
     // A cross-origin page cannot frame the strict page either (frame-ancestors 'none').
     const fp = await ctx.newPage();
-    await fp.setContent(`<iframe src="${BASE}/p/${id}"></iframe>`);
+    await fp.evaluate((u) => { const f = document.createElement('iframe'); f.src = u; document.body.append(f); }, `${BASE}/p/${id}`);
     await fp.waitForTimeout(2000);
     const child = fp.frames().find((f) => f !== fp.mainFrame());
     let framed = false;

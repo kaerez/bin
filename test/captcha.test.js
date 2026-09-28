@@ -677,10 +677,38 @@ describe('a missing or ended share answers exactly as a protected one without a 
 describe('the pages: strict where the key is, the Turnstile CSP only on the check page', () => {
   const nav = { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'none' };
   const back = { ...nav, 'sec-fetch-site': 'same-origin' }; // the check page's return navigation
-  const keyOf = (html) => /<meta name="secbin-page-key" content="([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})">/.exec(html);
+  /**
+   * The page key in a page → [content, n, key], or null when the page has none (an empty or no
+   * "secbin-page-key" meta). The HTML is parsed (the runtime's HTMLRewriter), the attribute read as a value.
+   */
+  const keyOf = async (html) => {
+    let content = null;
+    await new globalThis.HTMLRewriter().on('meta[name="secbin-page-key"]', { element(el) { content = el.getAttribute('content'); } })
+      .transform(new Response(html)).text();
+    if (!content) return null;
+    const [n, key, extra] = content.split('.');
+    expect([n.length, key && key.length, extra]).toEqual([22, 43, undefined]); // a nonce of 16 and a key of 32 random bytes
+    return [content, n, key];
+  };
   const cookieOf = (res) => res.headers.get('set-cookie');
-  const COOKIE_RE = (path) => new RegExp(`^__Secure-secbin_pk=([A-Za-z0-9_-]{22})\\.([A-Za-z0-9_-]{43}); Path=${path.replace(/[/]/g, '\\/')}; HttpOnly; Secure; SameSite=Strict; Max-Age=900$`);
-  const CLEAR_RE = (path) => new RegExp(`^__Secure-secbin_pk=; Path=${path.replace(/[/]/g, '\\/')}; HttpOnly; Secure; SameSite=Strict; Max-Age=0$`);
+  /** A Set-Cookie header parsed (never matched as a pattern): { name, value, attrs } with lower-case attribute names. */
+  const parseSetCookie = (header) => {
+    const [pair, ...rest] = String(header).split(';').map((x) => x.trim());
+    const i = pair.indexOf('=');
+    const attrs = {};
+    for (const a of rest) {
+      const j = a.indexOf('=');
+      attrs[(j < 0 ? a : a.slice(0, j)).toLowerCase()] = j < 0 ? true : a.slice(j + 1);
+    }
+    return { name: pair.slice(0, i), value: pair.slice(i + 1), attrs };
+  };
+  /** The page key cookie for `path`: exactly these attributes (Max-Age 900 when set, 0 when cleared). */
+  const expectPageKeyCookie = (header, path, maxAge) => {
+    const c = parseSetCookie(header);
+    expect(c.name).toBe('__Secure-secbin_pk');
+    expect(c.attrs).toEqual({ path, httponly: true, secure: true, samesite: 'Strict', 'max-age': String(maxAge) });
+    return c.value;
+  };
   let paths;
   beforeAll(async () => {
     const u = await makeUser('cap-pages');
@@ -704,13 +732,12 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       expect(page.headers.get('cache-control')).toBe('no-store');
       const html = await page.text();
       expect(html).not.toContain('challenges.cloudflare.com');
-      const k = keyOf(html);
+      const k = await keyOf(html);
       expect(k).not.toBeNull();
-      const c = COOKIE_RE(path).exec(cookieOf(page));
-      expect(c, cookieOf(page)).not.toBeNull();
-      expect([c[1], c[2]]).toEqual([k[1], k[2]]); // the same value, held by the browser
+      const value = expectPageKeyCookie(cookieOf(page), path, 900);
+      expect(value.split('.')).toEqual([k[1], k[2]]); // the same value, held by the browser
       // Random: another navigation, another nonce and key (never derived from the id or the nonce).
-      const k2 = keyOf(await (await ts(path, { headers: back })).text());
+      const k2 = await keyOf(await (await ts(path, { headers: back })).text());
       expect(k2[1]).not.toBe(k[1]);
       expect(k2[2]).not.toBe(k[2]);
     }
@@ -719,12 +746,12 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
   it('PoC F1: the return (?n=) gives the key only to the browser holding its cookie — forged navigation headers without it get none', async () => {
     for (const path of paths) {
       const first = await ts(path, { headers: nav });
-      const [, n, key] = keyOf(await first.text());
+      const [, n, key] = await keyOf(await first.text());
       const cookie = cookieOf(first).split(';')[0];
       // An outside client (curl) sends the Fetch Metadata of a navigation, but has no cookie: no key, nothing set.
       for (const headers of [nav, back, { ...back, cookie: '__Secure-secbin_pk=' }, { ...back, cookie: `__Secure-secbin_pk=${n}.${'A'.repeat(43)}x` }]) {
         const res = await ts(`${path}?n=${n}`, { headers });
-        expect(keyOf(await res.text())).toBeNull();
+        expect(await keyOf(await res.text())).toBeNull();
         expect(cookieOf(res)).toBeNull();
       }
       // A cookie for another nonce (another round trip, another tab): no key.
@@ -732,18 +759,18 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       await other.text();
       const otherCookie = cookieOf(other).split(';')[0];
       const mismatch = await ts(`${path}?n=${n}`, { headers: { ...back, cookie: otherCookie } });
-      expect(keyOf(await mismatch.text())).toBeNull();
+      expect(await keyOf(await mismatch.text())).toBeNull();
       // The browser's own return: the key, and the cookie cleared in the same response.
       const ok = await ts(`${path}?n=${n}`, { headers: { ...back, cookie } });
-      expect(keyOf(await ok.text()).slice(1)).toEqual([n, key]);
-      expect(cookieOf(ok)).toMatch(CLEAR_RE(path));
+      expect((await keyOf(await ok.text())).slice(1)).toEqual([n, key]);
+      expect(expectPageKeyCookie(cookieOf(ok), path, 0)).toBe('');
     }
   });
 
   it('PoC F1: fetch() from a page (even with the cookie), a cross-site navigation, a frame or a HEAD gets no key and sets no cookie', async () => {
     for (const path of paths) {
       const first = await ts(path, { headers: nav });
-      const [, n] = keyOf(await first.text());
+      const [, n] = await keyOf(await first.text());
       const cookie = cookieOf(first).split(';')[0];
       const tries = [
         { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin', cookie },
@@ -758,7 +785,7 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       for (const headers of tries) {
         for (const q of [`?n=${n}`, '']) {
           const res = await ts(`${path}${q}`, { headers });
-          expect(keyOf(await res.text()), JSON.stringify(headers)).toBeNull();
+          expect(await keyOf(await res.text()), JSON.stringify(headers)).toBeNull();
           expect(cookieOf(res), JSON.stringify(headers)).toBeNull();
         }
       }
@@ -766,20 +793,20 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       expect(cookieOf(head)).toBeNull();
       // None of those used the cookie up: the real return still works once.
       const ok = await ts(`${path}?n=${n}`, { headers: { ...back, cookie } });
-      expect(keyOf(await ok.text())[1]).toBe(n);
+      expect((await keyOf(await ok.text()))[1]).toBe(n);
     }
   });
 
   it('the page key is single use: after the return that cleared it, a replayed cookie is the only way back, and no key is issued on a return', async () => {
     for (const path of paths) {
       const first = await ts(path, { headers: nav });
-      const [, n] = keyOf(await first.text());
+      const [, n] = await keyOf(await first.text());
       const cookie = cookieOf(first).split(';')[0];
       const ok = await ts(`${path}?n=${n}`, { headers: { ...back, cookie } });
-      expect(keyOf(await ok.text())[1]).toBe(n);
+      expect((await keyOf(await ok.text()))[1]).toBe(n);
       // The browser now holds no cookie for the path: the same return again gets nothing, and mints nothing.
       const again = await ts(`${path}?n=${n}`, { headers: back });
-      expect(keyOf(await again.text())).toBeNull();
+      expect(await keyOf(await again.text())).toBeNull();
       expect(cookieOf(again)).toBeNull();
     }
   });
@@ -801,7 +828,7 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       const ch = await check.text();
       expect(ch).toContain('/js/check.js');
       expect(ch).not.toMatch(/\/js\/(view|reverse|pwa)\.js/);
-      expect(keyOf(ch)).toBeNull();
+      expect(await keyOf(ch)).toBeNull();
     }
     // Login and Account keep their own Turnstile CSP (workers allowed there, as before).
     const login = await ts('/dashboard/login/', { headers: nav });

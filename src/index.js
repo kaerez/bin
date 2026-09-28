@@ -176,8 +176,9 @@ async function sharePage(request, env, url, kind) {
     pk = newPageKey();
     page.headers.append('set-cookie', pageKeyCookie(cookiePath, pk));
   }
-  return new Rewriter().on('head', {
-    element(el) { el.append(`<meta name="secbin-page-key" content="${pk.n}.${pk.key}">`, { html: true }); },
+  // Set as an attribute value by the rewriter (it escapes it), never written as markup.
+  return new Rewriter().on('meta[name="secbin-page-key"]', {
+    element(el) { el.setAttribute('content', `${pk.n}.${pk.key}`); },
   }).transform(page);
 }
 
