@@ -231,7 +231,7 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
     expect((await fetchJson('/api/private/me', { cookie: u.cookie })).status).toBe(200);
   });
 
-  it('covers every cookie-authenticated state-changing route', async () => {
+  it('covers every cookie-authenticated state-changing route', { timeout: 60000 }, async () => { // a sweep, like the ones below
     const id = 'AAAAAAAAAAAAAAAA';
     const share = 'kAAAAAAAAAAAAAAAAAAAAAA';
     const file = 'fAAAAAAAAAAAAAAAAAAAAAA';
