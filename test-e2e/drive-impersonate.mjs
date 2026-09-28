@@ -34,8 +34,11 @@ const watch = (p) => {
   p.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   p.on('console', (m) => { if (m.type() === 'error' && /Content Security Policy|Trusted Type/i.test(m.text())) errors.push(`console: ${m.text()}`); });
 };
+// A raw request as the page's own client sends it (public/js/api.js): a
+// change carries the session's CSRF token (the readable __Host-secbin_csrf cookie).
 const api = (p, url, init = {}) => p.evaluate(async ([u, i]) => {
-  const r = await fetch(u, { cache: 'no-store', ...i, headers: { 'content-type': 'application/json', 'x-secbin-intent': '1', ...(i.headers || {}) } });
+  const csrf = (document.cookie.match(/(?:^|;\s*)__Host-secbin_csrf=([^;]+)/) || [])[1] || '';
+  const r = await fetch(u, { cache: 'no-store', ...i, headers: { 'content-type': 'application/json', 'x-secbin-intent': '1', ...(i.method && i.method !== 'GET' ? { 'x-secbin-csrf': csrf } : {}), ...(i.headers || {}) } });
   return { status: r.status, body: await r.json().catch(() => null) };
 }, [url, init]);
 const rowNames = (p) => p.$$eval('#drive-rows tr', (trs) => trs.map((tr) => tr.children[1].textContent.trim()));

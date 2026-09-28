@@ -26,8 +26,10 @@ function loadScript() {
       s.onload = () => (globalThis.turnstile ? resolve(globalThis.turnstile) : reject(new Error(LOAD_FAILED)));
       s.onerror = () => { loader = null; s.remove(); reject(new Error(LOAD_FAILED)); };
       s.src = scriptURL(TURNSTILE_SCRIPT);
-      // Third-party script from here on: the tab's Drive keys leave
-      // sessionStorage for drivekeys.js's memory first (SECURITY.md, "Drive keys").
+      // Third-party script from here on: the old Drive key of the release
+      // before (the one Drive key a tab may keep, while its Drive waits for
+      // the upgrade) leaves sessionStorage for drivekeys.js's memory first
+      // (SECURITY.md, "Drive keys").
       holdSessionKeys();
       document.head.appendChild(s);
     });

@@ -10,7 +10,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:
 import worker from '../src/index.js';
 import { setSiteverify, turnstileConfig } from '../src/lib/turnstile.js';
 import { CSP } from '../src/lib/http.js';
-import { owner, makeUser, fetchJson, freshIp, cookieOf, salt16, proofFor, ORIGIN, USER_PW, intent } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, cookieOf, salt16, proofFor, ORIGIN, USER_PW, intent, csrfHeaders, STATE_CHANGING } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
@@ -26,6 +26,7 @@ async function tsFetch(path, { method = 'GET', body, cookie, headers = {}, ip, t
   if (cookie) h.cookie = cookie;
   if (ip) h['cf-connecting-ip'] = ip;
   if (token) h['x-secbin-turnstile'] = token;
+  if (cookie && STATE_CHANGING.has(method)) Object.assign(h, await csrfHeaders(cookie, ip));
   const ctx = createExecutionContext();
   const res = await worker.fetch(new Request(`${ORIGIN}${path}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' }), TS_ENV, ctx);
   await waitOnExecutionContext(ctx);

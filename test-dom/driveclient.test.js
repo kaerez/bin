@@ -10,7 +10,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   openDrive, DriveDisabled, DriveUnavailable, checkName, buildPersonalKit, verifyPersonalKit, restorePersonalKit,
 } from '../public/js/driveclient.js';
-import { clearSessionKey, loadSessionKeys, loadImpersonationKeys, openName, openDek, saveSessionKeys } from '../public/js/drivekeys.js';
+import { clearSessionKey, openName, openDek } from '../public/js/drivekeys.js';
+import { keyCheckValueV1, saveLegacyKey } from '../public/js/drivev1.js';
 import { parseDriveKit, openDriveKit, sealDriveKit } from '../public/js/drivekit.js';
 import { deriveAccess, openPaste } from '../public/js/crypto.js';
 import { validateRefsManifest } from '../public/js/refsmanifest.js';
@@ -50,9 +51,9 @@ describe('opening the Drive', () => {
     const cur = S.current();
     expect(d.keys.current).toBe(cur.id);
     expect([...d.keys.keks.get(cur.id)[0]]).toEqual([...await S.kekOf(cur.id)]);
-    // Kept in this tab's slot for the account (a reload asks the server again anyway).
-    expect(loadSessionKeys(S.user.id)).toMatchObject({ current: cur.id, keys: { [cur.id]: b64urlFromBytes(await S.kekOf(cur.id)) } });
-    expect(loadSessionKeys('someone-else')).toBeNull();
+    // In this page's memory only: nothing in the tab's storage.
+    expect(sessionStorage.length).toBe(0);
+    expect(localStorage.length).toBe(0);
     expect(S.requests.map((r) => r.path)).toEqual(['/api/auth/session', '/api/private/drive', '/api/private/drive/keys']);
     const docs = await d.mkdir('root', 'Docs');
     const wire = JSON.stringify(S.requests.map((r) => r.body));
@@ -76,17 +77,77 @@ describe('opening the Drive', () => {
     expect(e.reason).toBe('salt_missing');
   });
 
-  it('the owner acting as the user: the user’s keys, in a slot of their own (never over the owner’s)', async () => {
+  it('the owner acting as the user: the user’s keys, in the page’s memory only', async () => {
     install();
-    const ownKeys = { userId: 'owner1ownerowner', current: 'mAAAAAAAAAAA', keys: { mAAAAAAAAAAA: b64urlFromBytes(randomBytes(32)) } };
-    saveSessionKeys(ownKeys);
     S.impersonatedBy = 'owner';
     const d = await openDrive();
     expect(d.user).toMatchObject({ id: S.user.id, impersonating: true });
-    expect(loadImpersonationKeys(S.user.id)).toMatchObject({ current: S.current().id });
-    expect(loadSessionKeys('owner1ownerowner')).toEqual(ownKeys);
+    expect([...d.keys.keks.get(S.current().id)[0]]).toEqual([...await S.kekOf(S.current().id)]);
+    expect(sessionStorage.length).toBe(0);
     expect(S.audit.some((x) => x.action === 'drive.keys_used')).toBe(true);
     expect(await d.mkdir('root', 'by the owner')).toMatch(/^[A-Za-z0-9_-]{22}$/);
+  });
+
+  it('a key planted in the tab’s storage is never used: the KEKs come from the server, new items are sealed under them, the planted slots go', async () => {
+    install();
+    await openDrive(); // the keyring is made at the first request
+    const cur = S.current();
+    const planted = randomBytes(32);
+    const slot = JSON.stringify({ u: S.user.id, c: cur.id, k: { [cur.id]: b64urlFromBytes(planted) } });
+    sessionStorage.setItem('secbin_kek', slot);
+    sessionStorage.setItem('secbin_kek_imp', slot);
+    sessionStorage.setItem('secbin_dk_imp', b64urlFromBytes(randomBytes(32)));
+    sessionStorage.setItem('secbin_dk_imp_uid', S.user.id);
+    localStorage.setItem('secbin_kek', slot);
+    const d = await openDrive();
+    expect([...d.keys.keks.get(cur.id)[0]]).toEqual([...await S.kekOf(cur.id)]);
+    for (const k of ['secbin_kek', 'secbin_kek_imp', 'secbin_dk_imp', 'secbin_dk_imp_uid']) expect(sessionStorage.getItem(k), k).toBeNull();
+    // A new folder and a new file: sealed under the server's KEK (the fake server checks each seal), never the planted one.
+    const dir = await d.mkdir('root', 'after the plant');
+    const file = await d.upload('root', fakeFile('new.txt', pattern(10)));
+    for (const id of [dir, file]) {
+      const n = S.nodes.get(id);
+      const at = { userId: S.user.id, mekId: n.mek, salt: n.ks };
+      expect(fromUtf8(await openName(await S.kekOf(n.mek), at, 'name', n.name))).toMatch(/after the plant|new\.txt/);
+      await expect(openName(planted, at, 'name', n.name)).rejects.toThrow();
+      if (n.dek) await expect(openDek(planted, at, n.dek)).rejects.toThrow();
+    }
+    localStorage.clear();
+  });
+
+  it('when the server does not hand out the keys, the Drive does not open: no stored key to fall back on', async () => {
+    install();
+    await openDrive(); // the keyring is made at the first request
+    const cur = S.current();
+    sessionStorage.setItem('secbin_kek', JSON.stringify({ u: S.user.id, c: cur.id, k: { [cur.id]: b64urlFromBytes(randomBytes(32)) } }));
+    S.keysError = 'keys_missing';
+    await expect(openDrive()).rejects.toMatchObject({ name: 'DriveUnavailable', reason: 'keys_missing' });
+    S.keysError = null;
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (String(url).endsWith('/api/private/drive/keys') ? Promise.reject(new TypeError('network down')) : real(url, init));
+    await expect(openDrive()).rejects.toThrow(/network down/);
+    globalThis.fetch = real;
+  });
+
+  it('an old Drive key planted in the tab is used only once its check value is the server’s (a Drive waiting for its upgrade)', async () => {
+    install();
+    const dk = randomBytes(32);
+    S.migration = { pending: true, v1Items: 1, v1Links: 0, legacy: true };
+    S.legacyState = { state: 'pending', v1Items: 1, v1Links: 0, archived: 0, legacy: true, kcv: await keyCheckValueV1(dk), driveSalt: null, wraps: [] };
+    sessionStorage.setItem('secbin_dk', b64urlFromBytes(randomBytes(32))); // not this Drive's
+    sessionStorage.setItem('secbin_dk_uid', S.user.id);
+    let d = await openDrive();
+    expect(d.legacy).toBeNull();
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull(); // removed
+    saveLegacyKey(dk, S.user.id); // this Drive's (the sign-in opened it)
+    d = await openDrive();
+    expect([...d.legacy]).toEqual([...dk]);
+    // A Drive with no check value: the key must open one of its old items.
+    S.legacyState = { ...S.legacyState, kcv: null };
+    S.legacyItems = { items: [{ id: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'dir', name: JSON.stringify({ iv: b64urlFromBytes(randomBytes(12)), ct: b64urlFromBytes(randomBytes(40)) }) }], links: [], next: null };
+    d = await openDrive();
+    expect(d.legacy).toBeNull();
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
   });
 
   it('a new sub-MEK on the server: the next item is sealed under it after one retry; older items still open', async () => {

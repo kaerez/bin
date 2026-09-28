@@ -80,6 +80,14 @@ function bound(v, max) {
  * /api/private/drive/reverse and /api/private/drive/received[/<id>] (the
  * Drive route has checked the session and that the role has a Drive; creating
  * also needs the reverse-share option). Returns null for any other path.
+ *
+ * CSRF: these are cookie-authenticated, so every change here (create, take
+ * in, mark failed, retry) has already passed authenticate()'s checks in the
+ * Drive route: Sec-Fetch-Site, the request shape and the session's CSRF token
+ * (src/lib/auth.js checkCsrf), before the step-up and before the id is
+ * claimed. Extend, revoke and lock go through the shares routes, which check
+ * the same. test/csrf.test.js reads this file and fails if a route or method
+ * here is missing from its sweep.
  */
 export async function handleReverseOwner(request, env, url, a) {
   const p = url.pathname;
@@ -265,6 +273,18 @@ async function createReverse(request, env, dir, a) {
 }
 
 // ── the uploader (anonymous) ─────────────────────────────────────────────────
+// CSRF: exempt from the session's CSRF token, like the other anonymous routes
+// (SECURITY.md "CSRF"). The uploader has no account: nothing here reads the
+// session cookie, so a forged request carries no user's authority, and a
+// signed-in user's cookie in the same browser changes nothing. What these
+// routes act on is held by the link instead (the link proof from the
+// #fragment, then the session grant and the per-file upload token), and they
+// keep their own guards: the cross-site check before any Guard accounting,
+// a non-simple request (the intent header, a JSON or octet-stream body, or
+// the grant and upload-token headers, which a cross-origin page cannot send
+// without a failing preflight), Turnstile on `begin` (before the password),
+// the link's password lockout, the Guard's `invalid` scope and the
+// per-network session limit.
 
 const blockedRes = (until) => err(429, 'blocked', 'Too many invalid requests from your network. Try again later.', until ? { until } : undefined);
 async function failed(env, g, res) {

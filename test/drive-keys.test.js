@@ -332,7 +332,7 @@ describe('the key kit (secbin-key-kit/1)', () => {
       s.storage.sql.exec('DELETE FROM meks WHERE id = ?', k0.current);
       s.storage.sql.exec('DELETE FROM user_salts WHERE user_id = ?', u.id);
     });
-    const lost = await fetchJson('/api/private/drive/keys', { cookie: u.cookie });
+    const lost = await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {} });
     expect([lost.status, await errorOf(lost)]).toEqual([409, 'salt_missing']);
     const plan = await (await restore({ root: m.root, subs: m.subs, salts: m.salts })).json();
     expect(plan).toMatchObject({ dryRun: true, changed: true, salts: { restored: 1 } });
@@ -346,7 +346,7 @@ describe('the key kit (secbin-key-kit/1)', () => {
     // A lost root MEK: never replaced silently; the kit brings it back.
     await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec("DELETE FROM meta WHERE k = 'mek.root'"));
     expect(await status()).toMatchObject({ ready: false, lost: true });
-    expect(await errorOf(await fetchJson('/api/private/drive/keys', { cookie: u.cookie }))).toBe('keys_missing');
+    expect(await errorOf(await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {} }))).toBe('keys_missing');
     expect((await (await restore({ root: m.root, dryRun: false, ...STEP })).json()).root).toBe('restored');
     expect((await status()).ready).toBe(true);
     expect((await driveKeys(u.cookie, { fresh: true })).raw.keys).toEqual(k1.raw.keys);

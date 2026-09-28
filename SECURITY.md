@@ -291,9 +291,9 @@ api_key_not_allowed`).
 - **Trust trade-off.** On those pages a compromise of Cloudflare's Turnstile script could read
   the page:
   - on login and Account, the password being typed;
-  - on Account, the Drive keys while the page uses them (see "Drive keys", in the tab): they
-    are kept out of `sessionStorage` there, but the personal kit is built on that page; on login,
-    while a Drive waits for its upgrade, the old Drive key the sign-in opens there;
+  - on Account, the Drive keys while the personal kit is built there (see "Drive keys", in the
+    tab: they are never in the tab's storage); on login, while a Drive waits for its upgrade, the
+    old Drive key the sign-in opens there;
   - on the home page, what an anonymous sender types and the link, with its key, that it
     produces;
   - on a reverse share's uploader page (`/r/<id>`), the link key in `location.hash` (it reads the
@@ -411,9 +411,127 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - Disabling also bumps the session version, so re-enabling never brings old sessions back.
   - Capabilities held by link holders (a share's delete token, an open download grant) are
     not account credentials, so they keep working.
-- **CSRF**: state-changing calls must be non-simple (JSON content type or `X-Secbin-Intent`), are
-  refused when `Sec-Fetch-Site` is `cross-site` **or `same-site`** (a sibling subdomain is not
-  trusted), and cookies are SameSite=Strict. The API has no CORS.
+- **CSRF**: layered guards, every one enforced on its own.
+  - The session cookie is `__Host-`, HttpOnly, Secure and SameSite=Strict.
+  - State-changing calls must be non-simple: a JSON content type, or `X-Secbin-Intent: 1`
+    (every `DELETE` and every action without a body). File chunks are
+    `application/octet-stream` with `X-Upload-Token`.
+  - Requests with `Sec-Fetch-Site: cross-site` **or `same-site`** are refused (`403
+    cross_site`); a sibling subdomain is not trusted.
+  - The API sends no CORS headers.
+  - **CSRF tokens** (`src/lib/csrf.js`), on top of the guards above. The token is stateless and
+    bound to the session: `HMAC-SHA256(K, "secbin-csrf/v1:" ‖ session id ‖ ":" ‖ session
+    version)`, base64url. `K = HMAC-SHA256(SIG, "secbin-csrf-key/v1")` is a subkey of the
+    session signing secret, used for nothing else. While impersonating, the version is the
+    owner's.
+    - One token per session, the same in every tab and request. It changes only when the
+      session does: sign-in, sign-out, a session-version bump (password change or reset,
+      disable), impersonation start or end.
+    - Delivered in a readable cookie `__Host-secbin_csrf` (Secure, SameSite=Strict, `Path=/`,
+      not HttpOnly) whenever the session cookie is set or refreshed, on every signed-in
+      dashboard page load, and in `GET /api/private/me` (`csrf`, with the cookie re-set). Its
+      lifetime is always the session cookie's: when it is re-set on its own (a page load, `/me`),
+      its `Max-Age` is what the session cookie has left (the idle window from the last activity,
+      capped by the absolute expiry). Sign-out and a disabled account clear it. The Worker never
+      logs it or puts it in an error message.
+    - Every cookie-authenticated `POST`, `PUT`, `PATCH` and `DELETE` (`/api/private/*`,
+      `POST /api/auth/logout`) must send it in `X-Secbin-CSRF`. Right after the session is
+      resolved (`authenticate()`, and logout), before anything else runs, three checks are made
+      in this order:
+      1. `Sec-Fetch-Site` (`403 cross_site`);
+      2. the request shape: a JSON body, a file chunk (`application/octet-stream`) or
+         `X-Secbin-Intent: 1`, and the intent header on every `DELETE`. A body of any other type
+         gets `415 unsupported_media_type`; a request with neither a body type nor the header,
+         or a `DELETE` without the header, gets `400 missing_intent`;
+      3. the token (`403 csrf_mismatch`).
+
+      This covers the Drive and reverse shares too: creating a reverse link (`POST
+      /api/private/drive/reverse`), taking a received file in (`POST …/received/<id>`), marking
+      it failed (`POST …/received/<id>/failed`) and retrying it (`DELETE …/received/<id>/failed`),
+      and extending, revoking and locking a link through My shares and Admin → Shares
+      (`/api/private/shares/<id>`, `/api/private/admin/shares/<id>`). They all go through
+      `authenticate()`, so the token and the shape check come before the step-up (the password or
+      passkey that creating a link needs) and before anything is claimed in the share index. The
+      Drive page sends the page's recorded token through `api.js`. The workerd suite
+      (`test/csrf.test.js`) reads `src/routes/reverse.js` and fails if a cookie-authenticated
+      reverse route or method is missing from its sweep.
+
+      1 and 2 apply with the `csrfTokens` setting off too. So a refused request has changed
+      nothing, counted no failure (lockouts, network blocks) and spent no single-use token, and
+      it can be retried as it is. The comparison is timing-safe
+      (`crypto.subtle.timingSafeEqual`). A missing, wrong, other-session or old-session-version
+      token is refused. A request without a live session gets the usual `401`.
+    - Every route that takes a Turnstile token checks its request body before it verifies the
+      token, so a request of the wrong shape never spends one. The account changes (password,
+      username, API keys, passkeys, recovery codes, second step), sign-in, recovery and passkey
+      sign-in read and parse their JSON body first. Starting a public share checks the content
+      type and the declared size first; its body (up to 4 MiB, from anyone) is still read only
+      after the human check.
+    - The browser client (`public/js/api.js`) acts for the session its page was loaded for.
+      Each dashboard page records, from `GET /api/private/me` at load, the user id, the
+      impersonation state (`impersonatedBy`) and that session's token, and sends that token,
+      not whatever the shared cookie holds later. (A page that has recorded none records the
+      current session before its first change.) When another tab signs in as someone else, or
+      starts or ends impersonation, the page's token no longer matches and the server refuses
+      its next change. On `403 csrf_mismatch` the client fetches `/api/private/me` and compares
+      the user id and impersonation state with the page's own:
+      - the same: a new session of the same user (signed out and in again, a password change).
+        It takes the new token and retries once. That is safe because the refused request
+        changed nothing;
+      - different, or a second refusal: no retry. The page stops acting for any session (every
+        later change, sign-out included, is refused in the page without a request) and shows
+        "Your session changed in another tab; reload the page." with a Reload button. A page
+        loaded for one user never changes another user's account, and does not sign the other
+        session out.
+
+      A dashboard page restored from the back-forward cache also re-checks the session and
+      reloads if it now belongs to someone else. Sign-out goes through the same refresh and
+      retry; a failure for any other reason (such as the network) is shown, and the user can
+      try again.
+    - **Exempt, with their reasons:**
+      - API-key (`Authorization: Bearer sbk_…`) requests from the CLI and scripts: the key is
+        sent explicitly and never attached by a browser on its own, and no cookie is involved.
+      - The anonymous routes: opening, "delete now" and deleting a share by its capabilities,
+        public creation, login, passkey and recovery sign-in (and `POST
+        /api/auth/passkey/options`, which stores nothing: its challenge is signed, not stored),
+        prelogin and setup. There is no session to bind a token to. They keep their own guards
+        (the cross-site check, JSON bodies or custom headers, access proofs and tokens,
+        Turnstile, rate limits).
+      - The reverse-share uploader: the `/r/<id>` page and its calls under `/api/reverse/<id>/`
+        (`open`, `begin` (the session start), `files` (reserve), `files/<node>/chunk/<i>`,
+        `files/<node>/finalize`, cancel (`DELETE files/<node>`) and `done`). The uploader is
+        anonymous: these routes never read the session cookie, so a forged request gains no
+        user's authority, and a signed-in user's cookie in the same browser changes nothing. What
+        they act on is held by the link, not by a session: the link proof (derived from the key
+        in the `#fragment`), then the session grant and the per-file upload token. They keep
+        their own guards: the cross-site check (before any Guard accounting), a non-simple
+        request (the intent header, a JSON or `application/octet-stream` body, or the
+        `X-Reverse-Grant` and `X-Upload-Token` headers), Turnstile on `begin` (before the password),
+        the per-link password lockout, the Guard's `invalid` scope and the per-network session
+        limit (see "Reverse shares"). The uploader page's client (`public/js/reverseclient.js`,
+        through `api.js`'s `reverseApi`) sends no token and never asks `/api/private/me`.
+    - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default,
+      server-wide). Off, the server stops requiring `X-Secbin-CSRF` (the header is ignored); the
+      cookie is still issued, and every other guard above stays enforced. The value is read
+      with the session in the same Directory call, so the switch adds no round trip and takes
+      effect on the next request. Turning it on again covers open pages through the one retry.
+      Each change is recorded in the owner-only admin audit as `settings.csrf` (old and new
+      value). The setting travels in an export's settings part, and the import preview warns
+      when an import would turn tokens off.
+    - **An import can be applied without a preview.** The dashboard always shows the preview
+      (with that warning) before it lets the owner apply an import. The API does not require
+      one: `POST /api/private/admin/import` with `dryRun: false` applies the import directly,
+      and the preview's warnings are then never shown. It still needs the owner's password (or
+      passkey) and a real owner session (not an API key, not while impersonating). The server
+      recomputes the plan itself, and the change is recorded in the admin audit
+      (`settings.csrf` `import: from=true to=false`, and in `settings.updated`).
+    - **Not verified: Cloudflare's production logs.** The Worker never logs the token or the
+      `Cookie` header, and locally neither the `wrangler dev` log nor its trace store records
+      request headers. With `[observability] enabled = true` (`wrangler.toml`), whether Workers
+      Logs, `wrangler tail` or a Logpush job capture request headers such as `Cookie` or
+      `X-Secbin-CSRF` in production has not been checked. The session cookie travels in the
+      `Cookie` header as well, so the token adds no new kind of exposure. Whoever runs the
+      deployment should confirm the fields those logs keep.
 - **API keys** (`sbk_…`, stored hashed) authenticate share creation, the policy read and the
   key user's own shares (list, receipts, label, extend, revoke) — never the account itself
   (profile, password, passkeys, keys, activity) or admin endpoints (`403 api_key_not_allowed`).
@@ -673,15 +791,22 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   step-up on a kit download gates the server's handing out of the keys; the throttle on failed
   kit openings is in the page's memory only (guessing a passphrase offline needs only the file);
   kit checks are limited to 30 per session per 10 minutes.
-- **In the tab.** The KEKs are kept in the tab's `sessionStorage` (bound to the user id) until
-  sign-out, a session ending, or the tab closing; they are readable by script on the origin, and
-  the CSP and Trusted Types (§4) keep other script out, as for the rest of the app. The pages
-  that may load Cloudflare's Turnstile script (the one third-party script, §4) keep them where
-  that script cannot read them: the Account page moves them into its own module's memory before
-  anything can load the script (and puts them back only when the server has no human check), and
-  the sign-in page and the home page's public composer clear them before it loads. What remains:
-  a compromised Turnstile script on the Account page could read the page's own memory copy while
-  the personal kit is being built there, as it could read the password typed there.
+- **In the tab.** The KEKs are never written to browser storage (`sessionStorage`,
+  `localStorage`): each page asks the server for them (`POST /api/private/drive/keys`, cheap,
+  since the server derives them) and keeps them in its own memory, gone when the page is left. A
+  failed request is shown as an error; there is no stored key to fall back on. Nothing read from
+  storage is ever used as a key, so a value that other script on the origin plants there is
+  ignored: it can neither seal a new DEK nor stand in for a Drive's keys (a regression test plants
+  one). The one Drive key a tab may keep in `sessionStorage` is the old Drive key of the release
+  before, only while that Drive waits for its upgrade (the sign-in page opens it, the Drive page
+  and Admin use it); it is used only once its key check value matches the server's (a Drive
+  without one: once it opens one of the Drive's old items), and a key that fails is removed.
+  Every other slot a release before used is removed at each Drive open and dashboard load. The
+  CSP and Trusted Types (§4) keep other script out, as for the rest of the app; the pages that
+  may load Cloudflare's Turnstile script (the one third-party script, §4) move that old key into
+  the page's memory before the script loads (the sign-in page writes it back as it leaves). What
+  remains: a compromised Turnstile script on the Account page could read the page's own memory
+  while the personal kit is being built there, as it could read the password typed there.
 - **The upgrade of Drives made before this model** (DRIVE.md §3.3) opens the old Drive key only
   in a browser — at the user's sign-in, or in the owner's browser through the owner's escrow of
   that release (recorded, `drive.escrow_used`) — re-seals every item under the user's KEK, and
@@ -889,7 +1014,11 @@ under "Drive keys" above.
   being written, so a late retry never lands on (or removes a chunk of) a finished file; upload tokens are 256-bit and stored as
   hashes; unfinished uploads are purged after the role's `filePendingSec` without progress. The
   state-changing routes use the same CSRF guards as the rest of the API (JSON body or intent
-  header, `Sec-Fetch-Site`, the upload token header). R2 keys are built from the server's user id
+  header, `Sec-Fetch-Site`, the upload token header), and the session's CSRF token, all checked
+  in `authenticate()` before any Drive route runs (chunk uploads pass the shape check as
+  `application/octet-stream`; the session's keys, `POST /api/private/drive/keys`, which may make
+  the account's salt and writes to the admin audit for the owner acting as the user, are a `POST`
+  too). R2 keys are built from the server's user id
   and validated node ids only.
 - **Deletion.** Only the Drive object deletes Drive ciphertext in R2 (`d/<userId>/<nodeId>/<i>`):
   a recursive delete removes the objects first, then the rows, and ends every share that
@@ -948,6 +1077,12 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   stores these values and cannot open them. It sees each file's exact size and chunk count, the
   uploader's network address (as for every request) and the number of files per session; not the
   names, the folder structure of an upload or the types. Files are not padded.
+- **CSRF.** The user's routes (create, take in, mark failed, retry; extend, revoke and lock
+  through the shares routes) are cookie-authenticated and need the session's CSRF token and the
+  request shape check, before the step-up and before the id is claimed. The uploader's routes
+  under `/api/reverse/<id>/` are anonymous and exempt (they read no session); the link proof, the
+  session grant, the upload token, Turnstile, the password lockout and the Guard guard them (see
+  "CSRF" above).
 - **Declared file types.** When the user limits a link to some file types, the uploader's
   browser declares each file's `{ extension, MIME type }`; the server checks it against the
   link's rules and does not store it (as for file shares: a modified client could lie).

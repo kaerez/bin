@@ -58,8 +58,8 @@ export default [
     languageOptions: { globals: { ...globals.node } },
   },
 
-  // Manual end-to-end scripts (test-e2e/, never run in CI): Node, plus the DOM
-  // globals of the functions they run inside the page.
+  // End-to-end suites (manual, Playwright): Node scripts whose page.evaluate()
+  // callbacks run in the browser.
   {
     files: ['test-e2e/**/*.mjs'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },

@@ -4,7 +4,7 @@
 // under the current KEK (the server checks every seal opens), folder / file
 // creation and a complete chunked upload.
 import { SELF } from 'cloudflare:test';
-import { ORIGIN, fetchJson, owner, intent } from './helpers.js';
+import { ORIGIN, fetchJson, owner, intent, csrfHeaders } from './helpers.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { keyBytes, newSalt, sealName, sealDek, openName, openDek } from '../public/js/drivekeys.js';
 import { importFileKey, encryptChunk } from '../public/js/files.js';
@@ -43,10 +43,10 @@ export const enableDrive = (uid, extra = {}) => driveLimits(uid, { driveEnabled:
 
 // ── the session's keys ──────────────────────────────────────────────────────
 const keyCache = new Map();
-/** GET /api/private/drive/keys as `cookie` → { userId, current, keks: Map(mekId → bytes), raw } (cached per cookie; `fresh` re-reads). */
+/** POST /api/private/drive/keys as `cookie` → { userId, current, keks: Map(mekId → bytes), raw } (cached per cookie; `fresh` re-reads). */
 export async function driveKeys(cookie, { fresh = false } = {}) {
   if (!fresh && keyCache.has(cookie)) return keyCache.get(cookie);
-  const r = await fetchJson('/api/private/drive/keys', { cookie });
+  const r = await fetchJson('/api/private/drive/keys', { method: 'POST', cookie, body: {} });
   if (r.status !== 200) throw new Error(`drive keys: ${r.status} ${await r.text()}`);
   const raw = await r.json();
   const k = { userId: raw.userId, current: raw.current, keks: new Map(raw.keys.map((x) => [x.mekId, keyBytes(x.kek)])), raw };
@@ -98,10 +98,12 @@ export async function createFile(cookie, parent, size, { id, fields } = {}) {
   return { res: r, fields: f, ...(r.status === 201 ? await r.json() : {}) };
 }
 
-export const putChunk = (cookie, id, i, bytes, token, headers = {}) => SELF.fetch(`${ORIGIN}/api/private/drive/files/${id}/chunk/${i}`, {
-  method: 'PUT', headers: { cookie, 'content-type': 'application/octet-stream', 'x-upload-token': token, ...headers }, body: bytes,
+/** A raw chunk upload as the browser sends it: the session's CSRF token too (`headers` may override it). */
+export const putChunk = async (cookie, id, i, bytes, token, headers = {}) => SELF.fetch(`${ORIGIN}/api/private/drive/files/${id}/chunk/${i}`, {
+  method: 'PUT', headers: { cookie, ...(await csrfHeaders(cookie)), 'content-type': 'application/octet-stream', 'x-upload-token': token, ...headers }, body: bytes,
 });
-export const finalize = (cookie, id, token) => fetchJson(`/api/private/drive/files/${id}/finalize`, { method: 'POST', cookie, headers: { 'x-upload-token': token } });
+// As the browser sends it (api.js drive.finalize): no body, so the intent header (the request-shape check).
+export const finalize = (cookie, id, token) => fetchJson(`/api/private/drive/files/${id}/finalize`, { method: 'POST', cookie, headers: { ...intent, 'x-upload-token': token } });
 export const getChunk = (cookie, id, i) => SELF.fetch(`${ORIGIN}/api/private/drive/files/${id}/chunk/${i}`, { headers: { cookie } });
 
 /** Create + upload + finalize a file of `size` bytes of (random) ciphertext → { id, chunks, fields, ch }. */

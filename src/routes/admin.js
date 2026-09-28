@@ -2,7 +2,7 @@
 // requires a real owner session (not an API key, not while impersonating),
 // except "unimpersonate", which is how an impersonating owner returns.
 
-import { json, err, readJsonBody, assertIntent, methodNotAllowed } from '../lib/http.js';
+import { json, err, readJsonBody, assertIntent, methodNotAllowed, appendCookies } from '../lib/http.js';
 import { authenticate, issueSession, logoutCookie } from '../lib/auth.js';
 import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSettings, ipContext, recordFailure } from '../lib/guard.js';
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
@@ -131,7 +131,7 @@ export async function handleAdmin(request, env, url) {
     if (!step.ok) {
       if (step.error === 'wrong_password' || step.error === 'session_revoked') await recordFailure(env, g, 'login');
       const res = fromDir(step);
-      if (step.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
+      if (step.error === 'session_revoked') appendCookies(res, logoutCookie());
       return res;
     }
     if (!isImport) {
@@ -383,7 +383,7 @@ export async function handleAdmin(request, env, url) {
     if (!step.ok) {
       if (step.error === 'wrong_password' || step.error === 'session_revoked') await recordFailure(env, g, 'login');
       const res = fromDir(step);
-      if (step.error === 'session_revoked') res.headers.append('set-cookie', logoutCookie());
+      if (step.error === 'session_revoked') appendCookies(res, logoutCookie());
       return res;
     }
     const r = await dir.clearLogs({ scope: body.scope, userId: body.user, before: body.before ?? null });

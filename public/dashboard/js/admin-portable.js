@@ -270,11 +270,11 @@ function renderReview(out, doc, users, profile) {
       const name = as.value.trim().toLowerCase();
       const clash = name === ownerName ? 'owner' : existing.has(name) ? 'user' : null;
       const keep = action.value;
-      clear(action).append(
+      clear(action).append(...[
         h('option', { value: 'skip', text: 'skip' }),
         clash === null && u.credentials ? h('option', { value: 'create', text: 'create' }) : null,
         clash === 'user' ? h('option', { value: 'update', text: 'update existing: role + add passkeys' }) : null,
-        clash === 'owner' ? h('option', { value: 'update', text: 'update your account: add passkeys' }) : null);
+        clash === 'owner' ? h('option', { value: 'update', text: 'update your account: add passkeys' }) : null].filter(Boolean));
       usual = clash ? 'update' : u.credentials ? 'create' : 'skip';
       action.value = [...action.options].some((o) => o.value === keep) ? keep : 'skip';
       pb.fit((k) => !clash || EXISTING[clash].includes(k));
@@ -365,14 +365,14 @@ function renderReview(out, doc, users, profile) {
   const ownerHolds = doc.owner ? Object.keys(doc.owner).map((k) => (k === 'passkeys' ? 'passkeys' : 'recovery codes')).join(' and ') : '';
   const bulks = h('div.stack.bulk', {}, userBulk,
     ...cols.map(([k, label]) => bulk(label, `${label} for every user`, () => rows.map((r) => r.parts.boxes[k]).filter(Boolean))));
-  out.append(
+  out.append(...[
     h('p.mono.muted', { text: `Export from ${doc.origin || 'an unknown origin'} · ${formatDate(doc.created)} · ${doc.system ? 'system configuration + ' : ''}${doc.owner ? `owner's ${ownerHolds} + ` : ''}${plural(doc.users.length, 'user')}` }),
     sysChecks.length ? h('fieldset.range', {}, h('legend', { text: 'System parts to import' }), ...sysChecks.map((c) => c.el)) : null,
     rows.length ? h('fieldset.range', {}, h('legend', { text: 'Users (the owner included) and what to import for each' }), bulks,
       h('div.table-wrap', {}, h('table.table.part-table', {}, h('thead', {}, h('tr', {}, ...['User', 'Import as', 'Action', ...cols.map(([, label]) => label), 'Here'].map((t) => h('th', { text: t })))), body)),
       partNotes()) : null,
     field('Your password (confirms it is you)', mine),
-    h('div.btn-row', {}, preview, apply), msg, planBox);
+    h('div.btn-row', {}, preview, apply), msg, planBox].filter(Boolean));
 }
 
 function renderPlan(out, plan) {

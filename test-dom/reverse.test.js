@@ -16,13 +16,14 @@ import {
   newReverseId, pubFromFragment, pubOfPrivate,
 } from '../public/js/reversekeys.js';
 import {
-  clearSessionKey, clearImpersonationKeys, loadImpersonationKeys, sealLinkKey, openLinkKey, openName as openSealedName, openDek,
+  clearSessionKey, clearImpersonationKeys, sealLinkKey, openLinkKey, openName as openSealedName, openDek,
 } from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
 import { utf8, fromUtf8, bytesFromB64url } from '../public/js/bytes.js';
 import { formatDate } from '../public/js/common.js';
 import { CHUNK, TAG } from '../public/js/files.js';
-import { fakeServer, seedTree, seedReceived } from './drive-fake-server.js';
+import { revokeShare } from '../public/js/api.js';
+import { fakeServer, seedTree, seedReceived, FAKE_CSRF } from './drive-fake-server.js';
 
 // Argon2id stand-in: the DOM suites never run WebAssembly.
 setReverseStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('dom-stretch')));
@@ -321,7 +322,7 @@ const confirm = async (input) => {
   if (!v) throw new Error('Enter your current password.'); // as confirmStep: a plain Error
   return { current: `proof:${v}` };
 };
-const deps = (profile = PROFILE, extra = {}) => ({ drive, profile, user: S.user, confirm, canUsePasskey: async () => false, revoke: (id) => fetch(`/api/private/shares/${id}/revoke`, { method: 'POST' }), ...extra });
+const deps = (profile = PROFILE, extra = {}) => ({ drive, profile, user: S.user, confirm, canUsePasskey: async () => false, revoke: revokeShare, ...extra }); // as the Drive page wires it (public/dashboard/js/drive.js)
 const names = () => [...document.querySelectorAll('#drive-rows tr')].map((tr) => tr.children[1].textContent.trim());
 const dialog = () => document.querySelector('.drive-dialog [role="dialog"]');
 const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === text);
@@ -442,6 +443,9 @@ describe('Drive: Receive files…', () => {
     button(rowEl, 'Revoke now').click();
     await until(() => S.revoked.includes(old.id));
     await until(() => $('#drive-rev-table tbody tr').dataset.status === 'revoked');
+    // Through api.js: the page's recorded CSRF token and the intent header (the server refuses it otherwise).
+    const sent = S.requests.find((x) => x.method === 'POST' && x.path === `/api/private/shares/${old.id}/revoke`);
+    expect(sent.headers).toMatchObject({ 'x-secbin-csrf': FAKE_CSRF, 'x-secbin-intent': '1' });
   });
 });
 
@@ -628,7 +632,7 @@ describe('the owner acting as the user: received files', () => {
     await r.app.ready;
     await r.app.received;
     expect(S.audit.some((x) => x.action === 'drive.keys_used')).toBe(true);
-    expect(loadImpersonationKeys(S.user.id)).toMatchObject({ current: S.current().id }); // the user's keys in their own slot
+    expect(sessionStorage.length).toBe(0); // the user's keys in the page's memory only
     expect(S.nodes.get(got).rs).toBeNull();
     const folder = S.nodes.get(got).parent;
     expect(await fieldOf(folder)).toBe('from a client');

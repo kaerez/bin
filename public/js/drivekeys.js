@@ -303,24 +303,28 @@ export function parseManualKey(text) {
   return b;
 }
 
-// ── the tab's copy of the KEKs ─────────────────────────────────────────────
-// { u: userId, c: current mekId, k: { mekId: kek (base64url) } } in
-// sessionStorage "secbin_kek"; the user the owner acts as has their own slot
-// ("secbin_kek_imp"), never over the owner's, cleared when the impersonation
-// ends. The Drive key of the release before this one (drivev1.js, only while
-// a Drive waits for its upgrade) has its own slots too; all of them go
-// together here.
+// ── what the tab keeps ─────────────────────────────────────────────────────
+// The KEKs are never written to browser storage: each page asks the server
+// for them (POST /api/private/drive/keys, cheap: the server derives them) and
+// keeps them in its own memory (the DriveClient), gone when the page is left.
+// A value found in storage is never used as a key, so a key planted there by
+// any same-origin script is ignored. The one Drive key in sessionStorage is
+// the old DK of the release before (drivev1.js, only while a Drive waits for
+// its upgrade: the sign-in page opens it, the Drive page uses it), and it is
+// checked against the server's key check value before any use
+// (driveupgrade.js). Every other slot a release before used ("secbin_kek",
+// "secbin_kek_imp", "secbin_dk_imp", "secbin_dk_imp_uid") is removed
+// (purgeStaleSlots, at every Drive open and dashboard load).
 
-const SLOT = 'secbin_kek';
-const IMP = 'secbin_kek_imp';
-const LEGACY = ['secbin_dk', 'secbin_dk_uid', 'secbin_dk_imp', 'secbin_dk_imp_uid'];
-const ALL = [SLOT, IMP, ...LEGACY];
+const LEGACY = ['secbin_dk', 'secbin_dk_uid'];
+const STALE = ['secbin_kek', 'secbin_kek_imp', 'secbin_dk_imp', 'secbin_dk_imp_uid'];
+const ALL = [...LEGACY, ...STALE];
 
 function storage() {
   try { return typeof sessionStorage === 'undefined' ? null : sessionStorage; } catch { return null; }
 }
 
-/** While set (holdSessionKeys), the tab's keys live only in this module's memory, never in sessionStorage. */
+/** While set (holdSessionKeys), the tab's slots live only in this module's memory, never in sessionStorage. */
 let held = null;
 
 /** Read a raw slot (this module's memory while held). */
@@ -341,31 +345,12 @@ export function writeSlot(k, v) {
   }
 }
 
-function putKeys(slot, { userId, current, keys }) {
-  if (typeof userId !== 'string' || !userId || !keys || typeof keys !== 'object') return false;
-  const k = {};
-  for (const [id, v] of Object.entries(keys)) if (MEK_ID_RE.test(id) && typeof v === 'string' && KEY_RE.test(v)) k[id] = v;
-  return writeSlot(slot, JSON.stringify({ u: userId, c: typeof current === 'string' ? current : null, k }));
+/** Remove the slots no release uses any more (the KEK slots, the old impersonation DK). */
+export function purgeStaleSlots() {
+  for (const k of STALE) writeSlot(k, null);
 }
-function getKeys(slot, userId) {
-  let v;
-  try { v = JSON.parse(readSlot(slot) || 'null'); } catch { return null; }
-  if (!v || typeof v !== 'object' || v.u !== userId || !v.k || typeof v.k !== 'object') return null;
-  return { userId: v.u, current: typeof v.c === 'string' ? v.c : null, keys: v.k };
-}
-
-/** Keep the KEKs the server handed out for this tab: { userId, current, keys: { mekId: kek } }. */
-export const saveSessionKeys = (v) => putKeys(SLOT, v);
-/** This tab's KEKs for `userId`, or null (none, or another account's). */
-export const loadSessionKeys = (userId) => getKeys(SLOT, userId);
-/** The KEKs of the user the owner acts as: their own slot, bound to that user. */
-export const saveImpersonationKeys = (v) => putKeys(IMP, v);
-export const loadImpersonationKeys = (userId) => getKeys(IMP, userId);
-export function clearImpersonationKeys() {
-  writeSlot(IMP, null);
-  writeSlot('secbin_dk_imp', null);
-  writeSlot('secbin_dk_imp_uid', null);
-}
+/** The owner stopped acting as a user: nothing of theirs is kept (the KEKs were only in the page's memory). */
+export const clearImpersonationKeys = purgeStaleSlots;
 /** Forget every Drive key this tab holds (sign-out, the sign-in page). */
 export function clearSessionKey() {
   for (const k of ALL) writeSlot(k, null);
@@ -374,11 +359,11 @@ export function clearSessionKey() {
 /**
  * Called right before third-party script (the Turnstile widget on login,
  * Account and the public composer; public/js/turnstile.js) is added to the
- * page: the tab's Drive keys move out of sessionStorage into this module's
- * memory, where other script on the page cannot read them, and are gone when
- * the page is left (the Drive page fetches them again). releaseSessionKeys()
- * writes them back (the sign-in does, as it leaves the page). SECURITY.md,
- * "Drive keys, in the tab".
+ * page: the old DK of the release before (the one Drive key in
+ * sessionStorage, above) moves out of sessionStorage into this module's
+ * memory, where other script on the page cannot read it, and is gone when
+ * the page is left. releaseSessionKeys() writes it back (the sign-in does, as
+ * it leaves the page). SECURITY.md, "Drive keys, in the tab".
  */
 export function holdSessionKeys() {
   if (held) return;

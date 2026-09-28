@@ -12,8 +12,7 @@
 // driveclient.test.js and drive.test.js.)
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { openDrive } from '../public/js/driveclient.js';
-import { clearSessionKey, saveSessionKeys, loadSessionKeys, holdSessionKeys, releaseSessionKeys } from '../public/js/drivekeys.js';
-import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
+import { clearSessionKey, holdSessionKeys, releaseSessionKeys } from '../public/js/drivekeys.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
 
 const enc = (s) => new TextEncoder().encode(s);
@@ -56,7 +55,7 @@ describe('L-6: a file needs its sealed metadata', () => {
     // Files whose metadata alone is gone do not make the tab drop its keys.
     S.nodes.get(ids.get('c.txt')).meta = null;
     await c.list();
-    expect(loadSessionKeys(S.user.id)).toMatchObject({ current: S.current().id });
+    expect(c.keys.keks.get(S.current().id)).toBeDefined();
   }, 30000);
 });
 
@@ -124,18 +123,14 @@ describe('names: real names kept, spoofing characters removed (audit round 3, L-
 });
 
 describe('keys exposure: pages with third-party script', () => {
-  it('holdSessionKeys moves the tab’s KEKs out of sessionStorage (still usable); release puts them back', () => {
-    const k = { userId: 'u1', current: 'mAAAAAAAAAAA', keys: { mAAAAAAAAAAA: b64urlFromBytes(randomBytes(32)) } };
-    saveSessionKeys(k);
-    expect(sessionStorage.getItem('secbin_kek')).not.toBeNull();
+  it('no KEK is ever in sessionStorage; holdSessionKeys moves the old Drive key (the one slot a tab may keep) into memory, release puts it back', () => {
+    sessionStorage.setItem('secbin_dk', 'D'.repeat(43));
+    sessionStorage.setItem('secbin_dk_uid', 'u1');
     holdSessionKeys();
-    expect(sessionStorage.getItem('secbin_kek')).toBeNull();
-    expect(loadSessionKeys('u1')).toEqual(k);
-    const next = { ...k, keys: { mAAAAAAAAAAA: b64urlFromBytes(randomBytes(32)) } };
-    saveSessionKeys(next); // e.g. the Account page: memory only
-    expect(sessionStorage.getItem('secbin_kek')).toBeNull();
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
     releaseSessionKeys();
-    expect(loadSessionKeys('u1')).toEqual(next);
-    expect(JSON.parse(sessionStorage.getItem('secbin_kek')).u).toBe('u1');
+    expect(sessionStorage.getItem('secbin_dk')).toBe('D'.repeat(43));
+    expect(sessionStorage.getItem('secbin_kek')).toBeNull();
   });
 });
+

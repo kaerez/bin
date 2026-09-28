@@ -14,7 +14,7 @@
 import { drive as api, session, ApiError } from './api.js';
 import {
   keyBytes, newKey, newSalt, sealDek, openDek, sealName, openName, sealLinkKey, openLinkKey, keyCheckValue, saltCheckValue,
-  saveSessionKeys, saveImpersonationKeys, clearImpersonationKeys, effectiveAt,
+  purgeStaleSlots, effectiveAt,
 } from './drivekeys.js';
 import { encryptPaste } from './crypto.js';
 import { utf8, fromUtf8, b64urlFromBytes, bytesFromB64url, randomBytes } from './bytes.js';
@@ -25,7 +25,8 @@ import { RefsReader, saveFile, saveZip } from './downloads.js';
 import { buildRefsManifest, refChunks } from './refsmanifest.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
 import { createReverseKey, linkHash, passwordGate, sealNote, fragmentOf, openUpload, newReverseId, pubOfPrivate } from './reversekeys.js';
-import { deriveSubkeysV1, openFieldV1, openReversePrivV1, loadLegacyKey } from './drivev1.js';
+import { deriveSubkeysV1, openFieldV1, openReversePrivV1 } from './drivev1.js';
+import { provenLegacyKey } from './driveupgrade.js';
 
 /** The account's role has no Drive. */
 export class DriveDisabled extends Error {
@@ -129,9 +130,11 @@ async function loadState() {
 }
 
 /**
- * The session's KEKs → { userId, current, changing, keks: Map(mekId → [kek,
- * kekOld?]), list: [{ mekId, fp, from, until }] }, kept in this tab's slot
- * (the user's own, or the one of the user the owner acts as).
+ * The session's KEKs, from the server → { userId, current, changing, keks:
+ * Map(mekId → [kek, kekOld?]), list: [{ mekId, fp, from, until }] }. Kept in
+ * this page's memory only (the DriveClient), never in browser storage, and
+ * never read from it: a failure here is shown, with no stored key to fall
+ * back on (drivekeys.js, "what the tab keeps").
  */
 async function fetchKeys(u) {
   let r;
@@ -145,9 +148,6 @@ async function fetchKeys(u) {
   const keks = new Map();
   for (const k of r.keys) keks.set(k.mekId, [keyBytes(k.kek), ...(k.kekOld ? [keyBytes(k.kekOld)] : [])]);
   if (!r.current || !keks.has(r.current)) throw new DriveUnavailable('The current Drive key is not available: ask the administrator to check Admin → Security → Keys.', 'keys_missing');
-  const slot = { userId: u.id, current: r.current, keys: Object.fromEntries(r.keys.map((k) => [k.mekId, k.kek])) };
-  if (u.impersonating) saveImpersonationKeys(slot);
-  else { saveSessionKeys(slot); clearImpersonationKeys(); }
   return { userId: u.id, current: r.current, changing: !!r.changing, keks, list: r.keys.map(({ mekId, fp, from, until }) => ({ mekId, fp, from, until })) };
 }
 
@@ -159,23 +159,26 @@ async function fetchKeys(u) {
  * (the server records the owner's use of the user's keys).
  */
 export async function openDrive({ user } = {}) {
+  purgeStaleSlots(); // what a release before kept in the tab (the KEK slots, the old impersonation DK)
   const u = await whoAmI(user);
   const st = await loadState();
   const keys = await fetchKeys(u);
-  return new DriveClient(keys, u, st);
+  // The old Drive key (a Drive waiting for its upgrade): only once proven to be this Drive's.
+  const legacy = u.impersonating || !st.migration ? null : await provenLegacyKey(u.id).catch(() => null);
+  return new DriveClient(keys, u, st, legacy);
 }
 
 // ── the client ─────────────────────────────────────────────────────────────
 
 export class DriveClient {
-  constructor(keys, user, state = {}) {
+  constructor(keys, user, state = {}, legacy = null) {
     this.keys = keys;
     this.user = user;
     /** What the upgrade of a Drive made before the key model v2 still has to do, or null (docs/DRIVE.md §3.3). */
     this.migration = state.migration || null;
     this.state = state;
-    /** The Drive key of the release before, while this Drive waits for its upgrade (the sign-in opened it). */
-    this.legacy = user.impersonating ? null : loadLegacyKey(user.id);
+    /** The Drive key of the release before, while this Drive waits for its upgrade (the sign-in opened it; checked, driveupgrade.js provenLegacyKey). */
+    this.legacy = user.impersonating ? null : legacy;
     this.legacyKeys = null;
   }
 

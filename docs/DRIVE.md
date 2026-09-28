@@ -86,13 +86,17 @@ ciphertext size and chunk count, timestamps, and which shares reference which no
   items are sealed under the current sub-MEK; reading never depends on dates (every item names
   its sub-MEK).
 
-**Opening the Drive.** After sign-in, `GET /api/private/drive/keys` returns the user's KEK for
+**Opening the Drive.** After sign-in, `POST /api/private/drive/keys` (`{}`: a change like any
+other, with the CSRF token, since it may make the account's salt and is audited for the owner
+acting as the user) returns the user's KEK for
 every sub-MEK their items use and for the current one (`{ userId, current, keys: [{ mekId, fp,
 from, until, kek }] }`). There is no prompt: passwords, passkeys and recovery codes are not
 involved (the session is what the server trusts, and the step-up rules for sensitive actions stay
-as they are). The browser keeps the KEKs in the tab's `sessionStorage` (`secbin_kek`: `{ u: user
-id, c: current, k: { mekId: KEK } }`) for the account they were given to, and fetches them again
-when the page loads. The keyring is created on first need (at set-up, below, or at the first
+as they are). The browser keeps the KEKs in the page's memory only, never in browser storage,
+and asks for them again at every page load; a failure is shown as an error, with no stored key to
+fall back on, and nothing read from storage is ever used as a key (a value planted there by other
+script on the origin is ignored). Slots a release before used (`secbin_kek`, `secbin_kek_imp`,
+`secbin_dk_imp`, `secbin_dk_imp_uid`) are removed at each Drive open and dashboard load. The keyring is created on first need (at set-up, below, or at the first
 Drive request) and only if there never was one (`mek.ever`): a keyring that was lost is never
 replaced silently — the key kit restores it.
 
@@ -103,9 +107,8 @@ another sub-MEK — the browser fetches the keys again and seals once more) and 
 opened. A rename seals the new name under the item's own `mek` and `ks` (`409 stale_keys` when
 the server re-sealed the item meanwhile: the browser reads it again).
 
-**The owner acting as a user.** `GET /api/private/drive/keys` returns that user's KEKs to the
-owner's session (`drive.keys_used` in the admin audit, §9), kept in the tab's own slot for them
-(`secbin_kek_imp`), never over the owner's own, and cleared when the impersonation ends.
+**The owner acting as a user.** `POST /api/private/drive/keys` returns that user's KEKs to the
+owner's session (`drive.keys_used` in the admin audit, §9), in the page's memory only.
 
 **Re-sealing (the server alone).** The Worker derives every KEK, so it re-seals on its own —
 opening each DEK and name and sealing it again under another KEK, inside the Worker, never
@@ -135,10 +138,10 @@ uploader's file key), name and metadata under the current KEK like any new item.
 `openssl rand -base64 32`; they must differ). An owner recovery keeps the keys there are. After
 the set-up the page says to download the key kit.
 
-**Pages with third-party script.** The Account page (Turnstile) moves the tab's Drive keys out
-of `sessionStorage` into its module's memory before anything can load the Turnstile script
-(`holdSessionKeys`), uses them from there, and puts them back only when the server has no human
-check; the login page and the home page's public composer clear them before it loads.
+**Pages with third-party script.** The KEKs are never in the tab's storage. The one Drive key a
+tab may keep in `sessionStorage`, the old Drive key of the release before (§3.3), leaves it for
+the page's memory before anything can load the Turnstile script (`holdSessionKeys`); the sign-in
+page writes it back as it leaves, and the home page's public composer clears it.
 
 ### 3.1 Kits
 
@@ -216,7 +219,12 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   PRF output), kept in the tab (`secbin_dk`) only while the Drive waits; or in the owner's
   browser, through the owner's escrow of that release (the owner's own old DK, opened at the
   owner's sign-in, opens the owner's sealed escrow private key, which opens the user's escrow
-  wrap: `drive.escrow_used` in the admin audit).
+  wrap: `drive.escrow_used` in the admin audit). An old DK read from the tab, and one an escrow
+  wrap gives, is used only once it is proven to be that Drive's (`driveupgrade.js`
+  `isThisDrivesKey`): its key check value is the server's (`kcv` of the release before); a Drive
+  without one must have an item name or link key it opens. A key that fails is removed from the
+  tab and the upgrade stops (`wrong`), so a value planted in `sessionStorage` never re-seals, or
+  marks as damaged, anything.
 - **Re-sealing.** Every item's name, metadata and file key (now its DEK), and every reverse-link
   key, is sealed again in that browser under the user's KEK of the current sub-MEK, opened again
   there, and sent (`PUT …/migrate`). The server checks each opens under the KEK and stores it
@@ -285,7 +293,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | Method and path | Purpose |
 |---|---|
 | `GET /api/private/drive` | `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration }` (`current`: the current sub-MEK's id; `migration`: null, or `{ pending, v1Items, v1Links, legacy }` while the Drive waits for its upgrade, §3.3; `capacity` null = no limit). A role without a Drive: `200 { enabled: false, capacity, maxFile, used }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
-| `GET /api/private/drive/keys` | the session's KEKs (§3): `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — every sub-MEK the Drive's items use, and the current one (`kekOld` while the owner changes the root MEK; `missing` / `broken`: sub-MEKs the Directory does not have or cannot open). `503 keys_missing` without a root MEK, `409 salt_missing` without the account's salt. Not to another site (`403`). The owner acting as the user gets the user's (`drive.keys_used`) |
+| `POST /api/private/drive/keys` | `{}` → the session's KEKs (§3): `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — every sub-MEK the Drive's items use, and the current one (`kekOld` while the owner changes the root MEK; `missing` / `broken`: sub-MEKs the Directory does not have or cannot open). `503 keys_missing` without a root MEK, `409 salt_missing` without the account's salt. Not to another site (`403`). The owner acting as the user gets the user's (`drive.keys_used`) |
 | `POST /api/private/drive/kit` | the personal kit's content after the step-up (`current` \| `reauth`): `{ kit: { id, username, userSalt, current, keks: [{ mekId, fp, from, until, kek }] }, missing, broken }` (`drive.kit_exported`); `403 impersonating` for the owner acting as the user (as every kit route) |
 | `POST /api/private/drive/kit/verify` | `{ keks: { mekId: check }, salt: check }` (check values, §3) → `{ complete, salt, keks: [{ mekId, fp, from, until, inUse, current, result }], extra, now }` (`match` \| `mismatch` \| `absent`; read-only, `drive.kit_verified`); at most 30 per session per 10 minutes (`429 rate_limited`) |
 | `POST /api/private/drive/kit/restore` | `{ salt?, current \| reauth }` → `{ salt: 'restored' \| 'same' \| 'kept' \| 'wrong' \| 'absent', unreadable: [mekIds the server cannot open] }` (`drive.kit_restored`) |
@@ -465,9 +473,11 @@ stand-in. What each side relies on:
     `drive.escrow_used` (the upgrade through the escrow of the release before) and
     `drive.migrated`; the keyring's actions (`keys.*`, §3.2) and `drive.migration_done`, with no
     subject. Deleting an account's Drive with the account is an admin action too.
-- **The KEKs in the tab.** `sessionStorage` is readable by script on the origin; the CSP and
-  Trusted Types are what keep other script out, as for the rest of the app. The pages that load
-  the Turnstile script keep them out of `sessionStorage` (§3); what remains is in SECURITY.md.
+- **The KEKs in the tab.** In the page's memory only (§3): never written to or read from
+  browser storage, so a key planted there is never used. The old Drive key of the release before
+  (only while a Drive waits for its upgrade) is kept in `sessionStorage` and used only once its
+  key check value matches the server's (§3.3). The CSP and Trusted Types keep other script out,
+  as for the rest of the app; what remains is in SECURITY.md.
 - Capacity, sizes and chunk counts are enforced server-side; names and types are not (they are
   encrypted), so file-type rules for drive shares are enforced by the client, as for file shares.
 
@@ -502,7 +512,7 @@ leave open:
   (deleted, purged, the Drive destroyed) removes its object, never a chunk of a finished file.
 - **Keys.** Every seal a browser sends is opened once in the Worker with the current KEK before
   it is stored (`src/lib/mek.js` `checkNewItem`); a sealed DEK is at most 128 characters, a link
-  key 256. `GET …/drive/keys` makes the account's salt when the Drive has no item yet and the
+  key 256. `POST …/drive/keys` makes the account's salt when the Drive has no item yet and the
   account has none (a salt lost from a Drive with items is only restored, §3.1). The Worker
   re-seals only with compare-and-set writes in the Drive object (`applySealed`, `applyLegacy`,
   `restoreItem`), so a change made meanwhile is never overwritten.
@@ -551,7 +561,7 @@ API (`test-dom/drive-fake-server.js`), which must stay in step with the server.
    `impersonatedBy` (the keys' slots are bound to the account they were given to).
 3. **State:** `GET /api/private/drive` as §6; `{ enabled: false }` and the 403s read as "no
    Drive"; `capacity: null` (no limit) shows "no limit" without a meter.
-4. **Keys:** `GET /api/private/drive/keys` → `userId` is the session's account (the owner acting
+4. **Keys:** `POST /api/private/drive/keys` (`{}`), at every page load, kept in memory only → `userId` is the session's account (the owner acting
    as a user: the user's); `current` is one of `keys`; `503 keys_missing` / `409 salt_missing`
    read as "the Drive cannot be opened now"; `409 mek_not_current` → fetch the keys again and
    seal once more; `409 stale_keys` on a rename → read the item again.

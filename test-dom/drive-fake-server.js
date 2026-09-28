@@ -5,14 +5,20 @@
 // server would and follows its key rules (the key model v2, docs/DRIVE.md
 // §3; src/routes/drive.js, src/lib/mek.js): it holds the root MEK and the
 // sub-MEKs and derives the user's KEKs (drivekeys.js deriveKek, the real
-// derivation) for GET /api/private/drive/keys; every item sealed by the
+// derivation) for POST /api/private/drive/keys; every item sealed by the
 // browser must open under the current KEK (409 mek_not_current for another
 // sub-MEK, 400 bad_seal otherwise); a rename is sealed under the item's own
 // sub-MEK and salt (409 stale_keys when they changed); the personal kit's
 // routes need the step-up and are refused while the owner acts as the user
 // (`impersonatedBy`); the key kit and the keyring routes of Admin → Security
-// → Keys are the owner's. Not a test file itself (vitest.dom.config.js picks
-// up *.test.js only).
+// → Keys are the owner's. Like the real server (src/lib/csrf.js), every
+// signed-in change (POST / PUT / PATCH / DELETE under /api/private/, and
+// log-out) must carry the session's CSRF token in X-Secbin-CSRF, the one GET
+// /api/private/me hands out (403 csrf_mismatch otherwise, before anything
+// changes): the Drive client sends it through public/js/api.js. Every fake
+// server stands for the same browser session, so they share the token
+// (FAKE_CSRF). Not a test file itself (vitest.dom.config.js picks up *.test.js
+// only).
 import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
 import {
@@ -21,6 +27,19 @@ import {
 } from '../public/js/drivekeys.js';
 import { randomBytes, b64urlFromBytes, bytesFromB64url, utf8 } from '../public/js/bytes.js';
 import { sealUpload, newNodeId } from '../public/js/reversekeys.js';
+
+/** The session's CSRF token (43 base64url characters, as the server's HMAC). */
+export const FAKE_CSRF = b64urlFromBytes(randomBytes(32));
+const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+/** Where the real server checks the token: cookie-authenticated changes (authenticate()) and log-out. */
+export const needsCsrf = (method, path) => STATE_CHANGING.has(method) && (path.startsWith('/api/private/') || path === '/api/auth/logout');
+/** A request header, from a plain object or a Headers. */
+export const headerOf = (headers, name) => {
+  if (!headers) return undefined;
+  if (typeof headers.get === 'function') return headers.get(name) ?? undefined;
+  const k = Object.keys(headers).find((x) => x.toLowerCase() === name);
+  return k === undefined ? undefined : headers[k];
+};
 
 /** An in-memory Drive server for one user (plus an owner) and a fetch that talks to it. */
 export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 } = {}) {
@@ -32,7 +51,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     root: newKey(),
     subs: [],
     salt: newSalt(),
-    keysError: null, // 'keys_missing' | 'salt_missing': GET /drive/keys refuses
+    keysError: null, // 'keys_missing' | 'salt_missing': POST /drive/keys refuses
     nodes: new Map([['root', { id: 'root', parent: null, kind: 'dir', name: '', size: 0, chunks: 0, state: 'ready', created: 1, updated: 1 }]]),
     chunks: new Map(),
     shareBodies: [],
@@ -49,6 +68,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     activity: [], // the user's own activity rows the fake records
     kitRecord: null, // the key kit's record (at, root, subs)
     kitVerifyLeft: 30,
+    meCalls: 0, // GET /api/private/me (the page recording its session)
   };
   let clock = 1700000000;
   const tick = () => ++clock;
@@ -73,7 +93,11 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (body.current && S.proof && body.current !== S.proof) return fail(403, 'wrong_password');
     return null;
   };
-  const ok = (data, status = 200) => ({ ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) });
+  const ok = (data, status = 200) => {
+    const res = { ok: status < 400, status, type: 'basic', json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) };
+    res.clone = () => res; // api.js reads a 403's body twice (csrf_mismatch or not)
+    return res;
+  };
   const bin = (bytes) => ({ ok: true, status: 200, type: 'basic', json: async () => null, arrayBuffer: async () => bytes.slice().buffer });
   const fail = (status, error) => ok({ error, message: error }, status);
   // Received files (reverse shares) are not in the tree until the browser takes them in.
@@ -117,7 +141,13 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     const u = new URL(url, 'https://bin.example');
     const p = u.pathname;
     const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
+    // The page records its session (api.js bindSession) from here; not a Drive request.
+    if (p === '/api/private/me' && method === 'GET') {
+      S.meCalls++;
+      return ok({ user: S.user, impersonatedBy: S.impersonatedBy, csrf: FAKE_CSRF });
+    }
     S.requests.push({ method, path: p, body, headers: init.headers || {} });
+    if (needsCsrf(method, p) && headerOf(init.headers, 'x-secbin-csrf') !== FAKE_CSRF) return fail(403, 'csrf_mismatch');
     let m;
     if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: S.impersonatedBy });
     if (p === '/api/auth/prelogin' && method === 'POST') return ok({ salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3 });
@@ -130,7 +160,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       });
     }
     if (!S.enabled && p.startsWith('/api/private/drive/')) return fail(403, 'drive_disabled');
-    if (p === '/api/private/drive/keys' && method === 'GET') {
+    if (p === '/api/private/drive/keys' && method === 'POST') {
       if (S.keysError) return fail(S.keysError === 'keys_missing' ? 503 : 409, S.keysError);
       if (S.impersonatedBy) S.audit.push({ action: 'drive.keys_used', detail: S.user.id });
       return ok(await keysOut());
@@ -171,6 +201,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (p === '/api/private/drive/migrate' && method === 'GET') {
       return ok(S.legacyState || { state: null, v1Items: 0, v1Links: 0, archived: 0, legacy: false, kcv: null, driveSalt: null, wraps: [] });
     }
+    if (p === '/api/private/drive/migrate/items' && method === 'GET') return ok(S.legacyItems || { items: [], links: [], next: null });
     if ((m = p.match(/^\/api\/private\/drive\/nodes\/([^/]+)$/))) {
       const n = S.nodes.get(m[1]);
       if (!n) return fail(404, 'not_found');

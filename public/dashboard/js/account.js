@@ -19,11 +19,12 @@ import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
 import { humanCheck } from '../../js/turnstile.js';
-// With the human check on, loading its script moves the tab's Drive keys out of
-// sessionStorage into memory (turnstile.js → drivekeys.js holdSessionKeys);
-// the Drive page fetches them again after a visit here (SECURITY.md, Drive
-// keys in the tab). The personal kit's content is on this page while it is
-// made (SECURITY.md, Cloudflare Turnstile).
+// The Drive keys are never in the tab's storage (each page asks the server);
+// with the human check on, loading its script also moves the old Drive key of
+// the release before, if the tab has one, out of sessionStorage into memory
+// (turnstile.js → drivekeys.js holdSessionKeys; SECURITY.md, Drive keys in the
+// tab). The personal kit's content is on this page while it is made
+// (SECURITY.md, Cloudflare Turnstile).
 
 const $ = (s) => document.querySelector(s);
 let profile;

@@ -3,13 +3,13 @@
 // fingerprint, check values) and for every sealed format (a DEK, a name, a
 // sub-MEK, a link key, a field-layer value), what each seal is bound to (the
 // user, the sub-MEK, the per-item salt, the field; the item id is not part of
-// it), the sub-MEK timeline, keys entered by hand, the tab's copy of the KEKs,
+// it), the sub-MEK timeline, keys entered by hand, what the tab keeps (never a KEK),
 // and manifest v3 validation.
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   deriveKek, deriveUserKey, deriveFieldKey, keyFingerprint, keyCheckValue, saltCheckValue, sameCheck, sealDek, openDek, sealName, openName,
   sealSubMek, openSubMek, sealLinkKey, openLinkKey, sealAtRest, openAtRest, isAtRest, effectiveAt, mekStatus, checkTimeline, parseManualKey,
-  saveSessionKeys, loadSessionKeys, saveImpersonationKeys, loadImpersonationKeys, clearImpersonationKeys, clearSessionKey,
+  clearImpersonationKeys, clearSessionKey, purgeStaleSlots, readSlot, writeSlot,
   holdSessionKeys, releaseSessionKeys, newSalt, newKey, newMekId, MEK_ID_RE, KEY_RE,
 } from '../public/js/drivekeys.js';
 import { validateRefsManifest, buildRefsManifest, refChunks } from '../public/js/refsmanifest.js';
@@ -160,7 +160,7 @@ describe('keys entered by hand', () => {
   });
 });
 
-describe('the tab copy of the KEKs (sessionStorage)', () => {
+describe('what the tab keeps (sessionStorage): never a KEK', () => {
   const store = new Map();
   beforeEach(() => {
     store.clear();
@@ -170,44 +170,37 @@ describe('the tab copy of the KEKs (sessionStorage)', () => {
       removeItem: (k) => store.delete(k),
     };
   });
-  const keys = () => ({ [MEK]: b64urlFromBytes(newKey()) });
 
-  it('saves and loads for the same user only; the impersonated user has their own slot; everything clears', () => {
-    const own = { userId: 'u1', current: MEK, keys: keys() };
-    expect(saveSessionKeys(own)).toBe(true);
-    expect(loadSessionKeys('u1')).toEqual(own);
-    expect(loadSessionKeys('u2')).toBeNull();
-    const imp = { userId: 'u2', current: MEK, keys: keys() };
-    expect(saveImpersonationKeys(imp)).toBe(true);
-    expect(loadImpersonationKeys('u2')).toEqual(imp);
-    expect(loadSessionKeys('u1')).toEqual(own); // never over the owner's own
+  it('the module has no way to store or load a KEK', async () => {
+    const m = await import('../public/js/drivekeys.js');
+    for (const name of ['saveSessionKeys', 'loadSessionKeys', 'saveImpersonationKeys', 'loadImpersonationKeys']) expect(m[name], name).toBeUndefined();
+  });
+
+  it('the slots of a release before go (the KEK slots, the old impersonation DK); only the old DK of a Drive waiting for its upgrade stays until sign-out', () => {
+    for (const k of ['secbin_kek', 'secbin_kek_imp', 'secbin_dk_imp', 'secbin_dk_imp_uid', 'secbin_dk', 'secbin_dk_uid']) store.set(k, 'planted');
+    purgeStaleSlots();
+    expect([...store.keys()].sort()).toEqual(['secbin_dk', 'secbin_dk_uid']);
+    store.set('secbin_kek_imp', 'planted');
     clearImpersonationKeys();
-    expect(loadImpersonationKeys('u2')).toBeNull();
-    expect(loadSessionKeys('u1')).toEqual(own);
-    store.set('secbin_dk', 'x'); // the release before's slot goes too
+    expect(store.has('secbin_kek_imp')).toBe(false);
     clearSessionKey();
     expect(store.size).toBe(0);
   });
 
-  it('drops malformed keys, never throws, and holds the keys in memory while third-party script is on the page', () => {
-    expect(saveSessionKeys({ userId: 'u1', current: MEK, keys: { nope: 'x', [MEK]: 'short' } })).toBe(true);
-    expect(loadSessionKeys('u1').keys).toEqual({});
-    expect(saveSessionKeys({ userId: '', keys: {} })).toBe(false);
-    store.set('secbin_kek', '{not json');
-    expect(loadSessionKeys('u1')).toBeNull();
-    const own = { userId: 'u1', current: MEK, keys: keys() };
-    saveSessionKeys(own);
+  it('never throws, and holds the old DK in memory while third-party script is on the page', () => {
+    writeSlot('secbin_dk', 'D'.repeat(43));
     holdSessionKeys();
-    expect(store.has('secbin_kek')).toBe(false);
-    expect(loadSessionKeys('u1')).toEqual(own);
+    expect(store.has('secbin_dk')).toBe(false);
+    expect(readSlot('secbin_dk')).toBe('D'.repeat(43));
     releaseSessionKeys();
-    expect(store.has('secbin_kek')).toBe(true);
+    expect(store.get('secbin_dk')).toBe('D'.repeat(43));
     globalThis.sessionStorage = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); }, removeItem() { throw new Error('denied'); } };
-    expect(loadSessionKeys('u1')).toBeNull();
-    expect(saveSessionKeys(own)).toBe(false);
+    expect(readSlot('secbin_dk')).toBeNull();
+    expect(writeSlot('secbin_dk', 'x')).toBe(false);
     expect(() => clearSessionKey()).not.toThrow();
+    expect(() => purgeStaleSlots()).not.toThrow();
     delete globalThis.sessionStorage;
-    expect(loadSessionKeys('u1')).toBeNull();
+    expect(readSlot('secbin_dk')).toBeNull();
   });
 });
 

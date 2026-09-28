@@ -61,7 +61,7 @@ describe('Drive access', () => {
     const u = await makeUser('drv-api');
     await enableDrive(u.id, { apiEnabled: true });
     const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'k' } })).json()).key;
-    for (const [path, method, body] of [['/api/private/drive', 'GET'], ['/api/private/drive/keys', 'GET'], ['/api/private/drive/folders', 'POST', { parent: 'root', name: enc() }], ['/api/private/drive/nodes/root', 'GET']]) {
+    for (const [path, method, body] of [['/api/private/drive', 'GET'], ['/api/private/drive/keys', 'POST', {}], ['/api/private/drive/folders', 'POST', { parent: 'root', name: enc() }], ['/api/private/drive/nodes/root', 'GET']]) {
       const r = await fetchJson(path, { method, body, headers: { authorization: `Bearer ${key}` } });
       expect(r.status).toBe(403);
       expect((await r.json()).error).toBe('api_key_not_allowed');
@@ -75,8 +75,12 @@ describe('Drive access', () => {
     const f = await sealed(u.cookie);
     const cross = await fetchJson('/api/private/drive/folders', { method: 'POST', cookie: u.cookie, body: { parent: 'root', name: f.name, ks: f.ks, mek: f.mek }, headers: { 'sec-fetch-site': 'cross-site' } });
     expect(cross.status).toBe(403);
-    // The keys too: never to another site.
-    expect((await fetchJson('/api/private/drive/keys', { cookie: u.cookie, headers: { 'sec-fetch-site': 'cross-site' } })).status).toBe(403);
+    // The keys too: never to another site; a POST with a JSON body (it may make the salt, and is audited
+    // for the owner acting as the user), so the request shape and the session's CSRF token are checked.
+    expect((await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {}, headers: { 'sec-fetch-site': 'cross-site' } })).status).toBe(403);
+    expect((await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {}, csrf: false })).status).toBe(403);
+    expect((await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie })).status).toBe(400); // no body: missing_intent
+    expect((await fetchJson('/api/private/drive/keys', { cookie: u.cookie })).status).toBe(405); // not a GET
     const { id } = await mkdir(u.cookie);
     expect((await fetchJson(`/api/private/drive/nodes/${id}`, { method: 'DELETE', cookie: u.cookie })).status).toBe(400); // no intent header
   });
@@ -268,7 +272,7 @@ describe('Drive keys (key model v2, docs/DRIVE.md §3)', () => {
   it('the session gets its KEKs from the server with no prompt; the summary holds no key', async () => {
     const u = await makeUser('drv-keys');
     await enableDrive(u.id);
-    const r = await fetchJson('/api/private/drive/keys', { cookie: u.cookie });
+    const r = await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {} });
     expect(r.status).toBe(200);
     expect(r.headers.get('cache-control')).toBe('no-store');
     const k = await r.json();
@@ -285,7 +289,7 @@ describe('Drive keys (key model v2, docs/DRIVE.md §3)', () => {
     // Every user has a KEK of their own (their own salt).
     const v = await makeUser('drv-keys2');
     await enableDrive(v.id);
-    const kv = await (await fetchJson('/api/private/drive/keys', { cookie: v.cookie })).json();
+    const kv = await (await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: v.cookie, body: {} })).json();
     expect(kv.current).toBe(k.current);
     expect(kv.keys[0].kek).not.toBe(k.keys[0].kek);
   });
@@ -348,7 +352,7 @@ describe('Drive keys (key model v2, docs/DRIVE.md §3)', () => {
 
   it('a role without a Drive gets no keys', async () => {
     const u = await makeUser('drv-nokeys');
-    const r = await fetchJson('/api/private/drive/keys', { cookie: u.cookie });
+    const r = await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {} });
     expect(r.status).toBe(403);
     expect((await r.json()).error).toBe('drive_disabled');
   });

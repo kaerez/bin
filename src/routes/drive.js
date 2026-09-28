@@ -1,7 +1,10 @@
 // drive.js — /api/private/drive*: the signed-in user's Drive (docs/DRIVE.md
 // §6). Session only (API keys are refused by authenticate()). Every
 // state-changing call goes through the same CSRF guards as the rest of the
-// private API (JSON body, Sec-Fetch-Site, intent header or upload token).
+// private API, in authenticate() before anything else runs (src/lib/auth.js
+// checkCsrf): Sec-Fetch-Site, the request shape (a JSON body, a chunk or the
+// intent header), then the session's CSRF token; and then each route's own
+// (JSON body, intent header, upload token).
 //
 // The key model v2 (docs/DRIVE.md §3): the server derives the user's KEKs
 // (the Directory holds the root MEK, the sub-MEKs and the user salt) and
@@ -18,7 +21,7 @@
 // the escrow of that release), every item is re-sealed under the user's KEK
 // and checked here, and only then do the old key wraps go.
 
-import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS, HttpError } from '../lib/http.js';
+import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, appendCookies, SECURITY_HEADERS, HttpError } from '../lib/http.js';
 import { authenticate, actorId } from '../lib/auth.js';
 import { directory, ipContext } from '../lib/guard.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
@@ -39,10 +42,8 @@ const fromDir = (r) => {
   for (const k of ['max', 'used', 'quota', 'policy', 'refused', 'retryAfter', 'v1Items', 'v1Links']) if (r[k] !== undefined) extra[k] = r[k];
   return err(r.status, r.error, r.message, Object.keys(extra).length ? extra : undefined);
 };
-const withAuth = (a, res) => {
-  if (a.setCookie) res.headers.append('set-cookie', a.setCookie);
-  return res;
-};
+/** Attach a sliding-session cookie refresh (session + CSRF token cookies) to a response. */
+const withAuth = (a, res) => appendCookies(res, a.setCookie);
 const invalid = (message) => err(400, 'invalid', message);
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -144,9 +145,11 @@ export async function handleDrive(request, env, url) {
 
   // The user's KEKs for this session (docs/DRIVE.md §3): no prompt, no secret
   // of the user's; the owner acting as the user gets the user's (admin audit).
+  // A POST with a JSON body ({}): it may make the account's salt and writes to
+  // the admin audit, so it is a change like any other (the CSRF token too).
   if (p === '/api/private/drive/keys') {
-    if (request.method !== 'GET') return methodNotAllowed('GET');
-    assertNotCrossSite(request);
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    await readJsonBody(request);
     const s = await drive().summary(uid);
     const k = await userKeys(env, uid, { meks: s.meks, createSalt: s.items === 0 });
     if (a.actor) await dir.driveKeysUsed(a.actor.id, uid, 'opened while acting as the user');

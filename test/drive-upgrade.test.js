@@ -21,6 +21,7 @@ import { openLinkPriv, driveOf, dirStub } from './reverse-helpers.js';
 import * as main from './fixtures/drivekeys-main.js';
 import { upgradeOwnDrive, upgradeUserDrive, legacyUnlockAtSignIn, UpgradeBlocked } from '../public/js/driveupgrade.js';
 import { saveLegacyKey, loadLegacyKey, clearLegacyKey } from '../public/js/drivev1.js';
+import { bindSession } from '../public/js/api.js';
 import { createReverseKey, linkHash, fragmentOf } from '../public/js/reversekeys.js';
 import { driveChunkKey } from '../src/drive-do.js';
 import { b64urlFromBytes, randomBytes, utf8, fromUtf8 } from '../public/js/bytes.js';
@@ -51,6 +52,15 @@ beforeAll(async () => {
   await legacyDrive(ownerId, ownerDk, { owner: true, items: 1 });
 });
 afterAll(() => { globalThis.fetch = realFetch; delete globalThis.sessionStorage; });
+/**
+ * The browser code acts as `cookie`'s session from here, as a page loaded for
+ * it would (api.js records the session, and its CSRF token, from
+ * /api/private/me at load; nav.js bindSession).
+ */
+async function actAs(cookie) {
+  as = cookie;
+  bindSession(await (await fetchJson('/api/private/me', { cookie })).json());
+}
 
 const now = () => Math.floor(Date.now() / 1000);
 const nid = () => b64urlFromBytes(randomBytes(16));
@@ -181,7 +191,7 @@ describe('the upgrade of Drives made before the key model v2', () => {
   });
 
   it('the owner upgrades it through the escrow of that release (admin audit); every item opens under v2; then the old wraps go', async () => {
-    as = oc;
+    await actAs(oc);
     clearLegacyKey();
     await expect(upgradeUserDrive({ ownerId, userId: u.id })).rejects.toBeInstanceOf(UpgradeBlocked); // the owner's old DK is not in the tab
     saveLegacyKey(ownerDk, ownerId);
@@ -217,7 +227,7 @@ describe('the upgrade of Drives made before the key model v2', () => {
     const ic = cookieOf(await fetchJson(`/api/private/admin/users/${v.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
     const imp = await fetchJson('/api/private/drive/migrate', { method: 'PUT', cookie: ic, headers: intent, body: { items: [] } });
     expect([imp.status, (await imp.json()).error]).toEqual([403, 'impersonating']);
-    as = v.cookie;
+    await actAs(v.cookie);
     const user = { id: v.id, role: 'user' };
     expect(await legacyUnlockAtSignIn({ user, code: 'ZZZZ-YYYY-XXXX-WWWW' })).toBe(false); // not this Drive's code
     expect(await legacyUnlockAtSignIn({ user, code: CODE.toLowerCase() })).toBe(true);
@@ -229,6 +239,25 @@ describe('the upgrade of Drives made before the key model v2', () => {
     await checkUpgraded(v.cookie, v.id, dv);
     expect(await legacyOf(v.id)).toMatchObject({ wraps: [], v1: 0 });
     expect(await migrationRow(v.id)).toBe('done');
+  });
+
+  it('an old Drive key planted in the tab is refused before anything is sealed or marked damaged, and removed (its check value is not the server’s)', async () => {
+    const p = await makeUser('up-planted');
+    await enableDrive(p.id);
+    const dp = await legacyDrive(p.id, main.createDriveKey(), { items: 2, link: false });
+    await actAs(p.cookie);
+    const user = { id: p.id, role: 'user' };
+    saveLegacyKey(randomBytes(32), p.id); // any script on the origin could write this slot
+    const k = await driveKeys(p.cookie, { fresh: true });
+    const e = await upgradeOwnDrive({ user, current: k.current, kek: k.keks.get(k.current) }).catch((x) => x);
+    expect(e).toBeInstanceOf(UpgradeBlocked);
+    expect(e.reason).toBe('wrong');
+    expect(loadLegacyKey(p.id)).toBeNull();
+    expect((await legacyOf(p.id)).v1).toBe(3); // nothing re-sealed, nothing marked damaged
+    // The genuine key (the sign-in opens it) then upgrades it with nothing lost.
+    expect(await legacyUnlockAtSignIn({ user, code: CODE })).toBe(true);
+    expect(await upgradeOwnDrive({ user, current: k.current, kek: k.keks.get(k.current) })).toMatchObject({ upgraded: 3, damaged: 0 });
+    await checkUpgraded(p.cookie, p.id, dp);
   });
 
   it('resumable and idempotent; refuses what does not open; the verification cannot be skipped; nothing goes before every item opens', async () => {
@@ -300,7 +329,7 @@ describe('the upgrade of Drives made before the key model v2', () => {
 
   it('the owner’s own Drive last: upgraded in the owner’s browser; once every Drive is upgraded, the escrow keys and records go', async () => {
     // Every other Drive waiting is done first (the one made for the hygiene test, through the escrow).
-    as = oc;
+    await actAs(oc);
     saveLegacyKey(ownerDk, ownerId);
     const list = await (await fetchJson('/api/private/admin/drive/migration', { cookie: oc })).json();
     for (const x of list.drives.filter((y) => y.state !== 'done' && y.id !== ownerId)) await upgradeUserDrive({ ownerId, userId: x.id });
@@ -325,7 +354,7 @@ describe('the upgrade of Drives made before the key model v2', () => {
     await enableDrive(y.id);
     const dy = await legacyDrive(y.id, main.createDriveKey(), { items: 1, link: false });
     await runInDurableObject(driveOf(y.id), (i, s) => s.storage.sql.exec('UPDATE nodes SET name = ? WHERE id = ?', JSON.stringify({ iv: 'A'.repeat(16), ct: 'D'.repeat(40) }), dy.folders[0]));
-    as = y.cookie;
+    await actAs(y.cookie);
     saveLegacyKey(dy.dk, y.id);
     const k = await driveKeys(y.cookie, { fresh: true });
     const r = await upgradeOwnDrive({ user: { id: y.id, role: 'user' }, current: k.current, kek: k.keks.get(k.current) });

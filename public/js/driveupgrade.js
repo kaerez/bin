@@ -32,6 +32,47 @@ export class UpgradeBlocked extends Error {
 const PUT_BATCH = 100;
 const sameBytes = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
+/**
+ * Whether `dk` is this Drive's old key (docs/DRIVE.md §3.3): its key check
+ * value is the server's (`kcv`, from GET …/migrate or the escrow route); a
+ * Drive with none (made before check values) must have an item name or a
+ * link key that `dk` opens (AES-GCM), unless it has nothing sealed the old
+ * way. An old key read from the tab's storage is used only once this holds:
+ * a value planted there by other script on the origin is never a key, and a
+ * wrong key never marks the Drive's items as damaged.
+ */
+export async function isThisDrivesKey(dk, kcv, target = null) {
+  if (!(dk instanceof Uint8Array) || dk.length !== 32) return false;
+  if (typeof kcv === 'string' && kcv) return (await keyCheckValueV1(dk)) === kcv;
+  const page = await api.migrateItems(null, target);
+  const items = (page.items || []).filter((it) => it.name);
+  const links = page.links || [];
+  if (!items.length && !links.length) return true;
+  const sub = await deriveSubkeysV1(dk);
+  for (const it of items) {
+    try { await openFieldV1(sub.names, 'name', it.id, it.name); return true; } catch { /* the next */ }
+  }
+  for (const l of links) {
+    try { (await openReversePrivV1(dk, l.id, l.priv)).fill(0); return true; } catch { /* the next */ }
+  }
+  return false;
+}
+
+/**
+ * The old DK the tab holds for `userId` (the sign-in opened it), once proven
+ * to be this Drive's (isThisDrivesKey), or null; a key that is not is removed
+ * from the tab. `m`: GET …/migrate, when the caller has it.
+ */
+export async function provenLegacyKey(userId, m = null) {
+  const dk = loadLegacyKey(userId);
+  if (!dk) return null;
+  const info = m || await api.migrate();
+  if (await isThisDrivesKey(dk, info.kcv)) return dk;
+  dk.fill(0);
+  clearLegacyKey();
+  return null;
+}
+
 /** The old DK from what this sign-in used (password, recovery code, passkey PRF), or null. */
 async function openLegacy(m, { password, code, prfOutput, credentialId, spentWraps = [] }) {
   const wraps = [...(m.wraps || []), ...(Array.isArray(spentWraps) ? spentWraps : [])];
@@ -39,7 +80,7 @@ async function openLegacy(m, { password, code, prfOutput, credentialId, spentWra
   if (password) dk = await unlockWithPassword(password, m.driveSalt, wraps).catch(() => null);
   if (!dk && prfOutput && credentialId) dk = await unlockWithPrf(prfOutput, credentialId, wraps).catch(() => null);
   if (!dk && code) dk = await unlockWithRecovery(code, wraps).catch(() => null);
-  if (dk && m.kcv && (await keyCheckValueV1(dk)) !== m.kcv) return null;
+  if (dk && !(await isThisDrivesKey(dk, m.kcv))) return null;
   return dk;
 }
 
@@ -151,10 +192,9 @@ async function run({ dk, uid, mek, kek, target = null, onProgress }) {
  * the tab has none. `keys`: the Drive client's (current sub-MEK and KEK).
  */
 export async function upgradeOwnDrive({ user, current, kek, onProgress }) {
-  const dk = loadLegacyKey(user.id);
-  if (!dk) throw new UpgradeBlocked('Your Drive’s old key is not open in this tab.', 'locked');
-  const m = await api.migrate();
-  if (m.kcv && (await keyCheckValueV1(dk)) !== m.kcv) throw new UpgradeBlocked('The old key in this tab is not this Drive’s.', 'wrong');
+  if (!loadLegacyKey(user.id)) throw new UpgradeBlocked('Your Drive’s old key is not open in this tab.', 'locked');
+  const dk = await provenLegacyKey(user.id);
+  if (!dk) throw new UpgradeBlocked('The old key in this tab is not this Drive’s.', 'wrong');
   const r = await run({ dk, uid: user.id, mek: current, kek, onProgress });
   // The owner keeps the old key until every Drive is upgraded (it opens users' Drives through the escrow).
   if (user.role !== 'owner') clearLegacyKey();
@@ -169,9 +209,9 @@ export async function upgradeOwnDrive({ user, current, kek, onProgress }) {
  * The user's old key is not kept. → { upgraded, damaged, verified }.
  */
 export async function upgradeUserDrive({ ownerId, userId, onProgress }) {
-  const ownerDk = loadLegacyKey(ownerId);
-  if (!ownerDk) throw new UpgradeBlocked('Your own Drive’s old key is not open in this tab: sign out and sign in again with your password, then retry.', 'locked');
   const own = await api.migrate();
+  const ownerDk = await provenLegacyKey(ownerId, own);
+  if (!ownerDk) throw new UpgradeBlocked('Your own Drive’s old key is not open in this tab: sign out and sign in again with your password, then retry.', 'locked');
   const r = await api.migrateEscrow(userId);
   if (!r.kek || !r.current) throw new ApiError('The user’s Drive keys are not available.', 503, 'keys_missing');
   let dk = null;
@@ -187,7 +227,7 @@ export async function upgradeUserDrive({ ownerId, userId, onProgress }) {
     }
     dk = key ? await unlockWithEscrow(key.privateKey, r.wrap) : null;
     if (!dk) throw new UpgradeBlocked('This Drive’s escrow wrap is for an escrow key you no longer hold: its user upgrades it at their next sign-in.', 'escrow_failed');
-    if (r.kcv && (await keyCheckValueV1(dk)) !== r.kcv) throw new UpgradeBlocked('The escrow wrap did not give this Drive’s key.', 'escrow_failed');
+    if (!(await isThisDrivesKey(dk, r.kcv, userId))) throw new UpgradeBlocked('The escrow wrap did not give this Drive’s key.', 'escrow_failed');
   }
   try {
     if (!dk) {

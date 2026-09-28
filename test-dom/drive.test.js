@@ -9,10 +9,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startDrive, checkName, shareOptions, toFraction, modifiedOf, pathOf, sortChildren, successNote } from '../public/dashboard/js/drive-app.js';
 import * as drive from '../public/js/driveclient.js';
-import { clearSessionKey, loadSessionKeys } from '../public/js/drivekeys.js';
+import { clearSessionKey } from '../public/js/drivekeys.js';
 import { deriveAccess, openPaste } from '../public/js/crypto.js';
 import { TAG } from '../public/js/files.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
+import { revokeShare } from '../public/js/api.js';
 
 const until = async (fn, ms = 5000) => {
   const t0 = Date.now();
@@ -57,7 +58,8 @@ function mountPoint() {
   return mount;
 }
 
-const deps = (extra = {}) => ({ drive, profile: PROFILE, user: S.user, revoke: (id) => fetch(`/api/private/shares/${id}/revoke`, { method: 'POST' }), ...extra });
+// `revoke` as the page passes it (drive.js): api.js, which sends the session's CSRF token.
+const deps = (extra = {}) => ({ drive, profile: PROFILE, user: S.user, revoke: revokeShare, ...extra });
 
 async function openApp(extra = {}) {
   await server();
@@ -137,8 +139,9 @@ describe('startDrive states', () => {
     expect(mount.querySelector('#drive-unlock')).toBeNull();
     expect(mount.querySelector('input[type="password"]')).toBeNull();
     expect(names()).toEqual(['Documents', 'Empty', 'Photos', 'readme.txt']);
-    expect(loadSessionKeys(S.user.id)).toMatchObject({ current: S.current().id });
-    expect(S.requests.some((x) => x.method !== 'GET')).toBe(false);
+    expect(sessionStorage.length).toBe(0); // the keys are in the page's memory only
+    // Nothing but the session's keys is asked for (a POST: it may make the salt and is audited).
+    expect(S.requests.filter((x) => x.method !== 'GET').map((x) => `${x.method} ${x.path}`)).toEqual(['POST /api/private/drive/keys']);
   });
 
   it('keys that cannot be had: what happened and who fixes it (the salt: the personal kit; the keyring: the administrator)', async () => {
@@ -176,6 +179,64 @@ describe('startDrive states', () => {
     const r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true } }));
     await r.app.ready;
     expect(mount.querySelector('#drive-upgrade').textContent).toMatch(/2 items of this Drive still use.*Admin → Security → Keys/);
+  });
+});
+
+/** Text nodes reading "null" or "undefined" under `root` (a nullish child passed to append/replaceChildren). */
+function strayText(root) {
+  const out = [];
+  const walk = (n) => {
+    for (const c of n.childNodes) {
+      if (c.nodeType === 3 && ['null', 'undefined'].includes(c.textContent.trim())) out.push(`${c.textContent.trim()} in <${n.nodeName.toLowerCase()}${n.id ? `#${n.id}` : ''}>`);
+      else if (c.nodeType === 1) walk(c);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+describe('no stray "null" / "undefined" text in any state of the Drive page', () => {
+  it('a user and the owner: the open Drive', async () => {
+    await openApp();
+    expect(strayText(document.body)).toEqual([]);
+    await openApp({ user: { ...S.user, role: 'owner' }, profile: { ...PROFILE, user: { ...S.user } } });
+    expect(strayText(document.body)).toEqual([]);
+  });
+
+  it('the keys cannot be had (the salt, the keyring), for a user and for the owner', async () => {
+    for (const reason of ['salt_missing', 'keys_missing']) {
+      for (const role of ['user', 'owner']) {
+        await server();
+        S.keysError = reason;
+        const mount = mountPoint();
+        const r = await startDrive(mount, deps({ user: { ...S.user, role } }));
+        expect(r).toEqual({ state: 'unavailable', reason });
+        expect([...mount.childNodes].map((n) => n.id)).toEqual(['drive-unavailable']);
+        expect(strayText(document.body)).toEqual([]);
+      }
+    }
+  });
+
+  it('the owner acting as a user, a Drive waiting for its upgrade, and no Drive', async () => {
+    await server();
+    S.impersonatedBy = 'owner';
+    let mount = mountPoint();
+    let r = await startDrive(mount, deps({ user: { ...S.user, impersonating: true }, profile: { ...PROFILE, user: { username: 'alice' } } }));
+    await r.app.ready;
+    expect(strayText(document.body)).toEqual([]);
+    await server();
+    S.migration = { pending: true, v1Items: 2, v1Links: 0, legacy: true };
+    mount = mountPoint();
+    r = await startDrive(mount, deps());
+    await r.app.ready;
+    expect(mount.querySelector('#drive-upgrade')).not.toBeNull();
+    expect(strayText(document.body)).toEqual([]);
+    S = fakeServer({ enabled: false });
+    globalThis.fetch = S.fetch;
+    mount = mountPoint();
+    r = await startDrive(mount, deps());
+    expect(r.state).toBe('disabled');
+    expect(strayText(document.body)).toEqual([]);
   });
 });
 
@@ -428,7 +489,10 @@ describe('the client\'s progress and cancel for downloads', () => {
 describe('nav: Drive link', () => {
   it('driveAllowed reads caps.driveEnabled', async () => {
     vi.resetModules();
-    vi.doMock('../public/js/api.js', () => ({ me: () => new Promise(() => {}), logout: async () => {}, admin: {}, ApiError: class extends Error {} }));
+    vi.doMock('../public/js/api.js', () => ({
+      me: () => new Promise(() => {}), logout: async () => {}, admin: {}, ApiError: class extends Error {},
+      bindSession: () => {}, forgetSession: () => {}, onSessionChanged: () => {}, isSessionChanged: () => false, SESSION_CHANGED: '',
+    }));
     const { driveAllowed } = await import('../public/dashboard/js/nav.js');
     expect(driveAllowed({ caps: { driveEnabled: true } })).toBe(true);
     expect(driveAllowed({ caps: { driveEnabled: 1 } })).toBe(false);
