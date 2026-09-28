@@ -69,7 +69,10 @@ ciphertext size and chunk count, timestamps, and which shares reference which no
   sub-MEK's id (`mek`) and fingerprint (`mfp`), and for a file its **ciphertext hash** (`ch`):
   `SHA-256("secbin-ch/v1\n<n>\n" ‖ the chunks' SHA-256s, one per line)`, computed by the server
   from the chunks it received (never a hash of the plaintext). Files uploaded before it existed
-  get it from the Drive object's alarm.
+  get it from the Drive object's alarm. The browser computes it again from the chunks it
+  downloads and refuses a file whose chunks do not give it (the last chunk is never handed over);
+  a file with no hash yet is read as before. It is integrity metadata the server keeps, not a
+  seal: the per-chunk GCM check under the DEK is what binds the content (§9).
 - **Fingerprints and check values.** A key's fingerprint: the first 8 bytes of
   `HMAC-SHA-256(key, "secbin-mek-fp/v1")`, base64url (shown as `xxxx-xxxx-xxx`). A kit's check
   values: `HMAC-SHA-256(key, "secbin-kek-check/v1")` for a KEK, `"secbin-mek-check/v1"` for the
@@ -108,7 +111,10 @@ the current KEK and sends them with `ks` and `mek`. The Worker opens each seal o
 current KEK before it stores it (`400 bad_seal` when it does not open; `409 mek_not_current` for
 another sub-MEK — the browser fetches the keys again and seals once more) and keeps nothing it
 opened. A rename seals the new name under the item's own `mek` and `ks` (`409 stale_keys` when
-the server re-sealed the item meanwhile: the browser reads it again).
+the server re-sealed the item meanwhile: the browser reads it again). During a root change a new
+name must be sealed under the KEK of the new root: one sealed under the previous root (a page
+that fetched its keys before the change) is `409 stale_keys` too, and the browser fetches its keys
+again; nothing new is ever stored under a root that is going.
 
 **The owner acting as a user.** `POST /api/private/drive/keys` returns that user's KEKs to the
 owner's session (`drive.keys_used` in the admin audit, §9), in the page's memory only.
@@ -122,13 +128,30 @@ stored or logged in the clear — for:
   (`409 in_use` otherwise); never the current one (`409 current_key`) or the only one;
 - **changing the root MEK**: the sub-MEKs are re-sealed under the new root at once, every KEK and
   field key changes, and every item, link key and field-layer value is re-sealed under the new
-  ones; until that is done the previous root stays (`mek.rootOld`) and a session gets both KEKs
-  (`kekOld`), then it is removed.
+  ones (each of an item's fields under either root: a rename during the change seals only the
+  name under the new one); until that is done the previous root stays (`mek.rootOld`) and a
+  session gets both KEKs (`kekOld`). Then every Drive is checked once more (those made meanwhile
+  too): every item, link key and field-layer value must open under the new root only; only then
+  is the previous root removed. A root change waits while any Drive still has something of the
+  release before in it (`409 migration_pending`, with those Drives; §3.3): link keys of the
+  release before are the upgrade's, and a root change leaves them as they are.
+- **a root change that cannot finish** (the check found items under neither root, or only under
+  the previous one): the previous root is kept for them and the items are listed. The owner runs
+  the re-seal again (`POST …/keys/jobs { kind: 'root' }`, after putting them right: a kit, an
+  import), goes back to the previous root (`POST …/keys/root/undo`: the roots swap, the sub-MEKs
+  are sealed under the previous one again and every item is re-sealed under it; then the root
+  that was new goes), or removes the previous root and leaves those items unreadable
+  (`POST …/keys/root/drop-old`, its fingerprint typed; `keys.root_old_dropped` with the count).
+  Each needs the step-up. The key kit, a restore and an import work during a root change.
 
 These run as a **job** the owner's browser drives (`POST …/keys/jobs/step`, a few seconds of work
-per call, with its progress): Drive by Drive, page by page, each write a compare-and-set on the
-item's `mek` and `ks` (a change made meanwhile is never overwritten; up to three passes pick
-such items up).
+per call, with its progress) over every Drive that can hold anything sealed under a KEK or a
+field key (every account with a user salt, not only those with a usage row: a Drive whose only
+content is a reverse link counts too): Drive by Drive, page by page, each write a compare-and-set
+on the item's `mek`, `ks` and sealed fields as stored (a change made meanwhile, such as a rename,
+is never overwritten; up to three passes pick such items up). A sub-MEK is deleted only when a
+count over those same Drives finds nothing under it. Cancelling a re-seal needs the step-up; a
+root change is not cancelled (it is finished, undone or its old root dropped).
 
 **Reverse shares.** The uploader seals to the link's public key as before. The link's private
 key is sealed under `HKDF(KEK, "", "secbin-reverse-link/v1")`, AAD
@@ -164,7 +187,8 @@ with no minimum; the page warns when it is empty or short.
 - **Key kit** (`secbin-key-kit/1`, Admin → Security → Keys): the root MEK, every sub-MEK with its
   dates and every user salt. It restores everything. The download needs the step-up and is
   recorded (`keys.kit_exported`, and what it covers: after a change to the keys or a new account
-  the page says to download a fresh one). Not during a root change.
+  the page says to download a fresh one). During a root change it also holds the previous root
+  MEK (`rootOld`: items not re-sealed yet open under it), so a backup can always be made.
 - **Verify** (both): read-only, on a file the person selects (never a copy the page kept; the
   input and the passphrase are cleared after use). The kit opens in the browser; only check
   values are sent (§3), and the server answers match or no match for each key and the salt. A
@@ -173,9 +197,16 @@ with no minimum; the page warns when it is empty or short.
   openings are throttled in the page.
 - **Restore** (both): only what the server lost comes back; working keys are never replaced. For
   the key kit: the root MEK when there is none (or none of the sub-MEKs opens under the one
-  there), or — with "Use the kit's root MEK" — on an instance with no Drive item yet; sub-MEKs
-  that are missing or do not open; user salts of accounts that have none. A preview first; the
-  restore itself needs the step-up.
+  there), or — with "Use the kit's root MEK" — on an instance with no Drive item or link key yet
+  (never during a root change); the previous root MEK of a kit made during a root change, when
+  this server has none (then the root change's re-seal runs again); sub-MEKs that do not open
+  here (with the recorded fingerprint), and a sub-MEK id this server does not have only when it
+  opens an item or a link key sealed under that id here (else it is reported `unused` or
+  `wrong`); user salts of accounts that have none, only when the salt opens one of that
+  Drive's items, link keys or received files (or the Drive holds nothing sealed under it: else
+  `wrong`, not written). Keys lost together are checked together (the kit's root and sub-MEKs
+  stand in for those this server lacks). The preview and the restore both need the step-up (the
+  preview tells which of the file's keys match this server's).
 
 ### 3.2 Admin → Security → Keys
 
@@ -187,12 +218,15 @@ now…"), the key kit (Download, Verify, Restore), the upgrade of Drives made be
 model v2 (§3.3) and one user's keys (their salt and KEKs, or their files' DEKs with names:
 masked until "Show", hidden again after 60 seconds). A new key is either **generated** by the
 server (a candidate shown with its fingerprint: "Use this key" or "Generate another"; kept for
-10 minutes for that session only and used once) or **entered by hand** (hex or base64, 32 bytes,
+10 minutes for that session only, used once and only for what it was made for — a root MEK or a
+sub-MEK, `409 candidate_purpose` otherwise; an unused one is deleted once its 10 minutes are over,
+at the next keyring call or the hourly alarm) or **entered by hand** (hex or base64, 32 bytes,
 with the out-of-band help; a key of one repeated byte is refused). Every change and every Show
 needs the step-up (the password, or a passkey), and is in the admin audit by fingerprint, never
 with a key (`keys.created`, `keys.candidate`, `keys.added`, `keys.rotated`, `keys.dates`,
 `keys.current`, `keys.removed`, `keys.viewed`, `keys.root_changed`, `keys.root_change_done`,
-`keys.kit_exported`, `keys.kit_verified`, `keys.restored`, `keys.exported`, `keys.imported`).
+`keys.root_old_dropped`, `keys.kit_exported`, `keys.kit_verified`, `keys.restored`,
+`keys.exported`, `keys.imported`).
 After a change the page says to download a fresh key kit.
 
 **Import / export** (Admin → Import / export → Drive keys): a file of its own
@@ -203,7 +237,8 @@ KEKs and, optionally, their files' DEKs (all, or the file ids listed). Users are
 search, Select all / Deselect all (of those shown), an uploaded id list (one per line, or a JSON
 array) and a download of the chosen ids. The server builds the document after the step-up; the
 page shows it masked (each value behind "Show") before it is sealed and saved. An import is
-decrypted in the browser, previewed (a dry run), then applied with the step-up; it never
+decrypted in the browser, previewed (a dry run, with the step-up: it checks KEKs and names the
+users), then applied with the step-up; it never
 replaces working keys: the root MEK, sub-MEKs and salts as a key-kit restore; a KEK is derived,
 so importing one only checks it (match, mismatch, or no such sub-MEK here); a DEK restores an
 item's DEK seal only when it is missing or does not open, and only after it opened the file's
@@ -219,10 +254,14 @@ row or an escrow wrap) as `pending` (`drive_migration`).
 
 - **Opening the old DK.** Only in a browser, with what the old release used
   (`public/js/drivev1.js`): at the user's sign-in (the password, a recovery code or a passkey's
-  PRF output), kept in the tab (`secbin_dk`) only while the Drive waits; or in the owner's
+  PRF output), kept in the tab (`secbin_dk`) only while the Drive waits (the tab drops it when it
+  opens the Drive and nothing waits any more: upgraded elsewhere, or by the owner; the owner's
+  own once the escrow clean-up is done); with a recovery kit of that release
+  (`secbin-owner-kit/1`, `secbin-user-kit/1`, opened in the browser only: the Drive page's "Use a
+  recovery kit of the previous release", when no wrap opens any more); or in the owner's
   browser, through the owner's escrow of that release (the owner's own old DK, opened at the
   owner's sign-in, opens the owner's sealed escrow private key, which opens the user's escrow
-  wrap: `drive.escrow_used` in the admin audit). An old DK read from the tab, and one an escrow
+  wrap, handed out with the step-up: `drive.escrow_used` in the admin audit). An old DK read from the tab, and one an escrow
   wrap gives, is used only once it is proven to be that Drive's (`driveupgrade.js`
   `isThisDrivesKey`): its key check value is the server's (`kcv` of the release before); a Drive
   without one must have an item name or link key it opens. A key that fails is removed from the
@@ -234,27 +273,44 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   only where the item is still sealed the old way (a compare-and-set): the upgrade can stop at
   any time and resume, and a repeat changes nothing. An item the old key cannot open (damaged in
   storage) is kept under a placeholder name (`damaged-<id>`) and, for a file whose key is lost
-  too, a random DEK (its content was already unreadable).
+  too, a random DEK (its content was already unreadable). A reverse-link key the old DK does not
+  open (damaged, or sealed under an archive's key by a start over of that release) holds the
+  upgrade: the page lists those links and its user retires them (`POST …/migrate/retire`, the
+  step-up; the owner through Admin for a user's Drive): each link ends, its key goes, and the
+  files it received that were not taken in are listed as failed, to be deleted
+  (`drive.links_retired`). A Drive that is upgraded stays upgraded: a late or repeated
+  `PUT …/migrate` is `409 already_upgraded`, and nothing sets it back to waiting.
 - **Verifying, then removing.** `POST …/migrate/finish` checks, a page per call from where the
   last call stopped (the cursor is the server's, so no page can be skipped), that every item and
-  link key opens under the user's KEKs. Only after the last page are the old key wraps and the
-  Drive's old salt, pin and check value removed; a failure starts the check over and removes
-  nothing. The owner's own old wraps and sealed escrow keys stay until every Drive is upgraded
-  (they open the users' Drives), and then go with the Directory's escrow records
-  (`drive.migration_done`).
+  link key opens under the user's KEKs (items upgraded after the cursor passed them were each
+  checked when they were written; neither check opens a file's content, so a "damaged" item's
+  random DEK passes). Only after the last page are the old key wraps and the Drive's old salt,
+  pin and check value removed; a failure starts the check over and removes nothing. The owner's
+  own old wraps and sealed escrow keys stay until every Drive is upgraded (they open the users'
+  Drives), and then go with the Directory's escrow records (`drive.migration_done`): after the
+  last upgrade, or after the last account still waiting is deleted, or when Admin → Security →
+  Keys finds nothing waiting.
 - **Where.** The Drive page upgrades the user's own Drive by itself, with its progress (asking
   once for the account password or a recovery code when the tab has no old DK); Admin →
-  Security → Keys lists every Drive waiting and upgrades a user's Drive through the escrow, per
-  user or all at once. The owner acting as a user cannot upgrade that Drive from the Drive page.
-  An item still sealed the old way shows as "waiting for the upgrade" and cannot be renamed,
-  downloaded or shared until then. `drive.migrated` is in the admin audit (with the owner as the
-  actor when the owner did it) and a system event in the user's activity.
+  Security → Keys lists every Drive waiting (a disabled account's too) and upgrades a user's
+  Drive through the escrow, per user or all at once (the owner's password asked once). The owner
+  acting as a user cannot upgrade that Drive from the Drive page. An item still sealed the old way
+  cannot be renamed until then; a tab that holds the old DK reads, downloads and shares it as the
+  release before sealed it, and any other shows it as "waiting for the upgrade". The root MEK
+  cannot be changed while a Drive waits with something of the release before in it.
+  `drive.migrated` is in the admin audit (with the owner as the actor when the owner did it) and
+  a system event in the user's activity.
 - **While a Drive waits,** the old wraps are kept current as before: a spent recovery code's wrap
   goes (handed once to that sign-in, `driveSpent`), the wraps of removed passkeys and replaced
   codes go, and an admin reset removes the old password wrap when another wrap of the user's own
-  remains (else it is marked stale).
-- Archives the owner's Drive kept after starting over in the release before stay as they were
-  (they are counted in the capacity; no page shows them).
+  remains (else it is marked stale). An AUTHN owner recovery keeps the owner's old wraps while
+  any Drive waits (the owner's old DK opens every user's escrow wrap, and the paper recovery codes
+  still open their wraps); they go with the escrow clean-up.
+- **The owner's archive** of the release before (a Drive started over, with the uploads its
+  paused links had received) is kept as it was, is not counted in the capacity, and opens with
+  nothing here. The owner deletes it in Admin → Security → Keys (`DELETE
+  /api/private/admin/drive/archive`, the step-up and the username typed): its R2 objects and rows
+  go, the links it paused are retired as above (`drive.archive_deleted` in the admin audit).
 
 ## 4. Storage (server)
 
@@ -266,8 +322,9 @@ row or an escrow wrap) as `pending` (`drive_migration`).
     `{iv, ct}`); `fk` holds an item's file key of the release before until its upgrade.
   - `upchunks(node_id, i, h)`: the chunks of a pending upload, with each chunk's SHA-256.
   - `refs(share_id, node_id)`: which shares reference which nodes.
-  - `reverse(…, priv, mek)`: reverse shares; `priv` is the link key sealed under the KEK of
-    `mek` and at rest under the field layer.
+  - `reverse(…, priv, mek, retired)`: reverse shares; `priv` is the link key sealed under the KEK
+    of `mek` and at rest under the field layer; `retired`: a link of the release before whose
+    key the upgrade could not open, ended with its key removed (§3.3).
   - `meta(k, v)`: rate-limit counters (`rl`), the upgrade's cursor while it runs, and — only
     while the Drive waits for its upgrade — the old `driveSalt`, `kcv` and pin (for the owner the
     sealed escrow keys); `wraps(kind, ref, data)`: the old wraps, likewise.
@@ -275,7 +332,7 @@ row or an escrow wrap) as `pending` (`drive_migration`).
 - The keyring lives in the Directory: meta `mek.root` (`{ key, fp, created }`), `mek.rootOld`
   while a root change runs, `mek.ever`, `mek.kit` (what the latest key kit covers) and `mek.job`;
   tables `meks(id, sealed, fp, from_ts, until_ts, created, note)`, `user_salts(user_id, salt,
-  created)`, `mek_candidates(id, sid, key, exp)` and `drive_migration(user_id, state, v1_items,
+  created)`, `mek_candidates(id, sid, key, exp, purpose)` and `drive_migration(user_id, state, v1_items,
   v1_links, updated)`.
 - Pending uploads older than the role's `filePendingSec` are purged by the Drive DO's alarm.
 
@@ -299,13 +356,13 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/private/drive` | `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration }` (`current`: the current sub-MEK's id; `migration`: null, or `{ pending, v1Items, v1Links, legacy }` while the Drive waits for its upgrade, §3.3; `capacity` null = no limit). A role without a Drive: `200 { enabled: false, capacity, maxFile, used }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
+| `GET /api/private/drive` | `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration }` (`current`: the current sub-MEK's id; `migration`: null, or `{ pending, v1Items, v1Links, legacy }` while the Drive waits for its upgrade, §3.3; `capacity` null = no limit). A read with two side effects, both the server's own: the keyring is made on first need, and a Drive waiting for its upgrade with nothing of the release before in it is marked upgraded (the session cookie is `SameSite=Strict`, so no other site can cause either). A role without a Drive: `200 { enabled: false, capacity, maxFile, used }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
 | `POST /api/private/drive/keys` | `{}` → the session's KEKs (§3): `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — every sub-MEK the Drive's items use, and the current one (`kekOld` while the owner changes the root MEK; `missing` / `broken`: sub-MEKs the Directory does not have or cannot open). `503 keys_missing` without a root MEK, `409 salt_missing` without the account's salt. Not to another site (`403`). The owner acting as the user gets the user's (`drive.keys_used`) |
 | `POST /api/private/drive/kit` | the personal kit's content after the step-up (`current` \| `reauth`): `{ kit: { id, username, userSalt, current, keks: [{ mekId, fp, from, until, kek }] }, missing, broken }` (`drive.kit_exported`); `403 impersonating` for the owner acting as the user (as every kit route) |
 | `POST /api/private/drive/kit/verify` | `{ keks: { mekId: check }, salt: check }` (check values, §3) → `{ complete, salt, keks: [{ mekId, fp, from, until, inUse, current, result }], extra, now }` (`match` \| `mismatch` \| `absent`; read-only, `drive.kit_verified`); at most 30 per session per 10 minutes (`429 rate_limited`) |
-| `POST /api/private/drive/kit/restore` | `{ salt?, current \| reauth }` → `{ salt: 'restored' \| 'same' \| 'kept' \| 'wrong' \| 'absent', unreadable: [mekIds the server cannot open] }` (`drive.kit_restored`) |
-| `GET /api/private/drive/kit/items?mek=&after=` · `PUT /api/private/drive/kit/items` | the items and link keys sealed under a sub-MEK the server can no longer open (`409 readable` otherwise), and the same re-sealed in the browser with the kit's KEK under the current one (each checked; compare-and-set on `fromMek` / `fromKs`) |
-| `GET /api/private/drive/migrate` · `GET …/migrate/items?after=` · `PUT …/migrate` · `POST …/migrate/finish` | the upgrade of the user's own Drive (§3.3): what is left and the user's own old wraps and salt (for the owner also the sealed escrow keys); a page of old items; `{ items: [{ id, ks, mek, name, meta?, dek? }], links: [{ id, mek, priv }] }` re-sealed (each checked; `409 mek_not_current`, `400 bad_seal`) → `{ done, skipped, v1Items, v1Links }`; the verification a page per call → `{ verified, next }` or `{ done: true, left, cleanup }` (`409 not_upgraded`, `409 verify_failed`). `403 impersonating` for the owner acting as the user |
+| `POST /api/private/drive/kit/restore` | `{ salt?, current \| reauth }` → `{ salt: 'restored' \| 'same' \| 'kept' \| 'wrong' \| 'absent', unreadable: [mekIds the server cannot open] }` (`drive.kit_restored`; the salt must open one of the Drive's items, link keys or received files, or the Drive holds nothing sealed under it) |
+| `GET /api/private/drive/kit/items?mek=&after=` · `PUT /api/private/drive/kit/items` | the items (with `from`: their sealed fields as stored) and link keys sealed under a sub-MEK the server can no longer open (`409 readable` otherwise), and the same re-sealed in the browser with the kit's KEK under the current one (each checked; compare-and-set on `fromMek`, `fromKs` and `from`) |
+| `GET /api/private/drive/migrate` · `GET …/migrate/items?after=` · `PUT …/migrate` · `POST …/migrate/finish` · `POST …/migrate/retire` | the upgrade of the user's own Drive (§3.3): what is left and the user's own old wraps and salt (for the owner also the sealed escrow keys: with a stolen session they allow offline guessing of the old password, as the release before's `GET /drive` did, only while the Drive waits, and never while impersonating); a page of old items (link keys as the release before sealed them, the field layer taken off); `{ items: [{ id, ks, mek, name, meta?, dek? }], links: [{ id, mek, priv }] }` re-sealed (each checked; `409 mek_not_current`, `400 bad_seal`, `409 already_upgraded` once the Drive is upgraded) → `{ done, skipped, v1Items, v1Links }`; the verification a page per call → `{ verified, next }` or `{ done: true, left, cleanup }` (`409 not_upgraded`, `409 verify_failed`); `{ ids, current \| reauth }` → the links of the release before that the old key does not open, retired → `{ retired, failed, v1Items, v1Links }` (`drive.links_retired`). `403 impersonating` for the owner acting as the user |
 | `GET /api/private/drive/nodes/<id>` | the node and its children: `{ node, children: [...], path: [...ancestors] }` (`root` for the top; `path` root first). Each node: `{ id, parent, kind: 'dir' \| 'file', name, meta, ks, mek, mfp, size, chunks, state, dek, ch, created, updated }` with the sealed fields as stored; an item of the release before has `v1: true` and `fk` instead of `ks`, `mek`, `mfp`, `dek` and `ch`. 404 for an unknown id |
 | `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `{ id }` (`id` chosen by the browser; 409 if taken; every seal checked, §3) |
 | `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `{ id, uploadToken, chunks }` (`size` = plaintext bytes, `chunks = ceil(size / 8 MiB)`; capacity checked) |
@@ -317,12 +374,14 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `POST /api/private/drive/shares` | `{ nodes: [file ids], views, expire, deletable?, label?, types?, depth?, paste, acc }` → `{ id, deletetoken }`: `nodes` lists **files** (the browser flattens folders), and `refs[i]` is `nodes[i]`; `types` / `depth` are the file-policy declaration, sent only when a policy applies (as for file shares); `paste` is the `encryptPaste` body (`acc` is also inside it) |
 | `GET /api/private/drive/nodes/<id>/shares` | shares referencing the node — for a folder, every share that references a file under it: `{ shares: [{ id, label, kind: 'drive', created, expires, views_total, left, status, locked }] }` (My shares' row fields; `views_total` / `left` null = unlimited) |
 | `GET /api/private/admin/keys` · `…/usage` | the owner: the keyring's status (fingerprints and dates, never a key: `{ ready, lost, root, subs: [{ id, fp, from, until, status, opens, note }], current, job, kit, kitFresh, users, now }`); the items per sub-MEK over every Drive |
-| `POST /api/private/admin/keys/candidate` · `…/subs` · `PATCH`/`DELETE …/subs/<id>` · `POST …/subs/<id>/current` · `…/subs/<id>/show` · `…/root` · `…/root/show` | the owner, each with the step-up (§3.2): a generated candidate `{ id, key, fp, expires }`; add (`{ candidate \| key, from?, note?, rotate? }`); edit dates; delete (`409 in_use`, `409 current_key`); set current; Show; change the root (`{ candidate \| key }` → `{ fp, job }`) |
-| `POST /api/private/admin/keys/jobs` · `POST …/jobs/step` · `DELETE …/jobs` | a re-seal job (`{ from, remove?, current \| reauth }`), its next step → `{ job: { kind, from, drives, drive, phase, done, failed, pass, finished, result } }`, cancel (not a root change) |
-| `POST /api/private/admin/keys/kit` · `…/verify` · `…/restore` | the key kit's content after the step-up (`{ kit, material: { made, current, root, subs, salts } }`); a read-only check by check values (at most 30 per session per 10 minutes); a restore (`{ root?, subs?, salts?, useRoot?, dryRun }`, the step-up unless a dry run; `409 in_use` for `useRoot` on an instance with items) |
-| `POST /api/private/admin/keys/export` · `…/import` | the keys parts of Import / export (§3.2): `{ root?, subs?: 'all' \| [ids], salts?: [userIds], users?: [{ id, keks, deks: 'all' \| [nodeIds] \| false }] }` → `{ document }` (at most 10 000 DEKs per user); `{ document, take, useRoot?, dryRun }` → `{ keys, users: [{ keks: { match, mismatch, unknown }, deks: { restored, working, failed, missing } }] }` |
+| `POST /api/private/admin/keys/candidate` · `…/subs` · `PATCH`/`DELETE …/subs/<id>` · `POST …/subs/<id>/current` · `…/subs/<id>/show` · `…/root` · `…/root/show` | the owner, each with the step-up (§3.2): a generated candidate (`{ purpose: 'root' \| 'sub' }` → `{ id, key, fp, expires }`); add (`{ candidate \| key, from?, note?, rotate? }`); edit dates; delete (`409 in_use`, `409 current_key`); set current; Show; change the root (`{ candidate \| key }` → `{ fp, job }`; `409 migration_pending` with `drives` while a Drive waits with something of the release before; `409 candidate_purpose` for a sub-MEK's candidate) |
+| `POST /api/private/admin/keys/jobs` · `POST …/jobs/step` · `DELETE …/jobs` | a re-seal job (`{ from, remove?, current \| reauth }`), or the root change's again (`{ kind: 'root', current \| reauth }`, while the previous root is kept); its next step → `{ job: { kind, from, drives, drive, phase, done, failed, failedIds, pass, verifying, finished, result } }` (`phase` `items`, `atrest`, then for a root change `verify` and `verifyrest`); cancel, with the step-up (not a root change that runs) |
+| `POST /api/private/admin/keys/root/undo` · `…/root/drop-old` | a root change that could not finish (§3), each with the step-up: go back to the previous root (→ `{ fp, job }`); remove the previous root (`{ confirm: <its fingerprint> }` → `{ lost }`) |
+| `POST /api/private/admin/keys/kit` · `…/verify` · `…/restore` | the key kit's content after the step-up (`{ kit, material: { made, current, root, rootOld?, subs, salts } }`); a read-only check by check values (at most 30 per session per 10 minutes); a restore (`{ root?, rootOld?, subs?, salts?, useRoot?, dryRun }`, with the step-up, the preview too → `{ root, rootOld, subs: [{ id, result }], salts: { restored, same, kept, wrong, unknown } }`; `409 in_use` for `useRoot` on an instance with items or link keys) |
+| `POST /api/private/admin/keys/export` · `…/import` | the keys parts of Import / export (§3.2): `{ root?, subs?: 'all' \| [ids], salts?: [userIds], users?: [{ id, keks, deks: 'all' \| [nodeIds] \| false }] }` → `{ document }` (at most 10 000 DEKs per user); `{ document, take, useRoot?, dryRun }` (with the step-up, the preview too) → `{ keys, users: [{ keks: { match, mismatch, unknown }, deks: { restored, working, failed, missing } }] }` |
 | `POST /api/private/admin/keys/users/<userId>/view` | the owner, with the step-up: `{ what: 'keks' }` → the user's salt and KEKs; `{ what: 'deks', after? }` → a page of their files (id, name, DEK) (`drive.keys_viewed`) |
-| `GET /api/private/admin/drive/migration` · `POST …/drive/migrate/<userId>/escrow` · `GET`/`PUT …/drive/migrate/<userId>[/items]` · `POST …/finish` | the owner: every Drive waiting for its upgrade, with what is left; the user's escrow wrap of the release before and their current KEK (`drive.escrow_used`); the upgrade routes above for that user |
+| `GET /api/private/admin/drive/migration` · `POST …/drive/migrate/<userId>/escrow` · `GET`/`PUT …/drive/migrate/<userId>[/items]` · `POST …/finish` · `POST …/retire` | the owner: every Drive waiting for its upgrade (disabled accounts too), with what is left (it also runs the escrow clean-up once nothing waits); the user's escrow wrap of the release before and their current KEK, with the step-up (`drive.escrow_used`); the upgrade routes above for that user (retire: the owner's step-up, `drive.links_retired` in the admin audit) |
+| `GET`/`DELETE /api/private/admin/drive/archive` | the owner's archive of the release before (§3.3): `{ items, bytes, received, links }`; deleted with `{ confirm: <username>, current \| reauth }` → `{ items, bytes, links }` (`drive.archive_deleted`) |
 
 While the owner impersonates a user, every Drive route works for the owner as for the user
 (with the user's keys), except the personal kit and the upgrade (`403 impersonating`), and the
@@ -458,7 +517,10 @@ stand-in. What each side relies on:
   seal to another item together with its salt, and it would open there; a seal cannot be moved
   to another user, sub-MEK, field or salt. The browser checks a file's sealed metadata (its
   size must be the server's and match the chunk count) and the chunk AAD `(i, n)`, so a moved DEK
-  opens only content of the same size and chunk count, and a swapped chunk fails.
+  opens only content of the same size and chunk count, and a swapped chunk fails. The ciphertext
+  hash (`ch`, checked on download) is kept by the server next to the item, bound into no seal:
+  it catches stored chunks that changed after the upload, not a server that moves or rolls back
+  a whole item (with its hash).
 - **Keys handed out.** A session gets its own KEKs (§3); the owner acting as a user gets the
   user's. The root MEK and the sub-MEKs leave the Directory only for the owner after the step-up
   (Show, the key kit, an export), always in the admin audit by fingerprint; generated or entered
@@ -483,13 +545,19 @@ stand-in. What each side relies on:
   - the owner's use of a user's keys is the owner's own action, in the admin audit only:
     `drive.keys_used` (the user's KEKs handed to the owner acting as the user; `imp` and `adm`),
     `drive.keys_viewed` (Security → Keys, or an export), `drive.keys_imported`,
-    `drive.escrow_used` (the upgrade through the escrow of the release before) and
-    `drive.migrated`; the keyring's actions (`keys.*`, §3.2) and `drive.migration_done`, with no
-    subject. Deleting an account's Drive with the account is an admin action too.
+    `drive.escrow_used` (the upgrade through the escrow of the release before),
+    `drive.migrated`, `drive.links_retired` and `drive.archive_deleted`; the keyring's actions
+    (`keys.*`, §3.2) and `drive.migration_done`, with no subject. Deleting an account's Drive
+    with the account is an admin action too. A user retiring their own links of the release
+    before (§3.3) is in their activity (`drive.links_retired`).
 - **The KEKs in the tab.** In the page's memory only (§3): never written to or read from
   browser storage, so a key planted there is never used. The old Drive key of the release before
   (only while a Drive waits for its upgrade) is kept in `sessionStorage` and used only once its
-  key check value matches the server's (§3.3). The CSP and Trusted Types keep other script out,
+  key check value matches the server's (§3.3), and it leaves the tab once nothing waits. When the
+  page stops acting for its session (the session ended, or the browser is now signed in as
+  someone else: another tab signed in, or started or ended impersonation — found on the next
+  change, or when the tab is shown again), an open Drive closes: its KEKs are overwritten and
+  dropped, and what it showed leaves the page. The CSP and Trusted Types keep other script out,
   as for the rest of the app; what remains is in SECURITY.md.
 - Capacity, sizes and chunk counts are enforced server-side; names and types are not (they are
   encrypted), so file-type rules for drive shares are enforced by the client, as for file shares.
@@ -525,15 +593,17 @@ leave open:
   (deleted, purged, the Drive destroyed) removes its object, never a chunk of a finished file.
 - **Keys.** Every seal a browser sends is opened once in the Worker with the current KEK before
   it is stored (`src/lib/mek.js` `checkNewItem`); a sealed DEK is at most 128 characters, a link
-  key 256. `POST …/drive/keys` makes the account's salt when the Drive has no item yet and the
-  account has none (a salt lost from a Drive with items is only restored, §3.1). The Worker
-  re-seals only with compare-and-set writes in the Drive object (`applySealed`, `applyLegacy`,
-  `restoreItem`), so a change made meanwhile is never overwritten.
+  key 256. `POST …/drive/keys` makes the account's salt when the Drive has no item and no link
+  key yet and the account has none (a salt lost from a Drive with either is only restored,
+  §3.1). The Worker re-seals only with compare-and-set writes in the Drive object
+  (`applySealed`, `applyLegacy`, `restoreItem`, each on the stored mek, salt and sealed
+  fields), so a change made meanwhile is never overwritten.
 - **The wraps of the release before** (only while a Drive waits for its upgrade, §3.3): the
   server drops the wraps of passkeys and codes the account no longer has (a passkey removed,
   codes regenerated, a code spent at sign-in, the owner's "remove all passkeys"); a password
   change marks the `pw` wrap stale; an admin reset drops it when a passkey or recovery wrap
-  remains. Nothing writes a new wrap.
+  remains; an AUTHN owner recovery keeps the owner's while any Drive waits. Nothing writes a new
+  wrap.
 - **Shares.** A folder id in `nodes` is refused (`400 not_a_file`); files must be finalized
   (`409 not_ready`). `acc`, when sent both inside `paste` and next to it, must be the same. The
   stream-size caps (`maxShareBytes`, `maxFileBytes`) do not apply (nothing is uploaded; the files

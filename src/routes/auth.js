@@ -106,10 +106,11 @@ export async function handleAuth(request, env, url) {
     const res = await directory(env).setup({ authnHash, username: body.username, salt: body.salt, t: body.t, verifier });
     if (!res.ok) return err(res.status, res.error, res.message);
     if (res.recovered && res.ownerId) {
-      // The owner's passkeys and recovery codes are gone: so are the Drive key
-      // wraps of the release before that belonged to them (a Drive still
-      // waiting for its upgrade). No Drive key changes. The recovery itself
-      // never fails on this.
+      // The owner's passkeys and recovery codes are gone. Their Drive key wraps
+      // of the release before stay while any Drive waits for its upgrade (the
+      // paper codes still open them, and the owner's old key opens every
+      // user's escrow); once nothing waits they go. No Drive key changes. The
+      // recovery itself never fails on this.
       try { await driveOwnerRecovered(env, res.ownerId); } catch (e) { console.warn('secbin: owner Drive not synced after recovery', e && e.message ? e.message : e); }
     }
     let made = null;

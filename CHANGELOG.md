@@ -21,8 +21,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   server derives every KEK — `HKDF(root MEK ‖ sub-MEK, user salt, "secbin-kek/v1\n<userId>")` —
   from keys it keeps in the Directory, so the server, and anyone with a copy of the Directory's
   storage, can decrypt every Drive file. A leak of R2 or of a Drive object without the Directory
-  reveals nothing. Notes, file shares, Drive shares and reverse-share uploads (until taken in)
-  stay end-to-end.
+  reveals nothing. Notes and file shares stay end-to-end; Drive shares (Drive ciphertext whose
+  DEK is also sealed under the KEK) and reverse-share uploads (the link's private key is sealed
+  under the KEK) are not end-to-end against the server either, and the uploader's page, the
+  Drive page, the glossary and the docs say so.
   - The Drive opens right after sign-in: no set-up, unlock or recovery screens, and passwords,
     passkeys and recovery codes play no part in it. The owner acting as a user gets the user's
     keys (`drive.keys_used`, admin audit only).
@@ -49,9 +51,26 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - Every seal a browser sends is checked in the Worker; each file stores a ciphertext hash;
     reverse-link keys and received items are also sealed at rest under a per-user field key.
   - **The upgrade of existing Drives** (docs/DRIVE.md §3.3): each Drive made by the release
-    before is re-sealed once, in the user's browser at sign-in or in the owner's through the
-    escrow of that release, resumably, and the old wraps and escrow keys are removed only after
-    the server verified that every item opens under the new keys.
+    before is re-sealed once, in the user's browser at sign-in (or with a recovery kit of that
+    release) or in the owner's through the escrow of that release (with the step-up; disabled
+    accounts too), resumably, and the old wraps and escrow keys are removed only after the
+    server verified that every item opens under the new keys, and after the last Drive is done
+    or the last account still waiting is deleted. A link whose old key does not open is
+    retired by its user (the step-up); a finished upgrade stays finished; the old Drive key
+    leaves the tab once nothing waits; an AUTHN owner recovery keeps the owner's old wraps
+    while a Drive waits; the owner can delete the archive of a start over (not counted in the
+    capacity any more).
+  - **Keyring jobs, after the security audit:** every Drive that can hold a sealed value is part
+    of every job and count (a Drive with only a reverse link included); a root change seals
+    nothing new under the previous root (`409 stale_keys`), checks every Drive before the
+    previous root goes, waits while a Drive still has something of the release before, and one
+    that cannot finish is run again, undone, or its previous root dropped with its fingerprint
+    typed (the key kit holds both roots meanwhile); re-seals never revert a rename made
+    meanwhile; a restore or an import adds a sub-MEK or a salt only when it opens something
+    there; cancelling a job and the restore and import previews need the step-up; a generated
+    key is used only for its purpose and deleted when unused. A download checks the file's
+    ciphertext hash. An open Drive drops its keys when the session ends or the browser is now
+    signed in as someone else.
 - **CAPTCHA on shares and reverse shares** (role options; SECURITY.md "CAPTCHA on shares",
   docs/API.md, docs/REVERSE.md §5–§8, docs/DRIVE.md §5, §7): Admin → Roles has, for every
   non-public role, "CAPTCHA on shares" (notes, file shares, Drive shares) and — while the role

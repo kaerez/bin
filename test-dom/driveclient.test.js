@@ -1,7 +1,7 @@
 // driveclient.test.js — the Drive client (public/js/driveclient.js) against an
 // in-memory stand-in for the §6 API (docs/DRIVE.md) behind a mocked fetch
 // (drive-fake-server.js): the Drive opens with the KEKs the server hands the
-// session (no prompt; the tab's slot, the impersonated user's own slot), the
+// session (no prompt; kept in the page's memory only, the impersonated user's too), the
 // keys that cannot be had, a new sub-MEK picked up on the server's word, names
 // decrypted on list (and never sent in the clear), exact chunk sizes on upload,
 // download round trips, manifest v3 contents of a share (decrypted as a

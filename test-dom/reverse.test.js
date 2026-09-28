@@ -617,7 +617,7 @@ describe('audit round 3: taking received files in', () => {
 });
 
 describe('the owner acting as the user: received files', () => {
-  it('opens the user\'s Drive with the user\'s keys (their own slot), takes a received file in and downloads it', async () => {
+  it('opens the user\'s Drive with the user\'s keys (in the page\'s memory only), takes a received file in and downloads it', async () => {
     S = fakeServer({ capacity: 50 * 1024 * 1024 });
     globalThis.fetch = S.fetch;
     ids = await seedTree(S, { Inbox: {} });

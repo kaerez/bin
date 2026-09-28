@@ -954,17 +954,33 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   the sealed metadata carries the size, checked against the server's.
 - **Keys handed out.** After sign-in the server hands the session the user's KEKs (no prompt;
   the step-up rules for sensitive actions are unchanged). The owner acting as a user gets the
-  user's KEKs (`drive.keys_used`, in the admin audit only), kept in the tab's own slot for them,
-  never over the owner's. The root MEK and the sub-MEKs leave the Directory only for the owner,
+  user's KEKs (`drive.keys_used`, in the admin audit only), in that page's memory only. The same
+  holds for a user's current KEK the escrow route hands the owner for an upgrade
+  (`drive.escrow_used`, with the step-up, as for Show). The root MEK and the sub-MEKs leave the Directory only for the owner,
   after the step-up (Show, the key kit, an export), recorded by fingerprint; generated and
   entered keys are never logged. The Worker opens DEKs and names only to check a new seal and to
   re-seal (rotation, a sub-MEK deleted, a root change), in memory, never stored or logged.
 - **Every new seal is checked.** The Worker opens what a browser sends once with the current KEK
-  before storing it (`400 bad_seal`, `409 mek_not_current`), so the server can always re-seal it
-  later; re-seals are compare-and-set writes, so a change made meanwhile is never overwritten.
+  before storing it (`400 bad_seal`, `409 mek_not_current`; during a root change a rename sealed
+  under the previous root is `409 stale_keys`), so the server can always re-seal it later;
+  re-seals are compare-and-set writes on the stored keys and sealed fields, so a change made
+  meanwhile (a rename) is never overwritten.
+- **Key jobs cover every Drive.** A re-seal, a sub-MEK delete and a root change visit every
+  account with a user salt (a Drive whose only content is a reverse link included). A sub-MEK is
+  deleted only when a count over them finds nothing under it; a root change removes the
+  previous root only after a final check that everything opens under the new one, and waits
+  while a Drive still has something of the release before. One that cannot finish keeps the
+  previous root; the owner runs it again, goes back, or drops the previous root with its
+  fingerprint typed (the items listed stay unreadable), each with the step-up; the key kit made
+  meanwhile holds both roots.
 - **The keyring.** Created on first need, and only if there never was one: a lost keyring is
   never replaced silently (the Drive says the keys are missing and the key kit restores them).
-  Restores and imports never replace a working key.
+  Restores and imports never replace a working key, and add only what proved to belong: a
+  sub-MEK this server does not have only when it opens an item or link key sealed under its id
+  here, a user salt only when it opens something of that Drive's (a Drive that holds a link key
+  never gets a new random salt in place of a lost one). A generated key is used only for what it
+  was made for (a root MEK or a sub-MEK), and an unused one is deleted after 10 minutes. Every
+  keyring change, and the previews of a restore or an import, need the step-up.
 - **Kits.** The personal kit (every user) holds the user's salt and KEKs; the key kit (the
   owner) the root MEK, every sub-MEK and every user salt. Each is sealed in the browser under an
   optional passphrase (Argon2id, AES-256-GCM, bound to the account and the origin) and never sent
@@ -985,6 +1001,13 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   and Admin use it); it is used only once its key check value matches the server's (a Drive
   without one: once it opens one of the Drive's old items), and a key that fails is removed.
   Every other slot a release before used is removed at each Drive open and dashboard load. The
+  old key leaves the tab when its Drive opens and nothing waits any more (the owner's once the
+  escrow clean-up is done). When the page stops acting for its session (the session ended; the
+  browser is now signed in as someone else — another tab signed in, impersonation started or
+  ended — found at the next change or when the tab is shown again), an open Drive closes: its
+  KEKs are overwritten and dropped, and what it showed leaves the page. A download checks the
+  file's chunks against the ciphertext hash the server recorded and refuses a file that does not
+  match (integrity metadata, not a seal: DRIVE.md §9). The
   CSP and Trusted Types (§4) keep other script out, as for the rest of the app; the pages that
   may load Cloudflare's Turnstile script (the one third-party script, §4) move that old key into
   the page's memory before the script loads (the sign-in page writes it back as it leaves). What
@@ -994,12 +1017,17 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   (`secbin_dk…`, `secbin_kek…`) from `sessionStorage` before it goes there (*CAPTCHA on shares*);
   a Drive still waiting for its upgrade then asks for the password once.
 - **The upgrade of Drives made before this model** (DRIVE.md §3.3) opens the old Drive key only
-  in a browser — at the user's sign-in, or in the owner's browser through the owner's escrow of
-  that release (recorded, `drive.escrow_used`) — re-seals every item under the user's KEK, and
-  removes the old wraps only after the server has verified that every item opens under the new
-  keys (the owner's escrow keys and records only once every Drive is upgraded). While a Drive
-  waits, its old key wraps are kept current as before (spent recovery codes, removed passkeys and
-  replaced codes lose theirs; an admin reset drops the old password's wrap when another remains).
+  in a browser — at the user's sign-in, with a recovery kit of that release, or in the owner's
+  browser through the owner's escrow of that release (with the step-up; recorded,
+  `drive.escrow_used`) — re-seals every item under the user's KEK, and removes the old wraps only
+  after the server has verified that every item opens under the new keys (the owner's escrow
+  keys and records only once every Drive is upgraded, or the last account still waiting is
+  deleted). A link whose old key does not open is retired by its user (the step-up): it ends and
+  its key goes. A finished upgrade stays finished. While a Drive waits, its old key wraps are
+  kept current as before (spent recovery codes, removed passkeys and replaced codes lose theirs;
+  an admin reset drops the old password's wrap when another remains; an AUTHN owner recovery
+  keeps the owner's until nothing waits). The owner's archive of that release (a start over) is
+  deleted from Admin → Security → Keys (the step-up, the username typed; audited).
 
 ### Read receipts
 
