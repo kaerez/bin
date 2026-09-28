@@ -14,6 +14,7 @@ import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib
 import { parseId } from '../lib/ids.js';
 import { MAX_SHARE_FILTER_USERS } from '../directory-do.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
+import { escrowRoute, adminSetUserKeys, syncCredentialWraps, destroyDrive, drivePasswordChanged } from './drive.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
@@ -22,7 +23,7 @@ const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const SCOPE_RE = /^(global|role:default|role:[A-Za-z0-9_-]{16}|[A-Za-z0-9_-]{16})$/;
 const SCOPE_MSG = 'scope must be "global", "role:<id>" or the public account';
 const now = () => Math.floor(Date.now() / 1000);
-const SHARE_KINDS = ['text', 'files', 'url', 'secret'];
+const SHARE_KINDS = ['text', 'files', 'url', 'secret', 'drive'];
 const SHARE_STATUSES = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'];
 
 /** Parse the admin share-list filters from the query string (all optional). */
@@ -65,6 +66,11 @@ export async function handleAdmin(request, env, url) {
   if (a.actor) return err(403, 'impersonating', 'Return to your own account to use the admin panel.');
   if (a.user.role !== 'owner') return err(403, 'forbidden', 'Owner only.');
   const me = a.user.id;
+
+  // A user's Drive keys (docs/DRIVE.md §3, §6): open their escrow wrap (with a
+  // reason) / write their password wrap after a reset. Both logged.
+  const em = p.match(/^\/api\/private\/admin\/drive\/(escrow|keys)\/([A-Za-z0-9_-]{16})$/);
+  if (em) return em[1] === 'escrow' ? escrowRoute(request, env, me, em[2]) : adminSetUserKeys(request, env, me, em[2]);
 
   if (p === '/api/private/admin/shares') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -272,6 +278,18 @@ export async function handleAdmin(request, env, url) {
       }
       if (request.method === 'DELETE') {
         assertIntent(request);
+        const can = await dir.canDeleteUser(uid);
+        if (!can.ok) return fromDir(can);
+        // The Drive goes first (its shares end, then its ciphertext and state),
+        // so the account is deleted only once nothing of its Drive is left;
+        // on a failure the account stays and deleting it again retries.
+        try {
+          await destroyDrive(env, dir, uid, { id: me, adm: true }); // an admin action: never in the user's activity
+        } catch (e) {
+          if (e && e.status && e.status < 600) throw e; // e.g. 503 not_configured
+          console.warn('secbin: drive not destroyed', e && e.message ? e.message : e);
+          return err(503, 'drive_not_deleted', 'The account was not deleted: its Drive could not be removed right now. Try again.');
+        }
         const r = await dir.deleteUser(uid, me);
         if (!r.ok) return fromDir(r);
         if (url.searchParams.get('revokeShares') === '1') {
@@ -288,6 +306,8 @@ export async function handleAdmin(request, env, url) {
       if (!verifier) return err(400, 'invalid_credential', 'Invalid password proof.');
       const r = await dir.setPassword(uid, { salt: body.salt, t: body.t, verifier }, me);
       if (!r.ok) return fromDir(r);
+      // The Drive's password wrap opens only with the old password now.
+      await drivePasswordChanged(env, uid, { reset: true });
       if (uid === me) {
         // Resetting your own password ends your other sessions; keep this one.
         const s = await cachedSettings(env);
@@ -311,6 +331,7 @@ export async function handleAdmin(request, env, url) {
       const body = await readJsonBody(request);
       const step = uid === me ? await stepUpFrom(body, url) : {};
       const r = await dir.adminResetPasskeys(uid, me, { ...step, lockoutOff: g.off.all });
+      if (r.ok) await syncCredentialWraps(env, uid);
       return r.ok ? json(r) : afterRefusal(env, g, r, fromDir(r));
     }
     if (action === 'role') {

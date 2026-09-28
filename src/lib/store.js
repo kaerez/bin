@@ -57,3 +57,9 @@ export function fileStub(env, id) {
   const ns = binding(env, 'FILESHARE');
   return ns.get(ns.idFromName(id));
 }
+
+/** A user's Drive (docs/DRIVE.md): one Durable Object per user. */
+export function driveStub(env, uid) {
+  const ns = binding(env, 'DRIVE');
+  return ns.get(ns.idFromName(`drive:${uid}`));
+}

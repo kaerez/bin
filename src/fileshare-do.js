@@ -12,6 +12,11 @@
 // Every expiry path (deadline, share expiry, last grant) runs through the alarm,
 // which deletes the R2 objects — R2 has no per-object TTL. The server never sees
 // file names, types, sizes or structure: only the padded stream length.
+//
+// A Drive share (docs/DRIVE.md §7) is the same record with `refs` — the Drive
+// files it references ({ key: 'd/<uid>/<node>', chunks, size }) — instead of
+// an uploaded stream: created active, its purge deletes only this record
+// (never a d/ object: the Drive owns those), and chunks are read by (ref, i).
 
 import { DurableObject } from 'cloudflare:workers';
 import { verifyToken } from './lib/ids.js';
@@ -56,7 +61,7 @@ export class FileShare extends DurableObject {
   }
 
   async #purge(rec) {
-    if (rec) {
+    if (rec && !Array.isArray(rec.refs)) {
       const r2 = this.env.FILES;
       if (r2 && typeof r2.delete === 'function') {
         const keys = Array.from({ length: rec.chunks }, (_, i) => r2Key(rec.id, i));
@@ -144,6 +149,30 @@ export class FileShare extends DurableObject {
     });
   }
 
+  /**
+   * A Drive share: active at once, referencing Drive files (`refs`) instead of
+   * an upload. The encrypted manifest must declare what was authorized.
+   */
+  async initRefs({ id, dth, refs, views, expire, ttl, deletable = false, paste, acc }) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (await this.#rec()) return { status: 'exists' };
+      if (paste.adata.bar !== (views !== null) || paste.meta.expire !== expire
+          || (paste.meta.views ?? null) !== views || (paste.meta.deletable === true) !== !!deletable) return { status: 'mismatch' };
+      const created = nowSec();
+      const expires = created + ttl;
+      const meta = { expire, created, expires };
+      if (views !== null) meta.views = views;
+      if (deletable) meta.deletable = true;
+      await this.#put({
+        id, state: 'active', dth, padded: 0, chunks: 0, views, left: views, expire, ttl, expires, acc, grants: [],
+        refs: refs.map((r) => ({ key: r.key, chunks: r.chunks, size: r.size })),
+        paste: { v: paste.v, ct: paste.ct, wk: paste.wk, adata: paste.adata, meta },
+      });
+      await this.ctx.storage.setAlarm(expires * 1000);
+      return { status: 'ok', created, expires };
+    });
+  }
+
   // ── read ──────────────────────────────────────────────────────────────────
   #metaOut(rec) {
     const m = { ...rec.paste.meta, expires: rec.expires };
@@ -193,11 +222,13 @@ export class FileShare extends DurableObject {
       await this.ctx.storage.put(GRANTS_KEY, grants);
       await this.#put(rec);
       const p = rec.paste;
-      return {
+      const out = {
         status: 'ok',
         paste: { v: p.v, ct: p.ct, wk: p.wk, adata: p.adata, meta: this.#metaOut(rec) },
         grantExpires: gexp, chunks: rec.chunks, padded: rec.padded,
       };
+      if (Array.isArray(rec.refs)) out.refs = rec.refs.map((r) => ({ chunks: r.chunks, size: r.size }));
+      return out;
     });
   }
 
@@ -223,6 +254,17 @@ export class FileShare extends DurableObject {
     if (!Number.isInteger(i) || i < 0 || i >= rec.chunks) return { status: 'bad_index' };
     if (!(await this.#grants(rec)).some((g) => safeEq(g.h, grantHash))) return { status: 'bad_grant' };
     return { status: 'ok', key: r2Key(rec.id, i) };
+  }
+
+  /** Drive shares: is `grantHash` valid for chunk i of ref `ref`? Returns the Drive object's key. */
+  async chunkAccessRef(grantHash, ref, i) {
+    const rec = await this.#live();
+    if (!rec || rec.state === 'pending') return { status: 'gone' };
+    if (!Array.isArray(rec.refs) || !Number.isInteger(ref) || ref < 0 || ref >= rec.refs.length) return { status: 'bad_index' };
+    const r = rec.refs[ref];
+    if (!Number.isInteger(i) || i < 0 || i >= r.chunks) return { status: 'bad_index' };
+    if (!(await this.#grants(rec)).some((g) => safeEq(g.h, grantHash))) return { status: 'bad_grant' };
+    return { status: 'ok', key: `${r.key}/${i}` };
   }
 
   // ── owner / delete ────────────────────────────────────────────────────────

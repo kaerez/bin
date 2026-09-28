@@ -16,6 +16,9 @@ import { encryptPaste } from '../public/js/crypto.js';
 import {
   ORIGIN, owner, makeUser, login, fetchJson, cookieOf, csrfFor, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16,
 } from './helpers.js';
+import { driveLimits } from './drive-helpers.js';
+import driveSrc from '../src/routes/drive.js?raw';
+import adminSrc from '../src/routes/admin.js?raw';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -31,6 +34,40 @@ const tokenOf = (res) => /^__Host-secbin_csrf=([^;]*)/.exec(csrfCookieOf(res) ??
 const settings = (patch, cookie = oc) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie, body: patch });
 const myShares = async (cookie) => (await (await fetchJson('/api/private/shares', { cookie })).json()).total;
 const loginRes = (username, password) => fetchJson('/api/auth/login', { method: 'POST', body: { username, proof: proofFor(password) }, ip: freshIp() });
+
+// ── the Drive's routes (src/routes/drive.js, and the owner's in admin.js) ──
+// Every cookie-authenticated change under /api/private/drive and
+// /api/private/admin/drive, with the method and shape the browser uses
+// (public/js/api.js `drive`): a JSON body, the intent header, or (the chunk
+// upload) a raw application/octet-stream body with the upload token.
+const DRIVE_ID = 'AAAAAAAAAAAAAAAAAAAAAA';
+const DRIVE_USER = 'uAAAAAAAAAAAAAAA';
+const dj = (method, path) => ({ method, path, body: {}, headers: intent });
+const da = (method, path) => ({ method, path, headers: intent });
+const DRIVE_ROUTES = [
+  dj('PUT', '/api/private/drive/keys'),
+  dj('POST', '/api/private/drive/kit'), dj('POST', '/api/private/drive/kit/probe'), dj('PUT', '/api/private/drive/kit/keys'),
+  dj('POST', '/api/private/drive/start-over'),
+  dj('PUT', '/api/private/drive/archive/1/nodes'), dj('POST', '/api/private/drive/archive/1/finish'), dj('DELETE', '/api/private/drive/archive/1'),
+  dj('POST', '/api/private/drive/escrow'),
+  dj('POST', '/api/private/drive/folders'), dj('POST', '/api/private/drive/files'),
+  { method: 'PUT', path: `/api/private/drive/files/${DRIVE_ID}/chunk/0`, raw: true },
+  { method: 'POST', path: `/api/private/drive/files/${DRIVE_ID}/finalize`, headers: { ...intent, 'x-upload-token': 'A'.repeat(43) } },
+  dj('PATCH', `/api/private/drive/nodes/${DRIVE_ID}`), da('DELETE', `/api/private/drive/nodes/${DRIVE_ID}`),
+  dj('POST', '/api/private/drive/shares'),
+  dj('POST', `/api/private/admin/drive/escrow/${DRIVE_USER}`), dj('PUT', `/api/private/admin/drive/keys/${DRIVE_USER}`),
+];
+/**
+ * Every Drive path the routers name, one concrete path each (the reads too:
+ * a state-changing method on them must be refused for its token as well).
+ */
+const DRIVE_PATHS = [
+  '/api/private/drive', '/api/private/drive/keys', '/api/private/drive/kit', '/api/private/drive/kit/probe', '/api/private/drive/kit/keys',
+  '/api/private/drive/start-over', '/api/private/drive/archive/1', '/api/private/drive/archive/1/nodes', '/api/private/drive/archive/1/finish',
+  '/api/private/drive/escrow', '/api/private/drive/folders', '/api/private/drive/files', `/api/private/drive/files/${DRIVE_ID}/chunk/0`,
+  `/api/private/drive/files/${DRIVE_ID}/finalize`, `/api/private/drive/nodes/${DRIVE_ID}`, `/api/private/drive/nodes/${DRIVE_ID}/shares`,
+  '/api/private/drive/shares', `/api/private/admin/drive/escrow/${DRIVE_USER}`, `/api/private/admin/drive/keys/${DRIVE_USER}`,
+];
 
 describe('the token and its cookie', () => {
   it('comes with every new session: a readable __Host- cookie next to the HttpOnly session cookie', async () => {
@@ -186,6 +223,7 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
       json('PATCH', `/api/private/admin/users/${id}/keys/${id}`), act('DELETE', `/api/private/admin/users/${id}/keys/${id}`),
       json('POST', '/api/private/admin/logs/clear'), json('POST', '/api/private/admin/ip-rules'), act('DELETE', `/api/private/admin/ip-rules/${id}`),
       json('POST', '/api/private/admin/guard/unblock'), json('POST', '/api/private/admin/guard/block'),
+      ...DRIVE_ROUTES,
       act('POST', '/api/auth/logout'),
     ];
     for (const r of routes) {
@@ -204,6 +242,68 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
       expect(`${r.method} ${r.path} → ${res.status} ${await errorOf(res)}`).toBe(`${r.method} ${r.path} → ${want}`);
     }
     expect((await fetchJson('/api/private/me', { cookie: oc })).status).toBe(200);
+  });
+
+  it('the sweep names every Drive route the routers have (src/routes/drive.js, admin.js)', () => {
+    const paths = new Set();
+    const patterns = [];
+    for (const src of [driveSrc, adminSrc]) {
+      for (const [, lit] of src.matchAll(/'(\/api\/private\/(?:admin\/)?drive[^']*)'/g)) paths.add(lit);
+      for (const [, re] of src.matchAll(/\.match\(\/(\^\\\/api\\\/private\\\/(?:admin\\\/)?drive.*?\$)\/\)/g)) patterns.push(new RegExp(re));
+    }
+    expect(paths.size).toBeGreaterThan(10);
+    expect(patterns.length).toBe(4); // files/…/chunk|finalize, nodes/…(/shares), archive/…(/nodes|/finish), admin/drive/(escrow|keys)/…
+    for (const lit of paths) {
+      const covered = lit.endsWith('/') ? DRIVE_PATHS.some((x) => x.startsWith(lit)) : DRIVE_PATHS.includes(lit);
+      expect(covered, lit).toBe(true);
+    }
+    for (const re of patterns) expect(DRIVE_PATHS.some((x) => re.test(x)), String(re)).toBe(true);
+    // Every change the sweep sends is on one of those paths, and every path
+    // that takes a change is in the sweep.
+    for (const r of DRIVE_ROUTES) expect(DRIVE_PATHS, r.path).toContain(r.path);
+    const reads = ['/api/private/drive', `/api/private/drive/nodes/${DRIVE_ID}/shares`];
+    for (const x of DRIVE_PATHS) if (!reads.includes(x)) expect(DRIVE_ROUTES.some((r) => r.path === x), x).toBe(true);
+  });
+
+  it('every state-changing method on every Drive path is refused for its token before routing (no 404 / 405 / 403 of the route first)', async () => {
+    for (const path of [...DRIVE_PATHS, '/api/private/drive/no-such-route', `/api/private/admin/drive/other/${DRIVE_USER}`]) {
+      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+        const res = await send(method, path, { body: {}, headers: intent });
+        expect(`${method} ${path} → ${res.status} ${await errorOf(res)}`).toBe(`${method} ${path} → 403 csrf_mismatch`);
+      }
+    }
+    // A user without the Drive, and while impersonating: the token first too.
+    const u = await makeUser('csrf-drive-none');
+    for (const r of DRIVE_ROUTES) {
+      const res = r.raw
+        ? await fetchJson(r.path, { method: r.method, cookie: u.cookie, csrf: false, headers: { 'content-type': 'application/octet-stream', 'x-upload-token': 'A'.repeat(43) } })
+        : await send(r.method, r.path, { cookie: u.cookie, body: r.body, headers: r.headers });
+      expect(`${r.method} ${r.path} → ${res.status} ${await errorOf(res)}`).toBe(`${r.method} ${r.path} → 403 csrf_mismatch`);
+    }
+  });
+
+  it('the Drive: with the token, the same requests reach the routes (and change something only then)', async () => {
+    const u = await makeUser('csrf-drive-ok');
+    await driveLimits(u.id, { driveEnabled: true });
+    const token = await csrfFor(u.cookie);
+    const folder = { parent: 'root', name: { iv: 'A'.repeat(16), ct: 'B'.repeat(40) } };
+    // Refused without the token: no folder.
+    expect(await errorOf(await send('POST', '/api/private/drive/folders', { cookie: u.cookie, body: folder }))).toBe('csrf_mismatch');
+    const children = async () => (await (await fetchJson('/api/private/drive/nodes/root', { cookie: u.cookie })).json()).children?.length ?? 0;
+    const before = await children();
+    // The Drive has no keys yet (a folder needs none on the server): with the token it is created.
+    const ok = await send('POST', '/api/private/drive/folders', { cookie: u.cookie, token, body: folder });
+    expect(ok.status).toBe(201);
+    expect(await children()).toBe(before + 1);
+    // A raw chunk: the chunk rule satisfies the shape check; the token is still needed.
+    const chunk = (t) => fetchJson(`/api/private/drive/files/${DRIVE_ID}/chunk/0`, { method: 'PUT', cookie: u.cookie, csrf: false, headers: { 'content-type': 'application/octet-stream', 'x-upload-token': 'A'.repeat(43), ...(t ? { 'x-secbin-csrf': t } : {}) } });
+    expect(await errorOf(await chunk(null))).toBe('csrf_mismatch');
+    expect([403, 404, 410]).toContain((await chunk(token)).status); // past the CSRF check: the route's own answer (no such upload)
+    expect(await errorOf(await chunk(token))).not.toBe('csrf_mismatch');
+    // Finalize has no body: the intent header is its shape.
+    const fin = (headers) => fetchJson(`/api/private/drive/files/${DRIVE_ID}/finalize`, { method: 'POST', cookie: u.cookie, headers: { 'x-upload-token': 'A'.repeat(43), ...headers } });
+    expect(await errorOf(await fin({}))).toBe('missing_intent');
+    expect(await errorOf(await fin(intent))).not.toBe('csrf_mismatch');
   });
 });
 

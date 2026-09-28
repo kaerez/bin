@@ -1,16 +1,18 @@
 // nav.js — shared dashboard chrome: loads the signed-in profile (/api/private/me)
 // and records it as the session this page acts for (api.js bindSession), shows
-// the nav (Admin only for the owner), the impersonation banner with "Return to
-// admin", log-out, and the "session changed" banner. Every dashboard page
-// awaits `ready`.
+// the nav (Drive only when the role allows it, Admin only for the owner), the
+// impersonation banner with "Return to admin", log-out, and the "session
+// changed" banner. Every dashboard page awaits `ready`.
 
 import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, SESSION_CHANGED } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError, h } from '../../js/common.js';
+import { clearSessionKey, clearImpersonationKey } from '../../js/drivekeys.js';
 
 const $ = (s) => document.querySelector(s);
 
 function toLogin(reason) {
+  clearSessionKey(); // signed out: forget the tab's Drive key (docs/DRIVE.md §3)
   location.replace(reason === 'account_disabled' ? '/dashboard/login/?disabled=1' : '/dashboard/login/');
 }
 
@@ -39,9 +41,16 @@ export function showSessionChanged() {
 }
 onSessionChanged(showSessionChanged);
 
+/** Whether the signed-in account's role has a Drive: `caps.driveEnabled` (docs/DRIVE.md §5, §8.1). */
+export function driveAllowed(profile) {
+  return !!(profile && profile.caps && profile.caps.driveEnabled === true);
+}
+
 export const ready = (async () => {
   const profile = await loadMe();
   bindSession(profile);
+  // The Drive key of a user the owner acted as lives only while acting as them.
+  if (!profile.impersonatedBy) clearImpersonationKey();
   const nav = $('#dash-nav');
   if (nav) {
     nav.hidden = false;
@@ -49,6 +58,8 @@ export const ready = (async () => {
     for (const a of nav.querySelectorAll('a[data-nav]')) if (new URL(a.href).pathname === here) a.setAttribute('aria-current', 'page');
     const adminLink = $('#nav-admin');
     if (adminLink) adminLink.hidden = !(profile.user.role === 'owner' && !profile.impersonatedBy);
+    const driveLink = $('#nav-drive');
+    if (driveLink) driveLink.hidden = !driveAllowed(profile);
     // Signing out is a change like any other: it goes through the same token
     // refresh and retry (api.js), so it is refused when the browser is now
     // signed in as someone else (that session is not ended from this page).
@@ -74,6 +85,7 @@ export const ready = (async () => {
     $('#imp-return').onclick = async () => {
       try {
         await admin.unimpersonate();
+        clearImpersonationKey();
         location.href = '/dashboard/admin/';
       } catch (e) {
         toast(friendlyError(e), { error: true });

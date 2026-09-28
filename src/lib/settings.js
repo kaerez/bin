@@ -12,6 +12,9 @@ const MIN = 60;
 const HOUR = 3600;
 const DAY = 86400;
 const MiB = 1024 * 1024;
+const GiB = 1024 * MiB;
+/** Hard ceiling on a Drive's capacity (and on any file in it), whatever the role says. */
+export const HARD_MAX_DRIVE_BYTES = 100 * GiB;
 
 export const PUBLIC_TRACKING = ['tracker', 'ip', 'both-permissive', 'both-restrictive'];
 export const DEFAULT_PUBLIC_NOTICE = 'Anonymous sharing is limited. To enforce the limits, this site keeps a random identifier in your browser (a cookie and similar storage) and/or uses your network address. It is used only for these limits and is not shared with anyone.';
@@ -228,6 +231,12 @@ export const LIMITS = {
   // server-wide value, which is also the owner's).
   fileGrantSec:        { type: 'int', min: SETTINGS['files.grantSec'].min, max: SETTINGS['files.grantSec'].max, nullable: true, def: null, owner: null },
   filePendingSec:      { type: 'int', min: SETTINGS['files.pendingSec'].min, max: SETTINGS['files.pendingSec'].max, nullable: true, def: null, owner: null },
+  // Drive (docs/DRIVE.md): the user's private encrypted folder tree. Capacity
+  // null = no limit up to HARD_MAX_DRIVE_BYTES; the largest file null = only
+  // the capacity applies. The public account never has a Drive.
+  driveEnabled:        { type: 'bool', def: false, owner: true },
+  driveMaxBytes:       { type: 'int', min: 1, max: HARD_MAX_DRIVE_BYTES, nullable: true, def: GiB, owner: null },
+  driveMaxFileBytes:   { type: 'int', min: 1, max: HARD_MAX_DRIVE_BYTES, nullable: true, def: null, owner: null },
 };
 
 /** The password-policy keys of the limits (see public/js/pwauth.js). */

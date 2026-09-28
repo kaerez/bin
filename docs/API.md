@@ -55,7 +55,8 @@ scopes — under the same rules as the dashboard's **My shares** page:
 API-key requests **never** need a CSRF token. It applies only to requests authenticated by the
 browser's session cookie, for example a script running in the signed-in dashboard.
 Such a request that changes something (`POST`, `PUT`, `PATCH` or `DELETE` on
-`/api/private/*`, and `POST /api/auth/logout`) must send:
+`/api/private/*`, the Drive's `/api/private/drive/*` and `/api/private/admin/drive/*`
+included, and `POST /api/auth/logout`) must send:
 
 ```
 X-Secbin-CSRF: <token>
@@ -65,7 +66,8 @@ X-Secbin-CSRF: <token>
   `GET /api/private/me`.
 - **Lifetime:** it belongs to the session and changes only when the session does (sign-in,
   sign-out, a password change, impersonation start or end).
-- **Shape first:** such a request also needs a JSON body or `X-Secbin-Intent: 1` (and the
+- **Shape first:** such a request also needs a JSON body, a chunk
+  (`application/octet-stream`, as in file and Drive uploads) or `X-Secbin-Intent: 1` (and the
   intent header on a `DELETE`). Without it the request is refused before the token is looked
   at: `415 unsupported_media_type` for a body of another type, else `400 missing_intent`.
 - **Refusal:** a missing or stale token gets `403 csrf_mismatch` and nothing changes. Fetch
@@ -459,6 +461,39 @@ res = requests.get("https://bin.example.com/api/private/policy", timeout=30,
                    headers={"Authorization": f"Bearer {os.environ['SECBIN_API_KEY']}"})
 print(res.status_code, res.json())  # {"url": ..., "urlRules": [...]}
 ```
+## Not with API keys: the Drive
+
+The Drive (`/api/private/drive*`, [`docs/DRIVE.md`](./DRIVE.md) §6) is for signed-in sessions
+only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes, for reference:
+
+| Method & path | Body → result |
+| --- | --- |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the `?` ones for the owner only; `capacity` / `maxFile` null = no limit) |
+| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, kcv?, escrowReset?, current? \| reauth? }` — key wraps (a later `pw` wrap only with the Drive key's check value `kcv`) (kinds `pw`, `recovery`, `passkey`, `escrow`); removing a wrap, replacing the password wrap or the salt, and changing the escrow or signing keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); a user's first set-up needs the owner's escrow key (`409 escrow_not_ready`), an escrow wrap for the current key and a wrap of the user's own; the escrow wrap cannot be removed (`403 escrow_required`); while impersonating, only added wraps (never a first set-up) |
+| `POST /api/private/drive/escrow` | the owner impersonating the user: `{}` → `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }` (in the admin audit) |
+| `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
+| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta? }` — move / rename |
+| `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
+| `GET /api/private/drive/nodes/:id/shares` | → `{ shares }` — the active shares of the item |
+| `POST /api/private/drive/folders` | `{ id?, parent, name, meta? }` → `201 { id }` |
+| `POST /api/private/drive/files` | `{ id?, parent, name, meta?, size, fk }` → `201 { id, uploadToken, chunks }` |
+| `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
+| `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` (`409 busy` while a chunk is still being written) |
+| `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
+| `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
+| `POST /api/private/drive/kit` | the owner: `{ event: "exported" \| "used", current \| reauth }` or `{ event: "verified", verdict, issues?, version? }` — the owner recovery kit's download, use and check, recorded (the kit itself is never sent) |
+| `POST /api/private/drive/kit/probe` | the owner: one user's escrow wrap per kid in use (each in the admin audit), for "Verify kit" |
+| `PUT /api/private/drive/kit/keys` | the owner, with `current` / `reauth`: sealed escrow keys put back from a kit (only the server's own public keys and kids in use) |
+| `POST /api/private/drive/start-over` | the owner, when nothing they sign in with opens their Drive: `{ confirm, driveSalt, set, escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv, current \| reauth }` — new keys; the old Drive archived |
+| `GET`, `DELETE /api/private/drive/archive/:gen`; `PUT …/nodes`; `POST …/finish` | the owner: an archived Drive — read (for a kit restore), items back, finish, or delete (`confirm` + `current` / `reauth`) |
+| `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (in the admin audit) |
+| `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }], kcv }` (the same Drive key); for a user with no Drive yet: `{ first: true, driveSalt, set: [pw, escrow], escrowPin, kcv }` (in the admin audit) |
+
+`name`, `meta` and `fk` are `{ iv, ct }` values encrypted in the browser; the server never sees
+names, types or keys. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
+then also returns `refs: [{ chunks, size }]`), and its chunks are read with
+`GET /api/file/:id/chunk/:ref/:i` and the download grant.
+
 ## Security notes
 
 - Treat a key like a password: it acts as you within its scopes until it expires or is revoked.

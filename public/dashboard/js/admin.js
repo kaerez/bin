@@ -13,6 +13,8 @@ import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
 import { STATEMENT_FIELDS, MAIN, ALT, guessDir } from '../../js/a11ystatement.js';
 import { ready } from './nav.js';
+import { escrowPasswordReset, ownerSetsUpUserDrive, unlockDrive } from '../../js/driveclient.js';
+import { loadSessionKey } from '../../js/drivekeys.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { renderShares } from './admin-shares.js';
 import { renderPortable } from './admin-portable.js';
@@ -87,6 +89,11 @@ const LIMIT_SECTIONS = [
     ['sessionIdleSec', 'Session: sign out after being idle for', 'dur', { nullable: false }],
     ['sessionAbsSec', 'Session: sign out in any case after', 'dur', { nullable: false }],
   ]],
+  ['Drive', [
+    ['driveEnabled', 'Drive allowed', 'bool'],
+    ['driveMaxBytes', 'Drive capacity', 'bytes'],
+    ['driveMaxFileBytes', 'Drive: largest file', 'bytes'],
+  ]],
 ];
 const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
@@ -138,7 +145,8 @@ const guard = async (fn, okText) => {
   // Arrow keys move between the tabs; Enter / Space opens one (panels load from the server).
   syncTabs = tablistKeys(document.querySelector('.tabs[role="tablist"]'));
   await refreshOverview();
-  selectTab('users');
+  // /dashboard/admin/#owner-kit (the Drive page's links) opens Import / export.
+  selectTab(['#portable', '#owner-kit'].includes(location.hash) ? 'portable' : 'users');
 })();
 
 async function refreshOverview() {
@@ -409,16 +417,25 @@ function rulesEditor(scope, list, { withPresets = true } = {}) {
 }
 
 // ── users ────────────────────────────────────────────────────────────────────
+/** A user's Drive usage for the list: used of capacity (the content itself is end-to-end encrypted). */
+const driveUsage = (d) => (!d ? '—' : !d.enabled && !d.used ? 'no Drive'
+  : `${formatBytes(d.used)} ${d.capacity === null ? '(no limit)' : `of ${formatBytes(d.capacity)}`}${d.enabled ? '' : ' (Drive off)'}`);
+
 /** `focusKey`: where focus goes if the re-render loses it (see keepFocus). */
 async function renderUsers(focusKey = null) {
   const refocus = keepFocus(panel('users'), { key: focusKey });
   try { await renderUsersInto(); } finally { refocus(); }
 }
 
+let usersRender = 0;
 async function renderUsersInto() {
-  const p = clear(panel('users'));
+  // Two renders at once (a tab click during one) must not both fill the panel.
+  const seq = ++usersRender;
+  clear(panel('users'));
   await refreshOverview(); // the global password policy may have just changed
   const [data, roleList] = await Promise.all([guard(() => admin.users()), guard(() => admin.roles())]);
+  if (seq !== usersRender) return;
+  const p = clear(panel('users'));
   if (!data) return;
   const assignable = (roleList?.roles || []).filter((r) => !r.locked && !r.fixed);
   const user = h('input.input', { placeholder: 'username', maxlength: '64', 'aria-label': 'New username', autocomplete: 'off' });
@@ -427,18 +444,24 @@ async function renderUsersInto() {
   const pw = h('input.input', { type: 'password', placeholder: 'password', 'aria-label': 'New user password', autocomplete: 'new-password' });
   const pw2 = h('input.input', { type: 'password', placeholder: 'repeat password', 'aria-label': 'Repeat password', autocomplete: 'new-password' });
   const add = h('button.btn', { type: 'button', text: 'Create user', dataset: { focusKey: 'users:create' } });
+  const created = h('p.mono', { id: 'user-create-drive', role: 'status', text: createNote, hidden: !createNote });
+  createNote = '';
   add.onclick = async () => {
     const bad = checkOwnerPassword(pw.value, pw2.value);
     if (bad) return msg(bad, true);
     add.disabled = true;
-    const cred = await newCredential(pw.value);
+    const password = pw.value;
+    const cred = await newCredential(password);
     const r = await guard(() => admin.createUser({ username: user.value.trim(), ...cred }), 'User created.');
     add.disabled = false;
-    if (r) renderUsers('users:create');
-    else add.focus();
+    if (r) {
+      createNote = await driveForNewUser(r.user, password);
+      renderUsers('users:create');
+    } else add.focus();
   };
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, user, pw, pw2, add),
-    h('p.mono.muted', { text: `You may set any password. When users change their own, it must follow their policy (${describePolicy(newPolicy)}), checked in the browser only: the server never sees passwords.` })));
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, user, pw, pw2, add), created,
+    h('p.mono.muted', { text: `You may set any password. When users change their own, it must follow their policy (${describePolicy(newPolicy)}), checked in the browser only: the server never sees passwords.` }),
+    h('p.mono.muted', { text: 'With your own Drive unlocked in this tab, the new user’s Drive is set up now, in this browser, with the password you set (and your escrow key); otherwise it is set up at their first sign-in.' })));
 
   const body = h('tbody');
   // The built-in public account is managed on the Public role, and the owner
@@ -457,10 +480,64 @@ async function renderUsersInto() {
     pick.onchange = async () => { if (!(await guard(() => admin.setUserRole(u.id, pick.value), `${u.username} now has the role ${pick.selectedOptions[0].textContent}.`))) renderUsers(); };
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td', { dataset: { label: 'Role' } }, pick),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
+      h('td.mono', { dataset: { label: 'Drive' }, text: driveUsage(u.drive) }),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(u.created) }), h('td.cell-actions', {}, actions)));
   }
-  p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Role', 'Status', 'Created', ''].map(th))), body)));
+  p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Role', 'Status', 'Drive', 'Created', ''].map(th))), body)));
   p.appendChild(h('div', { id: 'user-detail' }));
+}
+
+/** What happened to a new user's Drive (shown on the create form). */
+let createNote = '';
+const NO_DRIVE_NOTE = 'Drive is not enabled for this role, so no Drive was created.';
+
+/**
+ * A new user's Drive (docs/DRIVE.md §3): set up now in this browser, which
+ * knows the password just set, when their role has the Drive (the create
+ * response says so), the owner's Drive is unlocked here and the escrow key
+ * checks out; else at the user's first sign-in. A role without the Drive gets
+ * no request at all (the server's 409 drive_disabled is only a guard, e.g.
+ * against a role change at the same moment, and is handled as the same case).
+ */
+async function driveForNewUser(u, password) {
+  let r;
+  if (u.drive?.enabled !== true) r = 'disabled';
+  else {
+    try { r = await ownerSetsUpUserDrive({ ownerId: profile.user.id, userId: u.id, password }); } catch { r = 'failed'; }
+  }
+  return {
+    created: `${u.username}: their Drive is set up now; they open it with the password you set.`,
+    locked: `${u.username}: their Drive is set up at their first sign-in (your own Drive is not unlocked in this tab).`,
+    no_escrow: `${u.username}: their Drive is set up at their first sign-in (there is no escrow key yet: open your own Drive once).`,
+    disabled: `${u.username}: ${NO_DRIVE_NOTE}`,
+    exists: `${u.username}: they already have a Drive.`,
+    mismatch: `${u.username}: their Drive is set up at their first sign-in (the escrow key on the server does not check out: open your own Drive to review it).`,
+    failed: `${u.username}: their Drive could not be set up now; it is set up at their first sign-in.`,
+  }[r] || '';
+}
+
+/**
+ * After a password reset: re-key the user's Drive for the new password
+ * through the owner escrow (docs/DRIVE.md §3; the admin audit records the escrow use).
+ * Needs the owner's own Drive unlocked in this tab; otherwise the user unlocks
+ * their Drive with a recovery code or passkey. The reset never depends on it.
+ */
+async function driveAfterReset(userId, newPassword) {
+  let r;
+  try {
+    r = await escrowPasswordReset({ ownerId: profile.user.id, userId, newPassword, reason: 'password reset' });
+  } catch {
+    r = 'failed';
+  }
+  const note = {
+    ok: 'Their Drive now opens with the new password (the same Drive key).',
+    created: 'They had no Drive yet: it is set up now, with the new password.',
+    disabled: NO_DRIVE_NOTE, // their role lost the Drive at the same moment (the server's 409 guard)
+    locked: 'Their Drive was not re-keyed (your own Drive is locked in this tab): they open it with a recovery code or a passkey.',
+    failed: 'Their Drive could not be re-keyed: they open it with a recovery code or a passkey.',
+    mismatch: 'Their Drive was not re-keyed: the escrow public key on the server is not yours (it may have been replaced). Open your own Drive to review it.',
+  }[r];
+  if (note) toast(note, r === 'ok' || r === 'created' || r === 'disabled' ? {} : { error: true });
 }
 
 async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
@@ -474,17 +551,45 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   const npw = h('input.input', { type: 'password', placeholder: 'new password', autocomplete: 'new-password', 'aria-label': 'New password' });
   const npw2 = h('input.input', { type: 'password', placeholder: 'repeat', autocomplete: 'new-password', 'aria-label': 'Repeat new password' });
   const setBtn = h('button.btn', { type: 'button', text: 'Set password' });
+  // The user's Drive keeps its key: the new password's wrap is made here
+  // through your escrow key, which needs your own Drive unlocked in this tab.
+  // A role without the Drive: nothing is asked and no Drive request is made.
+  const withDrive = d.effective?.all?.driveEnabled === true;
+  const ownerLocked = () => withDrive && !loadSessionKey(profile.user.id);
+  const unlockPw = h('input.input', { type: 'password', id: 'reset-own-pw', autocomplete: 'current-password', 'aria-label': 'Your password, to unlock your own Drive', maxlength: '1024' });
+  const skip = h('input', { type: 'checkbox', id: 'reset-skip-drive' });
+  const unlockBox = h('div.stack', { id: 'reset-unlock', hidden: !ownerLocked() },
+    h('p.mono', { text: 'Your own Drive is locked in this tab. Unlock it here so that the user’s Drive keeps working with the new password (the same Drive key, a new password wrap).' }),
+    h('div.toolbar', {}, unlockPw),
+    h('label.inline', {}, skip, h('span', { text: ' Continue without unlocking' })),
+    h('p.type-hint.warn', { id: 'reset-skip-warn', text: 'Without it, the user’s Drive (its key unchanged) opens only with a recovery code, a passkey or their recovery kit, until you reset the password again with your Drive unlocked.' }));
   setBtn.onclick = async () => {
     const bad = checkOwnerPassword(npw.value, npw2.value);
     if (bad) return msg(bad, true);
+    if (ownerLocked() && !skip.checked) {
+      if (!unlockPw.value) { unlockPw.focus(); return msg('Enter your password to unlock your Drive, or choose to continue without unlocking.', true); }
+      setBtn.disabled = true;
+      try {
+        await unlockDrive({ password: unlockPw.value }, { user: { id: profile.user.id, role: 'owner', impersonating: false } });
+      } catch (e) {
+        setBtn.disabled = false;
+        unlockPw.value = '';
+        return msg(e && e.reason === 'wrong' ? 'That password does not unlock your Drive.' : friendlyError(e), true);
+      }
+      unlockPw.value = '';
+    }
     setBtn.disabled = true;
-    const cred = await newCredential(npw.value);
-    await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out; their passkeys and recovery codes still work.');
-    setBtn.disabled = false;
+    const newPassword = npw.value;
+    const cred = await newCredential(newPassword);
+    const done = await guard(() => admin.setPassword(id, cred), 'Password set. Their sessions were signed out; their passkeys and recovery codes still work.');
     npw.value = npw2.value = '';
+    if (done && withDrive) await driveAfterReset(id, newPassword);
+    unlockBox.hidden = !ownerLocked();
+    setBtn.disabled = false;
   };
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }),
     h('p.mono.muted', { text: 'This is account recovery: it also signs the user out everywhere. Their passkeys and recovery codes keep working; remove them below if the account may have been taken over.' }), h('div.toolbar', {}, npw, npw2, setBtn),
+    unlockBox,
     h('p.mono.muted', { text: `You may set any password. This user's own changes follow: ${describePolicy(userPolicy)}` })));
   if (passwordOnly) return;
 
@@ -977,7 +1082,8 @@ const PUBLIC_ID = 'public-user-0000';
 // Not for the public account (no API keys, receipts page, password, passkeys
 // or log of its own); the server refuses them too (PUBLIC_NA_LIMITS).
 const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs', 'receiptLanguages',
-  'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec'];
+  'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec',
+  'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],
   ['ip', 'Network address only', 'Counts per IP address (IPv6 per the tracking prefix), stored only as a keyed hash. Nothing is stored in the browser; people behind one address share the limits.'],

@@ -7,18 +7,21 @@
 import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
-import { validateManifest, buildTree, basename } from './files.js';
+import { validateManifest, buildTree, basename, cleanName } from './files.js';
 import { fetchHead, openShare, expireShare, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
 import { humanCheck } from './turnstile.js';
+import { clearSessionKey } from './drivekeys.js';
 import { ensureTracker } from './tracker.js';
 import { renderMarkdown } from './markdown.js';
 import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill } from './ui.js';
-import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError } from './common.js';
+import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError, nameEl } from './common.js';
 import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
-import { ShareReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
+import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
+import { validateRefsManifest } from './refsmanifest.js';
 import { allowedRenderer, renderPreview } from './viewer.js';
 import { progressBar } from './progress.js';
+import { folderBrowser } from './tree.js';
 
 let timer = null;
 let totpTimer = null;
@@ -71,6 +74,8 @@ async function initPublicComposer() {
   const n = $('#public-notice');
   if (prof.notice) { n.textContent = prof.notice; n.hidden = false; }
   // Loads alongside the composer; a share waits for the token only when created.
+  // Its script (third-party) must never find a Drive key left in this tab.
+  clearSessionKey();
   const check = humanCheck($('#public-turnstile'), 'public-share', { gate: [$('#create')] });
   setPublicHumanCheck(async () => (await check).take());
   const { startComposer } = await import('./composer.js');
@@ -137,11 +142,25 @@ async function doOpen({ id, kind, head, fragment, password }) {
   }
   const paste = validatePaste(res.paste);
   const { text } = await openPaste({ paste, access });
+  // v2: one packed stream under one key; v3 (a Drive share): each file its own
+  // chunk sequence under its own key (docs/DRIVE.md §7).
   let manifest;
-  try { manifest = validateManifest(JSON.parse(text)); } catch { throw new DecryptError('malformed manifest'); }
+  let reader;
+  try {
+    const m = JSON.parse(text);
+    if (m && m.v === 3) {
+      manifest = validateRefsManifest(m);
+      reader = RefsReader.forShare({ id, grant: res.grant, refs: res.refs, manifest });
+    } else {
+      manifest = validateManifest(m);
+    }
+  } catch { throw new DecryptError('malformed manifest'); }
+  const cleaned = cleanManifest(manifest);
+  if (cleaned !== manifest && reader) reader = RefsReader.forShare({ id, grant: res.grant, refs: res.refs, manifest: cleaned });
+  manifest = cleaned;
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
-  const reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
+  if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
   renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires);
   $('#files-delete-row').hidden = !canDeleteNow(paste.meta);
   wireDeleteNow($('#files-delete'), paste.meta, del, $('#files-msg'));
@@ -377,6 +396,24 @@ function secretCard(text) {
 }
 
 // ── file rendering ───────────────────────────────────────────────────────────
+/**
+ * Received names without spoofing characters (files.js cleanName): each entry
+ * whose path loses any is kept under the cleaned path, marked `renamed`
+ * (shown on the item). Saving and zipping use the cleaned paths.
+ */
+function cleanManifest(manifest) {
+  let changed = false;
+  const entries = manifest.entries.map((e) => {
+    const p = cleanName(e.path);
+    if (p === e.path) return e;
+    changed = true;
+    return { ...e, path: p, renamed: true };
+  });
+  return changed ? { ...manifest, entries } : manifest;
+}
+
+const renamedNote = (e) => (e.renamed ? h('span.tree-sub.mono.renamed-note', { text: 'renamed: hidden characters removed' }) : null);
+
 function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
   showView('files');
   const pills = clear($('#files-pills'));
@@ -451,7 +488,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
             // decrypt) as a percentage, then a busy bar while it renders.
             closePreview();
             previewOpener = viewBtn;
-            $('#preview-title').textContent = entry.path;
+            $('#preview-title').replaceChildren(nameEl(entry.path));
             clear(previewBody);
             preview.hidden = false;
             preview.scrollIntoView({ block: 'nearest' });
@@ -480,7 +517,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
     all.hidden = true;
     const f = files[0];
     tree.appendChild(h('div.file-card', {},
-      h('div.file-meta', {}, h('span.file-name', { text: f.path }), h('span.file-sub.mono', { text: `${formatBytes(f.size)} · ${f.type}` })),
+      h('div.file-meta', {}, h('span.file-name', {}, nameEl(f.path)), h('span.file-sub.mono', { text: `${formatBytes(f.size)} · ${f.type}` }), renamedNote(f)),
       h('div.btn-row', {}, ...fileButtons(f))));
     return;
   }
@@ -489,33 +526,29 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
 
   const size = (node) => node.files.reduce((n, f) => n + f.size, 0) + [...node.dirs.values()].reduce((n, d) => n + size(d), 0);
   const count = (node) => node.files.length + [...node.dirs.values()].reduce((n, d) => n + count(d), 0);
-  let treeSeq = 0;
-  const renderNode = (node, depth) => {
-    // Plain nested lists: an ARIA tree would need the full tree keyboard
-    // model (one Tab stop, arrow keys) and cannot hold these buttons.
-    const ul = h('ul.tree-list', { id: depth === 0 ? 'files-tree-list' : `files-tree-${++treeSeq}`, 'aria-label': depth === 0 ? 'Files' : null });
+  // One folder's content: its sub-folders (open, or download as a ZIP) and
+  // its files (view, download). With folders, a tree on the left picks the
+  // folder (public/js/tree.js — collapsed by default).
+  const renderPane = (node, { open } = {}) => {
+    const ul = h('ul.tree-list.pane-list');
     for (const d of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-      const children = renderNode(d, depth + 1);
-      const toggle = h('button.tree-toggle', { type: 'button', 'aria-expanded': 'true', 'aria-controls': children.id, 'aria-label': `Folder ${d.name}`, text: '▾' });
-      toggle.onclick = () => {
-        const open = toggle.getAttribute('aria-expanded') !== 'true';
-        toggle.setAttribute('aria-expanded', String(open));
-        toggle.textContent = open ? '▾' : '▸';
-        children.hidden = !open;
-      };
       ul.appendChild(h('li.tree-dir', {},
-        h('div.tree-row', {}, toggle, h('span.tree-name', { text: `${d.name}/` }), h('span.tree-sub.mono', { text: `${count(d)} · ${formatBytes(size(d))}` }),
-          h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p)) } })),
-        children));
+        h('div.tree-row', {},
+          h('button.tree-name.tree-open', { type: 'button', title: `Open ${d.name}`, on: { click: () => open(d.path) } }, nameEl(d.name, { suffix: '/' })),
+          h('span.tree-sub.mono', { text: `${count(d)} · ${formatBytes(size(d))}` }),
+          h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p)) } }))));
     }
     for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) {
       ul.appendChild(h('li.tree-file', {},
-        h('div.tree-row', {}, h('span.tree-spacer'), h('span.tree-name', { text: basename(f.path) }), h('span.tree-sub.mono', { text: formatBytes(f.size) }),
+        h('div.tree-row', {}, h('span.tree-name', {}, nameEl(basename(f.path))), h('span.tree-sub.mono', { text: formatBytes(f.size) }), renamedNote(f),
           h('span.tree-actions', {}, ...fileButtons(f).map((b) => { b.classList.add('tree-btn'); return b; })))));
     }
+    if (!ul.firstChild) return h('p.muted.pane-empty', { text: 'This folder is empty.' });
     return ul;
   };
-  tree.appendChild(renderNode(buildTree(manifest.entries), 0));
+  const root = buildTree(manifest.entries);
+  if (!hasDirs) { tree.appendChild(renderPane(root)); return; }
+  tree.appendChild(folderBrowser({ label: 'Folders', rootName: 'All files', root, renderPane, paneLabel: 'Folder contents' }).el);
 }
 
 // ── status + countdown ───────────────────────────────────────────────────────

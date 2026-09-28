@@ -192,6 +192,100 @@ describe('a refused token: one refresh, then a retry only for the same session h
   });
 });
 
+// ── the Drive (api.drive, used by public/js/driveclient.js) ─────────────────
+describe('the Drive API: every call goes through the same token path', () => {
+  const ID = 'AAAAAAAAAAAAAAAAAAAAAA';
+  const UID = 'uAAAAAAAAAAAAAAA';
+  // One call per method of api.drive. The list must name every method, so a
+  // new Drive call cannot be added without being checked here.
+  const CALLS = {
+    state: () => api.drive.state(),
+    setKeys: () => api.drive.setKeys({ set: [] }),
+    node: () => api.drive.node(ID),
+    mkdir: () => api.drive.mkdir({ parent: 'root' }),
+    createFile: () => api.drive.createFile({ parent: 'root', size: 1 }),
+    putChunk: () => api.drive.putChunk(ID, 0, new Uint8Array(4), 'U'.repeat(43)),
+    finalize: () => api.drive.finalize(ID, 'U'.repeat(43)),
+    chunk: () => api.drive.chunk(ID, 0),
+    update: () => api.drive.update(ID, { parent: 'root' }),
+    remove: () => api.drive.remove(ID),
+    share: () => api.drive.share({ nodes: [ID] }),
+    shares: () => api.drive.shares(ID),
+    impersonationEscrow: () => api.drive.impersonationEscrow(),
+    kit: () => api.drive.kit({ event: 'verified', verdict: 'complete' }),
+    kitProbe: () => api.drive.kitProbe(),
+    kitKeys: () => api.drive.kitKeys({ escrowPriv: {} }),
+    startOver: () => api.drive.startOver({ confirm: 'alice' }),
+    archive: () => api.drive.archive(1),
+    archiveNodes: () => api.drive.archiveNodes(1, { nodes: [] }),
+    archiveFinish: () => api.drive.archiveFinish(1, {}),
+    archiveDelete: () => api.drive.archiveDelete(1, { confirm: 'alice' }),
+    escrow: () => api.drive.escrow(UID, 'a reason'),
+    setUserKeys: () => api.drive.setUserKeys(UID, { set: [] }),
+  };
+  const shapeOk = (c) => {
+    const ct = (c.headers['content-type'] || '').split(';')[0].trim();
+    if (c.method === 'DELETE') return c.headers['x-secbin-intent'] === '1';
+    return c.headers['x-secbin-intent'] === '1' || ct === 'application/json' || ct === 'application/octet-stream';
+  };
+  beforeEach(() => { api.bindSession(profile()); });
+
+  it('the test names every Drive method', () => {
+    expect(Object.keys(CALLS).sort()).toEqual(Object.keys(api.drive).sort());
+  });
+
+  it('each change (the owner’s kit, keys, probe, start over, archive and escrow routes included) carries the page’s token and a shape the server accepts; reads carry none', async () => {
+    handler = () => json(200, { ok: true });
+    jar = `__Host-secbin_csrf=${TOKEN_C}`; // the shared cookie is someone else's now
+    const seen = [];
+    for (const [name, call] of Object.entries(CALLS)) {
+      const from = calls.length;
+      await call();
+      for (const c of calls.slice(from)) seen.push({ name, ...c });
+    }
+    const changes = seen.filter((c) => c.method !== 'GET');
+    expect(changes.map((c) => c.name).sort()).toEqual([
+      'archiveDelete', 'archiveFinish', 'archiveNodes', 'createFile', 'escrow', 'finalize', 'impersonationEscrow', 'kit', 'kitKeys', 'kitProbe',
+      'mkdir', 'putChunk', 'remove', 'setKeys', 'setUserKeys', 'share', 'startOver', 'update',
+    ]);
+    for (const c of changes) {
+      expect(c.path, c.name).toMatch(/^\/api\/private\/(drive|admin\/drive)(\/|$)/);
+      expect(tokenOf(c), c.name).toBe(TOKEN_B);
+      expect(shapeOk(c), c.name).toBe(true);
+    }
+    for (const c of seen.filter((x) => x.method === 'GET')) expect(tokenOf(c), c.name).toBeUndefined();
+    // The kit check records escrow use: a POST with a JSON body.
+    expect(changes.find((c) => c.name === 'kitProbe')).toMatchObject({ method: 'POST', path: '/api/private/drive/kit/probe', body: '{}' });
+  });
+
+  it('a raw binary chunk passes the shape check through the chunk rule, and a refused token is refreshed and the same bytes sent again', async () => {
+    let attempts = 0;
+    handler = (path) => {
+      if (path === '/api/private/me') return json(200, profile({ csrf: TOKEN_C }));
+      attempts += 1;
+      return attempts === 1 ? mismatch() : json(200, { ok: true });
+    };
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const ac = new AbortController();
+    await api.drive.putChunk(ID, 3, bytes, 'U'.repeat(43), ac.signal);
+    expect(trail()).toEqual([`PUT /api/private/drive/files/${ID}/chunk/3`, 'GET /api/private/me', `PUT /api/private/drive/files/${ID}/chunk/3`]);
+    expect(calls.map(tokenOf)).toEqual([TOKEN_B, undefined, TOKEN_C]);
+    for (const c of [calls[0], calls[2]]) {
+      expect(c.headers['content-type']).toBe('application/octet-stream');
+      expect(c.headers['x-upload-token']).toBe('U'.repeat(43));
+      expect(c.body).toBe(bytes);
+    }
+    const init = fetch.mock.calls[2][1];
+    expect(init.signal).toBe(ac.signal); // an abort still reaches the retry
+  });
+
+  it('a Drive change on a page whose browser is now someone else’s is not retried', async () => {
+    handler = (path) => (path === '/api/private/me' ? json(200, bob()) : mismatch());
+    expect(api.isSessionChanged(await api.drive.remove(ID).catch((x) => x))).toBe(true);
+    expect(trail()).toEqual([`DELETE /api/private/drive/nodes/${ID}`, 'GET /api/private/me']);
+  });
+});
+
 // ── nav.js ─────────────────────────────────────────────────────────────────
 function chrome() {
   document.body.replaceChildren();

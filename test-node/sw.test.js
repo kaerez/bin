@@ -82,10 +82,11 @@ describe('service worker request policy', () => {
   });
 
   it('does not cache dashboard pages or unknown paths', () => {
-    for (const p of ['/dashboard', '/dashboard/', '/dashboard/login/', '/dashboard/admin/', '/robots.txt', '/opengraph.png', '/sw.js']) {
+    for (const p of ['/dashboard', '/dashboard/', '/dashboard/login/', '/dashboard/admin/', '/dashboard/drive/', '/robots.txt', '/opengraph.png', '/sw.js']) {
       expect(ctx.requestPolicy(req(p, { mode: 'navigate' }), ORIGIN)).toBeNull();
     }
     expect(ctx.requestPolicy(req('/dashboard/js/create.js'), ORIGIN)).toBeNull();
+    expect(ctx.requestPolicy(req('/dashboard/js/drive-app.js'), ORIGIN)).toBeNull();
   });
 
   it('handles same-origin static assets and the landing shell', () => {
