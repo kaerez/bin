@@ -1,7 +1,8 @@
 // turnstile.js — Cloudflare Turnstile (a privacy-preserving human check) on
 // the forms bots attack: login, anonymous share creation and every change a
 // signed-in browser session makes to its own account (password, username,
-// passkeys, recovery codes, sign-in steps and API keys). Off unless a site key and a secret key are both configured:
+// passkeys, recovery codes, sign-in steps and API keys) and the Drive personal
+// kit's Download and Verify on the same page. Off unless a site key and a secret key are both configured:
 // as the deployment's TURNSTILE_SITEKEY and TURNSTILE_SECRET (preferred: a
 // Worker secret), or else in the admin panel (Security → Human check), where
 // the owner enters them. Admin password resets, the owner's changes to other
@@ -32,7 +33,7 @@ const VERIFY_TIMEOUT_MS = 10000;
 /**
  * The form each token is issued for (the widget's `action`): `account` covers
  * every other change on the account page (username, passkeys, recovery codes,
- * sign-in steps, API keys); `reverse` is the anonymous reverse-share upload;
+ * sign-in steps, API keys, the Drive personal kit); `reverse` is the anonymous reverse-share upload;
  * `share` opens a share that has the CAPTCHA (src/lib/human.js).
  */
 export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', account: 'account', public: 'public-share', reverse: 'reverse-upload', share: 'share-open' });

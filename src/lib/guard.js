@@ -129,7 +129,13 @@ export const CAPTCHA_PAGE = { max: 61, windowSec: 600, blockSec: 600 };
  * a loop reaches it; it is refused before the Directory is asked.
  */
 export const EXTEND_DOWNLOADS = { max: 121, windowSec: 600, blockSec: 600 };
+/**
+ * The set-up page's key proposals (POST /api/auth/setup/candidate, the setup
+ * token checked first): a network may ask SETUP_CANDIDATE.max − 1 times per
+ * window ("Generate again" a few times is plenty).
+ */
+export const SETUP_CANDIDATE = { max: 21, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
-export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend'];
+export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'setup-candidate'];
 
 export { shard as guardShardFor };
