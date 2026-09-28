@@ -148,6 +148,8 @@ try {
   watch(p, 'A');
   await p.goto(`${BASE}/dashboard/setup/`);
   await p.fill('#setup-token', TOKEN); await p.fill('#setup-user', 'owner'); await p.fill('#setup-pass', PW); await p.fill('#setup-pass2', PW);
+  // The Drive keys the server proposes: generated, then "Use these" (the release before has no such step).
+  if (await p.$('#setup-keys-gen')) { await p.click('#setup-keys-gen'); await p.click('#setup-keys-use'); }
   await p.click('#setup-btn');
   await p.waitForFunction(() => /created|recovered/.test(document.querySelector('#setup-msg').textContent), null, { timeout: 60000 });
 

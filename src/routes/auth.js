@@ -52,6 +52,29 @@ async function signedIn(env, g, res) {
   return json(out, 200, { 'set-cookie': cookie });
 }
 
+/**
+ * A set-up request's body and the set-up token it carries, checked (in
+ * constant time; a wrong one counts against the network, which is blocked
+ * after too many) → { body, authnHash } or { refused: the response }.
+ */
+async function setupToken(request, env) {
+  const token = authnToken(env);
+  const authnHash = token ? await sha256Hex(utf8(token)) : null;
+  // Setup disabled (AUTHN unset/deleted/too short): reject everything, cleanly.
+  if (!authnHash) return { refused: err(404, 'setup_disabled', 'Setup is disabled.') };
+  const g = await ipContext(env, request);
+  const b = await isBlocked(env, g, 'setup');
+  if (b.blocked) return { refused: blockedErr(b) };
+  const body = await readJsonBody(request);
+  const presented = typeof body.token === 'string' ? body.token.trim() : '';
+  const presentedHash = await sha256Hex(utf8(presented));
+  if (!timingSafeEqualHex(presentedHash, authnHash)) {
+    const r = await recordFailure(env, g, 'setup');
+    return { refused: r.newlyBlocked ? blockedErr(r) : err(403, 'bad_token', 'The setup token is incorrect.') };
+  }
+  return { body, authnHash };
+}
+
 export async function handleAuth(request, env, url) {
   const p = url.pathname;
 
@@ -68,34 +91,44 @@ export async function handleAuth(request, env, url) {
     }, 200, headers);
   }
 
+  // Set-up's proposed Drive keys (docs/DRIVE.md §3, "Set-up"): a root MEK and
+  // a first sub-MEK generated in the Directory and shown to the page, for
+  // whoever holds the set-up token (checked, and its failures counted, as for
+  // the set-up itself). Nothing is kept but the candidates (10 minutes); the
+  // set-up below uses them only when the page sends their ids ("Use these").
+  if (p === '/api/auth/setup/candidate') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertIntent(request);
+    const t = await setupToken(request, env);
+    if (t.refused) return t.refused;
+    const r = await directory(env).setupCandidates();
+    return r.ok ? json({ root: r.root, sub: r.sub, expires: r.expires }) : err(r.status, r.error, r.message);
+  }
+
   if (p === '/api/auth/setup') {
-    const token = authnToken(env);
-    const authnHash = token ? await sha256Hex(utf8(token)) : null;
     if (request.method === 'GET') {
+      const token = authnToken(env);
+      const authnHash = token ? await sha256Hex(utf8(token)) : null;
       if (!authnHash) return json({ enabled: false, configured: !!sessionKeys(env) });
       const st = await directory(env).setupStatus(authnHash);
       return json({ enabled: st.enabled, ownerExists: st.enabled ? st.ownerExists : undefined, configured: !!sessionKeys(env) });
     }
     if (request.method !== 'POST') return methodNotAllowed('GET, POST');
-    // Setup disabled (AUTHN unset/deleted/too short): reject everything, cleanly.
-    if (!authnHash) return err(404, 'setup_disabled', 'Setup is disabled.');
-    const g = await ipContext(env, request);
-    const b = await isBlocked(env, g, 'setup');
-    if (b.blocked) return blockedErr(b);
-    const body = await readJsonBody(request);
-    const presented = typeof body.token === 'string' ? body.token.trim() : '';
-    const presentedHash = await sha256Hex(utf8(presented));
-    if (!timingSafeEqualHex(presentedHash, authnHash)) {
-      const r = await recordFailure(env, g, 'setup');
-      return r.newlyBlocked ? blockedErr(r) : err(403, 'bad_token', 'The setup token is incorrect.');
-    }
+    const t = await setupToken(request, env);
+    if (t.refused) return t.refused;
+    const { body, authnHash } = t;
     const verifier = await verifierFrom(body.proof);
     if (!verifier) return err(400, 'invalid_credential', 'Invalid password proof.');
     // The Drive keys (docs/DRIVE.md §3): the root MEK and the first sub-MEK,
-    // generated here (the default) or entered by the owner — only when the
-    // server has none yet (they are never replaced here).
+    // generated here (the default), the pair the page showed and the owner
+    // chose, or entered by the owner — only when the server has none yet
+    // (they are never replaced here).
     let keys = { generate: true };
-    if (body.keys && typeof body.keys === 'object' && body.keys.mode === 'manual') {
+    if (body.keys && typeof body.keys === 'object' && body.keys.mode === 'generated') {
+      const c = await directory(env).setupChosen({ root: body.keys.root, sub: body.keys.sub });
+      if (!c.ok) return err(c.status, c.error, c.message);
+      keys = { generate: false, root: c.root, sub: c.sub, chosen: true };
+    } else if (body.keys && typeof body.keys === 'object' && body.keys.mode === 'manual') {
       try {
         keys = { generate: false, root: b64urlFromBytes(parseManualKey(body.keys.root)), sub: b64urlFromBytes(parseManualKey(body.keys.sub)) };
       } catch (e) {

@@ -256,6 +256,8 @@ signed-in browser session makes to its own account on the Account page:
 | Create an API key | `POST /api/private/me/keys` | `account` |
 | Change an API key (name, scopes) | `PATCH /api/private/me/keys/:id` | `account` |
 | Revoke an API key | `DELETE /api/private/me/keys/:id` | `account` |
+| Download the Drive personal kit | `POST /api/private/drive/kit` | `account` |
+| Verify a Drive personal kit | `POST /api/private/drive/kit/verify` | `account` |
 
 Asking for a challenge changes nothing and needs no token: the passkey registration options
 (`POST /api/private/me/passkeys/options`) and the passkey "confirm it's you" challenge
@@ -272,7 +274,8 @@ CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
   the widget has issued a token, and again after each token is used (one token per call) until
   the next one arrives; if the widget cannot load they stay disabled and the page says why. On
   the Account page each card that changes something (username, password, passkeys and recovery
-  codes, API keys) has its own always-visible widget; one widget serves every button of its card,
+  codes, API keys) or hands out keys (the Drive personal kit: Download and Verify) has its own
+  always-visible widget; one widget serves every button of its card,
   including the Remove and Revoke buttons of each table row. This is a usability guard: the
   server-side check below is what enforces it.
 - **Server-side verification** (`src/lib/turnstile.js`). Each protected call must carry
@@ -984,10 +987,28 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   never gets a new random salt in place of a lost one). A generated key is used only for what it
   was made for (a root MEK or a sub-MEK), and an unused one is deleted after 10 minutes. Every
   keyring change, and the previews of a restore or an import, need the step-up.
+- **Set-up keys.** The set-up page shows the root MEK and first sub-MEK the server proposes,
+  masked until Show, with "Use these", "Generate again" and "Enter manually". The proposal
+  (`POST /api/auth/setup/candidate`) is made only for a request with the setup token (checked in
+  constant time; wrong tokens count against the network like the set-up's own) and the intent
+  header, only while there is no keyring and never was one; it is kept as two candidates (a
+  sid no session can have) for 10 minutes, a new proposal replaces the last, and the admin
+  audit has their fingerprints only. No keyring exists until the set-up sends the pair's ids:
+  they are checked before the owner account is made (`410 candidate_expired` otherwise, and
+  nothing is created), then used once and deleted.
 - **Kits.** The personal kit (every user) holds the user's salt and KEKs; the key kit (the
   owner) the root MEK, every sub-MEK and every user salt. Each is sealed in the browser under an
   optional passphrase (Argon2id, AES-256-GCM, bound to the account and the origin) and never sent
-  to the server; verify sends check values only. **Only the owner restores from a kit**, in
+  to the server; verify sends check values only. On the Account page, Download and Verify also
+  need a fresh Turnstile token (the action `account`) when Turnstile is on, checked before the
+  step-up, as every other Account change. Both kits hold the keyring's version (a counter the
+  Directory raises on every key change, never a key or a fingerprint), and Verify compares it
+  with the server's. For each account the Directory records the date and key version of its
+  last personal-kit download and which sub-MEKs that kit held (meta `ukit:<userId>`, removed
+  with the account); from that the Account and Drive pages say, with no key detail, when the
+  keys changed after that download. Only the user's own session downloads a kit and so updates
+  the record: the owner acting as the user is refused (`403 impersonating`) and cannot clear
+  the notice. **Only the owner restores from a kit**, in
   Admin → Security → Keys: the key kit, and a user's personal kit ("Restore a user's personal
   kit": the user chosen there, the kit opened in the owner's browser for that user only, the
   server refusing a kit whose id is another user's). The Account page offers Download and Verify

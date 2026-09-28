@@ -17,7 +17,8 @@ export const AT_REST_FIELDS = ['linkKey', 'received'];
 
 /**
  * The user's KEKs → { userId, salt, current, changing, keks: Map(mekId → {
- * kek, kekOld, fp, from, until }), missing, broken }. `meks`: the sub-MEKs
+ * kek, kekOld, fp, from, until }), missing, broken, version (the keyring's
+ * version, docs/DRIVE.md §3.1) }. `meks`: the sub-MEKs
  * wanted (the current one always comes too), or `all`. HttpError when the
  * Directory has no salt or no root for them.
  */
@@ -26,7 +27,7 @@ export async function userKeys(env, uid, { meks = [], all = false, createSalt = 
   if (!r.ok) throw new HttpError(r.status, r.error, r.message);
   const keks = new Map();
   for (const k of r.keys) keks.set(k.mekId, { kek: keyBytes(k.kek), kekOld: k.kekOld ? keyBytes(k.kekOld) : null, fp: k.fp, from: k.from, until: k.until });
-  return { userId: r.userId, salt: r.salt, current: r.current, changing: r.changing, keks, missing: r.missing, broken: r.broken };
+  return { userId: r.userId, salt: r.salt, current: r.current, changing: r.changing, keks, missing: r.missing, broken: r.broken, version: r.version };
 }
 
 /** The KEKs an item sealed under `mekId` may open with: under the root now, then (during a root change) the previous one. */

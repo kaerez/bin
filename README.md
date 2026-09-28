@@ -154,7 +154,8 @@ working.
   already exists, it *recovers* it: new username/password, all owner sessions revoked, the owner's
   passkeys and recovery codes removed. To recover later, set a **new** `AUTHN` value and visit the
   page again. The first set-up also makes the Drive keys (the root MEK and the first sub-MEK:
-  generated, or entered by hand); a recovery keeps them. Download the key kit afterwards
+  proposed by the server and shown masked until Show, with "Use these", "Generate again" and
+  "Enter manually"; nothing is stored until you choose); a recovery keeps them. Download the key kit afterwards
   (Admin → Security → Keys) and keep it offline, next to the `AUTHN` secret.
 - **Sessions** are an HttpOnly, `SameSite=Strict`, `__Host-` cookie holding a JWT that is signed
   (HS256, `SIG`) and then encrypted (A256GCM, `ENC`). Idle and absolute timeouts are set by the
@@ -206,7 +207,9 @@ working.
   secret), the upgrade of Drives made by the previous release, and the restore of a user's
   personal kit. Each user has a **personal kit** on the Account page (their salt and keys:
   download and verify; only the owner restores from one, so no user can change what opens a
-  Drive). Admin → Import / export has the Drive keys in
+  Drive). Both kit cards show the key version ("Version N, <date>", raised on every key change)
+  and both kit files hold it; after a key change, the Account and Drive pages ask a user whose
+  kit is out of date to download a new one (the card shows when they last did). Admin → Import / export has the Drive keys in
   a file of their own (the parts chosen). See [SECURITY.md](./SECURITY.md), "Drive keys", and
   [docs/DRIVE.md](./docs/DRIVE.md).
 - **Quotas** — at most N per n seconds/minutes/hours/days/months/years (fixed windows), of one
@@ -261,7 +264,8 @@ working.
   passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
   none. The admin can remove a user's passkeys if they lose them all.
 - **Human check (optional):** Cloudflare Turnstile on login, every change on the Account page
-  (password, username, passkeys, recovery codes, sign-in steps, API keys) and anonymous share
+  (password, username, passkeys, recovery codes, sign-in steps, API keys, the Drive personal
+  kit's Download and Verify) and anonymous share
   creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
   disabled until the check has passed, and again after each use until the next one passes.
 - **CAPTCHA on shares (optional, per role):** the same check for the recipients of a share and

@@ -358,7 +358,7 @@ function swap(mount, ...nodes) {
 
 // ── notices above the Drive ─────────────────────────────────────────────────
 
-/** The banners over an open Drive: the owner acting as its user, and the upgrade of a Drive made before the key model v2. */
+/** The banners over an open Drive: the owner acting as its user, a personal kit that is out of date, and the upgrade of a Drive made before the key model v2. */
 function banners(client, deps) {
   const out = [];
   if (deps.user && deps.user.impersonating) {
@@ -366,6 +366,13 @@ function banners(client, deps) {
     out.push(h('div.card.drive-notice.drive-imp-note', { id: 'drive-imp-note', role: 'note' },
       h('p', { text: `You are in ${who}’s Drive: browse, upload, download, move, rename, delete and share as they would.` }),
       h('p.muted', { text: `The server gave you ${who}’s Drive keys as the administrator; that is recorded in the admin audit. What you do here shows in their activity as their own, and in the admin audit as yours.` })));
+  }
+  // The user's personal kit is out of date (the keys changed after their last download): a calm
+  // notice with no key detail. Not while the owner acts as the user: the kit is the user's own.
+  if (!(deps.user && deps.user.impersonating) && client.state && client.state.kit && client.state.kit.stale === true) {
+    out.push(h('div.card.drive-notice', { id: 'drive-kit-notice', role: 'note' },
+      h('p', { text: 'Your Drive’s keys were updated. Download a new personal kit and keep it safe.' }),
+      h('p', {}, h('a', { href: '/dashboard/account/#drive-kit', text: 'Download it on your Account page' }))));
   }
   if (client.migration) out.push(upgradeBox(client, deps));
   return out;

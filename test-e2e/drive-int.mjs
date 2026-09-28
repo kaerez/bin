@@ -119,6 +119,8 @@ try {
   });
   await p.goto(`${BASE}/dashboard/setup/`);
   await p.fill('#setup-token', TOKEN); await p.fill('#setup-user', 'owner'); await p.fill('#setup-pass', PW); await p.fill('#setup-pass2', PW);
+  // The Drive keys the server proposes: generated, then "Use these" (the release before has no such step).
+  if (await p.$('#setup-keys-gen')) { await p.click('#setup-keys-gen'); await p.click('#setup-keys-use'); }
   await p.click('#setup-btn');
   await p.waitForFunction(() => /created/.test(document.querySelector('#setup-msg').textContent), null, { timeout: 30000 });
   check('set-up: the Drive keys were made; the page says to download the key kit', /Drive keys were created.*key kit/.test(await p.textContent('#setup-msg')));

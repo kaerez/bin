@@ -8,7 +8,7 @@
 // up to a minute (Argon2id is slow as well); the throttle lives in this
 // page's memory only.
 
-import { h, showMsg } from '../../js/common.js';
+import { h, showMsg, formatDate } from '../../js/common.js';
 
 export const SHORT_PASSPHRASE = 12;
 
@@ -40,6 +40,9 @@ export function liveMsg(id = null) {
   const msg = h('p.msg', { id, hidden: true });
   return { msg, live: h('div.kit-live', { role: 'status' }, msg) };
 }
+
+/** "Version N, <date>": the keyring's version (docs/DRIVE.md §3.1) as both kit cards show it. */
+export const versionText = (n, at) => `Version ${n}${at ? `, ${formatDate(at)}` : ''}`;
 
 // ── fields ──────────────────────────────────────────────────────────────────
 export const field = (label, control, hint = null) => h('label.field', {}, h('span.field-label', { text: label }), control, hint);

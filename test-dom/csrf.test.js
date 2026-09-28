@@ -212,6 +212,7 @@ describe('the Drive API: every call goes through the same token path', () => {
     share: () => api.drive.share({ nodes: [ID] }),
     shares: () => api.drive.shares(ID),
     // The personal kit (download and verify: a restore is the owner's, keysApi), and the upgrade of a Drive made before the key model v2 (own, or the owner's for a user).
+    kitStatus: () => api.drive.kitStatus(),
     kit: () => api.drive.kit({ current: 'P'.repeat(43) }),
     kitVerify: () => api.drive.kitVerify({ keks: {} }),
     migrate: () => api.drive.migrate(UID),
