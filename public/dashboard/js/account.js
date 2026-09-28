@@ -20,7 +20,7 @@ import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
 import { humanCheck } from '../../js/turnstile.js';
-import { kindWhat } from '../../js/quotakinds.js';
+import { kindWhat, quotaAmount } from '../../js/quotakinds.js';
 // The Drive keys are never in the tab's storage (each page asks the server);
 // with the human check on, loading its script also moves the old Drive key of
 // the release before, if the tab has one, out of sessionStorage into memory
@@ -179,7 +179,7 @@ function renderLimits() {
   if (profile.quotas.length) {
     q.appendChild(h('h3.field-label', { text: 'Quotas' }));
     for (const x of profile.quotas) {
-      q.appendChild(h('p.mono', { text: `${x.used} / ${x.max} ${kindWhat(x.kind)} per ${x.n}${x.unit}${x.channel === 'api' ? ' (API)' : ''}` }));
+      q.appendChild(h('p.mono', { text: `${quotaAmount(x.kind, x.used)} / ${quotaAmount(x.kind, x.max)} ${kindWhat(x.kind)} per ${x.n}${x.unit}${x.channel === 'api' ? ' (API)' : ''}` }));
     }
   }
 }

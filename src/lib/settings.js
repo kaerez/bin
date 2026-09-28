@@ -7,7 +7,7 @@ import { HARD_MAX_SHARE_BYTES, RENDERERS } from '../../public/js/files.js';
 import { FILE_TYPE_MODES, MAX_FOLDER_DEPTH, normalizeRules } from '../../public/js/filepolicy.js';
 import { DEFAULT_URL_RULES, normalizeUrlRules } from '../../public/js/sharetypes.js';
 import { A11Y_SETTINGS, checkStatement } from '../../public/js/a11ystatement.js';
-import { QUOTA_KINDS, PUBLIC_QUOTA_KINDS, KINDS as QUOTA_KIND_INFO } from '../../public/js/quotakinds.js';
+import { QUOTA_KINDS, PUBLIC_QUOTA_KINDS, KINDS as QUOTA_KIND_INFO, MAX_QUOTA_BYTES } from '../../public/js/quotakinds.js';
 
 const MIN = 60;
 const HOUR = 3600;
@@ -527,7 +527,8 @@ export { QUOTA_KINDS, PUBLIC_QUOTA_KINDS };
  * A quota as stored, or throws. `publicAccount`: the public (anonymous)
  * account's list, which takes only the kinds it can use (no Drive, no
  * Receive). A kind done only in the web app (Drive shares, Drive uploads,
- * Receive) takes no "API only" channel: nothing would ever count.
+ * Receive) takes no "API only" channel: nothing would ever count. A kind
+ * counted in bytes (drive-bytes) takes a max of up to MAX_QUOTA_BYTES.
  */
 export function checkQuota(q, { publicAccount = false } = {}) {
   if (!q || typeof q !== 'object') throw new Error('invalid quota');
@@ -537,7 +538,9 @@ export function checkQuota(q, { publicAccount = false } = {}) {
   if (q.channel === 'api' && QUOTA_KIND_INFO[q.kind].gui) throw new Error(`quota kind ${q.kind} is only ever counted in the web app: its channel must be all`);
   if (!Object.prototype.hasOwnProperty.call(QUOTA_UNITS, q.unit)) throw new Error('quota unit must be s, m, h, d, mo or y');
   if (!Number.isSafeInteger(q.n) || q.n < 1 || q.n > 100000) throw new Error('quota period must be 1–100000');
-  if (!Number.isSafeInteger(q.max) || q.max < 0 || q.max > 10000000) throw new Error('quota max must be 0–10000000');
+  if (QUOTA_KIND_INFO[q.kind].bytes) {
+    if (!Number.isSafeInteger(q.max) || q.max < 0 || q.max > MAX_QUOTA_BYTES) throw new Error(`quota max of kind ${q.kind} must be 0–${MAX_QUOTA_BYTES} bytes`);
+  } else if (!Number.isSafeInteger(q.max) || q.max < 0 || q.max > 10000000) throw new Error('quota max must be 0–10000000');
   return { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max };
 }
 

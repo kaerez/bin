@@ -619,6 +619,99 @@ describe('the Drive', () => {
   });
 });
 
+describe('the role\'s file rules in the Drive (checked before anything is sent; the server\'s refusals shown as they come)', () => {
+  const posts = (path) => S.requests.filter((r) => r.method === 'POST' && r.path === path);
+  const withLimits = (extra) => ({ profile: { ...PROFILE, limits: { ...LIMITS, ...extra } } });
+  const upload = (files) => {
+    const input = document.getElementById('drive-file-input');
+    Object.defineProperty(input, 'files', { configurable: true, value: files });
+    input.dispatchEvent(new Event('change'));
+  };
+  const driveMsg = () => document.getElementById('drive-msg');
+
+  it('an upload with a type the role refuses: the reason, and nothing of the batch sent; allowed types are declared', async () => {
+    await openApp(withLimits({ fileTypeMode: 'block', fileTypeRules: ['ext:exe'] }));
+    upload([new File(['a'], 'hi.txt', { type: 'text/plain' }), new File(['b'], 'tool.exe', { type: 'application/x-msdownload' })]);
+    await until(() => !driveMsg().hidden);
+    expect(driveMsg().textContent).toBe('Your administrator does not allow .exe (application/x-msdownload) files in the Drive (“tool.exe”).');
+    expect(posts('/api/private/drive/files')).toHaveLength(0);
+    upload([new File(['a'], 'hi.txt', { type: 'text/plain' })]);
+    await until(() => row('hi.txt'));
+    expect(posts('/api/private/drive/files').map((r) => r.body.types)).toEqual([[{ ext: 'txt', mime: 'text/plain' }]]);
+    // Without a type policy, nothing is declared.
+    await openApp();
+    upload([new File(['a'], 'hi.txt', { type: 'text/plain' })]);
+    await until(() => row('hi.txt'));
+    expect(posts('/api/private/drive/files')[0].body).not.toHaveProperty('types');
+  });
+
+  it('a new folder past the depth limit: the reason in the dialog, nothing sent; one within it is made', async () => {
+    const { app } = await openApp(withLimits({ maxFolderDepth: 1 }));
+    await app.open(ids.get('Documents'));
+    document.getElementById('drive-mkdir').click();
+    let d = dialog();
+    d.querySelector('input').value = 'Deeper';
+    button(d, 'Create').click();
+    await until(() => !d.querySelector('.modal-msg').hidden);
+    expect(d.querySelector('.modal-msg').textContent).toBe('Folders may nest at most 1 level deep in your Drive for your account; the new folder would be at level 2.');
+    expect(posts('/api/private/drive/folders')).toHaveLength(0);
+    button(d, 'Cancel').click();
+    await app.open('root');
+    document.getElementById('drive-mkdir').click();
+    d = dialog();
+    d.querySelector('input').value = 'Level one';
+    button(d, 'Create').click();
+    await until(() => row('Level one'));
+    expect(posts('/api/private/drive/folders')).toHaveLength(1);
+  });
+
+  it('an upload into a folder deeper than the limit (made before it): refused with the reason; what is there stays listed; the server\'s refusals as it words them', async () => {
+    const { app } = await openApp(withLimits({ maxFolderDepth: 1 }));
+    await app.open(ids.get('Documents/Reports'));
+    expect(names()).toEqual(['Archive', 'q1.txt']);
+    upload([new File(['a'], 'late.txt', { type: 'text/plain' })]);
+    await until(() => !driveMsg().hidden);
+    expect(driveMsg().textContent).toBe('Folders may nest at most 1 level deep in your Drive for your account; this folder is at level 2.');
+    expect(posts('/api/private/drive/files')).toHaveLength(0);
+    expect(names()).toEqual(['Archive', 'q1.txt']);
+    // A refusal the server makes (here the bytes quota) is shown as it words it.
+    S.refusals.push({ method: 'POST', path: /^\/api\/private\/drive\/files$/, status: 429, error: 'quota_exceeded', message: 'Quota reached: 1.0 GB uploaded to the Drive per 1d.', extra: { quota: { channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 1024 ** 3 } } });
+    await app.open(ids.get('Documents'));
+    upload([new File(['a'], 'big.txt', { type: 'text/plain' })]);
+    await until(() => /Quota reached/.test(driveMsg().textContent));
+    expect(driveMsg().textContent).toBe('Quota reached: 1.0 GB uploaded to the Drive per 1d.');
+    expect(row('big.txt')).toBeUndefined();
+  });
+
+  it('a move past the depth limit: the reason in the move dialog, nothing sent; a refusal only the server can make, as it words it', async () => {
+    await openApp(withLimits({ maxFolderDepth: 1 }));
+    row('Empty').querySelector('input[type="checkbox"]').click();
+    document.getElementById('drive-move').click();
+    const d = dialog();
+    const picker = d.querySelector('[role="tree"]');
+    await until(() => picker.querySelectorAll('.tree-item').length >= 3);
+    [...picker.querySelectorAll('.tree-text')].find((t) => t.textContent === 'Photos').closest('.tree-label').click();
+    button(d, 'Move here').click();
+    await until(() => !d.querySelector('.modal-msg').hidden);
+    expect(d.querySelector('.modal-msg').textContent).toBe('Folders may nest at most 1 level deep in your Drive for your account; the folder would be at level 2.');
+    expect(S.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+    button(d, 'Cancel').click();
+    // What only the server can tell (the folders inside a folder being moved) comes back as it words it.
+    S.refusals.push({ method: 'PATCH', path: /^\/api\/private\/drive\/nodes\//, status: 403, error: 'folder_too_deep', message: 'Folders may be nested at most 1 level deep in your Drive.', extra: { max: 1 } });
+    row('Empty').querySelector('input[type="checkbox"]').click(); // unselected: now the file alone, which fits at level 1 here
+    row('readme.txt').querySelector('input[type="checkbox"]').click();
+    document.getElementById('drive-move').click();
+    const d2 = dialog();
+    const picker2 = d2.querySelector('[role="tree"]');
+    await until(() => picker2.querySelectorAll('.tree-item').length >= 3);
+    [...picker2.querySelectorAll('.tree-text')].find((t) => t.textContent === 'Photos').closest('.tree-label').click();
+    button(d2, 'Move here').click();
+    await until(() => !d2.querySelector('.modal-msg').hidden);
+    expect(d2.querySelector('.modal-msg').textContent).toBe('Folders may be nested at most 1 level deep in your Drive.');
+  });
+
+});
+
 describe('the client\'s progress and cancel for downloads', () => {
   it('download(id, { onProgress, signal }) reports (bytesDone, total) and stops on abort', async () => {
     await server();

@@ -136,8 +136,8 @@ export const PW_WINDOW_SEC = 900;
 export const PW_LOCK_SEC = 900;
 /** Received files per page of GET /received. */
 export const RECEIVED_PAGE = 500;
-/** Why the user's browser could not take a received file in (nodes.rwhy). */
-export const RECEIVED_FAIL_REASONS = ['unreadable', 'name', 'place'];
+/** Why the user's browser could not take a received file in (nodes.rwhy); 'type': the role's file-type rules keep it out of the Drive. */
+export const RECEIVED_FAIL_REASONS = ['unreadable', 'name', 'place', 'type'];
 /** An ended reverse share is kept (for its lists) this long — as long as the share index keeps its row. */
 const REVERSE_KEEP_SEC = 30 * 86400;
 /**
@@ -254,6 +254,21 @@ export class Drive extends DurableObject {
   #subtree(id) {
     return this.sql.exec(`WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
       SELECT n.* FROM sub JOIN nodes n ON n.id = sub.id`, id).toArray();
+  }
+  /** How many folder levels there are below folder `id` (none, or only files: 0). */
+  #dirHeight(id) {
+    return this.sql.exec(`WITH RECURSIVE sub(id, lvl) AS (SELECT ?, 0 UNION ALL SELECT n.id, sub.lvl + 1 FROM nodes n JOIN sub ON n.parent = sub.id WHERE n.kind = 'dir')
+      SELECT MAX(lvl) AS h FROM sub`, id).one().h ?? 0;
+  }
+  /**
+   * The role's folder-depth limit (maxFolderDepth, as for file shares; null:
+   * none): an item may not end up deeper than `max` — a folder at its own
+   * depth (one in the top folder: 1), a file at its folder's. `depth` is the
+   * deepest level the change makes → the refusal, or null.
+   */
+  #tooDeep(depth, max) {
+    if (max === null || max === undefined || depth <= max) return null;
+    return fail(403, 'folder_too_deep', `Folders may be nested at most ${max} level${max === 1 ? '' : 's'} deep in your Drive.`, { max });
   }
   /** How many folder levels a subtree adds below its top (a lone file or empty folder: 0). */
   #height(id) {
@@ -759,12 +774,17 @@ export class Drive extends DurableObject {
     return { ok: true, node: this.#out(n), children, path };
   }
 
-  /** A folder (its name sealed under `mek` with salt `ks`); its sealed name (and meta) count towards the capacity. */
-  async createFolder(uid, { id, parent, name, meta = null, ks, mek, mfp, capacity = null }) {
+  /**
+   * A folder (its name sealed under `mek` with salt `ks`); its sealed name (and meta) count towards the capacity.
+   * `maxDepth`: the role's folder-depth limit (null: none).
+   */
+  async createFolder(uid, { id, parent, name, meta = null, ks, mek, mfp, capacity = null, maxDepth = null }) {
     this.#bind(uid);
     const bad = this.#checkNew(id) || this.#checkParent(parent) || this.#fits(name.length + (meta ? meta.length : 0) + ks.length, capacity);
     if (bad) return bad;
     if (this.#depth(parent) + 1 > MAX_DEPTH) return fail(409, 'too_deep', `Folders nest at most ${MAX_DEPTH} levels.`);
+    const deep = this.#tooDeep(this.#depth(parent) + 1, maxDepth);
+    if (deep) return deep;
     const t = nowSec();
     this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, state, created, updated, ks, mek, mfp) VALUES (?, ?, 'dir', ?, ?, 'ready', ?, ?, ?, ?, ?)",
       id, parent, name, meta, t, t, ks, mek, mfp);
@@ -774,11 +794,12 @@ export class Drive extends DurableObject {
   /**
    * Reserve a file: capacity and the largest-file limit are checked here, at
    * once, against every file already stored or being uploaded (and the
-   * sealed fields of every item, this one's included).
+   * sealed fields of every item, this one's included). `maxDepth`: the role's
+   * folder-depth limit (null: none) — no file goes into a folder deeper.
    */
-  async createFile(uid, { id, parent, name, meta = null, size, dek, ks, mek, mfp, uploadHash, capacity, maxFile, pendingSec }) {
+  async createFile(uid, { id, parent, name, meta = null, size, dek, ks, mek, mfp, uploadHash, capacity, maxFile, pendingSec, maxDepth = null }) {
     this.#bind(uid);
-    const bad = this.#checkNew(id) || this.#checkParent(parent);
+    const bad = this.#checkNew(id) || this.#checkParent(parent) || this.#tooDeep(this.#depth(parent), maxDepth);
     if (bad) return bad;
     if (size > maxFile) return fail(413, 'file_too_large', `A Drive file may be at most ${maxFile} bytes.`, { max: maxFile });
     const used = this.#used();
@@ -876,9 +897,10 @@ export class Drive extends DurableObject {
    * Move (`parent`) and / or rename (`name`, `meta`) an item. The root can
    * do neither. A new name or metadata is sealed under the item's own keys:
    * `mek` and `ks` must still be the item's (else `409 stale_keys`: it was
-   * re-sealed meanwhile, and the browser seals again).
+   * re-sealed meanwhile, and the browser seals again). `maxDepth`: the role's
+   * folder-depth limit (null: none) — a move may not put anything deeper.
    */
-  async patchNode(uid, id, { parent, name, meta, mek, ks, capacity = null }) {
+  async patchNode(uid, id, { parent, name, meta, mek, ks, capacity = null, maxDepth = null }) {
     this.#bind(uid);
     if (id === ROOT) return fail(400, 'root', 'The top folder cannot be moved or renamed.');
     const n = this.#node(id);
@@ -898,6 +920,9 @@ export class Drive extends DurableObject {
       // A folder cannot go into itself or anything below it.
       if (parent === id || this.#ancestors(parent).some((a) => a.id === id)) return fail(409, 'cycle', 'A folder cannot be moved into itself or one of its sub-folders.');
       if (this.#depth(parent) + 1 + this.#height(id) > MAX_DEPTH) return fail(409, 'too_deep', `Folders nest at most ${MAX_DEPTH} levels.`);
+      // A folder lands one level below `parent` with its sub-folders under it; a file at `parent`'s level.
+      const deep = this.#tooDeep(this.#depth(parent) + (n.kind === 'dir' ? 1 + this.#dirHeight(id) : 0), maxDepth);
+      if (deep) return deep;
     }
     const t = nowSec();
     this.ctx.storage.transactionSync(() => {
@@ -942,7 +967,7 @@ export class Drive extends DurableObject {
       });
       this.#dropEndedReverse();
       // Uploads that never completed (the browser deletes one it cancelled): the Worker gives their quota back.
-      const unfinished = rows.filter((r) => r.kind === 'file' && r.state === 'pending' && !r.rs).map((r) => r.created);
+      const unfinished = rows.filter((r) => r.kind === 'file' && r.state === 'pending' && !r.rs).map((r) => ({ t: r.created, size: r.size }));
       return { ok: true, deleted: ids.length, shares: [...shares], reverse, unfinished, used: this.#used() };
     });
   }
@@ -1137,6 +1162,15 @@ export class Drive extends DurableObject {
     if (!uid || !times.length) return;
     const ns = this.env.DIRECTORY;
     try { await ns.get(ns.idFromName('directory')).refundAt(uid, action, times); } catch (e) {
+      console.warn('secbin: quota not given back', e && e.message ? e.message : e);
+    }
+  }
+  /** Give back Drive uploads that never completed, [{ t, size }] (Directory refundDriveUploads): a failure is only logged. */
+  async #refundUploads(files) {
+    const uid = this.#meta('uid');
+    if (!uid || !files.length) return;
+    const ns = this.env.DIRECTORY;
+    try { await ns.get(ns.idFromName('directory')).refundDriveUploads(uid, files); } catch (e) {
       console.warn('secbin: quota not given back', e && e.message ? e.message : e);
     }
   }
@@ -1562,9 +1596,10 @@ export class Drive extends DurableObject {
   /**
    * A received file taken in by the user's browser (its DEK, name and
    * metadata sealed under the KEK of the current sub-MEK, checked by the
-   * Worker): from now on an ordinary Drive file (in `parent`).
+   * Worker): from now on an ordinary Drive file (in `parent`). `maxDepth`:
+   * the role's folder-depth limit (null: none), as for an upload.
    */
-  async acceptReceived(uid, node, { parent, name, meta, dek, ks, mek, mfp }) {
+  async acceptReceived(uid, node, { parent, name, meta, dek, ks, mek, mfp, maxDepth = null }) {
     this.#bind(uid);
     const n = this.#node(node);
     if (!n || !n.rs || n.state !== 'ready' || (this.#reverse(n.rs)?.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
@@ -1572,6 +1607,8 @@ export class Drive extends DurableObject {
       const bad = this.#checkParent(parent);
       if (bad) return bad;
     }
+    const deep = this.#tooDeep(this.#depth(parent), maxDepth);
+    if (deep) return deep;
     this.sql.exec('UPDATE nodes SET parent = ?, name = ?, meta = ?, fk = NULL, dek = ?, ks = ?, mek = ?, mfp = ?, rs = NULL, rfail = NULL, rwhy = NULL, updated = ? WHERE id = ?',
       parent, name, meta, dek, ks, mek, mfp, nowSec(), node);
     if (!n.ch) await this.#scheduleHashes(); // received before the chunk hashes were kept
@@ -1597,11 +1634,11 @@ export class Drive extends DurableObject {
         for (const f of stale) this.#dropPending(f);
       });
       purged = stale.length;
-      unfinished = stale.filter((f) => !f.rs).map((f) => f.created);
+      unfinished = stale.filter((f) => !f.rs).map((f) => ({ t: f.created, size: f.size }));
     });
     if (purged) await this.#reportUsage();
-    // Drive uploads that never completed give their quota back.
-    await this.#refundAt('drive-upload', unfinished);
+    // Drive uploads that never completed give their quota back (the file, and its bytes).
+    await this.#refundUploads(unfinished);
     await this.#lapseSessions();
     this.#dropEndedReverse();
     const more = await this.#hashStored(uid).catch((e) => { console.warn('secbin: drive hashes not computed', e && e.message ? e.message : e); return false; });

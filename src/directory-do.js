@@ -29,7 +29,7 @@ import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
 import { publicStatement } from '../public/js/a11ystatement.js';
-import { ACTIONS, quotaCovers, shareAction, kindWhat } from '../public/js/quotakinds.js';
+import { ACTIONS, quotaCovers, shareAction, kindWhat, quotaAmount } from '../public/js/quotakinds.js';
 import {
   deriveKek, deriveUserKey, deriveFieldKey, keyFingerprint, keyCheckValue, saltCheckValue, sameCheck, sealSubMek, openSubMek,
   newMekId, newKey, newSalt, KEY_RE, MEK_ID_RE, effectiveAt, mekStatus, checkTimeline,
@@ -493,8 +493,8 @@ function cleanLabel(s) {
   return v.length <= 100 ? v : null;
 }
 
-/** A quota in the audit log: "10 uploads received per 1d [receive-upload]" (and "via the API" for an API-only one). */
-const quotaText = (q) => `${q.max} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''} [${q.kind}]`;
+/** A quota in the audit log: "10 uploads received per 1d [receive-upload]", "1.0 GB uploaded to the Drive per 1d [drive-bytes]" (and "via the API" for an API-only one). */
+const quotaText = (q) => `${quotaAmount(q.kind, q.max)} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''} [${q.kind}]`;
 
 function cleanDetail(s) {
   // eslint-disable-next-line no-control-regex
@@ -1628,41 +1628,49 @@ export class Directory extends DurableObject {
     for (const h of hits) {
       // Public hits carry their subject key; the account's own hits use uid.
       const key = typeof h.key === 'string' && uid === PUBLIC_ID && h.key.startsWith('pub:') ? h.key : uid;
-      this.sql.exec('UPDATE usage SET count = MAX(0, count - 1) WHERE quota_id = ? AND user_id = ? AND bucket = ?', h.quota_id, key, h.bucket);
+      // What the hit counted: one action, or (a quota counted in bytes) the file's size.
+      const n = Number.isSafeInteger(h.n) && h.n > 0 ? h.n : 1;
+      this.sql.exec('UPDATE usage SET count = MAX(0, count - ?) WHERE quota_id = ? AND user_id = ? AND bucket = ?', n, h.quota_id, key, h.bucket);
     }
   }
 
   /**
-   * Check and count one `action` (public/js/quotakinds.js ACTIONS) against
-   * every quota of the account that covers it, atomically (nothing here
-   * awaits): refused (429 quota_exceeded, naming the quota) when a quota is
-   * reached, else counted in each quota's current window → { ok, hits } (the
-   * hits give it back: refund). `channel` 'api' also counts the API-only
-   * quotas. `keys`: who is counted (the public account's anonymous subjects;
-   * by default the account); `needAll`: refused only when every key is over.
-   * The owner is never counted.
+   * Check and count `action` (public/js/quotakinds.js ACTIONS: one of it) —
+   * or several actions at once, `[{ action, n }]` (a Drive upload: one file,
+   * and its size in bytes) — against every quota of the account that covers
+   * them, atomically (nothing here awaits): refused (429 quota_exceeded,
+   * naming the quota) when a quota would go past its max, else counted in
+   * each quota's current window → { ok, hits } (the hits give it back:
+   * refund). `channel` 'api' also counts the API-only quotas. `keys`: who is
+   * counted (the public account's anonymous subjects; by default the
+   * account); `needAll`: refused only when every key is over. The owner is
+   * never counted.
    */
   #chargeQuotas(uid, channel, action, { keys = [uid], needAll = false } = {}) {
     const u = this.#user(uid);
     if (!u || u.role === 'owner') return { ok: true, hits: [] };
     const ts = now();
-    const applicable = this.#applicableQuotas(uid).filter((q) => quotaCovers(q.kind, action) && (q.channel === 'all' || channel === 'api'));
+    const charges = typeof action === 'string' ? [{ action, n: 1 }] : action;
+    const covered = (q) => charges.filter((c) => quotaCovers(q.kind, c.action));
+    const applicable = this.#applicableQuotas(uid).filter((q) => covered(q).length && (q.channel === 'all' || channel === 'api'));
     const hits = [];
     for (const q of applicable) {
+      // How much this quota counts now: one per action, or the bytes (drive-bytes).
+      const n = covered(q).reduce((sum, c) => sum + c.n, 0);
       const bucket = quotaBucket(q, ts);
       const over = keys.map((k) => {
         const row = this.sql.exec('SELECT count FROM usage WHERE quota_id = ? AND user_id = ? AND bucket = ?', q.id, k, bucket).toArray()[0];
-        return (row ? row.count : 0) >= q.max;
+        return (row ? row.count : 0) + n > q.max;
       });
       if (needAll ? over.every(Boolean) : over.some(Boolean)) {
-        return fail(429, 'quota_exceeded', `Quota reached: ${q.max} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''}.`, { quota: { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max } });
+        return fail(429, 'quota_exceeded', `Quota reached: ${quotaAmount(q.kind, q.max)} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''}.`, { quota: { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max } });
       }
-      for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k });
+      if (n > 0) for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k, n });
     }
     this.ctx.storage.transactionSync(() => {
       for (const h of hits) {
-        this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, 1, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + 1',
-          h.quota_id, h.key, h.bucket, ts);
+        this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, ?, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + excluded.count',
+          h.quota_id, h.key, h.bucket, h.n, ts);
       }
     });
     return { ok: true, hits };
@@ -1690,14 +1698,39 @@ export class Directory extends DurableObject {
   }
 
   /**
-   * Count one file added to the Drive by an upload (not one taken in from a
-   * Receive link) against the quotas of kind drive-upload (the Drive has no
-   * API channel) → { ok, refund } or 429 quota_exceeded.
+   * Give back Drive uploads that never completed (deleted unfinished, or
+   * purged): `files` = [{ t, size }] (when each was counted, and its size) —
+   * one file each for the quotas of kind drive-upload and its size for those
+   * of kind drive-bytes, in the window it was counted in (never below zero).
    */
-  async authorizeDriveUpload(uid) {
+  async refundDriveUploads(uid, files) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'owner' || u.role === 'public' || !Array.isArray(files)) return { ok: true };
+    const list = files.filter((f) => f && Number.isSafeInteger(f.t) && f.t > 0 && Number.isSafeInteger(f.size) && f.size >= 0).slice(0, 10000);
+    if (!list.length) return { ok: true };
+    const applicable = this.#applicableQuotas(uid).filter((q) => q.channel === 'all' && (quotaCovers(q.kind, 'drive-upload') || quotaCovers(q.kind, 'drive-bytes')));
+    this.ctx.storage.transactionSync(() => {
+      for (const q of applicable) {
+        for (const f of list) {
+          const n = (quotaCovers(q.kind, 'drive-upload') ? 1 : 0) + (quotaCovers(q.kind, 'drive-bytes') ? f.size : 0);
+          if (n > 0) this.sql.exec('UPDATE usage SET count = MAX(0, count - ?) WHERE quota_id = ? AND user_id = ? AND bucket = ?', n, q.id, uid, quotaBucket(q, f.t));
+        }
+      }
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Count one file added to the Drive by an upload (not one taken in from a
+   * Receive link): one against the quotas of kind drive-upload and its `size`
+   * against those of kind drive-bytes, together and atomically (the Drive has
+   * no API channel) → { ok, refund } or 429 quota_exceeded.
+   */
+  async authorizeDriveUpload(uid, { size } = {}) {
     const u = this.#user(uid);
     if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
-    const q = this.#chargeQuotas(uid, 'all', 'drive-upload');
+    if (!Number.isSafeInteger(size) || size < 0) return fail(400, 'invalid_size', 'size must be the file’s size in bytes.');
+    const q = this.#chargeQuotas(uid, 'all', [{ action: 'drive-upload', n: 1 }, { action: 'drive-bytes', n: size }]);
     return q.ok ? { ok: true, refund: q.hits } : q;
   }
 
@@ -2249,6 +2282,8 @@ export class Directory extends DurableObject {
       current,
       // The Drive made before the key model v2 still waits for its upgrade.
       migration: mig ? mig.state : null,
+      // The role's file policy (as for file shares): the types Drive uploads and take-ins may have, how deep folders nest.
+      policy: { mode: L.fileTypeMode ?? 'any', rules: Array.isArray(L.fileTypeRules) ? L.fileTypeRules : [], maxFolderDepth: L.maxFolderDepth ?? null },
       // The user's personal kit against the keys now (the pages' "download a new kit" notice).
       kit: this.#userKitState(uid, current),
     };

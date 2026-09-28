@@ -12,7 +12,7 @@ import { toast, copyText, flashCopied, keepFocus, tablistKeys } from '../../js/u
 import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
 import { STATEMENT_FIELDS, MAIN, ALT, guessDir } from '../../js/a11ystatement.js';
-import { KINDS, QUOTA_GROUPS, QUOTA_KINDS, PUBLIC_QUOTA_KINDS, kindLabel } from '../../js/quotakinds.js';
+import { KINDS, QUOTA_GROUPS, QUOTA_KINDS, PUBLIC_QUOTA_KINDS, kindLabel, isBytesKind } from '../../js/quotakinds.js';
 import { ready } from './nav.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { renderShares } from './admin-shares.js';
@@ -22,6 +22,7 @@ import { keysSection, KEYS_ANCHOR } from './admin-keys.js';
 const $ = (s) => document.querySelector(s);
 const panel = (name) => document.querySelector(`.admin-panel[data-panel="${name}"]`);
 const MiB = 1024 * 1024;
+const GiB = 1024 * MiB;
 /** A header cell; the actions column (no visible title) is named for screen readers. */
 const th = (t) => (t ? h('th', { text: t }) : h('th', {}, h('span.sr-only', { text: 'Actions' })));
 
@@ -565,13 +566,29 @@ function quotasEditor(scope, list, { publicAccount = false } = {}) {
     };
     kind.addEventListener('change', syncChannel);
     syncChannel();
-    const max = h('input.input.opt-num', { type: 'number', min: '0', value: String(q.max), 'aria-label': 'Max' });
+    // A kind counted in bytes (Drive → "Bytes uploaded") takes its max in MiB or GiB, as the other byte limits.
+    const SCALE = { MiB, GiB };
+    const startUnit = isBytesKind(q.kind) && q.max >= GiB && q.max % GiB === 0 ? 'GiB' : 'MiB';
+    const max = h('input.input.opt-num', { type: 'number', min: '0', value: String(isBytesKind(q.kind) ? q.max / SCALE[startUnit] : q.max), 'aria-label': 'Max' });
+    const maxUnit = h('select.input', { 'aria-label': 'Max unit' }, h('option', { value: 'MiB', text: 'MiB' }), h('option', { value: 'GiB', text: 'GiB' }));
+    maxUnit.value = startUnit;
+    const maxUnitBox = labelled(maxUnit, 'Max unit');
+    const syncBytes = () => {
+      const bytes = isBytesKind(kind.value);
+      maxUnitBox.hidden = !bytes;
+      max.step = bytes ? 'any' : '1';
+    };
+    kind.addEventListener('change', syncBytes);
+    syncBytes();
     const n = h('input.input.opt-num', { type: 'number', min: '1', value: String(q.n), 'aria-label': 'Per (period)' });
     const unit = h('select.input', { 'aria-label': 'Period unit' }, ...[['s', 'seconds'], ['m', 'minutes'], ['h', 'hours'], ['d', 'days'], ['mo', 'months'], ['y', 'years']].map(([v, t]) => h('option', { value: v, text: t, selected: q.unit === v })));
     unit.value = q.unit;
-    const row = h('div.toolbar.quota-row', {}, labelled(max), labelled(kind), labelled(n, 'Per (period)'), labelled(unit, 'Period unit'), labelled(channel, 'Via (channel)'),
+    const row = h('div.toolbar.quota-row', {}, labelled(max), maxUnitBox, labelled(kind), labelled(n, 'Per (period)'), labelled(unit, 'Period unit'), labelled(channel, 'Via (channel)'),
       h('button.btn', { type: 'button', text: 'Remove', on: { click: () => row.remove() } }));
-    row.read = () => ({ channel: channel.value, kind: kind.value, n: Number(n.value), unit: unit.value, max: Number(max.value) });
+    row.read = () => ({
+      channel: channel.value, kind: kind.value, n: Number(n.value), unit: unit.value,
+      max: isBytesKind(kind.value) ? Math.round(Number(max.value) * SCALE[maxUnit.value]) : Number(max.value),
+    });
     rows.appendChild(row);
   };
   for (const q of list) addRow(q);
@@ -588,7 +605,7 @@ function quotasEditor(scope, list, { publicAccount = false } = {}) {
 // What each group of kinds counts (Admin → Roles → Quotas).
 const QUOTA_HELP = {
   outgoing: 'Outgoing shares: "All outgoing shares" counts every note, link, credential, file share and Drive share (never Drive uploads or Receive). "Notes, links and credentials" and "File and Drive shares" count those together; the other kinds count one type each (a note is plain text, Markdown or code).',
-  webOnly: 'Drive: "Files uploaded" counts each file uploaded to the Drive (a folder upload counts every file; files taken in from Receive links do not count), given back when the upload does not complete. Receive: "New links" counts each Receive link created; "Uploads received" counts each upload session that sends files through one of the user\'s links (counted for the user, never the sender); "All receive" counts both. Drive shares, the Drive and Receive are used in the web app only, so their quotas are GUI + API.',
+  webOnly: 'Drive: "Files uploaded" counts each file uploaded to the Drive (a folder upload counts every file; files taken in from Receive links do not count), and "Bytes uploaded" their size (its max in MiB or GiB); both are given back when the upload does not complete. Receive: "New links" counts each Receive link created; "Uploads received" counts each upload session that sends files through one of the user\'s links (counted for the user, never the sender); "All receive" counts both. Drive shares, the Drive and Receive are used in the web app only, so their quotas are GUI + API.',
 };
 
 function rulesEditor(scope, list, { withPresets = true } = {}) {
