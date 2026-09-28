@@ -99,6 +99,8 @@ try {
   watch(op, 'owner');
   await op.goto(`${BASE}/dashboard/setup/`);
   await op.fill('#setup-token', TOKEN); await op.fill('#setup-user', 'owner'); await op.fill('#setup-pass', PW); await op.fill('#setup-pass2', PW);
+  // The Drive keys the server proposes: generated, then "Use these".
+  await op.click('#setup-keys-gen'); await op.click('#setup-keys-use');
   await op.click('#setup-btn');
   await op.waitForFunction(() => /created/.test(document.querySelector('#setup-msg').textContent), null, { timeout: 60000 });
   await login(op, 'owner', PW);
