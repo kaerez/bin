@@ -1541,11 +1541,14 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
     for WCAG 2.2.1). The grant is the only credential (a custom header; cross-site requests are
     refused). Each extension ends the window the role's download window from now, at most 10
     times per grant, never past the share's expiry, and spends no view.
-  - Every refusal of an extension counts towards the network's "invalid" limit: a bad grant, an
-    id that was never a share (answered from the share index without creating a FileShare
-    object), a grant past its tenth extension (`409 extend_limit`; the viewer stops asking after
-    the first) and a share that has ended (`410`; a late tab asks once). Repeated calls end in
-    `429 blocked`, refused before the Directory is asked.
+  - Every extend call counts towards the route's own per-network limit (`download-extend`: 120
+    calls per 10 minutes, then `429 rate_limited` with `Retry-After` for 10 minutes), checked
+    first, so a loop is refused before the Directory is asked. What a guesser produces also counts
+    as invalid, as on the chunk route: a bad grant, and an id that was never a share (answered
+    from the share index without creating a FileShare object). The right credential arriving late
+    or once too often is never counted as invalid: a share that has ended (`410`) and a grant past
+    its tenth extension (`409 extend_limit`; the viewer stops asking after the first). The owner
+    sees and lifts `download-extend` blocks with the others.
   - After a file share's last view its ciphertext is purged when the last live grant ends. So
     extensions keep a one-view share's encrypted data in R2, and downloadable with that grant,
     for up to 10 more windows after the only view, never past the share's expiry. The sender is

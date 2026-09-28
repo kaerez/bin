@@ -122,7 +122,14 @@ export async function rateLimit(env, g, scope, rule) {
  */
 export const CAPTCHA_VERIFY = { max: 31, windowSec: 600, blockSec: 600 };
 export const CAPTCHA_PAGE = { max: 61, windowSec: 600, blockSec: 600 };
+/**
+ * "Keep downloads open" (POST /api/file/:id/extend): a network may ask at most
+ * EXTEND_DOWNLOADS.max − 1 times per window, whatever the answer. A recipient
+ * extends a window about once per download window (at most ten times), so only
+ * a loop reaches it; it is refused before the Directory is asked.
+ */
+export const EXTEND_DOWNLOADS = { max: 121, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
-export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page'];
+export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend'];
 
 export { shard as guardShardFor };

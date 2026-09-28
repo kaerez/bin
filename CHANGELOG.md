@@ -455,8 +455,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
       view (the recipient can keep a download window open up to 10 more times, never past the
       expiry), and every extension is recorded in the share owner's activity log
       (`share.download_extended`: share id, extension number, new end);
-    - `POST /api/file/:id/extend`: calls past the tenth extension (409) and on a share that has
-      ended (410) count towards the network's "invalid" limit, so repeated calls end in 429;
+    - `POST /api/file/:id/extend` has its own per-network limit (`download-extend`, 120 calls per
+      10 minutes, then 429 `rate_limited`), checked before the Directory, so a loop of calls past
+      the tenth extension (409) ends there; a 409 or a 410 on a share that has ended, with a
+      valid grant, is never counted as invalid;
     - when the grant table is full, a grant living on an extension gives way to a new open;
     - the session and download-window warnings go by the server's clock (`now` in `/me`'s
       `session` and in the open and extend answers);

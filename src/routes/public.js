@@ -13,7 +13,7 @@
 
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
-import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig, rateLimit, EXTEND_DOWNLOADS } from '../lib/guard.js';
 import { parseUserAgent, parseLanguages } from '../lib/ua.js';
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
@@ -342,15 +342,23 @@ async function expireByOpener(env, g, id, info, { lh, kh }, human) {
 
 /**
  * Keep a download window open longer (WCAG 2.2.1): the grant itself is the
- * credential (as for chunks); the window is the sender's role's, now. Every
- * refusal counts towards the network's "invalid" limit, so repeated calls end
- * in 429 (refused up front, before the Directory): a bad grant, an id that
- * was never a share (answered from the Directory's index alone, without
- * creating a FileShare object), a grant past its last extension (the viewer
- * stops asking after the first 409) and a share that has ended (a late tab
- * asks once). Each extension is recorded in the share owner's activity log.
+ * credential (as for chunks); the window is the sender's role's, now. Every call
+ * counts towards the network's own "download-extend" limit (EXTEND_DOWNLOADS),
+ * checked first: a loop ends in 429 before the Directory is asked. Refusals a
+ * guesser produces also count as invalid (as on the chunk route): a bad grant,
+ * and an id that was never a share (answered from the Directory's index alone,
+ * without creating a FileShare object). A known share that has ended (410) and a
+ * grant past its last extension (409) are the right credential arriving late or
+ * once too often: never counted as invalid (the invalid-fetch rule). Each
+ * extension is recorded in the share owner's activity log.
  */
 async function extendGrant(request, env, g, id, human = false) {
+  const rl = await rateLimit(env, g, 'download-extend', EXTEND_DOWNLOADS);
+  if (!rl.ok) {
+    const res = err(429, 'rate_limited', 'Too many requests to keep downloads open from your network. Try again later.', rl.until ? { until: rl.until } : undefined);
+    res.headers.set('retry-after', String(EXTEND_DOWNLOADS.blockSec));
+    return res;
+  }
   const grant = request.headers.get('x-download-grant') || '';
   if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) return failed(env, g, err(403, 'bad_grant', 'A valid X-Download-Grant header is required.'));
   const policy = await directory(env).shareOpenPolicy(id);
@@ -363,9 +371,9 @@ async function extendGrant(request, env, g, id, human = false) {
     await directory(env).recordDownloadExtended(id, { n: r.extensions, until: r.grantExpires });
     return json({ grantExpires: r.grantExpires, extensionsLeft: r.extensionsLeft, now: Math.floor(Date.now() / 1000) });
   }
-  if (r.status === 'limit') return failed(env, g, err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires }));
+  if (r.status === 'limit') return err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires });
   if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'The download window has expired — open the link again.'));
-  return failed(env, g, human ? err(410, 'gone', GONE) : captchaRequired().toResponse());
+  return human ? err(410, 'gone', GONE) : captchaRequired().toResponse();
 }
 
 /** Chunk i of a file share's stream, or (with `ref`) chunk i of a Drive share's file number `ref`. */

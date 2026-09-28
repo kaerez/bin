@@ -266,7 +266,7 @@ describe('extending a download window (WCAG 2.2.1)', () => {
   // Audit round 4, R4-L4: an unknown id answered 410 uncounted (a Directory
   // call and a new FileShare object each, never blocked); the chunk route
   // blocks the same pattern at guard.invalid.max.
-  it('an id that was never a share counts as invalid, as on the chunk route; so does a known share that ended (R4-L4, F2)', async () => {
+  it('an id that was never a share counts as invalid, as on the chunk route; a known share that ended does not (R4-L4)', async () => {
     const unknown = () => `f${b64urlFromBytes(randomBytes(16))}`; // well-formed, never created
     const ip = freshIp();
     let last;
@@ -284,42 +284,46 @@ describe('extending a download window (WCAG 2.2.1)', () => {
     for (let i = 0; i < 80; i++) { c = await getChunk(unknown(), 0, 'C'.repeat(43), ip2); if (c.status === 429) break; }
     expect(c.status).toBe(429);
     // A share that existed and ended (its only view spent, then purged): a late
-    // extend from the viewer's tab is a 410, and counted: repeated ones end in 429
-    // (security audit F2: each one cost a call on the Directory, never blocked).
+    // extend from the viewer's tab is a plain 410, never counted.
     const s = await upload(oc, [{ path: 'ended.txt', bytes: utf8('gone') }], { views: 1, expire: '1d' });
     const { grant } = await (await openShare(s.id, s.fragment)).res.json();
     vi.useFakeTimers({ now: Date.now() + 70 * 60 * 1000, toFake: ['Date'] }); // past the only window
     await runDurableObjectAlarm(env.FILESHARE.get(env.FILESHARE.idFromName(s.id)));
     expect(await env.FILES.get(`f/${s.id}/0`)).toBeNull();
     const ip3 = freshIp();
-    expect((await extend(s.id, grant, ip3)).status).toBe(410);
-    let e;
-    let k = 1;
-    for (; k < 80; k++) { e = await extend(s.id, grant, ip3); if (e.status === 429) break; expect(e.status).toBe(410); }
-    expect(e.status).toBe(429);
-    expect(k).toBeLessThanOrEqual(60);
+    for (let i = 0; i < 70; i++) expect((await extend(s.id, grant, ip3)).status).toBe(410);
   }, 120000);
 
-  // Security audit F2: past the tenth extension, every further call was answered 409 and never
-  // counted. Now it is counted like any refusal, so a loop ends in 429 (refused before the
-  // Directory); a recipient's own ten extensions and the one 409 the viewer sees do not block.
-  it('calls past the last extension count as invalid; a recipient\'s ten extensions and one 409 do not block', async () => {
+  // Security audit F2: past the tenth extension, every further call was answered 409, uncounted,
+  // each one a Directory call. The extend route has its own per-network limit (download-extend):
+  // a loop ends in 429 rate_limited, refused before the Directory, and never sets the network's
+  // invalid block (a 409 with a valid grant is not an invalid fetch). A recipient's ten extensions
+  // and the one 409 the viewer sees keep working.
+  it('a loop past the last extension ends in 429 (the extend route\'s own limit), never the invalid block; a recipient\'s ten extensions and one 409 work', async () => {
     const s = await upload(oc, [{ path: 'many.txt', bytes: utf8('many') }], { views: null, expire: '1d' });
     const ip = freshIp();
     const { grant } = await (await openShare(s.id, s.fragment, '', ip)).res.json();
     for (let i = 0; i < MAX_GRANT_EXTENSIONS; i++) expect((await extend(s.id, grant, ip)).status).toBe(200);
-    expect((await extend(s.id, grant, ip)).status).toBe(409);
+    const once = await extend(s.id, grant, ip);
+    expect(once.status).toBe(409);
+    expect((await once.json()).error).toBe('extend_limit');
     // The same network still opens and downloads.
     const again = await openShare(s.id, s.fragment, '', ip);
     expect(again.res.status).toBe(200);
     expect((await getChunk(s.id, 0, (await again.res.json()).grant, ip)).status).toBe(200);
-    // A loop past the limit ends in 429, well within guard.invalid.max (60).
+    // A loop: 409 until the route's own limit, then 429 rate_limited (guard.invalid.max is 60).
     let r;
-    let n = 1;
-    for (; n < 80; n++) { r = await extend(s.id, grant, ip); if (r.status === 429) break; expect(r.status).toBe(409); }
+    let n = MAX_GRANT_EXTENSIONS + 1;
+    for (; n < 200; n++) { r = await extend(s.id, grant, ip); if (r.status === 429) break; expect(r.status).toBe(409); }
     expect(r.status).toBe(429);
-    expect(n).toBeLessThanOrEqual(60);
-  }, 120000);
+    expect((await r.json()).error).toBe('rate_limited');
+    expect(r.headers.get('retry-after')).toBe('600');
+    expect(n).toBeGreaterThan(60); // more 409s than guard.invalid.max: none of them counted as invalid
+    // Never the invalid block: the network still opens shares and downloads (only extending waits).
+    const after = await openShare(s.id, s.fragment, '', ip);
+    expect(after.res.status).toBe(200);
+    expect((await getChunk(s.id, 0, (await after.res.json()).grant, ip)).status).toBe(200);
+  }, 180000);
 
   // Security audit F1: every extension is in the share owner's activity log, with the share,
   // which extension it was and the new end; never the grant.
