@@ -1,32 +1,24 @@
 // drive-audit.test.js — the browser side of the Drive fixes from security
-// audit round 2 and of the owner's impersonated Drive (docs/DRIVE.md §3, §8.1),
-// with the real client against the in-memory server (drive-fake-server.js):
-//   H-1  the owner's browser checks the server's escrow public key against
-//        its own private key; a user's browser pins the escrow key and never
-//        re-wraps to another one without the user's say;
+// audit round 2 (docs/DRIVE.md §3, §8.1), with the real client against the
+// in-memory server (drive-fake-server.js):
+//   L-1  finalize while a chunk write is in flight: finalized again, not failed;
 //   L-6  a file without readable metadata, or whose size disagrees, is
 //        unreadable, never an empty file;
-//   DK   the Account page keeps the tab's keys out of sessionStorage;
-//   impersonation: the owner opens, reads, uploads and shares in a user's
-//        Drive through the escrow, with the user's key in its own slot, and
-//        creates a new Drive for the user (finished at the user's sign-in).
+//   names in every script kept, spoofing characters removed (round 3, L-5);
+//   keys  the pages with third-party script keep the tab's Drive keys out of
+//        sessionStorage.
+// (H-1 and the escrow blocks covered the owner's escrow key and its pins,
+// removed with the key model v2; the impersonated Drive is in
+// driveclient.test.js and drive.test.js.)
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { openDrive, unlockDrive, unlockAtSignIn, DriveLocked } from '../public/js/driveclient.js';
-import { escrowKeyEndorsed, sameEscrowKey } from '../public/js/drivekeys.js';
-import {
-  loadSessionKey, clearSessionKey, saveSessionKey, createDriveKey, createEscrowKeyPair, sealEscrowPriv, wrapEscrow,
-  wrapPassword, unlockWithPassword, escrowKeyId, openEscrowPin, sealEscrowPin, loadImpersonationKey, clearImpersonationKey,
-  holdSessionKeys, releaseSessionKeys, unlockWithEscrow, createSigningKeyPair, endorseEscrowKey, signingKeyId, openEscrowKeyPair,
-} from '../public/js/drivekeys.js';
-import { startDrive } from '../public/dashboard/js/drive-app.js';
-import * as drive from '../public/js/driveclient.js';
+import { openDrive } from '../public/js/driveclient.js';
+import { clearSessionKey, saveSessionKeys, loadSessionKeys, holdSessionKeys, releaseSessionKeys } from '../public/js/drivekeys.js';
+import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
 
-const PASSWORD = 'drive password 1';
 const enc = (s) => new TextEncoder().encode(s);
 let S;
 const install = (opts) => { S = fakeServer(opts); globalThis.fetch = S.fetch; return S; };
-const keyCalls = () => S.requests.filter((r) => r.path === '/api/private/drive/keys');
 beforeEach(() => { clearSessionKey(); releaseSessionKeys(); clearSessionKey(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -34,194 +26,9 @@ function fakeFile(name, bytes, type = 'text/plain') {
   return { name, size: bytes.length, type, lastModified: 1700000000000, slice: (a, b) => ({ arrayBuffer: async () => bytes.slice(a, b).buffer }) };
 }
 
-describe('H-1: the owner’s browser checks the escrow public key', () => {
-  async function ownerDrive() {
-    install({ role: 'owner' });
-    S.proof = 'PROOF';
-    const d = await unlockDrive({ password: PASSWORD }); // the first set-up creates the pair
-    return d;
-  }
-
-  it('alerts when the server’s escrow public key is not its own, and never re-creates the pair silently', async () => {
-    const d = await ownerDrive();
-    const mine = S.escrowPub;
-    const attacker = (await createEscrowKeyPair()).publicJwk;
-    S.escrowPub = attacker; // swapped on the server
-    const before = keyCalls().length;
-    const c = await openDrive({ user: S.user });
-    expect(c.notice).toMatchObject({ kind: 'escrow_mismatch' });
-    expect(keyCalls().length).toBe(before); // nothing written: no new pair, no re-seal
-    // Restoring needs the owner's confirmation and puts back the key derived from the private key.
-    await c.restoreEscrowKey({ current: 'PROOF' });
-    expect(S.escrowPub).toEqual(mine);
-    expect(keyCalls().at(-1).body.current).toBe('PROOF');
-    expect((await openDrive({ user: S.user })).notice).toBeNull();
-    void d;
-  }, 60000);
-
-  it('an escrow private key that does not open, or a missing one, is shown too (a new pair needs the confirmation)', async () => {
-    await ownerDrive();
-    const other = await createEscrowKeyPair();
-    S.escrowPriv = await sealEscrowPriv(createDriveKey(), other.privateKey); // sealed under another DK
-    const c = await openDrive({ user: S.user });
-    expect(c.notice).toMatchObject({ kind: 'escrow_unreadable' });
-    await expect(c.newEscrowKey({})).rejects.toMatchObject({ code: 'reauth_required' });
-    await c.newEscrowKey({ current: 'PROOF' });
-    expect((await openDrive({ user: S.user })).notice).toBeNull();
-    S.escrowPriv = null;
-    expect((await openDrive({ user: S.user })).notice).toMatchObject({ kind: 'escrow_missing' });
-  }, 60000);
-});
-
-describe('Escrow key rotation (the owner)', () => {
-  it('needs the owner’s confirmation, signs the new key, and keeps the old one sealed for the Drives not moved yet', async () => {
-    install({ role: 'owner' });
-    S.proof = 'PROOF';
-    const d = await unlockDrive({ password: PASSWORD }); // the first set-up: escrow key pair, signing key, signature
-    expect(await escrowKeyEndorsed(S.escrowSignPub, S.escrowPub, S.escrowSig)).toBe(true);
-    const oldPub = S.escrowPub;
-    const oldPriv = S.escrowPriv;
-    await expect(d.rotateEscrowKey({})).rejects.toMatchObject({ code: 'reauth_required' });
-    expect(S.escrowPub).toEqual(oldPub);
-    await d.rotateEscrowKey({ current: 'PROOF' });
-    expect(S.escrowPub).not.toEqual(oldPub);
-    expect(await escrowKeyEndorsed(S.escrowSignPub, S.escrowPub, S.escrowSig)).toBe(true);
-    expect(S.escrowPrivOld[await escrowKeyId(oldPub)]).toBe(oldPriv);
-    expect(sameEscrowKey((await openEscrowKeyPair(d.dk, S.escrowPrivOld[await escrowKeyId(oldPub)])).publicJwk, oldPub)).toBe(true);
-    expect((await openDrive({ user: S.user })).notice).toBeNull();
-  }, 60000);
-});
-
-describe('H-1: a user’s browser pins the escrow key', () => {
-  it('pins the first key (trust on first use); a new key is never wrapped to until the user accepts it', async () => {
-    install();
-    const first = await createEscrowKeyPair();
-    S.escrowPub = first.publicJwk;
-    const d = await unlockDrive({ password: PASSWORD });
-    expect(await openEscrowPin(d.dk, S.escrowPin)).toMatchObject({ escrow: await escrowKeyId(first.publicJwk) });
-    const wrapBefore = S.wraps.get('escrow|escrow');
-    // The server now hands out another key.
-    const second = await createEscrowKeyPair();
-    S.escrowPub = second.publicJwk;
-    const c = await openDrive({ user: S.user });
-    expect(c.notice).toMatchObject({ kind: 'escrow_changed', kid: await escrowKeyId(second.publicJwk) });
-    expect(S.wraps.get('escrow|escrow')).toEqual(wrapBefore); // not re-wrapped
-    expect(await unlockWithEscrow(first.privateKey, S.wraps.get('escrow|escrow'))).toEqual(d.dk);
-    // The user accepts: re-wrapped to the new key, which is now pinned.
-    await c.acceptEscrowKey();
-    expect(await unlockWithEscrow(second.privateKey, S.wraps.get('escrow|escrow'))).toEqual(d.dk);
-    expect(await openEscrowPin(d.dk, S.escrowPin)).toMatchObject({ escrow: await escrowKeyId(second.publicJwk) });
-    expect((await openDrive({ user: S.user })).notice).toBeNull();
-  }, 60000);
-
-  it('a pin that does not open (altered, or another Drive’s) counts as a changed key; no pin and a wrap for another key too', async () => {
-    install();
-    const k = await createEscrowKeyPair();
-    S.escrowPub = k.publicJwk;
-    const d = await unlockDrive({ password: PASSWORD });
-    S.escrowPin = await sealEscrowPin(createDriveKey(), await escrowKeyId(k.publicJwk));
-    expect((await openDrive({ user: S.user })).notice).toMatchObject({ kind: 'escrow_changed' });
-    // No pin, and the escrow wrap is for an older key: not silently re-wrapped either.
-    S.escrowPin = null;
-    const old = await createEscrowKeyPair();
-    S.wraps.set('escrow|escrow', await wrapEscrow(d.dk, old.publicJwk));
-    const n = keyCalls().length;
-    expect((await openDrive({ user: S.user })).notice).toMatchObject({ kind: 'escrow_changed' });
-    expect(keyCalls().length).toBe(n);
-  }, 60000);
-
-  it('a rotation signed by the pinned signing key: re-wrapped at the next unlock, no notice; a rotation signed by another key: the notice', async () => {
-    install();
-    const sp = await createSigningKeyPair();
-    const k1 = await createEscrowKeyPair();
-    Object.assign(S, { escrowPub: k1.publicJwk, escrowSignPub: sp.publicJwk, escrowSig: await endorseEscrowKey(sp.privateKey, k1.publicJwk) });
-    const d = await unlockDrive({ password: PASSWORD });
-    expect(await openEscrowPin(d.dk, S.escrowPin)).toEqual({ escrow: await escrowKeyId(k1.publicJwk), sign: await signingKeyId(sp.publicJwk) });
-    // The owner rotates (signed by the same signing key): the next unlock moves the Drive to it.
-    const k2 = await createEscrowKeyPair();
-    Object.assign(S, { escrowPub: k2.publicJwk, escrowSig: await endorseEscrowKey(sp.privateKey, k2.publicJwk) });
-    expect(await unlockWithEscrow(k1.privateKey, S.wraps.get('escrow|escrow'))).toEqual(d.dk); // the old key opens the old wrap until then
-    const c = await openDrive({ user: S.user });
-    expect(c.notice).toBeNull();
-    expect(await unlockWithEscrow(k2.privateKey, S.wraps.get('escrow|escrow'))).toEqual(d.dk);
-    expect(await openEscrowPin(d.dk, S.escrowPin)).toEqual({ escrow: await escrowKeyId(k2.publicJwk), sign: await signingKeyId(sp.publicJwk) });
-    // A key signed by another signing key (the server swapped both): not wrapped to.
-    const other = await createSigningKeyPair();
-    const k3 = await createEscrowKeyPair();
-    Object.assign(S, { escrowPub: k3.publicJwk, escrowSignPub: other.publicJwk, escrowSig: await endorseEscrowKey(other.privateKey, k3.publicJwk) });
-    const wrap = S.wraps.get('escrow|escrow');
-    expect((await openDrive({ user: S.user })).notice).toMatchObject({ kind: 'escrow_changed' });
-    expect(S.wraps.get('escrow|escrow')).toEqual(wrap);
-    // A bad signature by the pinned key: not wrapped to either.
-    Object.assign(S, { escrowSignPub: sp.publicJwk, escrowSig: await endorseEscrowKey(sp.privateKey, k2.publicJwk) });
-    expect((await openDrive({ user: S.user })).notice).toMatchObject({ kind: 'escrow_changed' });
-    expect(S.wraps.get('escrow|escrow')).toEqual(wrap);
-  }, 60000);
-
-  it('the Drive page shows the notice and its "Trust the new key" button', async () => {
-    install();
-    S.escrowPub = (await createEscrowKeyPair()).publicJwk;
-    await unlockDrive({ password: PASSWORD });
-    S.escrowPub = (await createEscrowKeyPair()).publicJwk;
-    const mount = document.createElement('div');
-    document.body.replaceChildren(mount);
-    const r = await startDrive(mount, { drive, profile: { limits: {}, user: { username: 'u' } }, user: S.user, revoke: async () => {} });
-    expect(r.state).toBe('open');
-    const box = mount.querySelector('#drive-escrow-notice');
-    expect(box.getAttribute('role')).toBe('status');
-    mount.querySelector('#drive-escrow-accept').click();
-    for (let i = 0; i < 200 && mount.querySelector('#drive-escrow-notice'); i++) await new Promise((res) => setTimeout(res, 10));
-    expect(mount.querySelector('#drive-escrow-notice')).toBeNull();
-  }, 60000);
-});
-
-describe('Automatic set-up at the first sign-in', () => {
-  it('a password sign-in creates DK with the pw and escrow wraps (pinned), with no user action', async () => {
-    install();
-    const kp = await createEscrowKeyPair();
-    S.escrowPub = kp.publicJwk;
-    expect(await unlockAtSignIn({ user: S.user, password: PASSWORD })).toBe(true);
-    const dk = loadSessionKey('u1');
-    expect([...S.wraps.keys()].sort()).toEqual(['escrow|escrow', 'pw|pw']);
-    expect(await unlockWithPassword(PASSWORD, S.driveSalt, [...S.wraps.values()])).toEqual(dk);
-    expect(await unlockWithEscrow(kp.privateKey, S.wraps.get('escrow|escrow'))).toEqual(dk);
-    expect(await openEscrowPin(dk, S.escrowPin)).toMatchObject({ escrow: await escrowKeyId(kp.publicJwk) });
-  }, 60000);
-
-  it('a passkey sign-in (PRF) sets it up too: the passkey and escrow wraps; the password wrap follows at a password sign-in', async () => {
-    install();
-    const kp = await createEscrowKeyPair();
-    S.escrowPub = kp.publicJwk;
-    const prf = new Uint8Array(32).fill(7);
-    expect(await unlockAtSignIn({ user: S.user, prfOutput: prf, credentialId: 'cred-1' })).toBe(true);
-    expect([...S.wraps.keys()].sort()).toEqual(['escrow|escrow', 'passkey|cred-1']);
-    const dk = loadSessionKey('u1');
-    expect(await unlockAtSignIn({ user: S.user, password: PASSWORD, prfOutput: prf, credentialId: 'cred-1' })).toBe(true);
-    expect(await unlockWithPassword(PASSWORD, S.driveSalt, [...S.wraps.values()])).toEqual(dk);
-  }, 60000);
-
-  it('without the owner’s escrow key: nothing is set up, and the page says the Drive is not ready yet', async () => {
-    install();
-    S.escrowPub = null;
-    expect(await unlockAtSignIn({ user: S.user, password: PASSWORD })).toBe(false);
-    expect(S.wraps.size).toBe(0);
-    expect(S.requests.some((x) => x.method === 'PUT')).toBe(false);
-    await expect(openDrive({ user: S.user })).rejects.toMatchObject({ reason: 'not_ready' });
-    const mount = document.createElement('div');
-    document.body.replaceChildren(mount);
-    const r = await startDrive(mount, { drive, profile: { limits: {}, user: { username: 'u' } }, user: S.user, revoke: async () => {} });
-    expect(r.state).toBe('not_ready');
-    expect(mount.querySelector('#drive-not-ready').textContent).toMatch(/Drive is not ready yet/);
-    expect(mount.querySelector('#drive-unlock')).toBeNull();
-  }, 60000);
-});
-
 describe('L-1: finalize while a chunk write is in flight', () => {
   it('the client finalizes again after "busy" instead of failing the upload', async () => {
     install();
-    const dk = createDriveKey();
-    saveSessionKey(dk, 'u1');
-    S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
     const c = await openDrive({ user: S.user });
     S.busyFinalize = 2;
     const id = await c.upload('root', fakeFile('late.txt', enc('written late')));
@@ -233,10 +40,7 @@ describe('L-1: finalize while a chunk write is in flight', () => {
 describe('L-6: a file needs its sealed metadata', () => {
   it('missing metadata or a size that disagrees makes it unreadable, never an empty file', async () => {
     install();
-    const dk = createDriveKey();
-    saveSessionKey(dk, 'u1');
-    S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
-    const ids = await seedTree(S, dk, { 'a.txt': enc('hello a'), 'b.txt': enc('hello b'), 'c.txt': enc('hello c') });
+    const ids = await seedTree(S, { 'a.txt': enc('hello a'), 'b.txt': enc('hello b'), 'c.txt': enc('hello c') });
     const a = S.nodes.get(ids.get('a.txt'));
     a.meta = null; a.size = 0; a.chunks = 0; // the server drops the metadata and claims an empty file
     const b = S.nodes.get(ids.get('b.txt'));
@@ -249,10 +53,10 @@ describe('L-6: a file needs its sealed metadata', () => {
     expect(by[ids.get('c.txt')].name).toBe('c.txt');
     await expect(c.download(a.id)).rejects.toThrow(/cannot be read/);
     await expect(c.download(b.id)).rejects.toThrow(/cannot be read/);
-    // Files whose metadata alone is gone do not make the tab drop its key (their names still open).
+    // Files whose metadata alone is gone do not make the tab drop its keys.
     S.nodes.get(ids.get('c.txt')).meta = null;
     await c.list();
-    expect(loadSessionKey('u1')).toEqual(dk);
+    expect(loadSessionKeys(S.user.id)).toMatchObject({ current: S.current().id });
   }, 30000);
 });
 
@@ -309,9 +113,6 @@ describe('names: real names kept, spoofing characters removed (audit round 3, L-
 
   it('the Drive stores and lists them unchanged (and cleans a spoofing one, marked renamed)', async () => {
     install();
-    const dk = createDriveKey();
-    saveSessionKey(dk, 'u1');
-    S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
     const c = await openDrive({ user: S.user });
     const dir = await c.mkdir('root', 'תיקייה');
     for (const n of REAL_NAMES) await c.upload(dir, fakeFile(n, enc(n)));
@@ -322,118 +123,19 @@ describe('names: real names kept, spoofing characters removed (audit round 3, L-
   }, 60000);
 });
 
-describe('DK exposure: pages with third-party script', () => {
-  it('holdSessionKeys moves the tab’s keys out of sessionStorage (still usable); release puts them back', () => {
-    const dk = createDriveKey();
-    saveSessionKey(dk, 'u1');
+describe('keys exposure: pages with third-party script', () => {
+  it('holdSessionKeys moves the tab’s KEKs out of sessionStorage (still usable); release puts them back', () => {
+    const k = { userId: 'u1', current: 'mAAAAAAAAAAA', keys: { mAAAAAAAAAAA: b64urlFromBytes(randomBytes(32)) } };
+    saveSessionKeys(k);
+    expect(sessionStorage.getItem('secbin_kek')).not.toBeNull();
     holdSessionKeys();
-    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
-    expect(sessionStorage.getItem('secbin_dk_uid')).toBeNull();
-    expect(loadSessionKey('u1')).toEqual(dk);
-    const next = createDriveKey();
-    saveSessionKey(next, 'u1'); // e.g. unlocked with the password on Account: memory only
-    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
+    expect(sessionStorage.getItem('secbin_kek')).toBeNull();
+    expect(loadSessionKeys('u1')).toEqual(k);
+    const next = { ...k, keys: { mAAAAAAAAAAA: b64urlFromBytes(randomBytes(32)) } };
+    saveSessionKeys(next); // e.g. the Account page: memory only
+    expect(sessionStorage.getItem('secbin_kek')).toBeNull();
     releaseSessionKeys();
-    expect(loadSessionKey('u1')).toEqual(next);
-    expect(sessionStorage.getItem('secbin_dk_uid')).toBe('u1');
+    expect(loadSessionKeys('u1')).toEqual(next);
+    expect(JSON.parse(sessionStorage.getItem('secbin_kek')).u).toBe('u1');
   });
-});
-
-describe('impersonation: the owner in a user’s Drive', () => {
-  async function ownerAndUser() {
-    install();
-    const ownerDk = createDriveKey();
-    const kp = await createEscrowKeyPair();
-    S.escrowPub = kp.publicJwk;
-    S.ownerEscrowPriv = await sealEscrowPriv(ownerDk, kp.privateKey);
-    return { ownerDk, kp };
-  }
-
-  it('opens the user’s Drive through the escrow, keeps the user’s key in its own slot, reads, uploads and shares', async () => {
-    const { ownerDk, kp } = await ownerAndUser();
-    const userDk = createDriveKey();
-    S.wraps.set('pw|pw', (await wrapPassword(userDk, 'the user password')).wrap);
-    S.wraps.set('escrow|escrow', await wrapEscrow(userDk, kp.publicJwk));
-    const ids = await seedTree(S, userDk, { 'report.txt': enc('the quarterly report') });
-    S.impersonatedBy = 'owner';
-    const u = { ...S.user, impersonating: true };
-    // Without the owner's own key in the tab: a notice, no escrow call.
-    await expect(openDrive({ user: u })).rejects.toMatchObject({ name: 'DriveLocked', reason: 'owner_locked' });
-    expect(S.requests.some((r) => r.path === '/api/private/drive/escrow')).toBe(false);
-    saveSessionKey(ownerDk, 'owner1');
-    const c = await openDrive({ user: u });
-    expect(S.escrowUses).toBe(1);
-    expect(loadSessionKey('owner1')).toEqual(ownerDk); // the owner's slot is untouched
-    expect(loadImpersonationKey('u1')).toEqual(userDk);
-    const { children } = await c.list();
-    expect(children.map((x) => x.name)).toEqual(['report.txt']);
-    const got = await (await c.download(ids.get('report.txt'))).blob();
-    expect(new TextDecoder().decode(new Uint8Array(await got.arrayBuffer()))).toBe('the quarterly report');
-    const id = await c.upload('root', fakeFile('from-owner.txt', enc('uploaded by the owner')));
-    expect(S.nodes.get(id).state).toBe('ready');
-    const sh = await c.share([id], { expire: '1h' });
-    expect(sh.id).toMatch(/^fSHARE/);
-    // Opening again in this tab needs no second escrow use; the user's own keys were never touched.
-    await openDrive({ user: u });
-    expect(S.escrowUses).toBe(1);
-    expect(keyCalls()).toHaveLength(0);
-    clearImpersonationKey();
-    expect(loadImpersonationKey('u1')).toBeNull();
-    expect(loadSessionKey('owner1')).toEqual(ownerDk);
-  }, 60000);
-
-  it('says what is missing: no escrow key yet, no escrow wrap, a server escrow key that is not the owner’s', async () => {
-    const { ownerDk } = await ownerAndUser();
-    saveSessionKey(ownerDk, 'owner1');
-    S.impersonatedBy = 'owner';
-    const u = { ...S.user, impersonating: true };
-    S.wraps.set('pw|pw', (await wrapPassword(createDriveKey(), 'x')).wrap);
-    await expect(openDrive({ user: u })).rejects.toMatchObject({ reason: 'no_wrap' });
-    const priv = S.ownerEscrowPriv;
-    S.ownerEscrowPriv = null;
-    await expect(openDrive({ user: u })).rejects.toMatchObject({ reason: 'no_escrow' });
-    S.ownerEscrowPriv = priv;
-    S.escrowPub = (await createEscrowKeyPair()).publicJwk;
-    await expect(openDrive({ user: u })).rejects.toMatchObject({ reason: 'escrow_mismatch' });
-    // The Drive page shows the notice (an alert for the mismatch), not the unlock prompt.
-    const mount = document.createElement('div');
-    document.body.replaceChildren(mount);
-    const r = await startDrive(mount, { drive, profile: { limits: {}, user: { username: 'alice' } }, user: u, revoke: async () => {} });
-    expect(r).toMatchObject({ state: 'impersonating', reason: 'escrow_mismatch' });
-    expect(mount.querySelector('#drive-impersonating [role="alert"]')).not.toBeNull();
-    expect(mount.querySelector('#drive-unlock')).toBeNull();
-    expect(DriveLocked).toBeTypeOf('function');
-  }, 60000);
-
-  it('an existing user Drive whose wrap is for the owner’s previous escrow key still opens (the old key, kept sealed)', async () => {
-    const { ownerDk, kp } = await ownerAndUser();
-    const userDk = createDriveKey();
-    S.wraps.set('pw|pw', (await wrapPassword(userDk, 'the user password')).wrap);
-    S.wraps.set('escrow|escrow', await wrapEscrow(userDk, kp.publicJwk));
-    // The owner rotated since: the current key is another, the old one is kept (sealed under the owner's DK).
-    const next = await createEscrowKeyPair();
-    S.escrowPrivOld = { [await escrowKeyId(kp.publicJwk)]: S.ownerEscrowPriv };
-    S.ownerEscrowPriv = await sealEscrowPriv(ownerDk, next.privateKey);
-    S.escrowPub = next.publicJwk;
-    saveSessionKey(ownerDk, 'owner1');
-    S.impersonatedBy = 'owner';
-    const c = await openDrive({ user: { ...S.user, impersonating: true } });
-    expect(c.dk).toEqual(userDk);
-  }, 60000);
-
-  it('a user who has not signed in since the Drive was enabled: the owner sees it, and nothing is created', async () => {
-    const { ownerDk } = await ownerAndUser();
-    saveSessionKey(ownerDk, 'owner1');
-    S.impersonatedBy = 'owner';
-    const u = { ...S.user, impersonating: true };
-    await expect(openDrive({ user: u })).rejects.toMatchObject({ reason: 'no_drive' });
-    const mount = document.createElement('div');
-    document.body.replaceChildren(mount);
-    const r = await startDrive(mount, { drive, profile: { limits: {}, user: { username: 'alice' } }, user: u, revoke: async () => {} });
-    expect(r).toMatchObject({ state: 'impersonating', reason: 'no_drive' });
-    expect(mount.querySelector('#drive-impersonating').textContent).toMatch(/hasn’t signed in since the Drive was enabled/);
-    expect(S.requests.some((x) => x.method !== 'GET')).toBe(false); // no escrow use, no keys written
-    expect(S.wraps.size).toBe(0);
-  }, 60000);
-
 });

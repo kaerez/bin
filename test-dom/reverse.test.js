@@ -5,25 +5,23 @@
 // list, drag and drop of files and folders, progress, errors, and a bad or
 // ended link — and the Drive's "Receive files…" action (create a link with
 // its options, the link with copy, the folder's links with revoke) plus the
-// received files being re-wrapped when the Drive opens (and counted on the
-// unlock prompt while it is locked).
+// received files being taken in when the Drive opens (sealed under the
+// user's KEK), and the owner acting as the user.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mountUploader, limitsText } from '../public/js/reverse.js';
 import { startDrive, reverseOptions } from '../public/dashboard/js/drive-app.js';
 import * as drive from '../public/js/driveclient.js';
 import {
-  setReverseStretcher, createReverseKey, sealReversePriv, openReversePriv, linkProof, passwordGate, sealNote, openUpload, fragmentOf,
-  newReverseId, pubFromFragment,
+  setReverseStretcher, createReverseKey, linkProof, passwordGate, sealNote, openUpload, fragmentOf,
+  newReverseId, pubFromFragment, pubOfPrivate,
 } from '../public/js/reversekeys.js';
 import {
-  createDriveKey, saveSessionKey, clearSessionKey, saveImpersonationKey, clearImpersonationKey, loadImpersonationKey, wrapRecovery, recoveryRef, deriveSubkeys, openField,
-  createEscrowKeyPair, sealEscrowPriv, wrapEscrow, wrapPassword,
+  clearSessionKey, clearImpersonationKeys, loadImpersonationKeys, sealLinkKey, openLinkKey, openName as openSealedName, openDek,
 } from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
 import { utf8, fromUtf8, bytesFromB64url } from '../public/js/bytes.js';
 import { formatDate } from '../public/js/common.js';
 import { CHUNK, TAG } from '../public/js/files.js';
-import { stretch } from '../public/js/pwauth.js';
 import { fakeServer, seedTree, seedReceived } from './drive-fake-server.js';
 
 // Argon2id stand-in: the DOM suites never run WebAssembly.
@@ -44,7 +42,7 @@ const sha = async (b64) => {
   return btoa(String.fromCharCode(...d)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 };
 
-beforeEach(() => { document.body.replaceChildren(); delete globalThis.turnstile; clearSessionKey(); clearImpersonationKey(); });
+beforeEach(() => { document.body.replaceChildren(); delete globalThis.turnstile; clearSessionKey(); clearImpersonationKeys(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
 // ── the uploader page ─────────────────────────────────────────────────────────
@@ -292,19 +290,22 @@ describe('the uploader page', () => {
 
 // ── the Drive: Receive files… and received files ─────────────────────────────
 
-const CODE = 'ABCD-EFGH-JKMN-PQRS';
 let S;
-let dk;
 let ids;
-async function server({ locked = false } = {}) {
+async function server() {
   S = fakeServer({ capacity: 50 * 1024 * 1024 });
   globalThis.fetch = S.fetch;
-  dk = createDriveKey();
-  const w = await wrapRecovery(dk, CODE, await recoveryRef(CODE));
-  S.wraps.set(`${w.kind}|${w.ref}`, w);
-  ids = await seedTree(S, dk, { Documents: { 'notes.md': utf8('# notes') }, 'readme.txt': utf8('hi') });
-  if (!locked) saveSessionKey(dk, S.user.id);
+  ids = await seedTree(S, { Documents: { 'notes.md': utf8('# notes') }, 'readme.txt': utf8('hi') });
   return S;
+}
+/** A stored item's field, opened with the user's KEK of its sub-MEK (a check in tests). */
+async function fieldOf(id, field = 'name') {
+  const n = S.nodes.get(id);
+  const at = { userId: S.user.id, mekId: n.mek, salt: n.ks };
+  const kek = await S.kekOf(n.mek);
+  if (field === 'dek') return openDek(kek, at, typeof n.dek === 'string' ? JSON.parse(n.dek) : n.dek);
+  const v = field === 'name' ? n.name : n.meta;
+  return fromUtf8(await openSealedName(kek, at, field, typeof v === 'string' ? JSON.parse(v) : v));
 }
 const PROFILE = { limits: { maxViews: 100, allowUnlimitedViews: true, maxExpireSec: null, files: true, reverseMaxBytes: 1024 ** 3 }, caps: { driveEnabled: true, reverseEnabled: true }, viewer: { enabled: false } };
 function mountPoint() {
@@ -324,11 +325,14 @@ const deps = (profile = PROFILE, extra = {}) => ({ drive, profile, user: S.user,
 const names = () => [...document.querySelectorAll('#drive-rows tr')].map((tr) => tr.children[1].textContent.trim());
 const dialog = () => document.querySelector('.drive-dialog [role="dialog"]');
 const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === text);
-/** A reverse share the Drive already has (its key sealed with DK), as the server lists it. */
+/** A reverse share the Drive already has (its key sealed under the current KEK), as the server lists it. */
 async function existingReverse(folder = 'root') {
   const id = newReverseId();
   const { pub, privateKey } = await createReverseKey();
-  S.reverse.push({ id, folder, label: 'old', priv: await sealReversePriv(dk, id, privateKey), status: 'active', files: 0, bytes: 0, created: 1700000000, expires: 2000000000 });
+  const mek = S.current().id;
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
+  const priv = await sealLinkKey(await S.kekOf(mek), { userId: S.user.id, mekId: mek, linkId: id }, pkcs8);
+  S.reverse.push({ id, folder, label: 'old', priv, mek, status: 'active', files: 0, bytes: 0, created: 1700000000, expires: 2000000000 });
   return { id, pub };
 }
 
@@ -385,19 +389,19 @@ describe('Drive: Receive files…', () => {
     expect(raw).not.toContain('Signed copies');
     expect(Object.keys(b.password).sort()).toEqual(['ph', 'salt', 't']);
     expect(b.current).toBe('proof:my account password');
-    // The link's key is not sent; the private key is sealed with this Drive's key.
+    // The link's key is not sent; the private key is sealed under the user's current KEK.
     expect(raw).not.toContain(m[2]);
-    expect(fragmentOf((await openReversePriv(dk, b.id, b.priv)).pub)).toBe(m[2]);
+    expect(b.mek).toBe(S.current().id);
+    const pk = await openLinkKey(await S.kekOf(b.mek), { userId: S.user.id, mekId: b.mek, linkId: b.id }, b.priv);
+    expect(fragmentOf((await pubOfPrivate(pk)).pub)).toBe(m[2]);
     expect(b.lh).toBe(await sha(await linkProof(pubFromFragment(m[2]))));
     expect(dialog().querySelector('.modal-sub').textContent).toMatch(/into “Documents” for 3 days/);
     expect($('#drive-rev-copy')).not.toBeNull();
   });
 
   it('the owner acting as the user is not asked to confirm (the server asks for nothing then)', async () => {
-    await server({ locked: true });
-    // The owner's tab already opened this user's Drive through the escrow (docs/DRIVE.md §3).
+    await server();
     S.impersonatedBy = 'owner';
-    saveImpersonationKey(dk, S.user.id);
     const r = await startDrive(mountPoint(), deps(PROFILE, { user: { ...S.user, impersonating: true } }));
     await r.app.ready;
     $('#drive-receive').click();
@@ -442,7 +446,7 @@ describe('Drive: Receive files…', () => {
 });
 
 describe('Drive: received files', () => {
-  it('are re-wrapped into the Drive when it opens: folders made from their paths, names readable, unreadable ones counted', async () => {
+  it('are taken into the Drive when it opens: folders made from their paths, sealed under the KEK, unreadable ones counted', async () => {
     await server();
     const rs = await existingReverse(ids.get('Documents'));
     await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'inbox/sub/a.txt', bytes: utf8('alpha') });
@@ -455,14 +459,14 @@ describe('Drive: received files', () => {
     await r.app.received;
     expect(S.accepted).toHaveLength(3);
     expect($('#drive-received').textContent).toMatch(/1 received file could not be added/);
-    // The re-wrapped fields are the Drive's own: sealed with DK's keys, bound to the node.
-    const keys = await deriveSubkeys(dk);
+    // The taken-in fields are the Drive's own: sealed under the user's current KEK, each with its salt.
     const inDocs = S.accepted.filter((x) => x.body.parent === ids.get('Documents'));
-    const leaves = await Promise.all(inDocs.map(async (x) => fromUtf8(await openField(keys.names, 'name', x.id, x.body.name))));
+    expect(inDocs.every((x) => x.body.mek === S.current().id && typeof x.body.ks === 'string')).toBe(true);
+    const leaves = await Promise.all(inDocs.map((x) => fieldOf(x.id)));
     expect([...leaves].sort()).toEqual(['b.txt', 'notes (2).md']);
-    const { id, body: b } = inDocs[leaves.indexOf('b.txt')];
-    expect(JSON.parse(fromUtf8(await openField(keys.names, 'meta', id, b.meta)))).toMatchObject({ type: 'text/plain', size: 5 });
-    expect((await openField(keys.files, 'fk', id, b.fk)).length).toBe(32);
+    const { id } = inDocs[leaves.indexOf('b.txt')];
+    expect(JSON.parse(await fieldOf(id, 'meta'))).toMatchObject({ type: 'text/plain', size: 5 });
+    expect((await fieldOf(id, 'dek')).length).toBe(32);
     // The folder shows them like any file; the path's folders exist.
     await r.app.open(ids.get('Documents'));
     expect(names()).toEqual(['inbox', 'b.txt', 'notes (2).md', 'notes.md']);
@@ -476,24 +480,13 @@ describe('Drive: received files', () => {
     const blob = await (await client.download(a.id)).blob();
     expect(new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()))).toBe('alpha');
   });
-
-  it('while the Drive is locked, the unlock prompt says how many are waiting', async () => {
-    await server({ locked: true });
-    const rs = await existingReverse('root');
-    await seedReceived(S, { rid: rs.id, pub: rs.pub, path: 'a.txt', bytes: utf8('a') });
-    await seedReceived(S, { rid: rs.id, pub: rs.pub, path: 'b.txt', bytes: utf8('b') });
-    const r = await startDrive(mountPoint(), deps());
-    expect(r.state).toBe('locked');
-    expect($('#drive-received-waiting').textContent).toBe('2 new received files: unlock your Drive to add them to your folders.');
-  });
 });
 
 // ── security audit round 3 (M-1, L-5): the take-in ─────────────────────────
 describe('audit round 3: taking received files in', () => {
   const dirs = () => [...S.nodes.values()].filter((n) => n.kind === 'dir' && !n.rs).length;
-  const keysOf = async () => deriveSubkeys(dk);
-  const openName = async (id) => fromUtf8(await openField((await keysOf()).names, 'name', id, S.nodes.get(id).name));
-  const openMeta = async (id) => JSON.parse(fromUtf8(await openField((await keysOf()).names, 'meta', id, S.nodes.get(id).meta)));
+  const openName = (id) => fieldOf(id);
+  const openMeta = async (id) => JSON.parse(await fieldOf(id, 'meta'));
 
   it(`L-5: a received path creates at most ${drive.RECEIVED_MAX_DEPTH} folder levels; deeper files land in the deepest one`, async () => {
     await server();
@@ -516,7 +509,7 @@ describe('audit round 3: taking received files in', () => {
     let chain = {};
     const top = chain;
     for (let i = 0; i < 61; i++) { chain[`c${i}`] = {}; chain = chain[`c${i}`]; }
-    const deepIds = await seedTree(S, dk, { deep: top });
+    const deepIds = await seedTree(S, { deep: top });
     const leafPath = ['deep', ...Array.from({ length: 61 }, (_, i) => `c${i}`)].join('/');
     const target = deepIds.get(leafPath);
     const rs = await existingReverse(target);
@@ -622,20 +615,10 @@ describe('audit round 3: taking received files in', () => {
 });
 
 describe('the owner acting as the user: received files', () => {
-  it('opens the user\'s Drive through the escrow, takes a received file in (the link\'s key sealed with the user\'s Drive key) and downloads it', async () => {
+  it('opens the user\'s Drive with the user\'s keys (their own slot), takes a received file in and downloads it', async () => {
     S = fakeServer({ capacity: 50 * 1024 * 1024 });
     globalThis.fetch = S.fetch;
-    // The owner's own Drive key is in the tab; the server has the owner's sealed escrow key.
-    const ownerDk = createDriveKey();
-    const kp = await createEscrowKeyPair();
-    S.escrowPub = kp.publicJwk;
-    S.ownerEscrowPriv = await sealEscrowPriv(ownerDk, kp.privateKey);
-    saveSessionKey(ownerDk, S.ownerId);
-    // The user's Drive: their key wrapped to their password and to the escrow key; a link on "Inbox".
-    dk = createDriveKey();
-    S.wraps.set('pw|pw', (await wrapPassword(dk, 'the user password')).wrap);
-    S.wraps.set('escrow|escrow', await wrapEscrow(dk, kp.publicJwk));
-    ids = await seedTree(S, dk, { Inbox: {} });
+    ids = await seedTree(S, { Inbox: {} });
     const rs = await existingReverse(ids.get('Inbox'));
     const got = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Inbox'), path: 'from a client/contract.pdf', bytes: utf8('signed contract'), type: 'application/pdf' });
     S.impersonatedBy = 'owner';
@@ -644,73 +627,15 @@ describe('the owner acting as the user: received files', () => {
     expect(r.state).toBe('open');
     await r.app.ready;
     await r.app.received;
-    expect(S.escrowUses).toBe(1);
-    expect(loadImpersonationKey(S.user.id)).toEqual(dk); // the user's key in its own slot, not a new one
+    expect(S.audit.some((x) => x.action === 'drive.keys_used')).toBe(true);
+    expect(loadImpersonationKeys(S.user.id)).toMatchObject({ current: S.current().id }); // the user's keys in their own slot
     expect(S.nodes.get(got).rs).toBeNull();
     const folder = S.nodes.get(got).parent;
-    expect(fromUtf8(await openField((await deriveSubkeys(dk)).names, 'name', folder, S.nodes.get(folder).name))).toBe('from a client');
-    // Readable by the user's own key (nothing new was sealed for the owner), and downloadable here.
-    expect(fromUtf8(await openField((await deriveSubkeys(dk)).names, 'name', got, S.nodes.get(got).name))).toBe('contract.pdf');
+    expect(await fieldOf(folder)).toBe('from a client');
+    // Readable with the user's own keys (nothing was sealed for the owner), and downloadable here.
+    expect(await fieldOf(got)).toBe('contract.pdf');
     const client = await drive.openDrive({ user });
     const blob = await (await client.download(got)).blob();
     expect(new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()))).toBe('signed contract');
-    expect([...S.wraps.keys()].sort()).toEqual(['escrow|escrow', 'pw|pw']);
   }, 60000);
-});
-
-describe('the owner starting over: reverse links paused, then resumed by a kit for the old Drive', () => {
-  it('pauses the owner\'s link (its item kept as it arrived, not taken in); the kit restore re-seals the link\'s key under the Drive key now, and the kept item is taken in', async () => {
-    const PW = 'owner password 1';
-    const NEWPW = 'owner password after recovery';
-    const SALT = 'AAAAAAAAAAAAAAAAAAAAAA';
-    const proofOld = await stretch(PW, SALT, 3);
-    const proofNew = await stretch(NEWPW, SALT, 3);
-    S = fakeServer({ role: 'owner' });
-    globalThis.fetch = S.fetch;
-    S.proof = proofOld;
-    const d = await drive.unlockDrive({ password: PW });
-    const user = S.user;
-    ids = await seedTree(S, d.dk, { Inbox: {} });
-    const id = newReverseId();
-    const { pub, privateKey } = await createReverseKey();
-    const priv = await sealReversePriv(d.dk, id, privateKey);
-    S.reverse.push({ id, folder: ids.get('Inbox'), label: 'client', priv, status: 'active', files: 1, bytes: 6, created: 1700000000, expires: 2000000000 });
-    const item = await seedReceived(S, { rid: id, pub, folder: ids.get('Inbox'), path: 'contract.txt', bytes: utf8('signed') });
-    const sealedBefore = JSON.stringify(S.nodes.get(item));
-    const kit = (await drive.buildOwnerKit({ user, passphrase: 'a kit passphrase', step: { current: proofOld } })).text;
-    // AUTHN recovery; nothing opens the Drive: start over.
-    S.authnRecovery(proofNew);
-    clearSessionKey();
-    const so = await drive.startOverOwnerDrive({ user, confirm: 'owner', password: NEWPW, step: { current: proofNew } });
-    expect(S.reverse[0]).toMatchObject({ status: 'paused', agen: 1, priv });
-    // Kept in the archive exactly as it arrived (sealed to the link's key); nothing to take in now.
-    expect(JSON.stringify(S.archives[0].nodes.get(item))).toBe(sealedBefore);
-    const n0 = S.requests.length;
-    await so.client.receivePending();
-    expect(S.accepted ?? []).toEqual([]);
-    expect(S.requests.slice(n0).filter((x) => x.method !== 'GET')).toEqual([]);
-    // The Drive page's archive box says the link is paused, and what deleting the archive would do.
-    const started = await startDrive(mountPoint(), deps({ ...PROFILE, user: { ...user } }));
-    await started.app.ready;
-    expect($('#drive-archive-links-1').textContent).toBe('1 of your upload links (Receive files) is paused: its key is in this archive. It accepts files again once the archive is restored; the files already received are kept in it.');
-    expect($('#drive-archive').textContent).toMatch(/Its 1 paused upload link is revoked, and the files it received are deleted with it\./);
-    // The kit for the old Drive: the archive back, the link's key re-sealed, the link resumed.
-    const r = await drive.restoreOwnerKit({ user, text: kit, passphrase: 'a kit passphrase', password: NEWPW, step: { current: proofNew } });
-    expect(r.restored).toMatchObject({ archive: 1, items: 2 });
-    const put = S.requests.filter((x) => x.method === 'PUT' && x.path.endsWith('/archive/1/nodes')).flatMap((x) => x.body.nodes);
-    expect(put.find((x) => x.id === item)).toEqual({ id: item }); // the received item as it is
-    expect(S.reverse[0]).toMatchObject({ status: 'active', agen: null });
-    expect(S.audit.some((x) => x.action === 'reverse.resumed' && x.detail === `id=${id}`)).toBe(true);
-    const back = await openReversePriv(so.client.dk, id, S.reverse[0].priv);
-    expect(back.pub).toEqual(pub);
-    await expect(openReversePriv(d.dk, id, S.reverse[0].priv)).rejects.toThrow();
-    expect(JSON.stringify(S.nodes.get(item))).toBe(sealedBefore);
-    // The kept item is taken in with the restored key, into the restored folder.
-    const c = await drive.openDrive({ user });
-    await c.receivePending();
-    expect(S.accepted.map((x) => x.id)).toEqual([item]);
-    expect(S.accepted[0].body.parent).toBe(ids.get('Inbox'));
-    const keys = await deriveSubkeys(so.client.dk);
-    expect(fromUtf8(await openField(keys.names, 'name', item, S.accepted[0].body.name))).toBe('contract.txt');
-  });
 });
