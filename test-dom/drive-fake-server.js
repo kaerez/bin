@@ -10,8 +10,9 @@
 // sub-MEK, 400 bad_seal otherwise); a rename is sealed under the item's own
 // sub-MEK and salt (409 stale_keys when they changed); the personal kit's
 // routes need the step-up and are refused while the owner acts as the user
-// (`impersonatedBy`); the key kit and the keyring routes of Admin → Security
-// → Keys are the owner's. Like the real server (src/lib/csrf.js), every
+// (`impersonatedBy`), and a restore from one is refused to everyone there
+// (403 owner_only); the key kit, a restore from a user's personal kit and
+// the keyring routes of Admin → Security → Keys are the owner's. Like the real server (src/lib/csrf.js), every
 // signed-in change (POST / PUT / PATCH / DELETE under /api/private/, and
 // log-out) must carry the session's CSRF token in X-Secbin-CSRF, the one GET
 // /api/private/me hands out (403 csrf_mismatch otherwise, before anything
@@ -166,6 +167,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       return ok(await keysOut());
     }
     // ── the personal kit ─────────────────────────────────────────────────
+    // A restore from one is the owner's (Admin → Security → Keys), never the user's.
+    if (p === '/api/private/drive/kit/restore' || p === '/api/private/drive/kit/items') return fail(403, 'owner_only');
     if (p === '/api/private/drive/kit' || p.startsWith('/api/private/drive/kit/')) {
       if (S.impersonatedBy) return fail(403, 'impersonating');
       if (p === '/api/private/drive/kit' && method === 'POST') {
@@ -187,13 +190,6 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         const salt = typeof body.salt === 'string' ? (sameCheck(body.salt, await saltCheckValue(S.salt, S.user.id)) ? 'match' : 'mismatch') : 'absent';
         S.activity.push({ action: 'drive.kit_verified', detail: salt });
         return ok({ complete: salt === 'match' && keks.filter((x) => x.inUse || x.current).every((x) => x.result === 'match'), salt, keks, extra: [], now: now() });
-      }
-      if (p === '/api/private/drive/kit/restore' && method === 'POST') {
-        const f = stepFail(body);
-        if (f) return f;
-        const salt = body.salt === S.salt ? 'same' : 'kept';
-        S.activity.push({ action: 'drive.kit_restored', detail: `salt ${salt}` });
-        return ok({ salt, unreadable: [] });
       }
       return fail(404, 'not_found');
     }
@@ -500,6 +496,18 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       }
       S.exportBodies = (S.exportBodies || []).concat([body]);
       return ok({ document: doc });
+    }
+    // A user's personal kit (as keys.js userKitRestore): that user's kit only; S.kitRestorePages calls
+    // before it is done (`next`), S.kitLost: the sub-MEKs the server cannot open.
+    if ((m = p.match(/^\/api\/private\/admin\/keys\/users\/([^/]+)\/kit-restore$/))) {
+      if (!body.kit || body.kit.id !== m[1]) return fail(400, 'kit_mismatch');
+      S.kitRestoreBodies = (S.kitRestoreBodies || []).concat([body]);
+      const n = S.kitRestoreBodies.length;
+      const salt = m[1] === S.user.id && body.kit.salt === S.salt ? 'same' : 'kept';
+      const lost = S.kitLost || [];
+      const next = lost.length && n < (S.kitRestorePages || 1) ? { mek: lost[0], after: `n.${'A'.repeat(22)}` } : null;
+      S.audit.push({ action: 'drive.kit_restored', detail: `salt ${salt}; sub-MEKs the server cannot open: ${lost.length}` });
+      return ok({ salt, unreadable: lost, done: lost.length ? 2 : 0, failed: 0, left: [], next });
     }
     if ((m = p.match(/^\/api\/private\/admin\/keys\/users\/([^/]+)\/view$/))) {
       if (body.what === 'deks') return ok({ userId: m[1], username: S.user.username, files: [], next: null });

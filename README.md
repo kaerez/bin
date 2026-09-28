@@ -203,8 +203,10 @@ working.
   **Admin → Security → Keys** manages the keys (generate or enter, view, add, rotate, edit
   dates, set current, re-seal, delete, change the root), with the **key kit** (the root MEK,
   every sub-MEK and every user salt: it restores everything; store it offline, like the `AUTHN`
-  secret) and the upgrade of Drives made by the previous release. Each user has a **personal
-  kit** on the Account page (their salt and keys). Admin → Import / export has the Drive keys in
+  secret), the upgrade of Drives made by the previous release, and the restore of a user's
+  personal kit. Each user has a **personal kit** on the Account page (their salt and keys:
+  download and verify; only the owner restores from one, so no user can change what opens a
+  Drive). Admin → Import / export has the Drive keys in
   a file of their own (the parts chosen). See [SECURITY.md](./SECURITY.md), "Drive keys", and
   [docs/DRIVE.md](./docs/DRIVE.md).
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or

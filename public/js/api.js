@@ -384,12 +384,9 @@ export const drive = {
   receivedFailed: (id, reason) => request(`${D}/received/${enc(id)}/failed`, { method: 'POST', headers: INTENT, body: { reason } }),
   receivedFailedList: (after = null) => request(`${D}/received?failed=1${after ? `&after=${enc(after)}` : ''}`),
   receivedRetry: (id) => request(`${D}/received/${enc(id)}/failed`, { method: 'DELETE', headers: INTENT }),
-  // The personal kit (docs/DRIVE.md §3.1): its content (with the step-up), a read-only check, a restore.
+  // The personal kit (docs/DRIVE.md §3.1): its content (with the step-up) and a read-only check (a restore is the owner's: keysApi).
   kit: (step) => request(`${D}/kit`, { method: 'POST', headers: INTENT, body: { ...step } }),
   kitVerify: (body) => request(`${D}/kit/verify`, { method: 'POST', headers: INTENT, body }),
-  kitRestore: (body) => request(`${D}/kit/restore`, { method: 'POST', headers: INTENT, body }),
-  kitItems: (mek, after = null) => request(`${D}/kit/items?mek=${enc(mek)}${after ? `&after=${enc(after)}` : ''}`),
-  kitItemsPut: (body) => request(`${D}/kit/items`, { method: 'PUT', headers: INTENT, body }),
   // The upgrade of a Drive made before the key model v2 (docs/DRIVE.md §3.3): own, or (the owner) a user's.
   migrate: (uid = null) => request(uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`),
   migrateItems: (after = null, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/items${after ? `?after=${enc(after)}` : ''}`),
@@ -428,6 +425,8 @@ export const keysApi = {
   exportKeys: (body) => request(`${K}/export`, { method: 'POST', headers: INTENT, body }),
   importKeys: (body) => request(`${K}/import`, { method: 'POST', headers: INTENT, body }),
   userView: (uid, body) => request(`${K}/users/${enc(uid)}/view`, { method: 'POST', headers: INTENT, body }),
+  // A user's personal kit (opened in the owner's browser): only what the server lost comes back.
+  userKitRestore: (uid, body) => request(`${K}/users/${enc(uid)}/kit-restore`, { method: 'POST', headers: INTENT, body }),
 };
 
 // ── reverse shares: the anonymous uploader (docs/REVERSE.md §6.2) ────────────

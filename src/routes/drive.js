@@ -21,7 +21,7 @@
 // the escrow of that release), every item is re-sealed under the user's KEK
 // and checked here, and only then do the old key wraps go.
 
-import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, appendCookies, SECURITY_HEADERS, HttpError } from '../lib/http.js';
+import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed, appendCookies, SECURITY_HEADERS } from '../lib/http.js';
 import { authenticate, actorId } from '../lib/auth.js';
 import { directory, ipContext } from '../lib/guard.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
@@ -168,6 +168,11 @@ export async function handleDrive(request, env, url) {
     if (r) return withAuth(a, r);
   }
 
+  // A restore from a personal kit is the owner's alone, from Admin → Security → Keys (docs/DRIVE.md
+  // §3.1): never the user's (it could change what opens the Drive), nor the owner's acting as a user.
+  if (p === '/api/private/drive/kit/restore' || p === '/api/private/drive/kit/items') {
+    return err(403, 'owner_only', 'Only the administrator restores from a personal kit (Admin → Security → Keys).');
+  }
   // The personal kit (docs/DRIVE.md §3.1): the user's own, never while acting as a user.
   if (p === '/api/private/drive/kit' || p.startsWith('/api/private/drive/kit/')) {
     if (a.actor) return err(403, 'impersonating', 'A personal kit is the user’s own: the key kit (Admin → Security → Keys) covers every Drive.');
@@ -349,14 +354,9 @@ const uploadTokenOf = (request) => {
  * - `POST …/kit/verify` `{ keks: { mekId: check }, salt: check }` — read-only:
  *   each check value compared here in constant time → match / mismatch /
  *   absent per sub-MEK, with each one's dates (`drive.kit_verified`); at most
- *   KIT_VERIFY_MAX per session per KIT_VERIFY_WINDOW;
- * - `POST …/kit/restore` `{ salt?, current | reauth }` — the user salt put
- *   back when the account has none (only if the kit's salt opens one of the
- *   Drive's items, when there are any), and which of the Drive's sub-MEKs
- *   the server cannot open any more (`drive.kit_restored`);
- * - `GET …/kit/items?mek=&after=` and `PUT …/kit/items` — the items sealed
- *   under such a sub-MEK, re-sealed in the browser with the kit's KEK under
- *   the current one (checked here, compare-and-set).
+ *   KIT_VERIFY_MAX per session per KIT_VERIFY_WINDOW.
+ * A restore from the kit is the owner's (src/routes/keys.js, Admin →
+ * Security → Keys): `…/kit/restore` and `…/kit/items` answer 403 above.
  */
 async function kitRoute(request, env, url, dir, a, driveLog) {
   const p = url.pathname;
@@ -396,77 +396,13 @@ async function kitRoute(request, env, url, dir, a, driveLog) {
     await driveLog('drive.kit_verified', `${complete ? 'complete' : 'incomplete'}: salt ${salt}; KEKs ${out.filter((x) => x.result === 'match').length}/${out.length}`);
     return json({ complete, salt, keks: out, extra, now: Math.floor(Date.now() / 1000) });
   }
-  if (p === '/api/private/drive/kit/restore') {
-    if (request.method !== 'POST') return methodNotAllowed('POST');
-    assertIntent(request);
-    const body = await readJsonBody(request);
-    const refused = await stepUp(request, env, url, dir, uid, body);
-    if (refused) return refused;
-    let salt = 'absent';
-    if (body.salt !== undefined) {
-      if (typeof body.salt !== 'string' || !KEY_RE.test(body.salt)) return invalid('salt must be the user salt (32 bytes, base64url).');
-      salt = await restoreSalt(env, dir, uid, body.salt);
-    }
-    const s = await drive.summary(uid);
-    let unreadable;
-    try {
-      const k = await userKeys(env, uid, { meks: s.meks });
-      unreadable = [...k.missing, ...k.broken];
-    } catch (e) {
-      if (!(e instanceof HttpError)) throw e;
-      unreadable = s.meks;
-    }
-    await driveLog('drive.kit_restored', `salt ${salt}; sub-MEKs the server cannot open: ${unreadable.length}`);
-    return json({ salt, unreadable });
-  }
-  if (p === '/api/private/drive/kit/items') {
-    if (request.method === 'GET') {
-      assertNotCrossSite(request);
-      const mek = url.searchParams.get('mek') || '';
-      if (!MEK_ID_RE.test(mek)) return invalid('mek must be a sub-MEK id.');
-      const s = await drive.summary(uid);
-      const k = await userKeys(env, uid, { meks: s.meks });
-      // Only what the server can no longer open itself (it re-seals the rest on its own).
-      if (![...k.missing, ...k.broken].includes(mek)) return err(409, 'readable', 'The server opens that sub-MEK’s items itself.');
-      const after = parseAfter(url.searchParams.get('after'));
-      const r = await drive.sealedPage(uid, { meks: [mek], after });
-      // Link keys come without the field layer (the browser opens them with the kit's KEK), with the stored value to replace.
-      const fk = r.links.length ? await fieldKeys(env, uid) : null;
-      const links = [];
-      for (const l of r.links) links.push({ id: l.id, mek: l.mek, priv: JSON.parse(await fromRest(fk, uid, 'linkKey', l.id, l.priv)), from: l.priv });
-      return json({ items: r.items, links, next: r.next ? `${r.next.kind}.${r.next.id}` : null });
-    }
-    if (request.method !== 'PUT') return methodNotAllowed('GET, PUT');
-    assertIntent(request);
-    const body = await readJsonBody(request, MAX_BODY);
-    const { items, links } = await resealedFromBrowser(env, uid, body);
-    const r = await drive.applySealed(uid, { items, links });
-    await driveLog('drive.kit_restored', `items re-sealed from the kit: ${r.done}`);
-    return json(r);
-  }
   return err(404, 'not_found', 'Not found.');
 }
 
 /** "n.<id>" / "r.<id>" (a page cursor of sealedPage) → { kind, id } or null. */
-function parseAfter(v) {
+export function parseAfter(v) {
   const m = /^([nr])\.([A-Za-z0-9_-]{22,23})$/.exec(v || '');
   return m ? { kind: m[1], id: m[2] } : null;
-}
-
-/**
- * A user salt from a kit, only for an account that has none: it must open
- * something of the Drive's (saltCheck), unless nothing there is sealed under
- * it → the outcome ('restored' | 'same' | 'kept' | 'wrong').
- */
-async function restoreSalt(env, dir, uid, salt) {
-  const have = await dir.driveKeys(uid, {}).catch(() => null);
-  if (have && have.ok) return have.salt === salt ? 'same' : 'kept';
-  if (!have || have.error !== 'salt_missing') return 'kept';
-  const c = await saltCheck(env, dir, uid, salt);
-  if (c === 'wrong') return 'wrong';
-  if (c !== 'ok' && c !== 'empty') return 'kept';
-  const w = await dir.saltRestore(uid, salt, null, { write: true });
-  return w.ok && w.written ? 'restored' : 'kept';
 }
 
 /**
@@ -524,44 +460,6 @@ export async function saltCheck(env, dir, uid, salt, { ownerId = null, extra = n
     try { await openAtRest(k, { userId: uid, field, ref: rec ? `name:${rec.id}` : legacy.id }, rec ? rec.name : legacy.priv); return 'ok'; } catch { /* the next one */ }
   }
   return 'wrong';
-}
-
-/** An item's sealed fields as stored (`from` of GET …/kit/items: what a re-seal replaces) → { name, meta, dek } or null. */
-function storedFields(v) {
-  const ok = (x, opt) => (opt && x === null) || (typeof x === 'string' && x.length <= 2048);
-  return isObj(v) && ok(v.name, false) && ok(v.meta, true) && ok(v.dek, true) ? { name: v.name, meta: v.meta, dek: v.dek } : null;
-}
-
-/**
- * Items (and link keys) re-sealed in a browser under the current sub-MEK,
- * each naming what it replaces (`fromMek`, `fromKs`; a link: `fromMek`) →
- * checked (they open under the current KEK) and ready for applySealed.
- */
-async function resealedFromBrowser(env, uid, body) {
-  const list = Array.isArray(body.items) ? body.items : [];
-  const lks = Array.isArray(body.links) ? body.links : [];
-  if (list.length + lks.length > KEYS_PAGE || !list.length && !lks.length) throw new HttpError(400, 'invalid', `Send 1–${KEYS_PAGE} items or links.`);
-  const keys = await userKeys(env, uid);
-  const items = [];
-  for (const x of list) {
-    const name = isObj(x) ? encField(x.name, MAX_NAME_CT) : null;
-    const meta = isObj(x) && x.meta ? encField(x.meta, MAX_META_CT) : null;
-    const dek = isObj(x) && x.dek ? encField(x.dek, MAX_DEK_CT) : null;
-    const kf = isObj(x) ? keyFields(x) : null;
-    const from = isObj(x) ? storedFields(x.from) : null;
-    if (!name || !kf || !from || !NODE_ID_RE.test(x.id ?? '') || !MEK_ID_RE.test(x.fromMek ?? '') || !KEY_RE.test(x.fromKs ?? '')) throw new HttpError(400, 'invalid', 'Each item needs id, fromMek, fromKs, from, ks, mek, name (meta?, dek?).');
-    const mfp = await checkNewItem(uid, keys, { kind: dek ? 'file' : 'dir', ...kf, name, meta, dek });
-    items.push({ id: x.id, ...kf, mfp, name, meta, dek, fromMek: x.fromMek, fromKs: x.fromKs, from });
-  }
-  const fk = lks.length ? await fieldKeys(env, uid) : null;
-  const links = [];
-  for (const l of lks) {
-    const priv = isObj(l) ? encField(l.priv, MAX_LINK_CT) : null;
-    if (!priv || !/^r[A-Za-z0-9_-]{22}$/.test(l.id ?? '') || !MEK_ID_RE.test(l.mek ?? '') || typeof l.from !== 'string') throw new HttpError(400, 'invalid', 'Each link needs id, mek, priv and from (the stored value it replaces).');
-    await checkLinkKey(uid, keys, l.id, l.mek, priv);
-    links.push({ id: l.id, mek: l.mek, priv: await toRest(fk, uid, 'linkKey', l.id, priv), fromMek: typeof l.fromMek === 'string' ? l.fromMek : null, fromPriv: l.from });
-  }
-  return { items, links };
 }
 
 // ── the upgrade of a Drive made before the key model v2 (docs/DRIVE.md §3.3) ──
