@@ -90,8 +90,8 @@ export function passphrasePair(prefix, what) {
   return { pass1, pass2, weak, sync, el: h('div.stack', {}, h('div.toolbar', {}, field('Kit passphrase (optional)', pass1), field('Repeat the kit passphrase', pass2)), weak) };
 }
 
-export function saveText(text, name) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+export function saveText(text, name, type = 'application/json') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
   const a = h('a', { href: url, download: name, hidden: true });
   document.body.appendChild(a);
   a.click();

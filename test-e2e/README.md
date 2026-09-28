@@ -97,6 +97,22 @@ WT=$PWD BASE=http://localhost:9220 node test-e2e/kit-fresh.mjs
 Every suite that creates the owner on the set-up page generates the Drive keys there and chooses
 "Use these" (the release before, in `drive-upgrade.mjs` phase 1, has no such step).
 
+## `port-ids.mjs` — the user id lists of the account export and import
+
+What it covers (Admin → Import / export): on export, each row's user id, the search by name and
+by id, Select all / Deselect all of the rows shown, an uploaded id list choosing exactly the users
+it names, "Download the chosen ids" (a plain text list, user ids only) and the export sent for
+those users (the file holds their ids); on import, the ids in the file shown and downloaded, an
+uploaded list taking over the accounts it names (a deleted one created with a new id, an existing
+one updated: its role only, its password unchanged) and skipping the others, the preview sending
+only those; axe on every new state; no page errors or CSP / Trusted Types violations. It needs a
+fresh server (no owner yet):
+
+```sh
+npx wrangler dev --port 9230 --inspector-port 9231 --persist-to .wrangler/ids-state
+WT=$PWD BASE=http://localhost:9230 node test-e2e/port-ids.mjs
+```
+
 ## `port-passkey.mjs` — Import / export with a passkey, and a Drive keys export verified
 
 What it covers (SECURITY.md, *Export / import*; [docs/DRIVE.md](../docs/DRIVE.md) §3.2), with

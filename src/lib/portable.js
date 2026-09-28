@@ -11,13 +11,16 @@
 //             channels, quotas, viewer rules) together with the custom roles;
 //             IP rules; the Turnstile keys set in the admin panel (site key
 //             and secret); the public account's own limits, quotas and rules;
-//   owner   — the owner's row, each part independent: `passkeys` ({ keys }:
-//             public keys, each with its user handle; the owner's
-//             "Password and passkey" choice never travels) and
+//   owner   — the owner's row (with its `id`, as for users), each part
+//             independent: `passkeys` ({ keys }: public keys, each with its
+//             user handle; the owner's "Password and passkey" choice never
+//             travels) and
 //             `recoveryCodes` (the code hashes). Never the owner's password,
 //             role or API keys. On import the owner always exists, so only
 //             its passkeys can be added; its recovery codes are never taken;
-//   users[] — per user, each part independent (username is always present):
+//   users[] — per user, each part independent (username is always present,
+//             and `id`, the user id on the exporting server, for the id lists
+//             of Import / export: an import never uses it):
 //             `credentials` (salt, t, verifier, disabled), `role` (the role's
 //             name, "Default" for the Default role), `apiKeys` (the stored
 //             hashes, names, scopes and dates: the keys keep working),
@@ -44,6 +47,7 @@ export const EXPORT_FORMAT = 'secbin-export/v1';
 export const MAX_EXPORT_USERS = 5000;
 export const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
 export const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{2,63}$/;
+const USER_ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 
@@ -246,10 +250,16 @@ function roleName(v, where) {
   return v.trim();
 }
 
+/** The entry's user id on the server it came from (optional): for the id lists in the page only, never used by an import. */
+function sourceId(v, where) {
+  if (v.id !== undefined && (typeof v.id !== 'string' || !USER_ID_RE.test(v.id))) throw new PortableError(`${where}: invalid user id`);
+}
+
 function user(v, i) {
   const where = `users[${i}]`;
-  keys(v, where, ['username'], USER_PARTS);
+  keys(v, where, ['username'], ['id', ...USER_PARTS]);
   if (typeof v.username !== 'string' || !USERNAME_RE.test(v.username)) throw new PortableError(`${where}: invalid username`);
+  sourceId(v, where);
   const out = { username: v.username };
   if (v.credentials !== undefined) {
     const c = v.credentials;
@@ -269,7 +279,8 @@ function user(v, i) {
 }
 
 function ownerEntry(v) {
-  keys(v, 'owner', [], OWNER_PARTS);
+  keys(v, 'owner', [], ['id', ...OWNER_PARTS]);
+  sourceId(v, 'owner');
   const out = {};
   if (v.passkeys !== undefined) out.passkeys = passkeyBlock(v.passkeys, 'owner.passkeys', true);
   if (v.recoveryCodes !== undefined) out.recoveryCodes = recoveryCodes(v.recoveryCodes, 'owner.recoveryCodes');

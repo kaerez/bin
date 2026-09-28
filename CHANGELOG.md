@@ -481,6 +481,19 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **Admin → Import / export: user id lists for the account export and import**, as the Drive
+  keys card has had (`public/dashboard/js/id-list.js`, now shared by both cards). Export: each
+  row shows the user's id; a search by user name or id, Select all / Deselect all of the rows
+  shown, "Choose from an id list" (an uploaded plain text list, one id per line, or a JSON
+  array) and "Download the chosen ids"; the per-part checkboxes and their bulk toggles are as
+  before. Import: each row shows the id in the file; an uploaded id list takes over the accounts
+  it names (by the id in the file, or the id of the account here that the row updates) with
+  their usual action and skips the others, and "Download the ids in the file". An id list holds
+  user ids only, never keys, passwords or other credentials, and only chooses rows: an existing
+  account still only gets its role set and passkeys added. The export document now carries each
+  user's id (`users[].id`, `owner.id`: the id on the exporting server); an import accepts it and
+  never uses it (a created account gets a new id).
+
 - **Admin → Import / export → Drive keys: Verify** (docs/DRIVE.md §3.2): a saved Drive keys
   export is decrypted in the browser and checked against this server, read-only, after the
   step-up (`POST /api/private/admin/keys/export/verify`): the root MEK, the sub-MEKs (match,
