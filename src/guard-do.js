@@ -1,7 +1,26 @@
-// guard-do.js — Guard Durable Object: per-IP brute-force tracking and blocks
-// for the login / setup / invalid (enumeration, wrong link, wrong password)
-// scopes. Sharded by hash(tracking key) across GUARD_SHARDS instances so no
-// single object sees all traffic; the admin view fans out to every shard.
+// guard-do.js — Guard Durable Object: per-network brute-force tracking and
+// blocks for the login / setup / invalid (enumeration, wrong link, wrong
+// password) scopes and the rate limits. Sharded by hash(key) across
+// GUARD_SHARDS instances so no single object sees all traffic; the admin view
+// fans out to every shard.
+//
+// A row's key is a keyed hash of the network (src/lib/records.js guardTag),
+// never the address: the address itself is kept only for the owner's view,
+// sealed by the Worker under the Guard's record key (`addr`, with its key id
+// in `rk`), or in the clear (`rk` NULL) while the instance has no keyring yet.
+// The Directory's background pass seals those, re-seals rows under an
+// earlier root's key and re-keys rows from before the tags (SECURITY.md, "Records at rest").
+// This object never holds a key and never opens an address.
+//
+// Rows from before the tags are keyed by the address, in the shard of the
+// address. Until the pass has re-keyed every one of this shard's (meta
+// "legacy.done", set by the pass through legacyDone; a shard made by this
+// release has none and is done from the start), the Worker also asks this
+// shard for them (legacyCheck, legacyTake): a block made before still applies
+// and failures counted before still count, so the upgrade opens no window.
+// A row keyed by an address written after that (an isolate of the release
+// before, still serving during a rollout) clears the flag again and asks the
+// Directory to run its pass soon, so such rows are looked up and re-keyed too.
 //
 // Rule semantics (admin-configurable, see settings.js): X failures within a
 // fixed window that opens at the first failure → block that key for N seconds.
@@ -11,20 +30,59 @@ import { DurableObject } from 'cloudflare:workers';
 
 export const GUARD_SHARDS = 8;
 
+/** The shard (0 … GUARD_SHARDS − 1) that holds `key` (FNV-1a). */
+export function guardShardIndex(key) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h % GUARD_SHARDS;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tracking (scope TEXT NOT NULL, key TEXT NOT NULL, count INTEGER NOT NULL, start INTEGER NOT NULL,
-  expires INTEGER NOT NULL, PRIMARY KEY (scope, key));
+  expires INTEGER NOT NULL, addr TEXT, rk TEXT, PRIMARY KEY (scope, key));
 CREATE TABLE IF NOT EXISTS blocks (scope TEXT NOT NULL, key TEXT NOT NULL, until INTEGER NOT NULL, since INTEGER NOT NULL,
-  PRIMARY KEY (scope, key));
+  addr TEXT, rk TEXT, PRIMARY KEY (scope, key));
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 `;
+const LEGACY = "key NOT LIKE 'h:%'";
+const TABLES = ['tracking', 'blocks'];
+/** Rows the Directory's pass asks for at once. */
+const MAX_PENDING = 500;
 
 const now = () => Math.floor(Date.now() / 1000);
+const str = (v) => (typeof v === 'string' ? v : null);
 
 export class Guard extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    ctx.blockConcurrencyWhile(async () => { this.sql.exec(SCHEMA); });
+    ctx.blockConcurrencyWhile(async () => {
+      // A shard this release makes holds no row from before the tags: done from the start.
+      const fresh = !this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tracking'").toArray().length;
+      this.sql.exec(SCHEMA);
+      if (fresh) this.#setDone();
+      // Shards made before the addresses were sealed: their rows are keyed by the address (re-keyed by the Directory's pass).
+      for (const t of TABLES) {
+        const cols = new Set(this.sql.exec(`PRAGMA table_info(${t})`).toArray().map((c) => c.name));
+        for (const c of ['addr', 'rk']) if (!cols.has(c)) this.sql.exec(`ALTER TABLE ${t} ADD COLUMN ${c} TEXT`);
+      }
+    });
+  }
+
+  #isDone() {
+    return this.sql.exec("SELECT 1 FROM meta WHERE k = 'legacy.done'").toArray().length > 0;
+  }
+  #setDone() {
+    this.sql.exec("INSERT INTO meta (k, v) VALUES ('legacy.done', ?) ON CONFLICT(k) DO NOTHING", String(now()));
+  }
+  /** A write keyed by an address (the release before): not done any more, and the Directory's pass runs soon. */
+  async #legacyWrite(key) {
+    if (typeof key !== 'string' || key.startsWith('h:') || !this.#isDone()) return;
+    this.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'");
+    try {
+      const ns = this.env?.DIRECTORY;
+      if (ns) await ns.get(ns.idFromName('directory')).recordsPassSoon();
+    } catch { /* the hourly pass still comes */ }
   }
 
   async #schedule(atSec) {
@@ -39,34 +97,56 @@ export class Guard extends DurableObject {
     return r && r.until > now() ? { blocked: true, until: r.until } : { blocked: false };
   }
 
-  /** Record one failure; returns the (possibly new) block state. */
-  async fail(scope, key, rule) {
+  /**
+   * Record one failure; returns the (possibly new) block state. `sealed`:
+   * the network's address for the owner's view ({ addr, rk }: sealed under
+   * key id `rk`, or in the clear with rk null), kept with the row. `carry`:
+   * the network's failures counted before the tags ({ count, start }, taken
+   * from its legacy row by legacyTake), added to this window's.
+   */
+  async fail(scope, key, rule, sealed = null, carry = null) {
+    await this.#legacyWrite(key);
     const ts = now();
     const blocked = await this.check(scope, key);
     if (blocked.blocked) return blocked;
+    const addr = str(sealed?.addr);
+    const rk = addr === null ? null : str(sealed?.rk);
     const r = this.sql.exec('SELECT count, start FROM tracking WHERE scope = ? AND key = ?', scope, key).toArray()[0];
-    const fresh = !r || ts - r.start >= rule.windowSec;
-    const count = fresh ? 1 : r.count + 1;
-    const start = fresh ? ts : r.start;
+    let prev = r && ts - r.start < rule.windowSec ? { count: r.count, start: r.start } : null;
+    if (carry && Number.isSafeInteger(carry.count) && carry.count > 0 && Number.isSafeInteger(carry.start) && ts - carry.start < rule.windowSec) {
+      prev = prev ? { count: prev.count + carry.count, start: Math.min(prev.start, carry.start) } : { count: carry.count, start: carry.start };
+    }
+    const count = prev ? prev.count + 1 : 1;
+    const start = prev ? prev.start : ts;
     if (count >= rule.max) {
       const until = ts + rule.blockSec;
-      this.sql.exec('INSERT OR REPLACE INTO blocks (scope, key, until, since) VALUES (?, ?, ?, ?)', scope, key, until, ts);
+      this.sql.exec('INSERT OR REPLACE INTO blocks (scope, key, until, since, addr, rk) VALUES (?, ?, ?, ?, ?, ?)', scope, key, until, ts, addr, rk);
       this.sql.exec('DELETE FROM tracking WHERE scope = ? AND key = ?', scope, key);
       await this.#schedule(until);
       return { blocked: true, until, newlyBlocked: true };
     }
     const expires = start + rule.windowSec;
-    this.sql.exec('INSERT OR REPLACE INTO tracking (scope, key, count, start, expires) VALUES (?, ?, ?, ?, ?)', scope, key, count, start, expires);
+    this.sql.exec('INSERT OR REPLACE INTO tracking (scope, key, count, start, expires, addr, rk) VALUES (?, ?, ?, ?, ?, ?, ?)', scope, key, count, start, expires, addr, rk);
     await this.#schedule(expires);
     return { blocked: false, count };
   }
 
+  /** Every live row, with its address as stored (sealed or not): the Worker has the Directory open them for the owner. */
   async list() {
     const ts = now();
     return {
-      blocks: this.sql.exec('SELECT scope, key, until, since FROM blocks WHERE until > ? ORDER BY since DESC', ts).toArray(),
-      tracking: this.sql.exec('SELECT scope, key, count, start, expires FROM tracking WHERE expires > ? ORDER BY count DESC', ts).toArray(),
+      blocks: this.sql.exec('SELECT scope, key, until, since, addr, rk FROM blocks WHERE until > ? ORDER BY since DESC', ts).toArray(),
+      tracking: this.sql.exec('SELECT scope, key, count, start, expires, addr, rk FROM tracking WHERE expires > ? ORDER BY count DESC', ts).toArray(),
     };
+  }
+
+  /** One key's stored address ({ addr, rk } from its block, else its tracking row) or null. */
+  async row(scope, key) {
+    for (const t of ['blocks', 'tracking']) {
+      const r = this.sql.exec(`SELECT addr, rk FROM ${t} WHERE scope = ? AND key = ?`, scope, key).toArray()[0];
+      if (r) return r;
+    }
+    return null;
   }
 
   async unblock(scope, key) {
@@ -75,9 +155,129 @@ export class Guard extends DurableObject {
     return { ok: true };
   }
 
-  async block(scope, key, until) {
-    this.sql.exec('INSERT OR REPLACE INTO blocks (scope, key, until, since) VALUES (?, ?, ?, ?)', scope, key, until, now());
+  /**
+   * The owner blocks a key: the block keeps the row's address, else
+   * `fallback` ({ addr, rk }: the address the owner typed, sealed by the
+   * Worker) when this shard has no row for the key.
+   */
+  async block(scope, key, until, fallback = null) {
+    await this.#legacyWrite(key);
+    const r = (await this.row(scope, key)) ?? (typeof fallback?.addr === 'string' ? { addr: fallback.addr, rk: str(fallback.rk) } : null);
+    this.sql.exec('INSERT OR REPLACE INTO blocks (scope, key, until, since, addr, rk) VALUES (?, ?, ?, ?, ?, ?)', scope, key, until, now(), r?.addr ?? null, r?.rk ?? null);
     await this.#schedule(until);
+    return { ok: true };
+  }
+
+  // ── rows from before the tags, until the pass is done here ────────────────
+
+  /**
+   * The Worker's lookup of a network's legacy block (keyed by its tracking
+   * key, `legacyKey`) in this shard → { done } when the pass has re-keyed
+   * every legacy row here (the Worker stops asking), else { done: false,
+   * blocked, until }.
+   */
+  async legacyCheck(scope, legacyKey) {
+    if (this.#isDone()) return { done: true, blocked: false };
+    const r = this.sql.exec(`SELECT until FROM blocks WHERE scope = ? AND key = ? AND ${LEGACY}`, scope, String(legacyKey)).toArray()[0];
+    return r && r.until > now() ? { done: false, blocked: true, until: r.until } : { done: false, blocked: false };
+  }
+
+  /**
+   * As legacyCheck, for a failure: also takes (removes and returns) the
+   * network's legacy failure counter for `scope` → { done, blocked, until,
+   * carry: { count, start } | null }, for fail() on its tag to count on.
+   */
+  async legacyTake(scope, legacyKey) {
+    const b = await this.legacyCheck(scope, legacyKey);
+    if (b.done || b.blocked) return { ...b, carry: null };
+    const r = this.sql.exec(`DELETE FROM tracking WHERE scope = ? AND key = ? AND ${LEGACY} AND expires > ? RETURNING count, start`, scope, String(legacyKey), now()).toArray()[0];
+    return { ...b, carry: r ? { count: r.count, start: r.start } : null };
+  }
+
+  /**
+   * The pass's move of legacy failure counters, their first half: `list`
+   * [{ scope, key }] read and deleted in one transaction → the rows taken
+   * ({ scope, key, count, start, expires }), for apply's `adopt` to add to
+   * their tags' counters. A failure counted in between (legacyTake finds
+   * nothing to carry) is never counted twice.
+   */
+  async takeLegacy(list = []) {
+    const out = [];
+    this.ctx.storage.transactionSync(() => {
+      for (const r of Array.isArray(list) ? list : []) {
+        const row = this.sql.exec(`DELETE FROM tracking WHERE scope = ? AND key = ? AND ${LEGACY} AND expires > ? RETURNING scope, key, count, start, expires`, String(r.scope), String(r.key), now()).toArray()[0];
+        if (row) out.push(row);
+      }
+    });
+    return out;
+  }
+
+  /**
+   * The pass ends here: when no live row from before the tags is left, this
+   * shard is marked done (the Worker's legacy lookups stop) → { done }.
+   */
+  async legacyDone() {
+    if (this.#isDone()) return { done: true };
+    const ts = now();
+    const left = this.sql.exec(`SELECT 1 FROM blocks WHERE until > ? AND ${LEGACY} UNION ALL SELECT 1 FROM tracking WHERE expires > ? AND ${LEGACY} LIMIT 1`, ts, ts).toArray().length;
+    if (left) return { done: false };
+    this.sql.exec(`DELETE FROM blocks WHERE ${LEGACY}`);
+    this.sql.exec(`DELETE FROM tracking WHERE ${LEGACY}`);
+    this.#setDone();
+    return { done: true };
+  }
+
+  // ── the Directory's background pass (SECURITY.md, "Records at rest") ──────
+
+  /**
+   * Live rows the pass has work for: keyed by the address (from before the
+   * tags), with an address in the clear, or sealed under another key id than
+   * `kid` (the current one; null: no keyring, so only the re-keying).
+   */
+  async pending({ kid = null, limit = MAX_PENDING } = {}) {
+    const ts = now();
+    const lim = Math.max(1, Math.min(MAX_PENDING, limit | 0));
+    const cond = kid ? "(key NOT LIKE 'h:%' OR (addr IS NOT NULL AND (rk IS NULL OR rk != ?)))" : "key NOT LIKE 'h:%'";
+    const args = kid ? [kid] : [];
+    return [
+      ...this.sql.exec(`SELECT 'blocks' AS t, scope, key, until, since, addr, rk FROM blocks WHERE until > ? AND ${cond} LIMIT ?`, ts, ...args, lim).toArray(),
+      ...this.sql.exec(`SELECT 'tracking' AS t, scope, key, count, start, expires, addr, rk FROM tracking WHERE expires > ? AND ${cond} LIMIT ?`, ts, ...args, lim).toArray(),
+    ];
+  }
+
+  /**
+   * The pass's results for rows of this shard: `reseal` [{ t, scope, key,
+   * addr, rk, was: { addr, rk } }] (only if the row still holds `was`);
+   * `adopt` [row with its new key] (a re-keyed row that lands here: a block
+   * keeps the later end, a counter adds to the one here); `drop` [{ t, scope,
+   * key }] (the re-keyed blocks' old keys, once their new rows are written).
+   */
+  async apply({ reseal = [], adopt = [], drop = [] } = {}) {
+    let next = null;
+    this.ctx.storage.transactionSync(() => {
+      for (const r of reseal) {
+        if (!TABLES.includes(r.t)) continue;
+        this.sql.exec(`UPDATE ${r.t} SET addr = ?, rk = ? WHERE scope = ? AND key = ? AND addr IS ? AND rk IS ?`,
+          str(r.addr), str(r.rk), r.scope, r.key, str(r.was?.addr), str(r.was?.rk));
+      }
+      for (const r of adopt) {
+        if (r.t === 'blocks') {
+          this.sql.exec(`INSERT INTO blocks (scope, key, until, since, addr, rk) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, key) DO UPDATE SET until = MAX(until, excluded.until)`, r.scope, r.key, r.until, r.since, str(r.addr), str(r.rk));
+          next = Math.min(next ?? r.until, r.until);
+        } else if (r.t === 'tracking') {
+          // A counter taken from its old key (takeLegacy): added to the tag's, which may hold failures counted since.
+          this.sql.exec(`INSERT INTO tracking (scope, key, count, start, expires, addr, rk) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, key) DO UPDATE SET count = count + excluded.count,
+              start = MIN(start, excluded.start), expires = CASE WHEN excluded.start < start THEN excluded.expires ELSE expires END,
+              addr = COALESCE(addr, excluded.addr), rk = CASE WHEN addr IS NULL THEN excluded.rk ELSE rk END`,
+          r.scope, r.key, r.count, r.start, r.expires, str(r.addr), str(r.rk));
+          next = Math.min(next ?? r.expires, r.expires);
+        }
+      }
+      for (const r of drop) if (TABLES.includes(r.t)) this.sql.exec(`DELETE FROM ${r.t} WHERE scope = ? AND key = ?`, r.scope, r.key);
+    });
+    if (next !== null) await this.#schedule(next);
     return { ok: true };
   }
 

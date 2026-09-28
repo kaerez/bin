@@ -1,16 +1,32 @@
 // guard.js — Worker-side brute-force protection: manual allow/block IP rules
 // (cached per isolate), per-scope failure tracking in sharded Guard DOs, and
 // the DISABLE_BFP / DISABLE_BFP_SETUP kill switches.
+//
+// The Guard never sees an address at rest: its rows are keyed by a keyed hash
+// of the network (guardTag) and hold the address only sealed under the
+// Guard's record key (or in the clear before there is a keyring), both keys
+// handed out by the Directory and cached here like the settings
+// (src/lib/records.js, SECURITY.md, "Records at rest").
 
 import { bfpDisabled, binding } from './config.js';
-import { parseIp, parseRule, ruleContains, trackingKey } from './ip.js';
+import { parseIp, parseCidr, formatCidr, parseRule, ruleContains, trackingKey } from './ip.js';
 import { clientIp } from './http.js';
-import { GUARD_SHARDS } from '../guard-do.js';
+import { GUARD_SHARDS, guardShardIndex } from '../guard-do.js';
+import { guardTag, guardWhere, isGuardTag, sealRecord } from './records.js';
+import { bytesFromB64url } from '../../public/js/bytes.js';
 
 const CACHE_MS = 30 * 1000;
 let rulesCache = { at: 0, rules: [] };
 let settingsCache = { at: 0, settings: null };
 let publicConfigCache = { at: 0, config: null };
+let guardKeysCache = { at: 0, keys: null };
+/**
+ * The Guard shards whose legacy rows the Directory's pass has re-keyed
+ * (legacyDone) → when this isolate learnt it. Asked again after CACHE_MS: a
+ * shard clears its flag when a row keyed by an address arrives after it (an
+ * isolate of the release before, during a rollout).
+ */
+let legacyDoneShards = new Map();
 
 export const directory = (env) => {
   const ns = binding(env, 'DIRECTORY');
@@ -22,6 +38,75 @@ export function invalidateGuardCaches() {
   rulesCache = { at: 0, rules: [] };
   settingsCache = { at: 0, settings: null };
   publicConfigCache = { at: 0, config: null };
+  guardKeysCache = { at: 0, keys: null };
+  legacyDoneShards = new Map();
+}
+
+/**
+ * The Guard's keys (Directory.guardKeys): the tag key (HMAC) and, once there
+ * is a keyring, the Guard's table key with its id → { tag, kid, seal | null }
+ * (32-byte keys, in this isolate's memory only). Cached per isolate like the settings:
+ * after a root change, addresses may be sealed under the previous root's key
+ * for up to CACHE_MS (they stay readable; the Directory's pass re-seals them).
+ */
+async function guardKeys(env) {
+  if (!guardKeysCache.keys || Date.now() - guardKeysCache.at > CACHE_MS) {
+    const r = await directory(env).guardKeys();
+    guardKeysCache = {
+      at: Date.now(),
+      keys: { tag: bytesFromB64url(r.tag), kid: r.kid ?? null, seal: r.key ? bytesFromB64url(r.key) : null },
+    };
+  }
+  return guardKeysCache.keys;
+}
+
+/** The Guard key of a tracking key the owner typed (an address or a prefix, as the Guard's rows showed it before the tags). */
+export async function guardKeyFor(env, trackingKeyText) {
+  return guardTag((await guardKeys(env)).tag, trackingKeyText);
+}
+
+/**
+ * A key the owner typed in the block / unblock routes, as the Guard keys a
+ * network: a bare IPv4 address → "/32", a bare IPv6 address → the Guard's
+ * IPv6 prefix (`guard.v6Prefix`, a /64 by default), a CIDR block in its
+ * canonical form; a row key (a tag), or anything with a suffix ("…#<name
+ * hash>"), keeps that suffix. Anything else is left as it is.
+ */
+export async function guardKeyTyped(env, text) {
+  if (typeof text !== 'string' || isGuardTag(text)) return text;
+  const hash = text.indexOf('#');
+  const head = hash < 0 ? text : text.slice(0, hash);
+  const tail = hash < 0 ? '' : text.slice(hash);
+  let key = head;
+  if (parseIp(head)) key = trackingKey(head, (await cachedSettings(env))['guard.v6Prefix']);
+  else if (head.includes('/')) { const c = parseCidr(head); if (c) key = formatCidr(c); }
+  return `${key}${tail}`;
+}
+
+/** An address the owner typed, sealed as the `scope` row of `tag` keeps it ({ addr, rk }). */
+export async function sealedTyped(env, scope, tag, text) {
+  const k = await guardKeys(env);
+  return k.seal ? { addr: await sealRecord(k.seal, guardWhere(scope, tag), text), rk: k.kid } : { addr: text, rk: null };
+}
+
+/**
+ * The caller's Guard key (a tag of its tracking key), once per request and
+ * key: callers pass `{ ...g, key: other }` for a scope keyed otherwise (a
+ * wider network, a network and a username), which must not reuse g's tag.
+ */
+async function tagOf(env, g) {
+  if (!g.tag || g.tagFor !== g.key) {
+    g.tagFor = g.key;
+    g.tag = (async () => guardTag((await guardKeys(env)).tag, g.key))();
+  }
+  return g.tag;
+}
+
+/** The caller's address as a `scope` row keeps it ({ addr, rk }): sealed, or in the clear before there is a keyring. */
+async function sealedAddr(env, g, scope, tag) {
+  const k = await guardKeys(env);
+  if (!k.seal) return { addr: g.key, rk: null };
+  return { addr: await sealRecord(k.seal, guardWhere(scope, tag), g.key), rk: k.kid };
 }
 
 /**
@@ -53,10 +138,8 @@ async function manualRules(env) {
 }
 
 function shard(env, key) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
   const ns = binding(env, 'GUARD');
-  return ns.get(ns.idFromName(`shard-${h % GUARD_SHARDS}`));
+  return ns.get(ns.idFromName(`shard-${guardShardIndex(key)}`));
 }
 
 export function guardShards(env) {
@@ -66,7 +149,9 @@ export function guardShards(env) {
 
 /**
  * Resolve the caller's IP context once per request:
- * { ip, key, manual: 'allow'|'block'|null, off: {all, setup} }.
+ * { ip, key, manual: 'allow'|'block'|null, off: {all, setup} }. `key` (the
+ * tracking key: the address, or its IPv6 prefix) stays in this request's
+ * memory; the Guard gets its tag (tagOf).
  */
 export async function ipContext(env, request) {
   const off = bfpDisabled(env);
@@ -90,7 +175,31 @@ const scopeOff = (g, scope) => (scope === 'setup' ? g.off.setup : g.off.all);
 export async function isBlocked(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   if (g.manual === 'block') return { blocked: true, manual: true };
-  return shard(env, g.key).check(scope, g.key);
+  const tag = await tagOf(env, g);
+  const [cur, before] = await Promise.all([shard(env, tag).check(scope, tag), legacy(env, g, (s) => s.legacyCheck(scope, g.key))]);
+  return cur.blocked || !before?.blocked ? cur : { blocked: true, until: before.until };
+}
+
+/**
+ * The caller's rows from before the tags (keyed by its tracking key, in that
+ * key's shard; src/guard-do.js), until the Directory's pass has re-keyed that
+ * shard: `ask(stub)` → its answer, or null once the shard is done.
+ */
+async function legacy(env, g, ask) {
+  const i = guardShardIndex(g.key);
+  if (Date.now() - (legacyDoneShards.get(i) ?? -Infinity) <= CACHE_MS) return null;
+  const ns = binding(env, 'GUARD');
+  const r = await ask(ns.get(ns.idFromName(`shard-${i}`)));
+  if (r.done) { legacyDoneShards.set(i, Date.now()); return null; }
+  return r;
+}
+
+/** One failure on the caller's tag, counting on (and taking) its failures from before the tags; a block from before refuses at once. */
+async function failOnTag(env, g, scope, rule) {
+  const tag = await tagOf(env, g);
+  const before = await legacy(env, g, (s) => s.legacyTake(scope, g.key));
+  if (before?.blocked) return { blocked: true, until: before.until };
+  return shard(env, tag).fail(scope, tag, rule, await sealedAddr(env, g, scope, tag), before?.carry ?? null);
 }
 
 /** Record one failure for `scope`; returns the block state after it. */
@@ -98,7 +207,7 @@ export async function recordFailure(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   const s = g.settings;
   const rule = { max: s[`guard.${scope}.max`], windowSec: s[`guard.${scope}.windowSec`], blockSec: s[`guard.${scope}.blockSec`] };
-  return shard(env, g.key).fail(scope, g.key, rule);
+  return failOnTag(env, g, scope, rule);
 }
 
 /**
@@ -111,7 +220,7 @@ export async function recordFailure(env, g, scope) {
 export async function rateLimit(env, g, scope, rule) {
   if (g.off.all || g.manual === 'allow') return { ok: true };
   if (g.manual === 'block') return { ok: false, until: null };
-  const r = await shard(env, g.key).fail(scope, g.key, rule);
+  const r = await failOnTag(env, g, scope, rule);
   return r.blocked ? { ok: false, until: r.until ?? null } : { ok: true };
 }
 

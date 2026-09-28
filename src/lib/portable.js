@@ -29,7 +29,9 @@
 //             registered under }) and `recoveryCodes` (the code hashes).
 //             Passkeys work only under the same hostname; recovery codes
 //             work anywhere.
-// Never: sessions, shares, usage counters or the activity log.
+// Never: sessions, shares, usage counters, the activity log or read receipts
+// (the sign-in and viewer records are left out, sealed or not: SECURITY.md,
+// "Records at rest").
 //
 // Import rule (confirmed by the maintainer): an import never removes or
 // overwrites an existing account's credentials. An account that already

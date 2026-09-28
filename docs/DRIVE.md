@@ -56,6 +56,7 @@ ciphertext size and chunk count, timestamps, and which shares reference which no
 | **KEK** | `HKDF-SHA-256(ikm = root MEK ‖ sub-MEK, salt = user salt, info = "secbin-kek/v1\n<userId>")`, one per user per sub-MEK | nowhere (derived when needed) | the server; the user's session (and the owner acting as the user); the user's personal kit |
 | **DEK** | 32 random bytes per file, made in the browser; encrypts the content | with the item, sealed under the KEK | whoever has the KEK |
 | **user key** (field layer) | `HKDF(ikm = root MEK, salt = user salt, info = "secbin-user/v1\n<userId>")`; each field key `HKDF(user key, "", "secbin-atrest/v1\n<field>")` | nowhere (derived) | the server only |
+| **record key** (not a Drive key) | `HKDF(ikm = root MEK, salt = "", info = "secbin-records/v1")`; it seals the sign-in and viewer records (read receipts, sign-in log entries, the Guard's addresses; SECURITY.md, "Records at rest"). The record keys of earlier roots are kept sealed under the root (`record_keys`) | nowhere, or `record_keys` | the server only (the Worker holds the Guard's table key) |
 
 - **Content.** Each file gets a random DEK in the browser; its content is encrypted in chunks
   exactly like a file share's (`encryptChunk(DEK, i, n, plain)` from `public/js/files.js`, AAD
@@ -139,7 +140,11 @@ stored or logged in the clear — for:
   too): every item, link key and field-layer value must open under the new root only; only then
   is the previous root removed. A root change waits while any Drive still has something of the
   release before in it (`409 migration_pending`, with those Drives; §3.3): link keys of the
-  release before are the upgrade's, and a root change leaves them as they are.
+  release before are the upgrade's, and a root change leaves them as they are. The records sealed
+  under the root's record key (SECURITY.md, "Records at rest") need none of this: in the root
+  change's own transaction the earlier root's record key is kept sealed under the new root
+  (`record_keys`; likewise for "Go back", a restored root and a dropped previous root), and the
+  Directory's background pass seals those records again under the new record key.
 - **a root change that cannot finish** (the check found items under neither root, or only under
   the previous one): the previous root is kept for them and the items are listed; the check's
   count is kept with the root change (`mek.rootCheck`), not only with the job, which can be

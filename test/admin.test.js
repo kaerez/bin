@@ -176,7 +176,7 @@ describe('guard: brute-force protection', () => {
     // Even the right password is refused while blocked — and the view is intact.
     expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(429);
     const g = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
-    const b = g.blocks.find((x) => x.key === `${ip}/32` && x.scope === 'invalid');
+    const b = g.blocks.find((x) => x.addr === `${ip}/32` && x.scope === 'invalid');
     expect(b).toBeTruthy();
     expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: b.key } })).status).toBe(200);
     expect((await openNote(n.id, n.fragment, 'pw-123456789', { ip })).res.status).toBe(200);

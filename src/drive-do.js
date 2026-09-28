@@ -65,7 +65,8 @@ CREATE INDEX IF NOT EXISTS rgone_exp ON rgone(exp);
 // paths, metadata and wraps received (they count towards the link's bytes);
 // reverse.pwfails / pwsince / pwlock: wrong passwords in the current window,
 // and a lock after too many. rsessions.net: 24 bits of a hash of the
-// uploader's network (per-network session cap); rsessions.started: its start.
+// uploader's network as the Worker hands it (a keyed HMAC, human.js reverseNet:
+// never the address), for the per-network session cap; rsessions.started: its start.
 // reverse.agen: the owner's archive (after starting over) whose Drive key
 // seals this link's private key — the link is paused while that archive
 // exists (docs/DRIVE.md §3.2); archive_nodes.rs / rfail / rwhy: a received

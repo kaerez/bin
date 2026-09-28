@@ -74,7 +74,10 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
   credential, never what it contains; and whether recipients may delete it.
 - **Account metadata:** usernames, which account created which share id, share **labels**
   (plain text by design — the UI warns not to put secrets in them), quota counters, API-key
-  names and use times, the activity/audit log.
+  names and use times, the activity/audit log. The sign-in and viewer records (read receipts,
+  the sign-in entries of the log, the Guard's addresses) are sealed at rest under a key the
+  server derives, so they are protected against a copy of the stored rows, not against the
+  server ("Records at rest" in §6).
 - For accounts that have a *files-per-share* or *max-file-size* limit, the creating client
   declares the file count / largest file size at upload time so the server can check it. The
   values are not stored. They cannot be verified by the server (the stream is encrypted);
@@ -878,7 +881,8 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     `429 rate_limited` with `Retry-After`), which is never an invalid fetch and which the owner
     sees and lifts with the others;
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
-    and tracking;
+    and tracking. The Guard's rows are keyed by a keyed hash of the network and hold its address
+    only sealed ("Records at rest" below);
   - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges
     (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard). A block rule
     that covers the owner's own address is refused unless an allow rule covers them first.
@@ -1189,7 +1193,8 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   every upload session granted by a Receive link (a view of it: a failed start is none), is
   recorded: the time, and what the opener's request itself revealed — the IP address,
   Cloudflare's coarse location (country, region, city), the browser and version, the operating
-  system and the `Accept-Language` languages.
+  system and the `Accept-Language` languages. These details are sealed at rest; the throttle
+  below compares a keyed hash of the address ("Records at rest").
 - **Throttling and retention.** Recording is throttled so that someone holding a link cannot
   flood the single Directory object or push the genuine receipts out:
   - at most one stored receipt per share and address per minute; beyond 5 opens a minute from
@@ -1209,6 +1214,101 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   and on the note or files view itself (a share without a password or view limit opens at once).
   A Receive link's uploader page says that sending is recorded, before anything is sent.
   The admin decides what senders may see; receipts are kept as long as the activity log.
+
+### Records at rest
+
+The sign-in and viewer records hold personal data: addresses, locations, browsers, device names.
+They are sealed at rest with AES-256-GCM under a record key the server derives from the Drive's
+root MEK (`src/lib/records.js`). The server can derive that key, so these records are **not**
+end-to-end encrypted, like the Drive ("Drive keys").
+
+What is sealed, table by table (everything else in these rows stays in the clear):
+
+| Where | Sealed | In the clear, and why |
+|---|---|---|
+| Directory `opens` (read receipts: a share's opens and a Receive link's upload sessions) | `ip`, `country`, `region`, `city`, `browser`, `browser_ver`, `os`, `langs` | `id`, `share_id`, `user_id`, `ts`: the per-share list, retention (log age limits, the share's pruning) and clearing; `ip_h`, a keyed hash of the address, for the "one receipt per address per minute" throttle; `rk`, the key id; `rn`, the row's random nonce |
+| Directory `activity`: the sign-in entries (`login`, `login.password_ok`, `logout`, `account.locked`, `account.unlocked`, `sessions.revoked`, `passkey.added`, `passkey.removed`, `guard.blocked`, `guard.unblocked`) | `detail` (a passkey's name, how the sign-in was made, a lockout's end, a blocked address) | `id`, `ts`, `actor_id`, `subject_id`, `action`, `imp`, `adm`: who sees an entry (My activity, the audit), retention and clearing; `rk`; `rn` |
+| Guard `tracking` and `blocks` (per-network counters and blocks: login, setup, invalid, rate limits) | `addr` (the address or IPv6 prefix, for the owner's view) | `scope`, the counters and times: the rule; `key`, `h:` + a keyed hash of the address, for the lookups; `rk` |
+
+Nothing else holds an address, a browser or a location at rest. Sessions are stateless (the
+cookie); `revoked_sessions` holds a session id and an expiry. The account lockout (`failures`)
+holds an account id, or a keyed hash of an unknown username, with counters. Anonymous trackers
+and the public quota subjects hold keyed hashes of the network only, and so does a Drive's
+Receive upload session (`rsessions.net`, for the per-network session cap: 24 bits of a hash, per
+link, of an HMAC of the network under a key derived from `SIG`, never the address or an unkeyed
+hash of it; sessions from before this release keep their old value until they expire). The manual IP rules are the
+owner's configuration, not records, and stay in the clear (they are matched on every request).
+The rest of the activity log (settings, roles, shares, the Drive, imports) is stored as before.
+
+- **Keys.** Record key = HKDF-SHA-256(ikm = root MEK, salt = "", info `secbin-records/v1`), one
+  per root MEK; not the KEK derivation (no sub-MEK, no user salt). Each table has its own key,
+  HKDF(record key, "", `secbin-records/table/v1\n<table>`); the Worker holds the Guard's only.
+  Each value is sealed with a random 96-bit IV and the AAD `secbin-records/v1\n<table>\n<column>\n<row
+  nonce>\n<owner columns>`: the row's random nonce (`rn`, 16 bytes, chosen before the row is
+  written) and its owner columns as JSON — `share_id`, `user_id` for a receipt; `actor_id`,
+  `subject_id`, `action` for a log entry; the `scope` for a Guard address (whose row nonce is its
+  key, the network's tag). A ciphertext moved to another row, column or table, or its row moved to
+  another share, account, actor, action or scope, does not open (it reads as unreadable).
+  The keyed hashes are HMAC-SHA-256 under keys of their own, derived from the Directory's secret
+  with HKDF (`secbin-records/opens-ip/v1`, `secbin-records/guard-ip/v1`), not from the root MEK,
+  so that a root change lifts no block and the throttles work before there is a keyring.
+- **Key ids and root changes.** Every sealed row stores its key id (`rk`): the fingerprint of
+  the root MEK its record key comes from. When the root changes (a change, "Go back", a restored
+  root, the previous root dropped), the record keys of the earlier roots are kept sealed under the
+  root (`record_keys`, HKDF(root MEK, "", `secbin-records/wrap/v1`), AAD bound to the key id), in
+  the same transaction as the root change, so every earlier record stays readable. The
+  background pass then seals those rows again under the current record key.
+- **Without a keyring** (an instance from before the Drive, or one whose keyring is lost),
+  records are written in the clear with `rk` NULL, as before. Once there is a keyring, new rows
+  are sealed as they are written, and the **background pass** (the Directory's alarm, run within
+  seconds of the keyring's creation, of a root change and of this release's migration 19) seals
+  the rows written before, 500 per table per run. It also re-keys the Guard rows from before this
+  release (they were keyed by the address, in the address's shard) to their keyed hash. Until the
+  pass has done so for a shard (its meta flag `legacy.done`; a shard made by this release starts
+  done), the Worker also looks the network up by its address there: a block made before still
+  refuses, and failures counted before are taken over by the tagged counter, so the upgrade opens
+  no window without blocks. The pass moves a block by writing it under its tag before deleting
+  the old row, and a failure counter by taking it out of its old shard (read and delete in one
+  Guard transaction) before adding it to the tag's, so a failure counted in between is counted
+  once. A row keyed by an address written after a shard is done (an isolate of the release
+  before, still serving during a rollout) clears the shard's flag and asks the Directory to run
+  its pass soon; the Worker re-reads each shard's flag at most every 30 seconds, so such a row is
+  looked up within that time and re-keyed by the next pass.
+- **Writing.** A record is sealed (Web Crypto) *before* the synchronous section of the call that
+  writes it: its row nonce is chosen first, so the seal does not wait for the row id. The call
+  then checks what it depends on afresh (nothing awaits from there) and writes the sealed row in
+  one statement with its other writes. No row is ever stored empty, pending or in the clear
+  while there is a keyring, and an object that stops right after a write loses nothing. Where an
+  entry names state read before its seal (how many recovery codes are left, a passkey's name),
+  that state is read again after the seal, and the entry sealed again if it changed. A code path
+  that skipped this would write its entry in the clear, flagged, for the pass to seal within
+  seconds (never lost); the tests fail on any such path. The Guard's addresses are sealed by the
+  Worker with the Guard's table key before the Guard is asked.
+- **Typed addresses.** The owner's block and unblock routes take a row's key or an address as
+  typed: a bare IPv4 address is keyed as its "/32", a bare IPv6 address as the Guard's IPv6
+  prefix (`guard.v6Prefix`), a CIDR block in its canonical form. A block made for a network with
+  no row yet keeps that address (sealed) for the owner's view and the audit.
+- **Reading.** Records are opened only where they are shown to someone allowed to see them: the
+  user's own My activity, the owner's audit log, the read receipts (the sender only for the
+  details the admin lets that account see; the admin all), and Admin → Security's Guard lists.
+  Opened values are never logged or put in an error message; one that does not open shows as
+  unreadable.
+- **Exports.** The admin export never holds the activity log or the read receipts (Admin export
+  / import); nothing changes there.
+
+**What this protects against:** a copy of the stored rows alone, without the Directory's
+keyring: a leaked or mishandled dump of the record tables, a query result or a row set copied
+elsewhere, and the Guard's storage (it never holds a key). **What it does not protect
+against:** anyone who controls the server (the Worker or the Directory, or the Cloudflare account
+that runs them), who can derive the keys as the server does; and a complete copy of the
+Directory's storage, which holds the root MEK (meta `mek.root`) and the Directory's secret next
+to the rows, so its records open, and its keyed hashes of IPv4 addresses can be reversed by
+trying every address. Values that were stored in the clear before they were sealed may remain in
+the storage's history (point-in-time recovery) and in freed database pages until they are
+overwritten. **Integrity:** the owner columns in the AAD stop a storage writer from moving a
+sealed record to another share, account or action, but this layer is not an integrity control
+for the log as a whole: someone who can write the storage can still delete rows, or insert rows
+in the clear (`rk` NULL), which read as written.
 
 ### Activity log retention and clearing
 
@@ -1792,6 +1892,10 @@ The Drive: a random DEK per file (the same chunk format); the DEK, name and meta
 AES-256-GCM under HKDF of the user's KEK and a 32-byte per-item salt; the KEK is HKDF-SHA256 of
 the root MEK and a sub-MEK with the user salt, all held by the server (docs/DRIVE.md §3; fixed
 vectors in `test-node/drivekeys.test.js`).
+Sign-in and viewer records: AES-256-GCM with a random 96-bit IV per value under HKDF-SHA256 of
+the root MEK (`secbin-records/v1`), then per table, with the table, column, a random row nonce and the row's owner columns as AAD (sealed before the synchronous section that writes the row, and written sealed in one statement);
+equality lookups on addresses use HMAC-SHA256 under HKDF subkeys of the Directory's secret
+("Records at rest" in §6).
 
 ## 8. Reporting a vulnerability
 

@@ -80,7 +80,7 @@ describe('the role options', () => {
   });
 
   it('migration 18 gives the Default role a value for each (a Directory the release before left)', async () => {
-    expect(SCHEMA_VERSION).toBe(18);
+    expect(SCHEMA_VERSION).toBe(19); // 19: sign-in records sealed (records.test.js), after 18
     await runInDurableObject(dirStub(), (i, s) => {
       s.storage.sql.exec(`DELETE FROM limits WHERE user_id = '' AND key IN (${KIND_KEYS.map(() => '?').join(', ')})`, ...KIND_KEYS);
       s.storage.sql.exec("UPDATE meta SET v = '17' WHERE k = 'schema_version'");
@@ -90,7 +90,7 @@ describe('the role options', () => {
       version: s.storage.sql.exec("SELECT v FROM meta WHERE k = 'schema_version'").one().v,
       rows: Object.fromEntries(s.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key IN ('reverseFiles', 'reverseText', 'reverseUrl', 'reverseSecret')").toArray().map((x) => [x.key, JSON.parse(x.value)])),
     }));
-    expect(after).toEqual({ version: '18', rows: { reverseFiles: true, reverseText: true, reverseUrl: false, reverseSecret: false } });
+    expect(after).toEqual({ version: '19', rows: { reverseFiles: true, reverseText: true, reverseUrl: false, reverseSecret: false } });
   });
 });
 

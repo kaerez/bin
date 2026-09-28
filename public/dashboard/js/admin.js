@@ -1334,15 +1334,17 @@ async function renderSecurity() {
     reconfirm.el,
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Range', 'Action', 'Expires', 'Note', ''].map(th))), rbody))));
 
+  // A row's key is a keyed hash of the network; the address comes opened by the server (it is sealed at rest).
+  const shownAddr = (r) => r.addr || r.key;
   const bbody = h('tbody');
   for (const b of g?.blocks || []) {
-    bbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: b.key }), h('td.mono', { dataset: { label: 'Scope' }, text: b.scope }),
+    bbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: shownAddr(b) }), h('td.mono', { dataset: { label: 'Scope' }, text: b.scope }),
       h('td.mono', { dataset: { label: 'Since' }, text: formatDate(b.since) }), h('td.mono', { dataset: { label: 'Until' }, text: formatDate(b.until) }),
       h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Unblock', on: { click: async () => { await guard(() => admin.unblock(b.scope, b.key), 'Unblocked.'); renderSecurity(); } } }))));
   }
   const tbody = h('tbody');
   for (const t of g?.tracking || []) {
-    tbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: t.key }), h('td.mono', { dataset: { label: 'Scope' }, text: t.scope }),
+    tbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: shownAddr(t) }), h('td.mono', { dataset: { label: 'Scope' }, text: t.scope }),
       h('td.mono', { dataset: { label: 'Failures' }, text: String(t.count) }), h('td.mono', { dataset: { label: 'Window ends' }, text: formatDate(t.expires) }),
       h('td.cell-actions', {}, h('div.btn-row.row-actions', {},
         h('button.btn', { type: 'button', text: 'Clear', on: { click: async () => { await guard(() => admin.unblock(t.scope, t.key), 'Cleared.'); renderSecurity(); } } }),

@@ -66,6 +66,7 @@ flowchart TD
 | Accounts | Built-in login; one owner/admin; users with one role each (capabilities, limits, quotas, password policy, passkeys, sessions) and API keys. |
 | Drive | If the user's role allows it: a private folder tree within a role capacity (Dashboard → Drive), encrypted in the browser under keys the server holds (not end-to-end). Any file or folder can be shared any number of times, with the usual share options; when a share ends only the share goes. See [docs/DRIVE.md](./docs/DRIVE.md). |
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, label shares, and see **read receipts** — every open with its time (and, if the admin allows, the opener's address, location, browser, system and languages). |
+| Records at rest | Read receipts, the sign-in entries of the activity log (passkey names, lockouts, blocked addresses) and the brute-force guard's addresses are sealed at rest (AES-256-GCM) under a key the server derives from the Drive's root MEK; lookups on an address use a keyed hash. This protects a copy of the stored rows, not the server itself. See SECURITY.md, "Records at rest". |
 | Admin | Users, roles (limits, quotas, session timeouts, file-size caps, viewer policy), impersonation ("log in as"), password resets, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
 | Public sharing (optional) | Off by default. The admin can let anyone create notes (and, if allowed, files) from the home page as a built-in public account with its own limits and quotas, counted per browser, per network or both. See SECURITY.md. |
@@ -412,6 +413,8 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
 ## Security
 
 Threat model, non-goals and the vulnerability-reporting process: [`SECURITY.md`](./SECURITY.md).
+What is sealed at rest and what stays in the clear for the sign-in and viewer records:
+SECURITY.md, "Records at rest".
 
 > [!IMPORTANT]
 > Report suspected vulnerabilities privately via

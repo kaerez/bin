@@ -82,7 +82,7 @@ describe('C3 / R1: tokens siteverify rejects are limited per network; accepted o
     expect((await login(freshIp(), 'junk-token')).status).toBe(403);
     expect(calls).toBe(TURNSTILE_VERIFY.max + 1);
     // The owner sees the block and can lift it like the other scopes.
-    expect((await guardBlocks()).some((b) => b.scope === 'turnstile-verify' && b.key === `${ip}/32`)).toBe(true);
+    expect((await guardBlocks()).some((b) => b.scope === 'turnstile-verify' && b.addr === `${ip}/32`)).toBe(true);
     expect((await unblock('turnstile-verify', `${ip}/32`)).status).toBe(200);
     expect((await login(ip, 'junk-token')).status).toBe(403);
   }, 60000);
@@ -141,11 +141,14 @@ describe('C4 / R2: prelogin is limited per network and per username, and says no
     expect((await fetchJson('/api/auth/passkey/options', { method: 'POST', ip, body: {} })).status).toBe(200);
     expect((await fetchJson('/api/auth/login', { method: 'POST', ip, body: { username: 'prelogin-limit', proof: proofFor(USER_PW) } })).status).toBe(200);
     // The owner sees the block (a keyed hash of the name, never the name) and lifts it.
-    const block = (await guardBlocks()).find((x) => x.scope === 'prelogin-user' && x.key.startsWith(`${ip}/32#`));
-    expect(block).toBeTruthy();
-    expect(block.key).toMatch(/#[0-9a-f]{16}$/);
-    expect(block.key).not.toContain('prelogin-limit');
-    expect((await unblock('prelogin-user', block.key)).status).toBe(200);
+    // One block per name from this network (both names reached the limit); the row keys are keyed hashes.
+    const blocks = (await guardBlocks()).filter((x) => x.scope === 'prelogin-user' && x.addr.startsWith(`${ip}/32#`));
+    expect(blocks).toHaveLength(2);
+    for (const block of blocks) {
+      expect(block.addr).toMatch(/#[0-9a-f]{16}$/);
+      expect(block.addr).not.toContain('prelogin-limit');
+      expect((await unblock('prelogin-user', block.key)).status).toBe(200);
+    }
     expect((await pre('prelogin-limit', ip)).status).toBe(200);
   }, 60000);
 
@@ -215,7 +218,7 @@ describe('C6: the anonymous tracker table cannot be filled', () => {
     expect(codes.slice(wide)).toEqual([429, 429]);
     // Another /48 is not affected; the owner sees the block and can lift it.
     expect((await note('2001:db8:4c7:1::7', await tracker('2001:db8:4c7:1::7'))).status).toBe(201);
-    const block = (await guardBlocks()).find((b) => b.scope === 'public-trackers' && /^2001:db8:4c6:0:0:0:0:0\/48$/.test(b.key));
+    const block = (await guardBlocks()).find((b) => b.scope === 'public-trackers' && /^2001:db8:4c6:0:0:0:0:0\/48$/.test(b.addr));
     expect(block).toBeTruthy();
     expect((await unblock('public-trackers', block.key)).status).toBe(200);
     expect((await note('2001:db8:4c6:99::7', await tracker('2001:db8:4c6:99::7'))).status).toBe(201);
@@ -231,7 +234,7 @@ describe('C6: the anonymous tracker table cannot be filled', () => {
         const r = await fetchJson('/api/public/paste', { method: 'POST', ip: attacker, headers: { cookie: `__Host-secbin_aid=${aid}`, 'x-secbin-aid': aid }, body: { paste: { v: 2 } } });
         expect(r.status, `refused create #${i + 1}`).toBe(400);
       }
-      expect((await guardBlocks()).some((b) => b.scope === 'public-trackers' && b.key.startsWith('2001:db8:5a1:'))).toBe(false);
+      expect((await guardBlocks()).some((b) => b.scope === 'public-trackers' && b.addr.startsWith('2001:db8:5a1:'))).toBe(false);
       // The neighbour /64 in the same /48 starts sharing with a new browser, and so does the attacker's /64 (its allowance came back).
       expect((await note('2001:db8:5a1:2::7', await tracker('2001:db8:5a1:2::7'))).status).toBe(201);
       expect((await note(attacker, await tracker(attacker))).status).toBe(201);

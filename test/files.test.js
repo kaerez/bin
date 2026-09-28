@@ -9,7 +9,7 @@ import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent, csrf
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
 import { layout, buildManifest, importFileKey, encryptChunk, decryptChunk, readStreamChunk, validateManifest, CHUNK } from '../public/js/files.js';
 import { utf8, randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
-import { invalidateGuardCaches, ENDED_CHUNKS, guardShardFor } from '../src/lib/guard.js';
+import { invalidateGuardCaches, ENDED_CHUNKS, guardShardFor, guardKeyFor } from '../src/lib/guard.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -510,11 +510,13 @@ describe('C1: chunk fetches of a share that ended are never counted as invalid',
     await first.arrayBuffer();
     // The network has used all but one of its ENDED_CHUNKS.max − 1 (the Guard's counter,
     // seeded as those requests would have left it, instead of making them one by one).
-    await runInDurableObject(guardShardFor(env, key), (_inst, state) => {
+    // The Guard keys the row by the network's keyed hash (SECURITY.md, "Records at rest").
+    const tag = await guardKeyFor(env, key);
+    await runInDurableObject(guardShardFor(env, tag), (_inst, state) => {
       const sql = state.storage.sql;
-      const row = sql.exec("SELECT count, start, expires FROM tracking WHERE scope = 'ended-chunks' AND key = ?", key).toArray()[0];
+      const row = sql.exec("SELECT count, start, expires FROM tracking WHERE scope = 'ended-chunks' AND key = ?", tag).toArray()[0];
       expect(row?.count).toBe(1);
-      sql.exec("UPDATE tracking SET count = ? WHERE scope = 'ended-chunks' AND key = ?", ENDED_CHUNKS.max - 2, key);
+      sql.exec("UPDATE tracking SET count = ? WHERE scope = 'ended-chunks' AND key = ?", ENDED_CHUNKS.max - 2, tag);
     });
     const last = await getChunk(s.id, 0, b64urlFromBytes(randomBytes(32)), ip);
     expect(last.status).toBe(410); // the (max − 1)th is still answered
@@ -525,9 +527,9 @@ describe('C1: chunk fetches of a share that ended are never counted as invalid',
     // Not an invalid-fetch block: the network still opens live shares, and nothing was counted as invalid.
     expect((await openShare(live.id, live.fragment, '', ip)).res.status).toBe(200);
     const g = (await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json());
-    expect(g.blocks.some((b) => b.scope === 'ended-chunks' && b.key === key)).toBe(true);
-    expect(g.blocks.some((b) => b.scope === 'invalid' && b.key === key)).toBe(false);
-    expect(g.tracking.some((t) => t.scope === 'invalid' && t.key === key)).toBe(false);
+    expect(g.blocks.some((b) => b.scope === 'ended-chunks' && b.addr === key)).toBe(true);
+    expect(g.blocks.some((b) => b.scope === 'invalid' && b.addr === key)).toBe(false);
+    expect(g.tracking.some((t) => t.scope === 'invalid' && t.addr === key)).toBe(false);
     // An unrelated network is not affected.
     const other = await getChunk(s.id, 0, 'A'.repeat(43), freshIp());
     expect(other.status).toBe(410);
