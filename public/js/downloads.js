@@ -6,7 +6,7 @@
 // browsers assemble a Blob in memory.
 
 import { fetchChunk, fetchRefChunk } from './api.js';
-import { decryptChunk, importFileKey, chunkSpan, CHUNK, basename, filesUnder, ManifestError, cleanName } from './files.js';
+import { decryptChunk, importFileKey, chunkSpan, CHUNK, basename, filesUnder, ManifestError, cleanName, cleanPath } from './files.js';
 import { refChunks } from './refsmanifest.js';
 import { createZipWriter } from './zip.js';
 
@@ -175,7 +175,7 @@ export async function saveZip(reader, dirPath, zipName, onBytes) {
   const disk = await diskSink(zipName, total);
   const sink = disk || memorySink();
   const zip = createZipWriter(sink);
-  const rel = (p) => cleanName(prefix ? p.slice(prefix.length) : p);
+  const rel = (p) => cleanPath(prefix ? p.slice(prefix.length) : p); // zip.js checks each name again
   try {
     for (const d of dirs) await zip.addDir(rel(d.path));
     for (const f of files) await zip.addFile(rel(f.path), f.mtime, reader.stream(f, onBytes));

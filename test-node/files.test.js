@@ -9,9 +9,10 @@ import path from 'node:path';
 import {
   checkPath, checkMime, layout, buildManifest, validateManifest, paddedLength, chunkCount,
   importFileKey, encryptChunk, decryptChunk, readStreamChunk, chunkSpan, buildTree, filesUnder,
-  CHUNK, PAD, ManifestError,
+  CHUNK, PAD, ManifestError, cleanPath, cleanEntries,
 } from '../public/js/files.js';
-import { createZipWriter, crc32 } from '../public/js/zip.js';
+import { validateRefsManifest } from '../public/js/refsmanifest.js';
+import { createZipWriter, crc32, memberName } from '../public/js/zip.js';
 import { detectMime, sniff, fromExtension, normalizeMime, OCTET } from '../public/js/mime.js';
 import { utf8 } from '../public/js/bytes.js';
 
@@ -30,6 +31,53 @@ describe('path rules — fail closed, never repair', () => {
     for (const t of ['image', 'IMAGE/PNG', 'text/plain; charset=utf-8', '', 'a/b/c', '<script>/x']) {
       expect(() => checkMime(t), t).toThrow(ManifestError);
     }
+  });
+});
+
+// A-1 (ZIP slip): names that pass checkPath raw but not once cleaned (cleanName).
+const Z = '\u200b';
+const SLIPS = [`docs/.${Z}./.${Z}./tmp/x`, `${Z}/etc/x`, `a/${Z}/b`, `.${Z}`, `${Z}`, `a/.${Z}./..${Z}/b`];
+
+describe('received paths: cleaned first, then checked (ZIP slip)', () => {
+  it('cleanPath refuses what cleaning makes unsafe, and keeps real names', () => {
+    for (const p of SLIPS) {
+      expect(() => checkPath(p), JSON.stringify(p)).not.toThrow(); // the raw check alone lets them through
+      expect(() => cleanPath(p), JSON.stringify(p)).toThrow(ManifestError);
+    }
+    expect(cleanPath(`in\u202evoice${Z}.pdf`)).toBe('invoice.pdf');
+    expect(cleanPath('שלום/ملف.txt')).toBe('שלום/ملف.txt');
+  });
+
+  const v2 = (paths) => {
+    const body = paths.map((path, i) => ({ path, type: 'text/plain', size: 1, mtime: 0, off: i }));
+    return validateManifest({ v: 2, fk: 'A'.repeat(43), chunk: CHUNK, total: paths.length, entries: body, view: null });
+  };
+  const v3 = (paths, dirs = []) => validateRefsManifest({
+    v: 3, kind: 'refs', dirs, view: null,
+    entries: paths.map((path, ref) => ({ path, size: 1, type: 'text/plain', mtime: 0, ref, fk: 'A'.repeat(43) })),
+  });
+
+  it('v2 and v3 manifests: a path that is only safe before cleaning refuses the manifest', () => {
+    for (const p of SLIPS) {
+      expect(() => cleanEntries(v2([p]).entries), JSON.stringify(p)).toThrow(ManifestError);
+      expect(() => cleanEntries(v3([p]).entries), JSON.stringify(p)).toThrow(ManifestError);
+      expect(() => cleanEntries(v3(['ok.txt'], [p]).entries), JSON.stringify(p)).toThrow(ManifestError);
+    }
+  });
+
+  it('two names that clean to the same path, or a file that becomes a folder, refuse the manifest', () => {
+    expect(() => cleanEntries(v2(['a.txt', `a${Z}.txt`]).entries)).toThrow(/duplicate path/);
+    expect(() => cleanEntries(v3(['a.txt', `a.txt${Z}`]).entries)).toThrow(/duplicate path/);
+    expect(() => cleanEntries(v2(['d', `d${Z}/x.txt`]).entries)).toThrow(/file\/folder conflict/);
+    expect(() => cleanEntries(v3(['d'], [`${Z}d`]).entries)).toThrow(/file\/folder conflict/);
+  });
+
+  it('cleaned names are kept and marked renamed; an unchanged manifest is returned as is', () => {
+    const m = v2(['plain.txt', `in\u202evoice.pdf`]);
+    const out = cleanEntries(m.entries);
+    expect(out.map((e) => [e.path, e.renamed === true])).toEqual([['plain.txt', false], ['invoice.pdf', true]]);
+    const same = v2(['a.txt', 'b/c.txt']);
+    expect(cleanEntries(same.entries)).toBe(same.entries);
   });
 });
 
@@ -123,6 +171,24 @@ describe('zip writer', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+  it('checks every member name itself, cleaned, right before writing it: no "..", absolute, drive-letter, backslash, empty or duplicate names', async () => {
+    const bad = [...SLIPS, '../x', '/etc/x', 'a//b', 'a/', '', 'C:/x', 'c:x', `${Z}C:/x`, 'a\\..\\x', 'a\u0000b'];
+    for (const name of bad) {
+      expect(() => memberName(name), JSON.stringify(name)).toThrow(ManifestError);
+      const parts = [];
+      const z = createZipWriter({ write: async (b) => { parts.push(b); } });
+      await expect(z.addFile(name, 0, (async function* () { yield utf8('x'); })()), JSON.stringify(name)).rejects.toThrow(/unsafe name in the ZIP/);
+      if (name !== 'a/') await expect(z.addDir(name), JSON.stringify(name)).rejects.toThrow(/unsafe name in the ZIP/); // a folder may end in "/"
+      expect(parts, 'nothing is written for a refused name').toEqual([]);
+    }
+    // Hidden characters are removed from what is written; the same name twice is refused.
+    expect(memberName(`in\u202evoice${Z}.pdf`)).toBe('invoice.pdf');
+    const z = createZipWriter({ write: async () => {} });
+    await z.addFile('a.txt', 0, (async function* () {})());
+    await expect(z.addFile(`a${Z}.txt`, 0, (async function* () {})())).rejects.toThrow(/duplicate/);
+    await z.addDir('d/');
+    await expect(z.addDir('d')).rejects.toThrow(/duplicate/);
   });
   it('crc32 matches the standard check value', () => {
     expect(crc32(utf8('123456789')).toString(16)).toBe('cbf43926');
