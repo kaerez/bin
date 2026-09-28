@@ -136,7 +136,7 @@ try {
   // A wrong password is still refused.
   await exp.locator(`input[aria-label="${MINE}"]`).fill('not-the-owner-password');
   await exp.locator('button:has-text("Encrypt and download")').click();
-  await p.waitForFunction(() => /incorrect/.test(document.querySelector('.admin-panel[data-panel="portable"] .card p.msg')?.textContent || ''), null, { timeout: 30000 });
+  await p.waitForFunction(() => /incorrect/.test(document.querySelector('#ax-msg')?.textContent || ''), null, { timeout: 30000 });
   check('export: a wrong password is refused', true);
   check('export: the field is cleared after each try', (await exp.locator(`input[aria-label="${MINE}"]`).inputValue()) === '');
   let n = sent.length;

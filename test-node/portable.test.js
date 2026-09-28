@@ -41,6 +41,23 @@ describe('validateExport', () => {
     expect(validateExport({ ...doc(), owner: { passkeys: { keys: [key(K1, { handle: null })] } } }).owner.passkeys.keys[0].handle).toBeNull();
   });
 
+  it('takes the user ids of the file (for the page\'s id lists) and drops them: an import never uses them', () => {
+    const d = doc();
+    d.owner.id = 'O'.repeat(16);
+    d.users[0].id = 'A'.repeat(16);
+    const v = validateExport(d);
+    expect(v.owner.id).toBeUndefined();
+    expect(v.users[0].id).toBeUndefined();
+    expect(v.users[1]).toEqual({ username: 'bob', role: 'Default' });
+    bad((x) => { x.users[0].id = 'short'; }, /users\[0\]: invalid user id/);
+    bad((x) => { x.users[0].id = 7; }, /users\[0\]: invalid user id/);
+    bad((x) => { x.users[0].id = 'A'.repeat(15) + '!'; }, /invalid user id/);
+    bad((x) => { x.owner.id = 'O'.repeat(17); }, /owner: invalid user id/);
+    // An id alone is not a part.
+    bad((x) => { x.users[1] = { id: 'B'.repeat(16), username: 'bob' }; }, /nothing to import/);
+    bad((x) => { x.owner = { id: 'O'.repeat(16) }; }, /owner: nothing to import/);
+  });
+
   it('refuses the old shapes and anything malformed', () => {
     bad((d) => { d.users[1] = { username: 'bob', config: { role: 'Default' } }; }, /unexpected field "config"/);
     bad((d) => { d.users[0].passkeys.recoveryCodes = []; }, /unexpected field "recoveryCodes"/);
