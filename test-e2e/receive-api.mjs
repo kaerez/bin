@@ -216,6 +216,8 @@ try {
   // ── paused through the API: the uploader is told; My shares resumes it ──
   const paused = await api(key, `/api/private/receive/${linkId}/pause`, { method: 'POST', headers: { 'x-secbin-intent': '1' } });
   check('API: paused', paused.status === 200 && paused.body.paused === true, JSON.stringify(paused.body));
+  const keyResume = await api(key, `/api/private/receive/${linkId}/resume`, { method: 'POST', headers: { 'x-secbin-intent': '1' } });
+  check('API: a key cannot resume it (403 step_up_required: it reopens the link)', keyResume.status === 403 && keyResume.body.error === 'step_up_required', JSON.stringify(keyResume.body));
   const refused = await upload(link, 'while-paused.txt');
   check('uploader: a paused link says it is not accepting files', /not accepting files right now/.test(refused.refused || ''), JSON.stringify(refused));
   await ap.goto(`${BASE}/dashboard/shares/`);
@@ -229,6 +231,16 @@ try {
   check('My shares: the receipts table (started at, address, browser)', (await ap.locator('.opens-row thead th').allTextContents()).join('|') === 'Started at|Address|Browser');
   await audit(ap, 'My shares: a paused Receive link with its receipts');
   await row.locator('button:text-is("Resume")').click();
+  // Resuming reopens the link: the account password first.
+  const resumeRow = ap.locator('.extend-row', { has: ap.locator('h2:has-text("Resume")') });
+  await resumeRow.waitFor({ timeout: 30000 });
+  check('My shares: Resume asks for the account password, focused', await ap.evaluate(() => document.activeElement?.type === 'password' && !!document.querySelector(`label[for="${document.activeElement.id}"]`)));
+  await audit(ap, 'My shares: Resume with its confirmation');
+  await resumeRow.locator('button:text-is("Resume")').click();
+  await ap.waitForFunction(() => { const m = document.querySelector('.extend-row p.msg.error'); return m && !m.hidden && m.textContent.length > 0; }, null, { timeout: 30000 });
+  check('My shares: Resume refused without the password', (await api(key, `/api/private/receive/${linkId}`)).body.link.paused === true);
+  await resumeRow.locator('input[type="password"]').fill(ALICE_PW);
+  await resumeRow.locator('button:text-is("Resume")').click();
   await ap.waitForFunction(() => /resumed/.test(document.getElementById('toast').textContent), null, { timeout: 30000 });
   row = receiveRow(ap);
   await row.locator('button:text-is("Pause")').waitFor({ timeout: 30000 });
@@ -304,8 +316,12 @@ try {
   await ap.waitForSelector('.drive-dialog button:text-is("Resume")', { timeout: 30000 });
   check('drive: paused from the Shares dialog (Resume offered)', (await api(key, `/api/private/receive/${linkId}`)).body.link.paused === true);
   await ap.click('.drive-dialog button:text-is("Resume")');
-  await ap.waitForSelector('.drive-dialog button:text-is("Pause")', { timeout: 30000 });
-  await ap.keyboard.press('Escape');
+  await ap.waitForFunction(() => document.querySelector('.drive-dialog .modal-title')?.textContent === 'Resume “Scans”', null, { timeout: 30000 });
+  await ap.fill('.drive-dialog input[type="password"]', ALICE_PW);
+  await audit(ap, 'the Drive: Resume with its confirmation');
+  await ap.click('.drive-dialog button.send:has-text("Resume")');
+  await ap.waitForSelector('.drive-dialog', { state: 'detached', timeout: 30000 });
+  check('drive: resumed from the Shares dialog with the account password', (await api(key, `/api/private/receive/${linkId}`)).body.link.paused === false);
 
   // ── the owner: the receipts in Admin → Shares; the log ──
   await op.goto(`${BASE}/dashboard/admin/`);

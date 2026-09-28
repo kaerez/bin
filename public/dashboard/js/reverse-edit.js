@@ -442,6 +442,31 @@ function folderBox({ id, cur, folders }) {
 }
 
 /**
+ * "Confirm it's you" for resuming a paused link (it reopens it to anonymous
+ * senders: a weakening change, docs/REVERSE.md §5) → { el, field, step() →
+ * { current } / { reauth } (throws with a reason), clear() }. The owner acting
+ * as the user confirms nothing (`el` hidden, step() → {}). `confirm(input)`:
+ * a stand-in for confirm.js confirmStep (tests).
+ */
+export function resumeConfirm(profile, { confirm = null, passkey = null, impersonating: acting = null } = {}) {
+  const n = ++seq;
+  const id = (x) => `rev-resume-${n}-${x}`;
+  const impersonating = acting ?? !!(profile && (profile.impersonatedBy || profile.user?.impersonating));
+  const input = h('input.input', { id: id('confirm'), type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false', 'aria-describedby': id('hint') });
+  const label = h('label.field-label', { for: id('confirm'), text: 'Your account password (to confirm it is you)' });
+  let withPasskey = passkey === true;
+  if (!impersonating && passkey === null) canUsePasskey().then((ok) => { withPasskey = !!ok; label.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
+  const el = h('div.dfield', { hidden: impersonating }, label, input,
+    h('p.type-hint', { id: id('hint'), text: 'Resuming opens the link to anyone who has it again, so it needs your password or a passkey, as making a link does.' }));
+  return {
+    el,
+    field: input,
+    step: async () => (impersonating ? {} : (confirm || ((i) => confirmStep(i, profile?.user?.username, withPasskey)))(input)),
+    clear: () => { input.value = ''; },
+  };
+}
+
+/**
  * Save a patch from reverseEditPatch: through the Drive client when the
  * password or the note changes (they are sealed with the link's key), else
  * as is. `deps`: { updateShare(id, body), driveClient() → a DriveClient }.

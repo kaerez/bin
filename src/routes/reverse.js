@@ -63,7 +63,7 @@ const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const invalid = (message) => err(400, 'invalid', message);
 const fromDo = (r) => {
   const extra = {};
-  for (const k of ['max', 'used', 'refused', 'quota']) if (r[k] !== undefined) extra[k] = r[k];
+  for (const k of ['max', 'used', 'refused', 'quota', 'folder']) if (r[k] !== undefined) extra[k] = r[k];
   return err(r.status, r.error, r.message, Object.keys(extra).length ? extra : undefined);
 };
 const eqB64 = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
@@ -487,7 +487,13 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
   const u = await dir.updateShare(uid, id, patch, actor, { admin, keyId });
   if (!u.ok) {
     // The index refused (locked in the meantime): the Drive goes back to what it held, so the two never differ.
-    if (r && r.prev) await drive.restoreReverse(owner, id, r.prev);
+    const back = r && r.prev ? await drive.restoreReverse(owner, id, r.prev) : { ok: true };
+    if (!back.ok && back.error === 'folder_gone') {
+      // Its old folder was deleted meanwhile: the link and its waiting items stay in the new one
+      // (nothing else was kept). That move stands, so it is logged, and the answer says so.
+      await dir.reverseMoveKept(uid, id, back.folder, actor, { keyId });
+      return err(u.status, u.error, `${u.message} The link’s folder change was kept: its old folder no longer exists.`, { kept: ['folder'], folder: back.folder });
+    }
     return fromDo(u);
   }
   return json(r ? { ok: true, expires: apiExpiry(r.expires), views: r.views, left: r.left, used: r.used, accept: r.accept, folder: r.folder } : { ok: true });
@@ -500,16 +506,37 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
  * — and the sessions open now end, their unfinished uploads deleted; what it
  * received stays and is taken in as before. Neither needs reverseEdit (like
  * revoking and the label), both only an active link that is not locked, and
- * the role's reverse shares. Logged as a share change (`paused` / `resumed`,
- * with the API key's id).
+ * the role's reverse shares. Pausing tightens the link: nothing more. Resuming
+ * reopens an upload channel the user closed, so it weakens the link: it needs
+ * the password proof or a passkey (`body.current` / `body.reauth`), as the
+ * other weakening changes do, and is refused for an API key (`403
+ * step_up_required`); the owner acting as the user confirms nothing. Logged
+ * as a share change (`paused` / `resumed`, with the API key's id).
  */
-export async function pauseReverse(env, dir, row, on, { uid, actor, channel = 'all', keyId = null }) {
+export async function pauseReverse(env, dir, row, on, { uid, actor, channel = 'all', keyId = null, request = null, body = {}, impersonating = false }) {
   const id = row.id;
   if (row.locked || await dir.isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
   if (row.status !== 'active') return err(409, 'not_active', 'Only active links can be paused or resumed.');
   const ok = await dir.authorizeReverseChange(uid, { pause: on }, { channel });
   if (!ok.ok) return fromDo(ok);
   const drive = driveStub(env, uid);
+  if (!on) {
+    // Only a link the user paused resumes (before the step-up: nothing to confirm otherwise).
+    const cur = await drive.reverseStatus(uid, id);
+    if (cur.status === 'ok' && !cur.paused) return json({ ok: true, paused: false });
+    if (cur.status === 'ok' && !cur.held) return err(409, 'not_paused', 'This link was not paused by you, so it cannot be resumed.');
+    if (cur.status === 'ok') {
+      if (channel === 'api') {
+        return err(403, 'step_up_required', 'Resuming an upload link reopens it to anonymous senders: it needs your password or a passkey in the browser; an API key cannot do it.', { weakens: ['paused'] });
+      }
+      if (!impersonating) {
+        const g = await ipContext(env, request);
+        const step = await stepUpFrom(body, new URL(request.url));
+        const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
+        if (!v.ok) return afterRefusal(env, g, v, fromDo(v));
+      }
+    }
+  }
   const r = await drive.pauseReverse(uid, id, on);
   if (r.status === 'gone') {
     // Ended in its Drive (expired, its folder deleted); one the owner's start over paused cannot be resumed.
@@ -613,7 +640,11 @@ export async function handleReversePublic(request, env, url) {
   if (!tg.ok) {
     if (tg.state === 'locked') return err(423, 'share_locked', 'The administrator has locked this link.');
     const res = err(410, 'gone', GONE);
-    return lh ? res : failed(env, g, res);
+    if (lh) return res;
+    // A grant or an upload token this link issued (its session or upload ended with it, e.g. when it
+    // was revoked): an uploader's late request, never counted; an unknown or forged one is.
+    if (tg.uid && (action === 'files' || action === 'done') && (await issuedBy(env, tg.uid, id, request)).known) return res;
+    return failed(env, g, res);
   }
   const uid = tg.uid;
   const drive = driveStub(env, uid);
@@ -728,7 +759,7 @@ export async function handleReversePublic(request, env, url) {
     const grant = grantOf(request);
     if (!grant) return failed(env, g, err(403, 'bad_grant', 'Missing or invalid X-Reverse-Grant.'));
     const r = await drive.reverseDone(uid, id, await hashToken(grant));
-    if (r.status !== 'ok') return failed(env, g, err(403, 'bad_grant', 'This upload session has ended.'));
+    if (r.status !== 'ok') return lateOrForged(env, g, uid, id, request, err(403, 'bad_grant', 'This upload session has ended.'));
     if (r.files > 0) await dir.reverseEvent(id, 'received', { files: r.files, bytes: r.bytes });
     else if (r.started) await dir.refundAt(uid, KIND_ACTIONS[isKind(r.kind) ? r.kind : 'files'], [r.started]); // it sent nothing: not counted
     return json({ files: r.files, bytes: r.bytes });
@@ -768,7 +799,7 @@ export async function handleReversePublic(request, env, url) {
   if (sub === 'finalize' && idx === undefined) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const r = await drive.reverseFinalize(uid, id, await hashToken(grant), node, await hashToken(token), tg.pendingSec);
-    if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'This upload session has ended.'));
+    if (r.status === 'bad_grant') return lateOrForged(env, g, uid, id, request, err(403, 'bad_grant', 'This upload session has ended.'));
     if (r.status === 'forbidden') return failed(env, g, err(403, 'bad_token', 'Wrong upload token.'));
     if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
     if (r.status === 'busy') return json({ error: 'busy', message: 'A chunk of this file is still being stored. Try again in a moment.' }, 409, { 'retry-after': '1' });
@@ -778,7 +809,7 @@ export async function handleReversePublic(request, env, url) {
   if (sub === undefined) {
     if (request.method !== 'DELETE') return methodNotAllowed('DELETE');
     const r = await drive.reverseCancel(uid, id, await hashToken(grant), node, await hashToken(token));
-    if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'This upload session has ended.'));
+    if (r.status === 'bad_grant') return lateOrForged(env, g, uid, id, request, err(403, 'bad_grant', 'This upload session has ended.'));
     if (r.status === 'forbidden') return failed(env, g, err(403, 'bad_token', 'Wrong upload token.'));
     if (r.status !== 'ok') return err(410, 'gone', 'This upload has already finished or ended.');
     const u = await drive.usage(uid);
@@ -786,6 +817,31 @@ export async function handleReversePublic(request, env, url) {
     return json({ ok: true });
   }
   return err(404, 'not_found', 'Not found.');
+}
+
+/**
+ * Did link `id` issue the session grant (X-Reverse-Grant) or upload token
+ * (X-Upload-Token) `request` carries — a session open or ended, an upload
+ * reserved or dropped (the Drive keeps them for a day: rgone)? → { known, state }.
+ */
+async function issuedBy(env, uid, id, request) {
+  const hashes = [];
+  for (const t of [grantOf(request), uploadTokenOf(request)]) if (t) hashes.push(await hashToken(t));
+  return hashes.length ? driveStub(env, uid).grantKnown(uid, id, hashes) : { known: false, state: 'gone' };
+}
+/**
+ * A grant-bearing request its session no longer takes: a grant or token the
+ * link issued is a genuine uploader's late request (the link was paused,
+ * revoked or ended, or the session ended) and is never counted in the Guard —
+ * `409 paused` while the link is paused, `410` once it has ended, else `res`;
+ * only an unknown or forged one counts (`res`, counted).
+ */
+async function lateOrForged(env, g, uid, id, request, res) {
+  const k = await issuedBy(env, uid, id, request);
+  if (!k.known) return failed(env, g, res);
+  if (k.state === 'paused') return pausedRes();
+  if (k.state !== 'active') return err(410, 'gone', GONE);
+  return res;
 }
 
 /** Give back the quota of sessions that lapsed having sent nothing (`lapsed`: [{ started, kind }]), per kind of send. */
@@ -806,10 +862,12 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
   if (!Number.isSafeInteger(body.size) || body.size < 0 || body.size > HARD_MAX_DRIVE_BYTES) return err(400, 'invalid_size', 'size must be the file’s size in bytes.');
   // The share's file types: declared by the uploader's browser (names are encrypted), as for file shares.
   const o = await drive.reverseOpen(uid, id, { roleMaxBytes: tg.roleMaxBytes, session: await hashToken(grant) });
-  // A paused link has no session (they ended when it was paused): any grant is not one of its own.
-  if (o.status === 'paused') return failed(env, g, err(403, 'bad_grant', 'This upload session has ended. Reload the page to start again.'));
+  // A paused link has no session (they ended when it was paused): a grant it issued gets 409 paused,
+  // uncounted; one it never issued is a guess.
+  const ended = err(403, 'bad_grant', 'This upload session has ended. Reload the page to start again.');
+  if (o.status === 'paused') return lateOrForged(env, g, uid, id, request, ended);
   if (o.status !== 'ok') return err(410, 'gone', GONE);
-  if (!o.session) return failed(env, g, err(403, 'bad_grant', 'This upload session has ended. Reload the page to start again.'));
+  if (!o.session) return lateOrForged(env, g, uid, id, request, ended);
   // Every upload: the kind of its session must still be one the link and its user's role take.
   if (!acceptedNow(o.head, tg).includes(o.session.kind)) return notAccepted(o.session.kind);
   // The file types apply to files only (a note, a link or a credential is not a file of a type).
@@ -832,7 +890,7 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
     capacity: tg.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: tg.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: tg.pendingSec,
     roleMaxBytes: tg.roleMaxBytes, // the role's current cap applies to existing links too
   });
-  if (!r.ok) return r.error === 'bad_grant' ? failed(env, g, fromDo(r)) : fromDo(r);
+  if (!r.ok) return r.error === 'bad_grant' ? lateOrForged(env, g, uid, id, request, fromDo(r)) : fromDo(r);
   await directory(env).setDriveUsed(uid, r.used);
   return json({ id: r.id, uploadToken, chunks: r.chunks }, 201);
 }

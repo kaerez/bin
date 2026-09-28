@@ -15,6 +15,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **An uploader's late requests are never counted as guesses:** after a Receive link is paused,
+  revoked or ends, the requests its uploaders still send with the grant or upload token the link
+  gave them (a finalize, the next file, a chunk, `done`) are answered (`409 paused`, `410`) without
+  a Guard count, so pausing or revoking a link can no longer get its senders' network blocked.
+  Only unknown or forged ids, grants and tokens count.
 - **Take-in holds received items to their link's rules** (audit A-3): the uploader's browser only
   declares a file's type and a send's kind to the server, so the user's browser now checks the
   real, decrypted name and type against the link's file types, a file's size against its largest
@@ -594,15 +599,16 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   `…/receive/<id>` and `…/<id>/opens` (scope `read`: the links with their folder, what they
   accept, limits, views and counters, never their key, note or password), `PATCH …/<id>`
   (`manage`: the changes of My shares' Edit, weakening ones refused for keys with `403
-  step_up_required` as before), `POST …/<id>/pause`, `…/resume` and `…/revoke` (`manage`). The
-  role's reverse shares, API use, the lock and the API limits (`reverseEdit`, the kinds, expiry,
+  step_up_required` as before), `POST …/<id>/pause`, `…/resume` (not with a key) and `…/revoke`
+  (`manage`). The role's reverse shares (not to revoke), API use, the lock and the API limits (`reverseEdit`, the kinds, expiry,
   views, folder depth) apply; a key still cannot create a link (its key is sealed under the
   user's Drive keys, which a key never gets, and creating one needs the step-up). A session can
   use the same routes (with its CSRF token).
 - **Pause and resume a Receive link** (My shares, the Drive's Receive… and Shares lists, the API):
   paused, it takes no upload session (`409 paused` on `open` and `begin`, never counted by the
   Guard), the sessions open then end and their unfinished uploads are deleted; what it received
-  stays and is taken in. Needs no `reverseEdit`. Logged as `share.updated … paused` / `resumed`.
+  stays and is taken in. Needs no `reverseEdit`. Resuming reopens the link, so it asks for the
+  password or a passkey (refused for an API key). Logged as `share.updated … paused` / `resumed`.
 - **Receipts for Receive links:** each upload session granted (a view) is recorded like a share's
   opening — the time, and the uploader's network address, location, browser, system and
   languages, shown to the user as far as the owner allows (`receipt*` options) and to the owner
@@ -613,7 +619,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   the API): any folder of the user's own Drive within the role's folder depth (`403
   folder_too_deep`; `404 folder_not_found` for a folder that is not theirs, deleted or a received
   item; `400 not_a_folder`); what it received and has not been taken in yet moves with it and is
-  taken in there; the folders' Shares and Receive… lists follow. Logged as `folder=<id>`.
+  taken in there — the server holds each take-in to the link's folder as it is now (`409
+  folder_moved` for a page that listed it before the move: it is added there next time); the
+  folders' Shares and Receive… lists follow. Logged as `folder=<id>`.
 - **"Receive" links take what regular shares carry** (docs/REVERSE.md §3.1): besides files, a
   link may accept a **note** (plain text, Markdown or code, with an optional title), a **link**
   and a **credential** (the regular credential's fields), as the user chooses when making it

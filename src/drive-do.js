@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS archive_nodes (gen INTEGER NOT NULL, id TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS archive_wraps (gen INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (gen, kind, ref));
 CREATE TABLE IF NOT EXISTS archive_meta (gen INTEGER NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY (gen, k));
 CREATE TABLE IF NOT EXISTS rhuman (j TEXT PRIMARY KEY, exp INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rgone (hash TEXT PRIMARY KEY, rid TEXT NOT NULL, exp INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS rgone_exp ON rgone(exp);
 `;
 // Columns added after the Drive first shipped (fresh objects get them from here too).
 // nodes.rs: the reverse share of a received file not yet re-wrapped; nodes.rsess:
@@ -89,7 +91,12 @@ CREATE TABLE IF NOT EXISTS rhuman (j TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 // session from before this column sends files) — for its limits and to give
 // its quota back; received items themselves carry no plaintext kind.
 // reverse.held: when the user paused the link (null: not paused): it takes no
-// upload session until they resume it (docs/REVERSE.md §5).
+// upload session until they resume it (docs/REVERSE.md §5). rgone: the hashes
+// of the session grants and upload tokens of a link whose session or upload
+// ended (done, lapsed, paused, revoked, its folder deleted), for
+// RECEIVE_MAX_SEC: a request that still presents one is a genuine uploader's
+// late request, never counted by the Guard as a guess (only unknown or forged
+// grants and tokens are).
 // archive_*: an owner's Drive started over in the release before; kept as it
 // is until the owner deletes it (Admin → Security → Keys); nothing here opens
 // it, and it does not count towards the Drive's capacity.
@@ -713,6 +720,7 @@ export class Drive extends DurableObject {
         for (const f of pending) this.#dropPending(f);
         for (const r of rows) {
           this.sql.exec("UPDATE reverse SET status = CASE WHEN status IN ('active', 'paused') THEN 'revoked' ELSE status END, ended = COALESCE(ended, ?), priv = '', agen = NULL, retired = ? WHERE id = ?", t, t, r.id);
+          this.#buryGrants('rid = ?', r.id);
           this.sql.exec('DELETE FROM rsessions WHERE rid = ?', r.id);
           failed += this.sql.exec("UPDATE nodes SET rfail = ?, rwhy = 'unreadable' WHERE rs = ? AND state = 'ready' AND rfail IS NULL", t, r.id).rowsWritten;
         }
@@ -747,6 +755,7 @@ export class Drive extends DurableObject {
         this.sql.exec('DELETE FROM archive_meta');
         for (const id of info.links) {
           this.sql.exec("UPDATE reverse SET status = CASE WHEN status IN ('active', 'paused') THEN 'revoked' ELSE status END, ended = COALESCE(ended, ?), priv = '', agen = NULL, retired = ? WHERE id = ? AND mek IS NULL", t, t, id);
+          this.#buryGrants('rid = ?', id);
           this.sql.exec('DELETE FROM rsessions WHERE rid = ?', id);
           this.sql.exec("UPDATE nodes SET rfail = ?, rwhy = 'unreadable' WHERE rs = ? AND state = 'ready' AND rfail IS NULL", t, id);
         }
@@ -973,6 +982,7 @@ export class Drive extends DurableObject {
       this.ctx.storage.transactionSync(() => {
         for (const rid of reverse) {
           this.sql.exec("UPDATE reverse SET status = 'revoked', ended = ? WHERE id = ?", nowSec(), rid);
+          this.#buryGrants('rid = ?', rid);
           this.sql.exec('DELETE FROM rsessions WHERE rid = ?', rid);
         }
         for (let k = 0; k < ids.length; k += 100) {
@@ -1123,8 +1133,41 @@ export class Drive extends DurableObject {
     if (priv) Object.assign(o, { priv: r.priv, mek: r.mek ?? null });
     return o;
   }
+  /**
+   * Remember the grants of link sessions about to be deleted (`cond`: a
+   * condition on rsessions, `args` its bound values), so their late requests
+   * are known (rgone). Column and table names are fixed here; values bound.
+   */
+  #buryGrants(cond, ...args) {
+    const t = nowSec();
+    this.sql.exec('DELETE FROM rgone WHERE exp <= ?', t);
+    this.sql.exec(`INSERT OR IGNORE INTO rgone (hash, rid, exp) SELECT hash, rid, ? FROM rsessions WHERE ${cond}`, t + RECEIVE_MAX_SEC, ...args);
+  }
+  /**
+   * Is one of `hashes` (a session grant's or an upload token's hash) one this
+   * link issued — a session open or ended, an upload reserved or dropped? →
+   * { known, state } (`state`: the link's now, #reverseState). The Worker
+   * answers a known one without counting it in the Guard.
+   */
+  async grantKnown(uid, id, hashes = []) {
+    this.#bind(uid);
+    const t = nowSec();
+    const hs = hashes.filter((x) => typeof x === 'string' && x.length <= 128).slice(0, 4);
+    let known = false;
+    for (const h of hs) {
+      if (this.sql.exec('SELECT 1 FROM rsessions WHERE hash = ? AND rid = ?', h, id).toArray().length
+        || this.sql.exec('SELECT 1 FROM rgone WHERE hash = ? AND rid = ? AND exp > ?', h, id, t).toArray().length
+        || this.sql.exec('SELECT 1 FROM nodes WHERE upload_hash = ? AND rs = ?', h, id).toArray().length) { known = true; break; }
+    }
+    return { known, state: this.#reverseState(this.#reverse(id)) };
+  }
   /** Give a pending (reserved) upload's allowance back and delete its rows (inside a transaction). */
   #dropPending(f) {
+    // A received file's upload token stays known (rgone): its late chunks are not guesses.
+    if (f.rs) {
+      const up = this.sql.exec("SELECT upload_hash FROM nodes WHERE id = ? AND state = 'pending'", f.id).toArray()[0]?.upload_hash;
+      if (up) this.sql.exec('INSERT OR IGNORE INTO rgone (hash, rid, exp) VALUES (?, ?, ?)', up, f.rs, nowSec() + RECEIVE_MAX_SEC);
+    }
     this.sql.exec('DELETE FROM upchunks WHERE node_id = ?', f.id);
     const row = this.sql.exec("SELECT LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0) AS o FROM nodes WHERE id = ? AND state = 'pending'", f.id).toArray()[0];
     const gone = this.sql.exec("DELETE FROM nodes WHERE id = ? AND state = 'pending'", f.id).rowsWritten;
@@ -1168,6 +1211,7 @@ export class Drive extends DurableObject {
   async #lapseSessions() {
     const stale = this.sql.exec('SELECT * FROM rsessions WHERE expires <= ?', nowSec()).toArray();
     if (!stale.length) return;
+    this.#buryGrants('expires <= ?', nowSec());
     this.sql.exec('DELETE FROM rsessions WHERE expires <= ?', nowSec());
     const ns = this.env.DIRECTORY;
     const dir = ns.get(ns.idFromName('directory'));
@@ -1235,6 +1279,15 @@ export class Drive extends DurableObject {
     return { ok: true, reverse: rows.map((r) => this.#reverseOut(r, { priv })) };
   }
 
+  /** Some reverse shares (`ids`, at most 100), as listReverse lists them, without their keys. */
+  async reverseLinks(uid, ids = []) {
+    this.#bind(uid);
+    const want = [...new Set(ids.filter((x) => typeof x === 'string'))].slice(0, 100);
+    if (!want.length) return { ok: true, reverse: [] };
+    const rows = this.sql.exec(`SELECT * FROM reverse WHERE id IN (${want.map(() => '?').join(', ')})`, ...want).toArray();
+    return { ok: true, reverse: rows.map((r) => this.#reverseOut(r, { priv: false })) };
+  }
+
   /** A reverse share's state and counters (My shares' live status). */
   async reverseStatus(uid, id) {
     this.#bind(uid);
@@ -1264,6 +1317,7 @@ export class Drive extends DurableObject {
       this.ctx.storage.transactionSync(() => {
         for (const f of pending) this.#dropPending(f);
         this.sql.exec('UPDATE reverse SET status = ?, ended = ? WHERE id = ?', status, nowSec(), id);
+        this.#buryGrants('rid = ?', id);
         this.sql.exec('DELETE FROM rsessions WHERE rid = ?', id);
       });
       this.#dropEndedReverse();
@@ -1366,17 +1420,28 @@ export class Drive extends DurableObject {
     return null;
   }
 
-  /** Undo an updateReverse (`prev`, as it returned it): only the columns it can change (a folder with its waiting items). */
+  /**
+   * Undo an updateReverse (`prev`, as it returned it): only the columns it
+   * can change, a folder with its waiting items. A folder that is gone by
+   * now (deleted meanwhile) is not written back — the link and its waiting
+   * items stay where they are, which the answer says: { ok: false, error:
+   * 'folder_gone', kept: ['folder'], folder } (the rest is put back).
+   */
   async restoreReverse(uid, id, prev = {}) {
     this.#bind(uid);
-    const cols = Object.keys(prev).filter((c) => REVERSE_EDITABLE.includes(c));
-    if (cols.length && this.#reverse(id)) {
-      this.ctx.storage.transactionSync(() => {
-        this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => prev[c]), id);
-        if (typeof prev.folder === 'string' && this.#node(prev.folder)) this.sql.exec('UPDATE nodes SET parent = ? WHERE rs = ?', prev.folder, id);
-      });
+    let cols = Object.keys(prev).filter((c) => REVERSE_EDITABLE.includes(c));
+    const r = this.#reverse(id);
+    if (!r) return { ok: true };
+    let kept = null;
+    if (cols.includes('folder')) {
+      const f = typeof prev.folder === 'string' ? this.#node(prev.folder) : null;
+      if (!f || f.kind !== 'dir' || f.rs) { kept = r.folder; cols = cols.filter((c) => c !== 'folder'); }
     }
-    return { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      if (cols.length) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => prev[c]), id);
+      if (cols.includes('folder')) this.sql.exec('UPDATE nodes SET parent = ? WHERE rs = ?', prev.folder, id);
+    });
+    return kept === null ? { ok: true } : { ok: false, error: 'folder_gone', kept: ['folder'], folder: kept };
   }
 
   /**
@@ -1494,6 +1559,7 @@ export class Drive extends DurableObject {
     // (their starts) lets the Worker give their quota back.
     const lapsed = this.sql.exec('SELECT started, kind FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0 AND started IS NOT NULL', id, t).toArray()
       .map((x) => ({ started: x.started, kind: sessionKind(x) }));
+    this.#buryGrants('rid = ? AND expires <= ? AND files = 0', id, t);
     this.sql.exec('DELETE FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0', id, t);
     if (this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND expires > ?', id, t).one().c >= MAX_SESSIONS) return { status: 'busy', lapsed };
     if (tag && this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND net = ? AND expires > ?', id, tag, t).one().c >= MAX_SESSIONS_PER_NET) {
@@ -1677,6 +1743,7 @@ export class Drive extends DurableObject {
     this.#bind(uid);
     const x = this.#session(id, hash);
     if (!x) return { status: 'bad_grant' };
+    this.#buryGrants('hash = ?', hash);
     this.sql.exec('DELETE FROM rsessions WHERE hash = ?', hash);
     return { status: 'ok', files: x.files, bytes: x.bytes, started: x.started ?? null, kind: sessionKind(x) };
   }
@@ -1758,7 +1825,13 @@ export class Drive extends DurableObject {
   async acceptReceived(uid, node, { parent, name, meta, dek, ks, mek, mfp, maxDepth = null }) {
     this.#bind(uid);
     const n = this.#node(node);
-    if (!n || !n.rs || n.state !== 'ready' || (this.#reverse(n.rs)?.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    const rv = n && n.rs ? this.#reverse(n.rs) : null;
+    if (!n || !n.rs || n.state !== 'ready' || (rv?.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    // It goes into its link's folder as it is now, or a folder below it (a path's folders): a
+    // browser that listed the item before the link moved is refused, and takes it in there next time.
+    if (rv && parent !== rv.folder && !this.#ancestors(parent).some((a) => a.id === rv.folder)) {
+      return fail(409, 'folder_moved', 'This item’s link receives into another folder now: it is added there.', { folder: rv.folder });
+    }
     if (parent !== n.parent) {
       const bad = this.#checkParent(parent);
       if (bad) return bad;

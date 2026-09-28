@@ -219,18 +219,42 @@ describe('Drive: Pause and Resume', () => {
     expect(button(row(), 'Edit')).toBeTruthy();
     expect(button(row(), 'Revoke')).toBeTruthy();
     expect(row().querySelector('td[data-label="Status"]').textContent).toMatch(/^paused/);
+    // Resume reopens it: the dialog asks for the account password first (a weakening change).
     button(row(), 'Resume').click();
-    await until(() => row()?.dataset.status === 'active');
-    expect(S.pauses.at(-1)).toEqual({ id, on: false, intent: '1' });
+    await until(() => dialog().querySelector('.modal-title').textContent === 'Resume “inbox”');
+    const pw = dialog().querySelector('input[type="password"][id$="-confirm"]');
+    expect(document.querySelector(`label[for="${pw.id}"]`).textContent).toMatch(/Your account password/);
+    expect(document.activeElement).toBe(pw);
+    expect(S.pauses).toHaveLength(1); // nothing sent yet
+    pw.value = 'acct pw';
+    button(dialog(), 'Resume').click();
+    await until(() => S.pauses.length === 2);
+    expect(S.pauses.at(-1)).toEqual({ id, on: false, intent: '1', body: { current: 'proof:acct pw' } });
+    await until(() => !dialog());
     // A link the owner's start over paused in the release before (not the user): Revoke only.
     await seedLink('root', { status: 'paused', held: false, label: 'old' });
-    dialog().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    await until(() => !dialog());
     $('#drive-receive').click();
     await until(() => $('#drive-rev-table')?.querySelectorAll('tbody tr').length === 2);
     const old = [...$('#drive-rev-table').querySelectorAll('tbody tr')].find((tr) => tr.children[0].textContent === 'old');
     expect(button(old, 'Revoke')).toBeTruthy();
     for (const t of ['Resume', 'Pause', 'Edit', 'Copy link']) expect(button(old, t), t).toBeUndefined();
+  });
+});
+
+describe('Drive: Resume while the owner acts as the user', () => {
+  it('asks for nothing and sends no confirmation', async () => {
+    await server();
+    const id = await seedLink('root', { status: 'paused', held: true });
+    const r = await startDrive(mountPoint(), { ...deps(profileWith({})), user: { ...S.user, impersonating: true } });
+    await r.app.ready;
+    $('#drive-receive').click();
+    await until(() => $('#drive-rev-table'));
+    button($('#drive-rev-table tbody tr'), 'Resume').click();
+    await until(() => dialog().querySelector('.modal-title').textContent === 'Resume “inbox”');
+    expect(dialog().querySelector('input[type="password"][id$="-confirm"]').closest('.dfield').hidden).toBe(true);
+    button(dialog(), 'Resume').click();
+    await until(() => S.pauses?.length === 1);
+    expect(S.pauses[0]).toEqual({ id, on: false, intent: '1', body: {} });
   });
 });
 

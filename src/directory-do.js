@@ -2218,6 +2218,20 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
+  /**
+   * A Receive link's move to `folder` that stands although the index refused
+   * the rest of its change (a lock in between, and its old folder deleted
+   * meanwhile, so the Drive could not put it back): logged as a change of
+   * the link, whatever its lock — the log never misses where uploads land.
+   */
+  async reverseMoveKept(uid, id, folder, actorId = uid, { keyId = null } = {}) {
+    const row = this.sql.exec("SELECT user_id FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse'", id, uid).toArray()[0];
+    const d = `folder=${folder}`;
+    if (!row || !FOLDER_DETAIL_RE.test(d)) return fail(404, 'not_found', 'Share not found.');
+    this.#log(actorId, uid, 'share.updated', `id=${id} ${d} kept${keyId ? ` apikey=${String(keyId).slice(0, 16)}` : ''}`);
+    return { ok: true };
+  }
+
   /** Admin: lock (freeze) or unlock a share. */
   async setShareLock(ownerId, id, locked) {
     const o = this.#user(ownerId);

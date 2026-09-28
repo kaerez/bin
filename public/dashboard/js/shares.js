@@ -10,7 +10,7 @@ import { opensButton } from './receipts.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, viewsText, expiresText } from '../../js/common.js';
 import { toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
-import { reverseEditForm, saveReverseEdit } from './reverse-edit.js';
+import { reverseEditForm, saveReverseEdit, resumeConfirm } from './reverse-edit.js';
 
 const $ = (s) => document.querySelector(s);
 let profile;
@@ -76,7 +76,7 @@ function render(focusKey = null) {
       if (r.kind === 'reverse') {
         if (profile.limits?.reverseEdit !== false) actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${r.label || 'this upload link'}`, dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openReverseEdit(r, tr) } }));
         // Pause / Resume (one the owner's start over paused in the release before can only be revoked).
-        if (!r.paused || r.held) actions.appendChild(pauseButton(r));
+        if (!r.paused || r.held) actions.appendChild(pauseButton(r, () => tr));
       } else actions.appendChild(h('button.btn', { type: 'button', text: 'Extend', dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openExtend(r, tr) } }));
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `share:${r.id}:revoke` } });
       armConfirm(rv, 'Revoke now — irreversible', async () => {
@@ -104,19 +104,57 @@ function render(focusKey = null) {
   refocus();
 }
 
-/** A Receive link's Pause (it takes no uploads until resumed) or Resume. */
-function pauseButton(r) {
+/**
+ * A Receive link's Pause (it takes no uploads until resumed: at once) or
+ * Resume (it reopens the link: a row under it asks for the account password
+ * or a passkey first, as a weakening change does; not while the owner acts
+ * as the user).
+ */
+function pauseButton(r, rowOf) {
   const on = !r.paused;
   const b = h('button.btn', { type: 'button', text: on ? 'Pause' : 'Resume', 'aria-label': `${on ? 'Pause' : 'Resume'} ${r.label || 'this upload link'}`, dataset: { focusKey: `share:${r.id}:pause` } });
   b.addEventListener('click', async () => {
+    if (!on) { openResume(r, rowOf(), b); return; }
     b.disabled = true;
     try {
-      await pauseReceive(r.id, on);
-      toast(on ? 'Upload link paused: it accepts no uploads until you resume it.' : 'Upload link resumed.');
+      await pauseReceive(r.id, true);
+      toast('Upload link paused: it accepts no uploads until you resume it.');
       reload(`share:${r.id}:pause`);
     } catch (e) { b.disabled = false; toast(friendlyError(e), { error: true }); }
   });
   return b;
+}
+
+/** Resume's row under the link's row: the confirmation, then Resume; again (or Cancel) closes it. */
+function openResume(r, tr, opener) {
+  const existing = tr.nextElementSibling;
+  if (existing && existing.classList.contains('extend-row')) { existing.remove(); return; }
+  const form = resumeConfirm(profile);
+  const msg = h('p.msg.error', { role: 'alert', hidden: true });
+  const go = h('button.btn', { type: 'button', text: 'Resume' });
+  const cancel = h('button.btn', { type: 'button', text: 'Cancel' });
+  const row = h('tr.extend-row', { dataset: { focusKey: `share:${r.id}:pause` } }, h('td.cell-full', { colspan: '8' }, h('div.extend-box', {},
+    h('h2.field-label', { text: `Resume ${r.label ? `“${r.label}”` : 'this upload link'}` }),
+    h('p.mono.muted', { text: 'It takes uploads again from anyone who has the link, as before you paused it.' }),
+    form.el, h('div.btn-row', {}, go, cancel), msg)));
+  cancel.onclick = () => { row.remove(); opener.focus(); };
+  go.onclick = async () => {
+    msg.hidden = true;
+    go.disabled = true;
+    try {
+      const step = await form.step();
+      await pauseReceive(r.id, false, step);
+      toast('Upload link resumed.');
+      reload(`share:${r.id}:pause`);
+    } catch (e) {
+      go.disabled = false;
+      const confirmFailed = e && ['wrong_password', 'reauth_failed', 'reauth_required', 'invalid_credential'].includes(e.code);
+      showMsg(msg, confirmFailed ? 'That did not confirm it is you — enter your account password again.' : e && e.code ? friendlyError(e) : (e && e.message) || friendlyError(e));
+      if (!form.el.hidden) form.field.focus();
+    }
+  };
+  tr.after(row);
+  (form.el.hidden ? go : form.field).focus();
 }
 
 /** The Drive's folders for the Edit form's folder choice (their names opened by the Drive client, loaded on first need). */

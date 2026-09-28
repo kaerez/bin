@@ -292,7 +292,9 @@ async function handleShares(request, env, url) {
  * pause / resume, and revoke. A session, or an API key with "read" (GET) or
  * "manage" (anything else); either way only the caller's own links, the
  * admin's locks apply, the role must allow reverse shares (and a key is held
- * to the account's API limits). Creating one stays in the Drive page: its key
+ * to the account's API limits) — except to revoke, which ends a link and is
+ * always the user's to do (as /shares/<id>/revoke). Resuming weakens a link
+ * (the step-up, never for a key: src/routes/reverse.js pauseReverse). Creating one stays in the Drive page: its key
  * is sealed under the user's Drive keys, which an API key never gets, and it
  * needs the step-up (docs/API.md).
  */
@@ -300,13 +302,16 @@ async function handleReceive(request, env, url) {
   const p = url.pathname;
   const a = await authenticate(request, env, { allowApiKey: true, scope: request.method === 'GET' ? 'read' : 'manage' });
   const dir = directory(env);
-  const access = await dir.reverseAccess(a.user.id, a.channel);
-  if (!access.ok) return withAuth(a, fromDir(access));
+  const m = p.match(/^\/api\/private\/receive\/([^/]+)(\/pause|\/resume|\/revoke|\/opens)?$/);
+  // Revoking needs no role option (it only ends the link); everything else needs the role's reverse shares.
+  if (!(m && m[2] === '/revoke')) {
+    const access = await dir.reverseAccess(a.user.id, a.channel);
+    if (!access.ok) return withAuth(a, fromDir(access));
+  }
   if (p === '/api/private/receive') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     return withAuth(a, json(await listReceive(env, a, url)));
   }
-  const m = p.match(/^\/api\/private\/receive\/([^/]+)(\/pause|\/resume|\/revoke|\/opens)?$/);
   if (!m) return err(404, 'not_found', 'Not found.');
   const id = decodePathSegment(m[1]);
   if (!id || !REVERSE_ID_RE.test(id)) return err(404, 'not_found', 'Receive link not found.');
@@ -322,7 +327,10 @@ async function handleReceive(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
     if (m[2] === '/revoke') return withAuth(a, await revokeShare(env, a, id, shareInfo(id)));
-    return withAuth(a, await pauseReverse(env, dir, row, m[2] === '/pause', { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId }));
+    // Resume: the step-up in a JSON body ({ current } or { reauth }); pause takes none.
+    const isJson = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json';
+    const body = m[2] === '/resume' && isJson ? await readJsonBody(request) : {};
+    return withAuth(a, await pauseReverse(env, dir, row, m[2] === '/pause', { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId, request, body, impersonating: !!a.actor }));
   }
   if (request.method === 'GET') {
     const [link] = await receiveLinks(env, dir, a.user.id, [row]);
@@ -351,7 +359,8 @@ async function listReceive(env, a, url) {
 async function receiveLinks(env, dir, uid, rows) {
   if (!rows.length) return [];
   const live = await withLiveStatus(env, dir, rows, uid);
-  const drive = await driveStub(env, uid).listReverse(uid, null, { priv: false });
+  // Just these links' Drive rows (a page of the list is at most 50).
+  const drive = await driveStub(env, uid).reverseLinks(uid, rows.map((r) => r.id));
   const byId = new Map((drive.reverse || []).map((x) => [x.id, x]));
   return live.map((r) => {
     const x = byId.get(r.id) || null;

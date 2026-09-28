@@ -35,7 +35,7 @@ Each key has **scopes** — give it only what it needs:
 | `files` | `POST /api/private/file`, `PUT …/chunk/:i`, `POST …/finalize` — file shares |
 | `policy` | `GET /api/private/policy` — what your client must check before creating (link rules) |
 | `read` | `GET /api/private/shares`, `GET /api/private/shares/:id`, `GET /api/private/shares/:id/opens` — your shares and their read receipts; `GET /api/private/receive`, `GET /api/private/receive/:id`, `GET /api/private/receive/:id/opens` — your Receive links and their receipts |
-| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry; a Receive link's other details too, except the changes that weaken it: below), `POST /api/private/shares/:id/revoke`; `PATCH /api/private/receive/:id`, `POST /api/private/receive/:id/pause`, `…/resume`, `…/revoke` |
+| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry; a Receive link's other details too, except the changes that weaken it: below), `POST /api/private/shares/:id/revoke`; `PATCH /api/private/receive/:id`, `POST /api/private/receive/:id/pause`, `…/revoke` (and `…/resume`, which weakens a link: refused for a key) |
 
 A key created without a choice of scopes gets `notes`, `files` and `policy` (creation only):
 `read` and `manage` must be chosen explicitly. Scopes can be changed later (Account → API keys →
@@ -612,11 +612,11 @@ anonymous uploader's routes (`/api/reverse/:id/open`, `begin`, `human`, `files`,
 
 A "Receive" link (`/r/<id>#<key>`, [`REVERSE.md`](./REVERSE.md)) lets anyone send notes, links,
 credentials and files into a folder of your Drive. It is **made in the Drive page** (Drive →
-Receive…); a key can list it, read its receipts, change it, move it to another folder, pause,
-resume and revoke it. The same routes work for a signed-in browser session (with its CSRF token,
-above). Every route needs a role with the Drive and reverse shares (`403 reverse_disabled`
-otherwise) and reaches only your own links (`404 not_found` for anything else, a regular share
-included).
+Receive…); a key can list it, read its receipts, change it, move it to another folder, pause and
+revoke it (resuming needs the browser: below). The same routes work for a signed-in browser
+session (with its CSRF token, above). Every route but revoke needs a role with the Drive and
+reverse shares (`403 reverse_disabled` otherwise), and every route reaches only your own links
+(`404 not_found` for anything else, a regular share included).
 
 | Method & path | Scope | Body → result |
 | --- | --- | --- |
@@ -625,8 +625,8 @@ included).
 | `GET /api/private/receive/:id/opens` | `read` | → `{ total, fields, rows: [{ ts, …}] }` — its receipts: one per **upload session** started (a view of the link), newest first (at most 200), with the details the administrator lets your account see, exactly as a share's read receipts (`fields` above) |
 | `PATCH /api/private/receive/:id` | `manage` | the fields of a Receive link's change (above: label, expiry, views, limits, `accept`, CAPTCHA, password, note, `folder`) → `{ ok, expires, views, left, used, accept, folder }`. A change that **weakens** the link is `403 step_up_required` (with `weakens`) for a key, whatever else it sends |
 | `POST /api/private/receive/:id/pause` | `manage` | header `X-Secbin-Intent: 1`, no body → `{ ok, paused: true }` — it takes no new upload session until resumed: the sender's page says it is not accepting files right now (`409 paused`); sessions open now end and their unfinished uploads are deleted (their reservations given back); what it received stays and is taken in as before |
-| `POST /api/private/receive/:id/resume` | `manage` | header `X-Secbin-Intent: 1` → `{ ok, paused: false }` — it takes uploads again (a link paused by an owner's start over in the release before cannot be resumed: `409 not_paused`) |
-| `POST /api/private/receive/:id/revoke` | `manage` | header `X-Secbin-Intent: 1` → `{ ok }` — uploads stop for good; what it received stays in your Drive |
+| `POST /api/private/receive/:id/resume` | `manage` | header `X-Secbin-Intent: 1` → `{ ok, paused: false }` — it takes uploads again. Resuming reopens the link to anonymous senders, so it **weakens** it: an API key gets `403 step_up_required` (`weakens: ["paused"]`); a browser session sends the step-up in a JSON body (`{ current }` or `{ reauth }`: `400 reauth_required` without it). A link paused by an owner's start over in the release before cannot be resumed: `409 not_paused` |
+| `POST /api/private/receive/:id/revoke` | `manage` | header `X-Secbin-Intent: 1` → `{ ok }` — uploads stop for good; what it received stays in your Drive. Like `/api/private/shares/:id/revoke`, it needs no role option: ending a link is always yours to do |
 
 A link is `{ id, label, created, expires, status, locked, captcha, paused, held, opens, views,
 used, left, received: { files, bytes }, folder, accept, password, note, maxFiles, maxBytes,
@@ -641,7 +641,8 @@ waiting to be taken in / that could not be. A link that has left the Drive (ende
 days ago) has the index's fields only (`folder: null`).
 
 Pausing and resuming need no `reverseEdit` (like the label and revoking); both need an active link
-that is not locked (`409 not_active`, `423 share_locked`). Everything else follows the rules of
+that is not locked (`409 not_active`, `423 share_locked`). Pausing is a tightening and works with a
+key; resuming is a weakening change and does not. Everything else follows the rules of
 `PATCH /api/private/shares/:id` above: the role's options for the channel the change comes
 through (for a key, the account's **API limits** of Admin → Roles: `reverseEdit`, the kinds,
 expiry, views and folder depth), the step-up rule, the lock. Every change is in your activity log
@@ -657,7 +658,7 @@ for the changes that weaken a link. `POST /api/private/receive` is `405`, and
 | Status | `error` | When |
 | --- | --- | --- |
 | 403 | `reverse_disabled` | your role does not allow reverse shares (or has no Drive) |
-| 403 | `step_up_required` | a change that weakens the link, with an API key (`weakens` lists what) |
+| 403 | `step_up_required` | a change that weakens the link, or resuming it, with an API key (`weakens` lists what) |
 | 403 | `reverse_edit_disabled` | your role (for a key: its API limits) does not allow changing a link after it is made |
 | 403 | `receive_kind_disabled` | `accept` adds a kind your role (or its API limits) does not allow (`kinds`) |
 | 403 | `folder_too_deep` | `folder` is deeper than your role's folder depth (`max`) |
@@ -709,40 +710,37 @@ for l in data["rows"]:
 print(len(data["rows"]), "of", data["total"])
 ```
 
-### Pause and resume a Receive link
+### Pause a Receive link
 
-Scope: `manage`.
+Scope: `manage`. Paused, it takes no uploads (sessions open now end); what it received stays.
+Resuming it reopens it to anonymous senders, so it is done in the browser (My shares or the
+Drive, with your password or a passkey): an API key gets `403 step_up_required`.
 
 curl:
 
 ```sh
-# paused, it takes no uploads (sessions open now end); what it received stays
 curl -sS -X POST -H "Authorization: Bearer $SECBIN_API_KEY" -H "X-Secbin-Intent: 1" \
   "https://bin.example.com/api/private/receive/$LINK_ID/pause"
-curl -sS -X POST -H "Authorization: Bearer $SECBIN_API_KEY" -H "X-Secbin-Intent: 1" \
-  "https://bin.example.com/api/private/receive/$LINK_ID/resume"
 ```
 
 Node.js:
 
 ```js
-// pause.mjs (run: LINK_ID=... node pause.mjs pause|resume)
-const action = process.argv[2] === 'resume' ? 'resume' : 'pause';
-const res = await fetch(`https://bin.example.com/api/private/receive/${process.env.LINK_ID}/${action}`, {
+// pause.mjs (run: LINK_ID=... node pause.mjs)
+const res = await fetch(`https://bin.example.com/api/private/receive/${process.env.LINK_ID}/pause`, {
   method: 'POST',
   headers: { authorization: `Bearer ${process.env.SECBIN_API_KEY}`, 'x-secbin-intent': '1' },
 });
-console.log(res.status, await res.json()); // { ok: true, paused: true | false }
+console.log(res.status, await res.json()); // { ok: true, paused: true }
 ```
 
 Python:
 
 ```python
-# pause.py (run: LINK_ID=... python3 pause.py pause|resume)
-import os, sys, requests
+# pause.py (run: LINK_ID=... python3 pause.py)
+import os, requests
 
-action = "resume" if sys.argv[1:] == ["resume"] else "pause"
-res = requests.post(f"https://bin.example.com/api/private/receive/{os.environ['LINK_ID']}/{action}", timeout=30,
+res = requests.post(f"https://bin.example.com/api/private/receive/{os.environ['LINK_ID']}/pause", timeout=30,
                     headers={"Authorization": f"Bearer {os.environ['SECBIN_API_KEY']}", "X-Secbin-Intent": "1"})
 print(res.status_code, res.json())
 ```

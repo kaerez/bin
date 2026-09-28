@@ -318,7 +318,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       const rv = S.reverse.find((x) => x.id === m[1]);
       if (!rv) return fail(404, 'not_found');
       const on = m[2] === 'pause';
-      S.pauses = (S.pauses || []).concat([{ id: rv.id, on, intent: headerOf(init.headers, 'x-secbin-intent') ?? null }]);
+      S.pauses = (S.pauses || []).concat([{ id: rv.id, on, intent: headerOf(init.headers, 'x-secbin-intent') ?? null, ...(on ? {} : { body: body ?? null }) }]);
       Object.assign(rv, on ? { status: 'paused', held: true } : { status: 'active', held: false });
       return ok({ ok: true, paused: on });
     }

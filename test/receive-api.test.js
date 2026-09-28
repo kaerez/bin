@@ -11,10 +11,13 @@
 // Synthetic data only.
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW } from './helpers.js';
-import { mkdir, uploadFile } from './drive-helpers.js';
+import { env } from 'cloudflare:test';
+import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW, cookieOf } from './helpers.js';
+import { mkdir, uploadFile, del } from './drive-helpers.js';
+import { changeReverse } from '../src/routes/reverse.js';
+import { randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
-import { dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, send, reserve, received, takeInAny } from './reverse-helpers.js';
+import { dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, grantOf, send, reserve, received, takeInAny, putChunk } from './reverse-helpers.js';
 import { createReverseKey, linkProof, passwordProof } from '../public/js/reversekeys.js';
 
 vi.setConfig({ testTimeout: 60000 });
@@ -39,6 +42,7 @@ async function apiReceiver(name, extra = {}) {
 const R = (id = '', sub = '') => `/api/private/receive${id ? `/${id}` : ''}${sub}`;
 const driveRow = (uid, id) => runInDurableObject(driveOf(uid), (i, s) => s.storage.sql.exec('SELECT * FROM reverse WHERE id = ?', id).toArray()[0]);
 const nodeRow = (uid, id) => runInDurableObject(driveOf(uid), (i, s) => s.storage.sql.exec('SELECT * FROM nodes WHERE id = ?', id).toArray()[0]);
+const dirRow = (id) => runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec('SELECT * FROM shares WHERE id = ?', id).toArray()[0]);
 const folderLinks = async (cookie, folder) => (await (await fetchJson(`/api/private/drive/reverse?folder=${folder}`, { cookie })).json()).reverse.map((x) => x.id);
 
 describe('the Receive links API: routes and scopes', () => {
@@ -217,7 +221,8 @@ describe('pause and resume', () => {
     // The uploader: 409 paused on open and begin (the link proof matched), no grant for a session begun before.
     expect(await errorOf(await openLink(r, ip))).toBe('paused');
     expect(await errorOf(await begin(r, { ip }))).toBe('paused');
-    expect(await errorOf(await reserve(r, g1, { ip }).then((x) => x.res))).toBe('bad_grant');
+    // A grant it gave before the pause: 409 paused (a late request, not a guess).
+    expect(await errorOf(await reserve(r, g1, { ip }).then((x) => x.res))).toBe('paused');
     // The unfinished upload was deleted and its reservation given back; the finished file stays.
     expect(await nodeRow(u.id, half.node)).toBeUndefined();
     expect((await driveRow(u.id, r.id)).files).toBe(1);
@@ -230,9 +235,9 @@ describe('pause and resume', () => {
     expect(mine).toMatchObject({ status: 'active', paused: true, held: true });
     expect((await (await fetchJson('/api/private/drive/reverse', { cookie: u.cookie })).json()).reverse.find((x) => x.id === r.id)).toMatchObject({ status: 'paused', held: true });
     expect((await (await fetchJson(R(r.id), { headers: bearer(u.read) })).json()).link).toMatchObject({ status: 'active', paused: true, held: true });
-    // Pausing again changes nothing; resuming (a session here) opens it again.
+    // Pausing again changes nothing; resuming (a session here, with the step-up) opens it again.
     expect(await (await fetchJson(R(r.id, '/pause'), { method: 'POST', cookie: u.cookie, headers: intent })).json()).toEqual({ ok: true, paused: true });
-    expect(await (await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent })).json()).toEqual({ ok: true, paused: false });
+    expect(await (await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent, body: CONFIRM })).json()).toEqual({ ok: true, paused: false });
     expect((await openLink(r, ip)).status).toBe(200);
     expect((await begin(r, { ip })).status).toBe(200);
     expect((await (await fetchJson(R(r.id), { headers: bearer(u.read) })).json()).link).toMatchObject({ paused: false, held: false });
@@ -268,14 +273,132 @@ describe('pause and resume', () => {
     const u = await receiver('ra-pause-rules', { reverseEdit: false });
     const r = await newReverse(u.cookie, {});
     expect((await fetchJson(R(r.id, '/pause'), { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
-    expect((await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
-    // Resuming a link that is not paused changes nothing.
+    expect((await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent, body: CONFIRM })).status).toBe(200);
+    // Resuming a link that is not paused changes nothing (and asks for nothing).
     expect(await (await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent })).json()).toEqual({ ok: true, paused: false });
     // Paused by the release before's start over (status 'paused' in its Drive): not the user's pause.
     await runInDurableObject(driveOf(u.id), (i, s) => s.storage.sql.exec("UPDATE reverse SET status = 'paused' WHERE id = ?", r.id));
     expect(await errorOf(await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent }))).toBe('not_paused');
     expect((await fetchJson(R(r.id), { cookie: u.cookie })).status).toBe(200);
     expect((await (await fetchJson(R(r.id), { cookie: u.cookie })).json()).link).toMatchObject({ paused: true, held: false });
+  });
+});
+
+describe('pause and resume: the step-up, and late uploaders never counted', () => {
+  it('resuming reopens the link: the step-up for a session (none while the owner acts as the user), never with a key; pausing needs none', async () => {
+    const u = await apiReceiver('ra-resume-step');
+    const r = await newReverse(u.cookie, {});
+    const pauseKey = await fetchJson(R(r.id, '/pause'), { method: 'POST', headers: { ...bearer(u.manage), ...intent } });
+    expect(pauseKey.status).toBe(200);
+    // An API key cannot resume it, whatever it sends.
+    for (const body of [undefined, CONFIRM]) {
+      const k = await fetchJson(R(r.id, '/resume'), { method: 'POST', headers: { ...bearer(u.manage), ...intent }, body });
+      expect(k.status).toBe(403);
+      expect(await k.json()).toMatchObject({ error: 'step_up_required', weakens: ['paused'] });
+    }
+    // A session: the password proof or a passkey.
+    expect(await errorOf(await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent }))).toBe('reauth_required');
+    expect(await errorOf(await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent, body: { current: proofFor('not the password') } }))).toBe('wrong_password');
+    expect((await driveRow(u.id, r.id)).held).toBeTruthy(); // still paused
+    expect((await openLink(r, freshIp())).status).toBe(409);
+    expect((await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent, body: CONFIRM })).status).toBe(200);
+    expect((await openLink(r, freshIp())).status).toBe(200);
+    // The owner acting as the user confirms nothing.
+    expect((await fetchJson(R(r.id, '/pause'), { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
+    const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
+    expect((await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: ic, headers: intent })).status).toBe(200);
+    expect((await driveRow(u.id, r.id)).held).toBeNull();
+  });
+
+  it('an uploader mid-upload is never blocked by a pause or a revoke; after resume it sends again; forged grants still count', async () => {
+    const u = await receiver('ra-late');
+    const r = await newReverse(u.cookie, {});
+    const ip = freshIp();
+    const g = await grantOf(r, { ip });
+    const f = await reserve(r, g, { ip, path: 'big.txt' });
+    expect(f.res.status).toBe(201);
+    const g2 = await grantOf(r, { ip }); // a session that has sent nothing yet
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': 3 } });
+    invalidateGuardCaches();
+    try {
+      const H = (grant, token) => ({ 'x-reverse-grant': grant, ...(token ? { 'x-upload-token': token } : {}) });
+      const late = async (grant, token, node) => [
+        (await rv(r.id, '/files', { headers: H(grant), body: { id: 'A'.repeat(22), name: { iv: 'A'.repeat(16), ct: 'A'.repeat(40) }, meta: { iv: 'A'.repeat(16), ct: 'A'.repeat(40) }, size: 1, wrap: `1.${'A'.repeat(87)}.${'A'.repeat(16)}.${'A'.repeat(107)}` }, ip })).status,
+        (await rv(r.id, `/files/${node}/finalize`, { headers: H(grant, token), ip })).status,
+        (await putChunk(r.id, node, 0, new Uint8Array(27), token, ip)).status,
+        (await rv(r.id, `/files/${node}`, { method: 'DELETE', headers: H(grant, token), ip })).status,
+        (await rv(r.id, '/done', { headers: H(grant), ip })).status,
+      ];
+      // Paused under it: every late request is answered, none counted (the Guard allows 3).
+      expect((await fetchJson(R(r.id, '/pause'), { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
+      for (let i = 0; i < 3; i++) {
+        const codes = await late(g, f.data.uploadToken, f.node);
+        expect(codes.every((c) => c === 409 || c === 410), JSON.stringify(codes)).toBe(true);
+        expect((await rv(r.id, '/done', { headers: H(g2), ip })).status).toBe(409);
+      }
+      expect(await errorOf(await rv(r.id, '/done', { headers: H(g), ip }))).toBe('paused');
+      // A forged grant is a guess (another network, so this one stays free).
+      const other = freshIp();
+      const forged = [];
+      for (let i = 0; i < 3; i++) forged.push((await rv(r.id, '/done', { headers: H(b64urlFromBytes(randomBytes(32))), ip: other })).status);
+      expect(forged).toEqual([403, 403, 429]);
+      // Resumed: the uploader's network is not blocked, it starts again and sends.
+      expect((await fetchJson(R(r.id, '/resume'), { method: 'POST', cookie: u.cookie, headers: intent, body: CONFIRM })).status).toBe(200);
+      expect((await openLink(r, ip)).status).toBe(200);
+      const g3 = await grantOf(r, { ip });
+      await send(r, g3, { ip, path: 'after.txt' });
+      // An old grant after the resume: its session ended (403), still not counted.
+      for (let i = 0; i < 4; i++) expect((await rv(r.id, '/done', { headers: H(g), ip })).status).toBe(403);
+      // Mid-upload during a revoke: the same, with 410.
+      const f4 = await reserve(r, g3, { ip, path: 'cut.txt' });
+      expect(f4.res.status).toBe(201);
+      expect((await fetchJson(R(r.id, '/revoke'), { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
+      for (let i = 0; i < 3; i++) {
+        const codes = await late(g3, f4.data.uploadToken, f4.node);
+        expect(codes, JSON.stringify(codes)).toEqual([410, 410, 410, 410, 410]);
+        expect((await openLink(r, ip)).status).toBe(410);
+      }
+      // Still not blocked: another link opens from this network.
+      const r2 = await newReverse(u.cookie, {});
+      expect((await openLink(r2, ip)).status).toBe(200);
+      // A forged grant on the revoked link is a guess.
+      const other2 = freshIp();
+      const forged2 = [];
+      for (let i = 0; i < 3; i++) forged2.push((await rv(r.id, '/done', { headers: H(b64urlFromBytes(randomBytes(32))), ip: other2 })).status);
+      expect(forged2).toEqual([410, 410, 429]);
+    } finally {
+      await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': 60 } });
+      invalidateGuardCaches();
+    }
+  });
+
+  it('revoking needs no role option (as /shares/<id>/revoke); the other routes do', async () => {
+    const u = await apiReceiver('ra-revoke-role');
+    const a = await newReverse(u.cookie, {});
+    const b = await newReverse(u.cookie, {});
+    expect((await limits(u.id, { reverseEnabled: false })).status).toBe(200);
+    expect(await errorOf(await fetchJson(R(a.id, '/pause'), { method: 'POST', headers: { ...bearer(u.manage), ...intent } }))).toBe('reverse_disabled');
+    const k = await fetchJson(R(a.id, '/revoke'), { method: 'POST', headers: { ...bearer(u.manage), ...intent } });
+    expect(k.status).toBe(200);
+    const c = await fetchJson(R(b.id, '/revoke'), { method: 'POST', cookie: u.cookie, headers: intent });
+    expect(c.status).toBe(200);
+    expect((await dirRow(a.id)).status).toBe('revoked');
+    expect((await dirRow(b.id)).status).toBe('revoked');
+    // Its scope, intent and CSRF checks stay.
+    expect(await errorOf(await fetchJson(R(a.id, '/revoke'), { method: 'POST', headers: { ...bearer(u.read), ...intent } }))).toBe('scope_denied');
+    expect(await errorOf(await fetchJson(R(a.id, '/revoke'), { method: 'POST', headers: bearer(u.manage) }))).toBe('missing_intent');
+    expect(await errorOf(await fetchJson(R(b.id, '/revoke'), { method: 'POST', cookie: u.cookie, csrf: false, headers: { ...intent, 'x-secbin-csrf': 'A'.repeat(43) } }))).toBe('csrf_mismatch');
+  });
+
+  it('one link is read on its own (reverseLinks), not with all the user’s links', async () => {
+    const u = await receiver('ra-one');
+    const a = await newReverse(u.cookie, {});
+    const b = await newReverse(u.cookie, {});
+    const got = await driveOf(u.id).reverseLinks(u.id, [a.id]);
+    expect(got.reverse.map((x) => x.id)).toEqual([a.id]);
+    expect(got.reverse[0].priv).toBeUndefined();
+    expect((await driveOf(u.id).reverseLinks(u.id, [])).reverse).toEqual([]);
+    expect((await (await fetchJson(R(b.id), { cookie: u.cookie })).json()).link.id).toBe(b.id);
   });
 });
 
@@ -420,6 +543,60 @@ describe('moving a link to another folder', () => {
     const key = await mkKey(u, ['manage']);
     expect(await errorOf(await fetchJson(R(r.id), { method: 'PATCH', headers: bearer(key), body: { folder: deep.id } }))).toBe('folder_too_deep');
     expect((await patch(deep.id)).status).toBe(200); // the session: no limit now
+  });
+
+  it('an undo never points the link back at a folder deleted meanwhile: it stays, with its items, and the move is logged', async () => {
+    const u = await receiver('ra-move-race');
+    const a = await mkdir(u.cookie, 'root');
+    const b = await mkdir(u.cookie, 'root');
+    const r = await newReverse(u.cookie, { folder: a.id });
+    const ip = freshIp();
+    const sent = await send(r, await grantOf(r, { ip }), { ip });
+    // The race: the move reaches the Drive, the old folder is deleted, then the index refuses (a lock).
+    const real = dirStub();
+    const racing = new Proxy(real, {
+      get(t, k) {
+        if (k === 'updateShare') return async () => { expect((await del(u.cookie, a.id)).status).toBe(200); return { ok: false, status: 423, error: 'share_locked', message: 'The administrator has locked this share; it cannot be changed.' }; };
+        return (...args) => t[k](...args);
+      },
+    });
+    const res = await changeReverse(env, racing, await dirRow(r.id), { folder: b.id }, { uid: u.id, actor: u.id });
+    expect(res.status).toBe(423);
+    expect(await res.json()).toMatchObject({ error: 'share_locked', kept: ['folder'], folder: b.id });
+    // The link still receives, into the new folder, with its waiting item there.
+    expect((await driveRow(u.id, r.id)).folder).toBe(b.id);
+    expect((await nodeRow(u.id, sent.node)).parent).toBe(b.id);
+    expect((await (await fetchJson(R(r.id), { cookie: u.cookie })).json()).link).toMatchObject({ status: 'active', folder: b.id });
+    expect((await openLink(r, ip)).status).toBe(200);
+    expect((await audit(u.id)).some((e) => e.action === 'share.updated' && e.detail === `id=${r.id} folder=${b.id} kept`)).toBe(true);
+    // The Drive's own answer: the folder is kept, the rest put back.
+    const c = await mkdir(u.cookie, 'root');
+    const moved = await driveOf(u.id).updateReverse(u.id, r.id, { folder: c.id, maxDepth: null, views: 7 });
+    expect((await del(u.cookie, b.id)).status).toBe(200);
+    expect(await driveOf(u.id).restoreReverse(u.id, r.id, moved.prev)).toEqual({ ok: false, error: 'folder_gone', kept: ['folder'], folder: c.id });
+    expect(await driveRow(u.id, r.id)).toMatchObject({ folder: c.id, views: null });
+  });
+
+  it('a take-in goes to the link’s folder as the server has it now: a page that listed the item before a move is refused', async () => {
+    const u = await receiver('ra-move-takein');
+    const a = await mkdir(u.cookie, 'root');
+    const b = await mkdir(u.cookie, 'root');
+    const other = await mkdir(u.cookie, 'root');
+    const r = await newReverse(u.cookie, { folder: a.id });
+    const ip = freshIp();
+    const sent = await send(r, await grantOf(r, { ip }), { ip });
+    expect((await received(u.cookie)).items.find((x) => x.id === sent.node).parent).toBe(a.id); // the page's listing
+    expect((await fetchJson(R(r.id), { method: 'PATCH', cookie: u.cookie, body: { folder: b.id } })).status).toBe(200);
+    // Taken in with that listing's folder: refused, with the folder it goes to now; still waiting.
+    const stale = await takeInAny(u.cookie, sent.node, a.id);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: 'folder_moved', folder: b.id });
+    expect(await errorOf(await takeInAny(u.cookie, sent.node, other.id))).toBe('folder_moved');
+    expect((await received(u.cookie)).items.find((x) => x.id === sent.node).parent).toBe(b.id);
+    // Into the new folder, or a folder below it (a path's folders): taken in.
+    const sub = await mkdir(u.cookie, b.id);
+    expect((await takeInAny(u.cookie, sent.node, sub.id)).status).toBe(200);
+    expect((await nodeRow(u.id, sent.node)).parent).toBe(sub.id);
   });
 
   it('needs reverseEdit and an active link; the owner changing it directly cannot move it; an undo puts the items back', async () => {

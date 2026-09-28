@@ -794,7 +794,8 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     Receive links (their folder ids, limits and the senders' receipts); a leaked `manage` key
     can revoke or pause the user's shares and links (availability) and move a link to another
     of the user's folders, but can never read their content, which stays encrypted with keys
-    the server never holds (or, for the Drive, keys a key never gets), nor weaken a link.
+    the server never holds (or, for the Drive, keys a key never gets), nor weaken or resume a
+    link.
   - **Storage:** the key is shown once. Keep it in a secrets manager (for example HashiCorp Vault
     or AWS Secrets Manager) and pass it through the environment, never in source code, shell
     history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`
@@ -1629,20 +1630,32 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   role's folder depth (for a key, its API limit), and moves the link's items not yet taken in
   with it in the same step, so its take-in places them there; the owner changing a link directly
   cannot. It changes where anonymous uploads land, not what may reach the user, so it is not a
-  weakening change.
-- **Pausing a link.** The user (or an API key with `manage`) can pause a link and resume it.
-  Paused, `open` and `begin` answer `409 paused` once the link proof matched (never counted by
-  the Guard, like a late visitor of an ended link; a wrong link proof is, as always), the sessions
-  open then end and their unfinished uploads are deleted at once; received items stay and are
-  taken in. Resuming restores the link as it was (no protection changes), so neither needs the
-  step-up; a link an owner's start over paused cannot be resumed.
+  weakening change. A take-in lands only in the link's folder as the server has it now (or below
+  it): a browser that listed the item before a move is refused and takes it in there next time.
+  An undo of a move (the index refused the change) never points the link back at a folder deleted
+  meanwhile: the link and its waiting items stay put, and that is logged.
+- **Pausing a link.** The user (or an API key with `manage`) can pause a link. Paused, `open` and
+  `begin` answer `409 paused` once the link proof matched (never counted by the Guard, like a late
+  visitor of an ended link; a wrong link proof is, as always), the sessions open then end and their
+  unfinished uploads are deleted at once; received items stay and are taken in. Pausing is a
+  tightening and needs nothing more. **Resuming** reopens an anonymous upload channel the user
+  deliberately closed, so it counts as weakening: the password proof or a passkey, refused for an
+  API key (`403 step_up_required`) — a leaked `manage` key cannot reopen a link. A link an owner's
+  start over paused cannot be resumed.
+- **Late uploader requests are never counted.** An uploader whose session a pause, a revoke or an
+  expiry ended still sends what it had under way. The Drive keeps the hashes of the grants and
+  upload tokens of ended sessions and uploads for 24 hours (`rgone`), and a request that presents
+  one is answered (`409 paused`, `410`, or `403 bad_grant` for a session that simply ended) without
+  a Guard count; only an unknown or forged id, grant or token counts. So pausing or revoking a link
+  can never get its uploaders' network blocked.
 - **Receipts.** Each upload session granted is recorded as a read receipt for the link's user
   (*Read receipts*): the uploader page says so, and the same visibility, throttling and
   retention apply.
 - **The Receive links' API** (`/api/private/receive`, docs/API.md) is the My shares surface for
-  links: the scopes `read` (list, one link, receipts) and `manage` (change, move, pause, resume,
-  revoke), only the caller's own links, the role's reverse shares required, the lock and the
-  API limits applied, and weakening changes refused for keys (`403 step_up_required`). A link is
+  links: the scopes `read` (list, one link, receipts) and `manage` (change, move, pause, revoke),
+  only the caller's own links, the role's reverse shares required (not to revoke: ending a link is
+  always allowed), the lock and the API limits applied, and weakening changes — resuming included
+  — refused for keys (`403 step_up_required`). A link is
   listed without its key, note or password (only whether it has them). A key cannot create a
   link: the link's private key is sealed under the user's Drive keys, which a key never gets, and
   creating one needs the step-up.

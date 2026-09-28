@@ -28,7 +28,7 @@ import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { captchaBox } from '../../js/captcha.js';
 import { SESSION_CHANGED_EVENT, updateShare, pauseReceive } from '../../js/api.js';
-import { reverseViews, reversePasswordChoice, reverseEditForm, saveReverseEdit, acceptChoice, acceptBox } from './reverse-edit.js';
+import { reverseViews, reversePasswordChoice, reverseEditForm, saveReverseEdit, acceptChoice, acceptBox, resumeConfirm } from './reverse-edit.js';
 import { KIND_LABELS, KIND_PLURALS, itemExport, SECRET_EXPORT_WARNING } from '../../js/receivekinds.js';
 import { linkCard, secretCard, stopTotp, noteKind, drawNote } from '../../js/typedview.js';
 import { urlRulesOf, ShareTypeError } from '../../js/sharetypes.js';
@@ -1358,22 +1358,55 @@ function mountApp(mount, client, deps) {
     form.focus();
   }
 
-  /** A Receive link's Pause (no uploads until resumed) or Resume, in dialog `d`; `redraw` shows its new state. */
+  /**
+   * A Receive link's Pause (no uploads until resumed: at once; `redraw` shows
+   * its new state) or Resume, in dialog `d`: it reopens the link, so the
+   * dialog asks for the account password or a passkey first (resumeLink).
+   */
   function pauseBtn(d, s, redraw) {
     const on = s.status !== 'paused';
     const b = h('button.btn.tree-btn', { type: 'button', text: on ? 'Pause' : 'Resume', 'aria-label': `${on ? 'Pause' : 'Resume'} ${s.label || 'this link'}` });
     b.addEventListener('click', async () => {
+      if (!on) { resumeLink(d, s); return; }
       b.disabled = true;
       d.clearError();
       try {
-        await (deps.pause || pauseReceive)(s.id, on);
-        Object.assign(s, on ? { status: 'paused', held: true } : { status: 'active', held: false });
-        toast(on ? 'Link paused: it accepts no uploads until you resume it.' : 'Link resumed.');
+        await (deps.pause || pauseReceive)(s.id, true);
+        Object.assign(s, { status: 'paused', held: true });
+        toast('Link paused: it accepts no uploads until you resume it.');
         redraw();
         d.box.focus();
       } catch (e) { b.disabled = false; d.error(friendlyError(e)); }
     });
     return b;
+  }
+
+  /** Resume a paused link in the dialog `d` it is listed in: its body becomes the confirmation; resumed, the dialog closes. */
+  function resumeLink(d, s) {
+    const acting = !!(deps.user?.impersonating || deps.profile?.impersonatedBy);
+    const form = resumeConfirm(deps.profile, { impersonating: acting, confirm: deps.confirm || null });
+    d.clearError();
+    d.setTitle(`Resume ${s.label ? `“${s.label}”` : 'this upload link'}`);
+    d.subEl.textContent = 'It takes uploads again from anyone who has the link, as before you paused it.';
+    d.subEl.hidden = false;
+    d.setBody(form.el);
+    const go = primary('Resume', async () => {
+      d.clearError();
+      go.disabled = true;
+      try {
+        const step = await form.step();
+        await (deps.pause || pauseReceive)(s.id, false, step);
+        Object.assign(s, { status: 'active', held: false });
+        toast('Link resumed.');
+        d.close();
+      } catch (e) {
+        go.disabled = false;
+        const confirmFailed = e && ['wrong_password', 'reauth_failed', 'reauth_required', 'invalid_credential'].includes(e.code);
+        d.error(confirmFailed ? 'That did not confirm it is you — enter your account password again.' : e && e.code ? friendlyError(e) : (e && e.message) || friendlyError(e), acting ? null : form.field);
+      }
+    });
+    d.setActions(btn('Cancel', () => d.close(), 'modal-btn'), go);
+    (acting ? go : form.field).focus();
   }
 
   async function reverseList(d, box, folder) {
