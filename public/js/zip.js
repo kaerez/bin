@@ -5,10 +5,13 @@
 // descriptor) so file data can stream through without buffering, and bit 11
 // (UTF-8 names). No ZIP64: the 2 GiB share ceiling keeps every offset and size
 // below 4 GiB, and writing past that is refused rather than silently corrupted.
-// Member names come from validated manifest paths (files.js checkPath), so an
-// archive can never contain absolute or "../" entries.
+// Member names come from cleaned and validated manifest paths (files.js
+// cleanPath), and the writer checks every name again right before writing it
+// (memberName), so an archive can never contain absolute, drive-letter,
+// backslash or "../" entries, or the same name twice.
 
 import { utf8 } from './bytes.js';
+import { cleanName, checkPath, ManifestError } from './files.js';
 
 const LIMIT = 0xffffffff;
 
@@ -43,6 +46,19 @@ function le(view, off, v, bytes) {
 }
 
 /**
+ * A member name as written: cleaned (files.js cleanName), then checked again,
+ * whatever the caller did before. Throws on an empty name or segment, "." or
+ * "..", an absolute path, a drive letter ("C:"), a backslash or a control
+ * character (files.js checkPath), so no extractor can write outside its folder.
+ */
+export function memberName(path) {
+  let name;
+  try { name = checkPath(cleanName(path)); } catch (e) { throw new ManifestError(`unsafe name in the ZIP (${e.message})`); }
+  if (/^[a-z]:/i.test(name)) throw new ManifestError('unsafe name in the ZIP (drive letter)');
+  return name;
+}
+
+/**
  * Create a writer over `sink` — an object with `async write(Uint8Array)`.
  * Usage: `await z.addDir(path)`, `await z.addFile(path, mtime, asyncIterable)`,
  * then `await z.finish()`. Members must be added sequentially.
@@ -50,6 +66,7 @@ function le(view, off, v, bytes) {
 export function createZipWriter(sink) {
   let offset = 0;
   const central = [];
+  const names = new Set();
 
   const emit = async (bytes) => {
     if (offset + bytes.length > LIMIT) throw new Error('archive exceeds 4 GiB (ZIP64 unsupported)');
@@ -73,6 +90,8 @@ export function createZipWriter(sink) {
   };
 
   async function addEntry(name, mtimeMs, chunks) {
+    if (names.has(name)) throw new ManifestError('unsafe name in the ZIP (duplicate)');
+    names.add(name);
     const nameBytes = utf8(name);
     const { time, date } = dosDateTime(mtimeMs);
     const headerOffset = offset;
@@ -97,8 +116,8 @@ export function createZipWriter(sink) {
   }
 
   return {
-    addDir: (path, mtimeMs = 0) => addEntry(path.endsWith('/') ? path : path + '/', mtimeMs, null),
-    addFile: (path, mtimeMs, chunks) => addEntry(path, mtimeMs, chunks),
+    addDir: async (path, mtimeMs = 0) => addEntry(`${memberName(String(path).replace(/\/$/, ''))}/`, mtimeMs, null),
+    addFile: async (path, mtimeMs, chunks) => addEntry(memberName(path), mtimeMs, chunks),
     async finish() {
       const cdStart = offset;
       for (const e of central) {

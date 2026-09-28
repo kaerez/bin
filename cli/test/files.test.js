@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { deriveAccess, encryptPaste, openPaste } from '../vendor/crypto.js';
 import { CHUNK } from '../vendor/files.js';
 import { run } from '../src/cli.js';
 import { selectEntries } from '../src/commands/get.js';
@@ -385,6 +386,76 @@ describe('download safety', () => {
     expect(selectEntries(entries, 'a/b', false).map((s) => s.rel)).toEqual(['b/c.txt', 'b/d/e.txt', 'b/empty']);
     expect(selectEntries(entries, 'a/bb.txt', false).map((s) => s.rel)).toEqual(['bb.txt']);
     expect(() => selectEntries(entries, 'a/x', true)).toThrow(UsageError);
+  });
+});
+
+// A-1 / A-7: received names are saved without hidden characters, and each
+// cleaned path is checked again. The sender's manifest is rewritten here the
+// way a modified client could write it (the CLI's own send cleans names first).
+describe('received names: cleaned, then checked again', () => {
+  const Z = '\u200b';
+  /** Send a.txt and b.txt, then re-seal the share's manifest with `paths` in their place → the new link. */
+  async function craft(server, paths) {
+    const src = join(tmp, 'src');
+    await mkdir(src);
+    await writeFile(join(src, 'a.txt'), 'A');
+    await writeFile(join(src, 'b.txt'), 'B');
+    const s = await send(server, [join(src, 'a.txt'), join(src, 'b.txt'), '--views', 'unlimited']);
+    expect(s.code).toBe(0);
+    const u = new URL(s.url);
+    const rec = server.files.get(u.pathname.split('/').pop());
+    const { text } = await openPaste({ paste: rec.paste, access: await deriveAccess({ adata: rec.paste.adata, fragment: u.hash.slice(1) }) });
+    const m = JSON.parse(text);
+    m.entries = m.entries.map((e, i) => ({ ...e, path: paths[i] }));
+    const enc = await encryptPaste({ text: JSON.stringify(m), fmt: 'files', expire: rec.expire });
+    rec.paste = { v: 2, ct: enc.body.ct, wk: enc.body.wk, adata: enc.body.adata, meta: rec.paste.meta };
+    rec.acc = enc.body.acc;
+    return `${u.origin}${u.pathname}#${enc.fragment}`;
+  }
+
+  for (const path of [`docs/.${Z}./.${Z}./x.txt`, `${Z}/etc/x.txt`, `d/${Z}/x.txt`]) {
+    it(`refuses a share whose name is only safe before cleaning (${JSON.stringify(path)}), writing nothing`, async () => {
+      const server = makeServer();
+      const url = await craft(server, ['ok.txt', path]);
+      const dest = join(tmp, 'out');
+      const g = await get(server, [url, '--out', dest]);
+      expect(g.code).toBe(1);
+      expect(g.err).toMatch(/malformed or was tampered with/);
+      expect(await readdir(dest)).toEqual([]);
+      expect(server.chunkGets()).toHaveLength(0);
+    });
+  }
+
+  it('two names that clean to the same path refuse the share', async () => {
+    const server = makeServer();
+    const url = await craft(server, ['a.txt', `a${Z}.txt`]);
+    const g = await get(server, [url, '--out', join(tmp, 'out')]);
+    expect(g.code).toBe(1);
+    expect(g.err).toMatch(/duplicate path/);
+  });
+
+  it('saves and lists a name with hidden characters under its cleaned name, and says so', async () => {
+    const server = makeServer();
+    const url = await craft(server, [`in\u202evoice${Z}.pdf`, `d${Z}ir/b.txt`]);
+    const l = await get(server, [url, '--list']);
+    expect(l.code).toBe(0);
+    expect(l.out).toMatch(/ invoice\.pdf$/m);
+    expect(l.out).not.toMatch(/[\u200b\u202e]/);
+    expect(l.err).toMatch(/2 names renamed: hidden characters removed/);
+    const dest = join(tmp, 'out');
+    const g = await get(server, [url, '--out', dest]);
+    expect(g.code).toBe(0);
+    expect(await listTree(dest)).toEqual(['dir/', 'dir/b.txt', 'invoice.pdf']);
+    expect(await readFile(join(dest, 'invoice.pdf'), 'utf8')).toBe('A');
+    // --path matches the cleaned names (and is cleaned itself).
+    const p = await get(server, [url, '--out', join(tmp, 'one'), '--path', `d${Z}ir`]);
+    expect(p.code).toBe(0);
+    expect(await listTree(join(tmp, 'one'))).toEqual(['dir/', 'dir/b.txt']);
+  });
+
+  it('targetPath refuses a name that still holds hidden characters', () => {
+    expect(() => targetPath(join(tmp, 'root'), `a${Z}.txt`)).toThrow(/hidden characters/);
+    expect(() => targetPath(join(tmp, 'root'), 'a\u202e.txt')).toThrow(UnsafePathError);
   });
 });
 

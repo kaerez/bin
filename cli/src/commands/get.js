@@ -18,7 +18,7 @@ import { lstat, open, unlink } from 'node:fs/promises';
 import process from 'node:process';
 import { parseArgs } from 'node:util';
 import { deriveAccess, openPaste } from '../../vendor/crypto.js';
-import { checkPath, chunkCount, ManifestError, paddedLength, validateManifest } from '../../vendor/files.js';
+import { chunkCount, cleanEntries, cleanPath, ManifestError, paddedLength, validateManifest } from '../../vendor/files.js';
 import { FormatError, validateHead, validatePaste } from '../../vendor/format.js';
 import { describeHost, parseSecret, parseShareUrl as parseLinkUrl, SECRET_FIELDS, ShareTypeError, totpCode } from '../../vendor/sharetypes.js';
 import { ApiError, Client } from '../client.js';
@@ -115,11 +115,11 @@ function promptPassword(io) {
   return io.promptHidden('Password: ');
 }
 
-/** "--path dir/sub/" → "dir/sub", validated like a manifest path. */
+/** "--path dir/sub/" → "dir/sub", cleaned and validated like a received manifest path. */
 function normalizeSubpath(raw) {
   const p = raw.replace(/^(\.\/)+/, '').replace(/\/+$/, '');
   try {
-    return checkPath(p);
+    return cleanPath(p);
   } catch {
     throw new UsageError(`invalid --path "${raw}" (a relative path inside the share, e.g. docs/readme.txt or docs)`);
   }
@@ -307,6 +307,10 @@ async function getFiles({ io, values, client, id, sub, limited, openShare, acces
   let manifest;
   try {
     manifest = validateManifest(JSON.parse(text));
+    // Names are listed and saved without hidden characters (files.js
+    // cleanEntries), and each cleaned path is checked again: one that only
+    // cleaning makes unsafe (".", U+200B, "." → "..") refuses the share.
+    manifest = { ...manifest, entries: cleanEntries(manifest.entries) };
   } catch (e) {
     throw new ManifestError(e instanceof ManifestError ? e.message : 'malformed manifest');
   }
@@ -318,6 +322,8 @@ async function getFiles({ io, values, client, id, sub, limited, openShare, acces
     + (Number.isSafeInteger(res.grantExpires) ? ` (this download window closes at ${new Date(res.grantExpires * 1000).toISOString()})` : '');
 
   const selection = select(manifest.entries, sub, limited);
+  const renamed = selection.filter((s) => s.entry.renamed).length;
+  if (renamed) io.stderr(`note: ${renamed} name${renamed === 1 ? '' : 's'} renamed: hidden characters removed\n`);
   if (values.list) {
     printList(io, selection.map((s) => s.entry));
     const nf = selection.filter((s) => !s.entry.dir).length;
