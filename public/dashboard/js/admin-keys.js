@@ -9,12 +9,12 @@
 
 import { keysApi, drive as driveApi, admin, SESSION_CHANGED_EVENT } from '../../js/api.js';
 import { h, clear, showMsg, formatDate, formatBytes, friendlyError, armConfirm } from '../../js/common.js';
-import { toast, copyText, flashCopied } from '../../js/ui.js';
+import { toast } from '../../js/ui.js';
 import { progressBar } from '../../js/progress.js';
 import { parseManualKey } from '../../js/drivekeys.js';
 import { b64urlFromBytes } from '../../js/bytes.js';
 import { buildKeyKit, verifyKeyKit, restoreKeyKit, restoreUserKit, fpText } from '../../js/keysclient.js';
-import { candidateView, MANUAL_KEY_HELP } from '../../js/keychoice.js';
+import { candidateView, copyKey, MANUAL_KEY_HELP } from '../../js/keychoice.js';
 import { confirmStep, canUsePasskey, confirmLabel } from './confirm.js';
 import {
   field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff, liveMsg, versionText,
@@ -62,7 +62,7 @@ if (typeof window !== 'undefined') {
 function reveal(slot, key, label) {
   const val = h('code.mono.key-value', { text: key });
   const copy = h('button.copy-btn', { type: 'button', text: 'copy', 'aria-label': `Copy ${label}` });
-  copy.addEventListener('click', async () => flashCopied(copy, (await copyText(key)) ? 'copied' : 'failed'));
+  copy.addEventListener('click', () => copyKey(copy, key));
   const hide = h('button.btn.mini', { type: 'button', text: 'Hide' });
   const box = h('div.key-reveal', { role: 'status' }, h('span.field-label', { text: `${label} (hidden again in ${SHOW_SEC} seconds): ` }), val, copy, hide);
   const gone = () => { clearTimeout(t); box.remove(); held.delete(gone); };

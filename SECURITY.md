@@ -996,13 +996,21 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   keyring change, and the previews of a restore or an import, need the step-up.
 - **Set-up keys.** The set-up page shows the root MEK and first sub-MEK the server proposes,
   masked until Show, with "Use these", "Generate again" and "Enter manually". The proposal
-  (`POST /api/auth/setup/candidate`) is made only for a request with the setup token (checked in
-  constant time; wrong tokens count against the network like the set-up's own) and the intent
-  header, only while there is no keyring and never was one; it is kept as two candidates (a
-  sid no session can have) for 10 minutes, a new proposal replaces the last, and the admin
-  audit has their fingerprints only. No keyring exists until the set-up sends the pair's ids:
-  they are checked before the owner account is made (`410 candidate_expired` otherwise, and
-  nothing is created), then used once and deleted.
+  (`POST /api/auth/setup/candidate`) is made only for a request with an unspent setup token
+  (checked in constant time; wrong tokens count against the network like the set-up's own) and
+  the intent header, only while no owner exists (a spent token, or an owner: `410 token_used`)
+  and there is no keyring and never was one. A network gets at most 20 proposals per 10 minutes
+  (the Guard's `setup-candidate` scope, which the owner sees and lifts like the others). A
+  proposal is kept as two candidates (a sid no session can have) for 10 minutes and a new one
+  replaces the last; proposals are not written to the admin audit, so they cannot flood it:
+  only the pair the set-up adopts is (`keys.created`, by fingerprint). No keyring exists until
+  the set-up sends the pair's ids, checked before anything is written (`410 candidate_expired`
+  otherwise); the pair (or keys entered by hand) is then written in the same transaction as the
+  owner account, so a failure leaves neither and the set-up can be run again. Copying a key
+  (the set-up page, Security → Keys) clears the clipboard after 60 s only where the page may
+  read it back and it still holds that key; the site's Permissions-Policy denies
+  `clipboard-read`, which is kept, so in practice the page tells the owner to clear the
+  clipboard (and any clipboard history) instead.
 - **Kits.** The personal kit (every user) holds the user's salt and KEKs; the key kit (the
   owner) the root MEK, every sub-MEK and every user salt. Each is sealed in the browser under an
   optional passphrase (Argon2id, AES-256-GCM, bound to the account and the origin) and never sent

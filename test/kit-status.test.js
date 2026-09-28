@@ -78,14 +78,19 @@ describe('set-up: the proposed Drive keys ("Use these" / "Generate again")', () 
     expect((await (await post(`${K}/subs/${st.current}/show`, STEP, oc)).json()).key).toBe(p3.sub.key);
     expect(st.version).toMatchObject({ n: 1 });
     // Used up, and no more proposals once there is a keyring.
+    // The token is spent and the owner exists: no more proposals.
     const again = await cand({ token: AUTHN });
-    expect([again.status, await errorOf(again)]).toEqual([409, 'keys_exist']);
+    expect([again.status, await errorOf(again)]).toEqual([410, 'token_used']);
     const left = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT COUNT(*) AS c FROM mek_candidates WHERE sid = 'setup:'").one().c);
     expect(left).toBe(0);
     // The admin audit: fingerprints only, never a key.
     const audit = JSON.stringify((await (await fetchJson('/api/private/admin/audit?limit=500', { cookie: oc })).json()).rows);
     expect(audit).toContain(p3.root.fp);
     expect(audit).toContain('generated at set-up, shown and chosen');
+    // Only the pair adopted is recorded (keys.created), not each proposal.
+    const rows = (await (await fetchJson('/api/private/admin/audit?limit=500', { cookie: oc })).json()).rows;
+    expect(rows.filter((x) => x.action === 'keys.candidate')).toHaveLength(0);
+    expect(rows.filter((x) => x.action === 'keys.created')).toHaveLength(1);
     for (const p of [p1, p2, p3]) for (const k of [p.root.key, p.sub.key]) expect(audit).not.toContain(k);
   });
 });

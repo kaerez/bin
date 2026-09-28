@@ -659,8 +659,17 @@ export class Directory extends DurableObject {
     };
   }
 
-  async setup({ authnHash, username, salt, t, verifier }) {
+  async setup({ authnHash, username, salt, t, verifier, keys = null }) {
     if (typeof authnHash !== 'string' || !HEX64_RE.test(authnHash)) return fail(404, 'setup_disabled', 'Setup is disabled.');
+    // The Drive keys the owner chose (a proposal) or entered: made in the same transaction as the
+    // owner, so the set-up never ends with other keys than the ones the page showed. Prepared
+    // first: everything below runs without an await, so nothing can come between the checks
+    // and the writes.
+    let prep = null;
+    if (keys) {
+      if (!KEY_RE.test(keys.root ?? '') || !KEY_RE.test(keys.sub ?? '')) return fail(400, 'invalid_key', 'Enter the root MEK and the first sub-MEK (32 bytes each), or generate them.');
+      if (!this.#hasKeyring()) prep = await this.#prepareKeys(bytesFromB64url(keys.root), bytesFromB64url(keys.sub));
+    }
     if (this.#meta(`authn_used:${authnHash}`)) {
       return fail(410, 'token_used', 'This setup token was already used. Set a new AUTHN value to run setup again.');
     }
@@ -672,6 +681,7 @@ export class Directory extends DurableObject {
     const clash = this.#userByName(username);
     if (clash && (!owner || clash.id !== owner.id)) return fail(409, 'username_taken', 'That username belongs to another account.');
     let recovered = false;
+    let made = null;
     this.ctx.storage.transactionSync(() => {
       if (owner) {
         recovered = true;
@@ -689,8 +699,12 @@ export class Directory extends DurableObject {
         this.#log(id, id, 'owner.created', `username=${username}`);
       }
       this.#setMeta(`authn_used:${authnHash}`, String(ts));
+      if (keys) {
+        if (prep && !this.#hasKeyring()) { this.#writeKeys(prep, keys.how || 'at set-up', null); made = 'created'; } else made = 'kept';
+        this.sql.exec('DELETE FROM mek_candidates WHERE sid = ?', SETUP_SID);
+      }
     });
-    return { ok: true, recovered, ...(recovered ? { ownerId: owner.id } : {}) };
+    return { ok: true, recovered, ...(recovered ? { ownerId: owner.id } : {}), ...(made ? { keys: made } : {}) };
   }
 
   // ── login / sessions ─────────────────────────────────────────────────────
@@ -2249,34 +2263,44 @@ export class Directory extends DurableObject {
   }
 
   async #createKeys(root, sub, how, actorId) {
+    const prep = await this.#prepareKeys(root, sub);
+    // Another call may have made them meanwhile (nothing above wrote).
+    if (this.#hasKeyring()) return { ok: true, created: false };
+    this.ctx.storage.transactionSync(() => this.#writeKeys(prep, how, actorId));
+    return { ok: true, created: true, root: prep.rfp, sub: { id: prep.id, fp: prep.sfp } };
+  }
+  /** There is a keyring, or there was one (a lost one is restored, never made anew). */
+  #hasKeyring() {
+    return !!(this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever'));
+  }
+  /** The first keyring's rows, made ready outside any transaction (sealing and fingerprints are async). */
+  async #prepareKeys(root, sub) {
     const id = newMekId();
     const [sealed, rfp, sfp] = await Promise.all([sealSubMek(root, id, sub), keyFingerprint(root), keyFingerprint(sub)]);
-    // Another call may have made them meanwhile (nothing above wrote).
-    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) return { ok: true, created: false };
+    return { id, root: b64urlFromBytes(root), sealed, rfp, sfp };
+  }
+  /** Write the first keyring (inside the caller's transaction). */
+  #writeKeys(prep, how, actorId) {
     const ts = now();
-    this.ctx.storage.transactionSync(() => {
-      this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(root), fp: rfp, created: ts }));
-      this.#setMeta('mek.ever', '1');
-      this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, NULL, ?, ?)', id, sealed, sfp, ts, ts, '');
-      // The first keyring: version 1.
-      this.#setMeta('mek.version', JSON.stringify({ n: 1, at: ts }));
-      this.#keyLog(actorId, 'keys.created', `root MEK ${rfp}, sub-MEK ${id} (${sfp}), ${how}`);
-    });
-    return { ok: true, created: true, root: rfp, sub: { id, fp: sfp } };
+    this.#setMeta('mek.root', JSON.stringify({ key: prep.root, fp: prep.rfp, created: ts }));
+    this.#setMeta('mek.ever', '1');
+    this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, NULL, ?, ?)', prep.id, prep.sealed, prep.sfp, ts, ts, '');
+    // The first keyring: version 1.
+    this.#setMeta('mek.version', JSON.stringify({ n: 1, at: ts }));
+    this.#keyLog(actorId, 'keys.created', `root MEK ${prep.rfp}, sub-MEK ${prep.id} (${prep.sfp}), ${how}`);
   }
 
   /**
-   * Set-up (the AUTHN page): the root MEK and the first sub-MEK, generated
-   * here (`generate`) or entered by the owner (`root`, `sub`: 32 bytes each,
-   * base64url, checked by the Worker). Keys that exist are never replaced.
+   * Set-up (the AUTHN page) with no keys chosen or entered (the API's
+   * default): the root MEK and the first sub-MEK generated here, after the
+   * owner account is made. Keys that exist are never replaced. The keys the
+   * page showed (a proposal chosen) or the owner entered are made with the
+   * owner instead, in one transaction (setup `keys`).
    */
-  async setupKeys({ generate = true, root = null, sub = null, chosen = false } = {}) {
-    // The set-up is done: a proposed pair not chosen goes (a chosen one is used below).
+  async setupKeys() {
     const drop = () => this.sql.exec('DELETE FROM mek_candidates WHERE sid = ?', SETUP_SID);
-    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) { drop(); return { ok: true, created: false }; }
-    if (!generate && !(KEY_RE.test(root ?? '') && KEY_RE.test(sub ?? ''))) return fail(400, 'invalid_key', 'Enter the root MEK and the first sub-MEK (32 bytes each), or generate them.');
-    const how = generate ? 'generated at set-up' : chosen ? 'generated at set-up, shown and chosen' : 'entered at set-up';
-    const r = await this.#createKeys(generate ? newKey() : bytesFromB64url(root), generate ? newKey() : bytesFromB64url(sub), how, null);
+    if (this.#hasKeyring()) { drop(); return { ok: true, created: false }; }
+    const r = await this.#createKeys(newKey(), newKey(), 'generated at set-up', null);
     drop();
     return r;
   }
@@ -2287,19 +2311,30 @@ export class Directory extends DurableObject {
    * on the page, masked until "Show". They are only candidates (as Admin →
    * Security → Keys makes them): kept for 10 minutes, and no keyring exists
    * until the set-up uses them ("Use these"); a new pair ("Generate again")
-   * replaces the one before. Only while there is no keyring and never was
-   * one. Logged by fingerprint only.
+   * replaces the one before. Only for an unspent setup token with no owner
+   * yet, while there is no keyring and never was one. Not logged: the pair
+   * the set-up adopts is (keys.created, by fingerprint).
    */
-  async setupCandidates() {
-    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) return fail(409, 'keys_exist', 'The Drive keys exist already: the set-up keeps them.');
+  async setupCandidates(authnHash) {
+    const refused = () => {
+      // The set-up call's own check: a spent token (one set-up per AUTHN value), or an owner already (a recovery keeps the keys).
+      if (typeof authnHash !== 'string' || this.#meta(`authn_used:${authnHash}`) || this.#owner()) return fail(410, 'token_used', 'This setup token was already used, or the owner exists (a recovery keeps the Drive keys): there are no keys to propose.');
+      if (this.#hasKeyring()) return fail(409, 'keys_exist', 'The Drive keys exist already: the set-up keeps them.');
+      return null;
+    };
+    const no = refused();
+    if (no) return no;
     const pair = [['root', newKey(), newId()], ['sub', newKey(), newId()]];
     const fps = await Promise.all(pair.map(([, key]) => keyFingerprint(key)));
     const exp = now() + MEK_CANDIDATE_SEC;
+    // Checked again after the await (nothing may have changed meanwhile). Not in the admin audit:
+    // only the pair the set-up uses is (keys.created, by fingerprint), so proposals cannot flood it.
+    const again = refused();
+    if (again) return again;
     this.ctx.storage.transactionSync(() => {
       this.#purgeCandidates();
       this.sql.exec('DELETE FROM mek_candidates WHERE sid = ?', SETUP_SID);
       for (const [purpose, key, id] of pair) this.sql.exec('INSERT INTO mek_candidates (id, sid, key, exp, purpose) VALUES (?, ?, ?, ?, ?)', id, SETUP_SID, b64urlFromBytes(key), exp, purpose);
-      this.#keyLog(null, 'keys.candidate', `set-up: root MEK candidate ${fps[0]}, sub-MEK candidate ${fps[1]}`);
     });
     const out = (i) => ({ id: pair[i][2], key: b64urlFromBytes(pair[i][1]), fp: fps[i] });
     return { ok: true, root: out(0), sub: out(1), expires: exp };
@@ -2307,7 +2342,7 @@ export class Directory extends DurableObject {
 
   /**
    * The pair the set-up page chose ("Use these": the ids setupCandidates
-   * gave) → { root, sub } (the keys, base64url, for setupKeys), or 410 when
+   * gave) → { root, sub } (the keys, base64url, for setup's `keys`), or 410 when
    * either is gone (10 minutes, or a newer pair). Checked before the owner
    * account is made, so that a set-up never ends without the keys it showed.
    */

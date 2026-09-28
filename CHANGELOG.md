@@ -46,7 +46,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   token), masked until Show, with "Use these", "Generate again" and "Enter manually", as
   Security → Keys' key chooser does (shared: `public/js/keychoice.js`). Nothing is stored until
   the set-up sends the chosen pair; a pair no longer kept (10 minutes, or replaced) is refused
-  before the owner account is made.
+  before the owner account is made. Proposals need an unspent token and no owner yet (`410
+  token_used`), are limited to 20 per network per 10 minutes, and are not logged (only the
+  adopted pair is, as `keys.created`). The chosen or entered keys are written in the same
+  transaction as the owner. Copying a key clears the clipboard after 60 s where the page may
+  read it back; this site's Permissions-Policy denies that, so the page says to clear it.
 
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left

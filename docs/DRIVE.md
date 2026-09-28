@@ -170,11 +170,19 @@ token), shows them masked until Show (each with its fingerprint and a copy butto
 these", "Generate again" and "Enter manually" — the same pieces as Security → Keys' key chooser
 (`public/js/keychoice.js`) — or takes two keys the owner made out of band (32 bytes each, hex or
 base64, e.g. `openssl rand -base64 32`; they must differ). A proposal is two candidates kept
-for 10 minutes (the table `mek_candidates`, sid `setup:`), made only while there is no keyring
-and never was one (`409 keys_exist`); a new one replaces the last. Nothing is stored until the
-set-up sends the chosen pair's ids (`keys: { mode: 'generated', root, sub }`), checked before
-the owner account is made (`410 candidate_expired`: nothing is created) and then used once. The
-page refuses to create the owner before "Use these" (or the keys entered by hand). An owner
+for 10 minutes (the table `mek_candidates`, sid `setup:`), made only for an unspent setup token
+while no owner exists (`410 token_used` otherwise) and while there is no keyring and never was
+one (`409 keys_exist`); a new one replaces the last, a network gets 20 per 10 minutes (`429
+rate_limited`, the Guard's `setup-candidate` scope), and no proposal is logged: only the pair
+the set-up adopts is (`keys.created`, by fingerprint). Nothing is stored until the set-up sends
+the chosen pair's ids (`keys: { mode: 'generated', root, sub }`), checked before anything is
+written (`410 candidate_expired`: nothing is created). The chosen pair — like keys entered by
+hand — is written in the same transaction as the owner account: if the keyring cannot be
+written, the owner is not made either and the token stays unspent, so a set-up never ends with
+other keys than the ones shown. The page refuses to create the owner before "Use these" (or the
+keys entered by hand). Copying a key (here and in Security → Keys) empties the clipboard after
+60 s only where the page may read it back to check it still holds the key; this site's
+Permissions-Policy denies `clipboard-read`, so the page says to clear it instead. An owner
 recovery keeps the keys there are. After the set-up the page says to download the key kit.
 
 **Pages with third-party script.** The KEKs are never in the tab's storage. The one Drive key a
@@ -458,7 +466,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `POST /api/private/admin/keys/candidate` · `…/subs` · `PATCH`/`DELETE …/subs/<id>` · `POST …/subs/<id>/current` · `…/subs/<id>/show` · `…/root` · `…/root/show` | the owner, each with the step-up (§3.2): a generated candidate (`{ purpose: 'root' \| 'sub' }` → `{ id, key, fp, expires }`); add (`{ candidate \| key, from?, note?, rotate? }`); edit dates; delete (`409 in_use`, `409 current_key`); set current; Show; change the root (`{ candidate \| key }` → `{ fp, job }`; `409 migration_pending` with `drives` while a Drive waits with something of the release before; `409 candidate_purpose` for a sub-MEK's candidate) |
 | `POST /api/private/admin/keys/jobs` · `POST …/jobs/step` · `DELETE …/jobs` | a re-seal job (`{ from, remove?, current \| reauth }`), or the root change's again (`{ kind: 'root', current \| reauth }`, while the previous root is kept); its next step → `{ job: { kind, from, drives, drive, phase, done, failed, failedIds, pass, verifying, finished, result } }` (`phase` `items`, `atrest`, then for a root change `verify` and `verifyrest`); cancel, with the step-up (not a root change that runs) |
 | `POST /api/private/admin/keys/root/undo` · `…/root/drop-old` | a root change that could not finish (§3), each with the step-up: go back to the previous root (→ `{ fp, job }`; `409 unproven_root` for a previous root put back from a kit that opens nothing here); remove the previous root (`{ confirm: <its fingerprint> }` → `{ lost, ids }`, the count from the root change's check; `409 not_checked` before one) |
-| `POST /api/auth/setup/candidate` | the set-up page's proposal (§3, "Set-up"), no session: `{ token }` (the setup token) and the intent header → `{ root: { id, key, fp }, sub: { id, key, fp }, expires }`; `403 bad_token` (counted against the network), `409 keys_exist` |
+| `POST /api/auth/setup/candidate` | the set-up page's proposal (§3, "Set-up"), no session: `{ token }` (the setup token) and the intent header → `{ root: { id, key, fp }, sub: { id, key, fp }, expires }`; `403 bad_token` (counted against the network), `410 token_used` (a spent token, or an owner exists), `409 keys_exist`, `429 rate_limited` |
 | `POST /api/private/admin/keys/kit` · `…/verify` · `…/restore` | the key kit's content after the step-up (`{ kit, material: { made, current, keyVersion, root, rootOld?, subs, salts } }`; the verify's answer also has `version`); a read-only check by check values (at most 30 per session per 10 minutes); a restore (`{ root?, rootOld?, subs?, salts?, useRoot?, dryRun }`, with the step-up, the preview too → `{ root, rootOld, subs: [{ id, result }], salts: { restored, same, kept, wrong, unknown } }`; `409 in_use` for `useRoot` on an instance with items or link keys) |
 | `POST /api/private/admin/keys/export/verify` | a keys export checked, read-only, with the step-up (§3.2): `{ root?: check, subs?: { id: check }, users: [{ id, salt?: check, keks?: { mekId: check }, deks?: [{ id, dek }] }] }` (check values: drivekeys.js `keyCheckValue` / `saltCheckValue`) → `{ matches, root: { result, fp }, subs: { inFile, list: [{ id, fp, from, until, status, result }], unknown: [ids] }, users: [{ id, username, salt, keks: [{ mekId, result }], deks?: { total, opens, fails, missing, empty, unchecked, failed, missingIds } }] }`; results `match` · `mismatch` · `absent` (not in the file) · `missing` (here, not in the file) · `unknown` (in the file, not here) · `none` (no salt here) · `unchecked`; nothing written (a per-session rate limit, as the kit's Verify); no key returned |
 | `POST /api/private/admin/keys/export` · `…/import` | the keys parts of Import / export (§3.2): `{ root?, subs?: 'all' \| [ids], salts?: [userIds], users?: [{ id, keks, deks: 'all' \| [nodeIds] \| false }] }` → `{ document }` (at most 10 000 DEKs per user); `{ document, take, useRoot?, dryRun }` (with the step-up, the preview too) → `{ keys, users: [{ keks: { match, mismatch, unknown }, deks: { restored, working, failed, missing } }] }` |
