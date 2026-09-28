@@ -107,7 +107,7 @@ export async function handleKeys(request, env, url, a) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const refused = await needStep(body);
     if (refused) return refused;
-    return done(await dir.mekCandidate(me, sid, body.purpose === 'root' ? 'root' : 'sub'));
+    return done(await dir.mekCandidate(me, sid, body.purpose)); // 'root' or 'sub' (the Directory refuses anything else)
   }
   if (p === '/api/private/admin/keys/subs') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -175,8 +175,10 @@ export async function handleKeys(request, env, url, a) {
     if (!status.root || !status.root.changing) return err(409, 'not_changing', 'No root change is running.');
     const cur = await dir.mekJob();
     if (cur && !cur.finished) return err(409, 'job_running', 'The root change is still running: let it finish first.');
-    const typed = typeof body.confirm === 'string' ? body.confirm.replace(/[^A-Za-z0-9_-]/g, '') : '';
-    if (typed !== status.root.oldFp) return err(400, 'confirm', 'Type the previous root MEK’s fingerprint to confirm.');
+    // As stored, or as the page shows it (xxxx-xxxx-xxx).
+    const typed = typeof body.confirm === 'string' ? body.confirm.trim() : '';
+    const fp = status.root.oldFp;
+    if (typed !== fp && typed !== `${fp.slice(0, 4)}-${fp.slice(4, 8)}-${fp.slice(8)}`) return err(400, 'confirm', 'Type the previous root MEK’s fingerprint to confirm.');
     const lost = cur && cur.kind === 'root' ? cur.failed : 0;
     const r = await dir.mekRootDropOld(me, { items: lost });
     if (!r.ok) return fromDir(r);

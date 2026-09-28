@@ -239,6 +239,58 @@ describe('startDrive states', () => {
     }
   });
 
+  // Audit B M2: links of the previous release the old key does not open are listed, and retired with the step-up.
+  it('a Drive waiting whose old links do not open: they are listed; "Retire" (the step-up) retires them and the upgrade finishes', async () => {
+    await server();
+    S.migration = { pending: true, v1Items: 1, v1Links: 1, legacy: true };
+    const calls = [];
+    const upgrade = {
+      upgradeOwnDrive: async () => { calls.push('upgrade'); return { upgraded: 1, damaged: 0, unopened: ['rAAAAAAAAAAAAAAAAAAAAAA'], done: false }; },
+      retireLinks: async (o) => { calls.push(['retire', o.ids, o.step]); return { retired: 1, failed: 0, done: true }; },
+    };
+    const confirm = async (input) => { const v = input.value; input.value = ''; if (!v) throw new Error('Enter your current password.'); return { current: `proof:${v}` }; };
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps({ upgrade, confirm, canUsePasskey: async () => false }));
+    await r.app.ready;
+    await until(() => mount.querySelector('#drive-retire-form'));
+    expect(mount.querySelector('#drive-retire-form').textContent).toMatch(/rAAAAAAAAAAAAAAAAAAAAAA/);
+    mount.querySelector('#drive-retire-btn').click();
+    await until(() => !mount.querySelector('#drive-upgrade-msg').hidden);
+    expect(mount.querySelector('#drive-upgrade-msg').textContent).toMatch(/password/);
+    mount.querySelector('#drive-retire-pw').value = 'pw';
+    mount.querySelector('#drive-retire-btn').click();
+    await until(() => /Your Drive is upgraded/.test(mount.querySelector('#drive-upgrade').textContent));
+    expect(calls).toEqual(['upgrade', ['retire', ['rAAAAAAAAAAAAAAAAAAAAAA'], { current: 'proof:pw' }]]);
+    expect(mount.querySelector('#drive-upgrade').textContent).toMatch(/1 link whose key did not open was ended/);
+  });
+
+  // Audit B M4: a recovery kit of the previous release opens the old keys when nothing else does.
+  it('a Drive waiting with no usable old key: a recovery kit of the previous release opens it (the file stays in the browser)', async () => {
+    await server();
+    S.migration = { pending: true, v1Items: 1, v1Links: 0, legacy: true };
+    const calls = [];
+    let first = true;
+    const upgrade = {
+      upgradeOwnDrive: async () => {
+        calls.push('upgrade');
+        if (first) { first = false; const e = new Error('no key'); e.name = 'UpgradeBlocked'; e.reason = 'locked'; throw e; }
+        return { upgraded: 1, damaged: 0, unopened: [], done: true };
+      },
+      legacyUnlockWithKit: async (o) => { calls.push(['kit', o.text, o.passphrase]); },
+    };
+    const mount = mountPoint();
+    const r = await startDrive(mount, deps({ upgrade }));
+    await r.app.ready;
+    await until(() => mount.querySelector('#drive-upgrade-kit-form'));
+    const f = mount.querySelector('#drive-upgrade-kit');
+    Object.defineProperty(f, 'files', { configurable: true, get: () => [new File(['{"format":"secbin-owner-kit/1"}'], 'kit.json')] });
+    mount.querySelector('#drive-upgrade-kit-pass').value = 'kit pass';
+    mount.querySelector('#drive-upgrade-kit-form').dispatchEvent(new Event('submit', { cancelable: true }));
+    await until(() => /Your Drive is upgraded/.test(mount.querySelector('#drive-upgrade').textContent));
+    expect(calls).toEqual(['upgrade', ['kit', '{"format":"secbin-owner-kit/1"}', 'kit pass'], 'upgrade']);
+    expect(mount.querySelector('#drive-upgrade-kit-pass')).toBeNull();
+  });
+
   it('a Drive made before the key model v2: the upgrade notice; the owner acting as the user is sent to Admin', async () => {
     await server();
     S.migration = { pending: true, v1Items: 2, v1Links: 0, legacy: true };

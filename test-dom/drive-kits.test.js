@@ -244,6 +244,82 @@ describe('Admin → Security → Keys', () => {
     expect(stray).toEqual([]);
   });
 
+  // Audit A F2: a root change that could not finish shows its failed items and the three ways on.
+  it('a stuck root change: the items listed; run it again, go back to the previous root, or drop it with its fingerprint typed (each with the step-up)', async () => {
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    S.rootOld = new Uint8Array(32).fill(9);
+    S.stuckIds = ['AAAAAAAAAAAAAAAAAAAAAA'];
+    S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'verifyrest', done: 3, failed: 1, failedIds: S.stuckIds, pass: 1, verifying: true, finished: true, result: { ok: false, message: '1 item(s) do not open under the new root MEK.' } };
+    const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
+    mount(keysSection({ profile: profile() }));
+    await until(() => $('#keys-root-stuck'));
+    expect($('#keys-root-stuck').textContent).toMatch(/1 item\(s\) do not open under the new root MEK \(AAAAAAAAAAAAAAAAAAAAAA\)/);
+    // Run it again: the step-up first.
+    $('#keys-root-retry').click();
+    await until(() => !$('#keys-msg').hidden);
+    expect($('#keys-msg').textContent).toMatch(/password/);
+    $('#keys-confirm').value = 'pw';
+    $('#keys-root-retry').click();
+    await until(() => S.rootJobs === 1);
+    await until(() => $('#keys-root-stuck') && !$('#keys-root-retry').disabled);
+    // Drop the previous root: its fingerprint typed.
+    const fp = $('#keys-root-stuck label').textContent.match(/\(([^)]+)\)/)[1];
+    $('#keys-root-drop-confirm').value = 'wrong';
+    $('#keys-confirm').value = 'pw';
+    $('#keys-root-drop').click();
+    await until(() => /confirm/.test($('#keys-msg').textContent));
+    expect(S.rootOld).not.toBeNull();
+    $('#keys-root-drop-confirm').value = fp;
+    $('#keys-confirm').value = 'pw';
+    $('#keys-root-drop').click();
+    await until(() => S.rootOld === null);
+    await until(() => !$('#keys-root-stuck'));
+    expect(S.audit.some((a) => a.action === 'keys.root_old_dropped')).toBe(true);
+  }, 60000);
+
+  it('a stuck root change: "Go back to the previous root" swaps the roots and re-seals everything under it', async () => {
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    const before = S.root;
+    S.rootOld = new Uint8Array(32).fill(5);
+    S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'verify', done: 0, failed: 1, failedIds: ['BBBBBBBBBBBBBBBBBBBBBB'], pass: 1, verifying: true, finished: true, result: { ok: false, message: 'x' } };
+    const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
+    mount(keysSection({ profile: profile() }));
+    await until(() => $('#keys-root-undo'));
+    $('#keys-confirm').value = 'pw';
+    $('#keys-root-undo').click(); // armed
+    $('#keys-root-undo').click(); // confirmed
+    await until(() => S.rootOld === null);
+    expect([...S.root]).toEqual(new Array(32).fill(5));
+    expect(S.root).not.toBe(before);
+    await until(() => !$('#keys-root-stuck'));
+  }, 60000);
+
+  // Audit B L5: the owner's archive of the release before, deleted with the step-up and the username typed.
+  it('the upgrade card shows the owner\'s archive of the previous release, and deletes it', async () => {
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    S.archive = { items: 3, bytes: 2048, received: 1, links: ['rAAAAAAAAAAAAAAAAAAAAAA'] };
+    const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
+    mount(keysSection({ profile: profile() }));
+    await until(() => $('#keys-archive'));
+    expect($('#keys-archive').textContent).toMatch(/3 items \(2\.0 KB, of which 1 received/);
+    $('#keys-archive-confirm').value = 'nobody';
+    $('#keys-archive-pw').value = 'pw';
+    $('#keys-archive-delete').click();
+    await until(() => !$('#keys-archive-msg').hidden);
+    expect(S.archive).not.toBeNull();
+    $('#keys-archive-confirm').value = S.user.username;
+    $('#keys-archive-pw').value = 'pw';
+    $('#keys-archive-delete').click();
+    await until(() => S.archive === null && $('#keys-upgrade').hidden); // nothing left to show: the card goes
+    expect(S.audit.some((a) => a.action === 'drive.archive_deleted')).toBe(true);
+  }, 60000);
+
   it('the key kit: download (the step-up, passphrase warning), then verify the saved file with a date', async () => {
     await open();
     const saves = captureSaves();

@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   openDrive, DriveDisabled, DriveUnavailable, checkName, buildPersonalKit, verifyPersonalKit, restorePersonalKit,
 } from '../public/js/driveclient.js';
-import { clearSessionKey, openName, openDek } from '../public/js/drivekeys.js';
+import { clearSessionKey, openName, openDek, chunkHash, ciphertextHash } from '../public/js/drivekeys.js';
 import { keyCheckValueV1, saveLegacyKey } from '../public/js/drivev1.js';
 import { parseDriveKit, openDriveKit, sealDriveKit } from '../public/js/drivekit.js';
 import { deriveAccess, openPaste } from '../public/js/crypto.js';
@@ -297,6 +297,30 @@ describe('files and folders', () => {
     // A swapped chunk fails authentication.
     S.chunks.set(`${id}/1`, S.chunks.get(`${id}/0`));
     await expect((await d.download(id)).blob()).rejects.toThrow(/authentication/);
+  }, 60000);
+
+  // Audit B I4: the ciphertext hash the server records (nodes.ch) is checked on download: a file whose
+  // stored chunks do not give it is refused, its last chunk never handed over.
+  it('a download checks the chunks against the recorded ciphertext hash, and refuses a file that does not match', async () => {
+    install();
+    const d = await openDrive();
+    const size = CHUNK + 999;
+    const bytes = pattern(size, 3);
+    const id = await d.upload('root', fakeFile('two.bin', bytes, 'application/octet-stream'));
+    const n = S.nodes.get(id);
+    const hs = [];
+    for (let i = 0; i < n.chunks; i++) hs.push(await chunkHash(S.chunks.get(`${id}/${i}`)));
+    n.ch = await ciphertextHash(n.chunks, (i) => hs[i]);
+    const got = new Uint8Array(await (await (await d.download(id)).blob()).arrayBuffer());
+    expect(Buffer.from(got).equals(Buffer.from(bytes))).toBe(true);
+    // A hash that is not the stored chunks' (the record or the chunks changed): refused before the end.
+    n.ch = await ciphertextHash(n.chunks, (i) => (i === 1 ? hs[0] : hs[i]));
+    const seen = [];
+    await expect((await d.download(id)).blob((k) => seen.push(k))).rejects.toThrow(/does not match the hash/);
+    expect(seen).toEqual([CHUNK]); // the first chunk only: the last one was never handed over
+    // No hash recorded yet (a file from before the chunk hashes): read as before.
+    n.ch = null;
+    expect(new Uint8Array(await (await (await d.download(id)).blob()).arrayBuffer()).length).toBe(size);
   }, 60000);
 
   it('an empty file has no chunks; a failed upload deletes its node; uploadTree builds folders', async () => {

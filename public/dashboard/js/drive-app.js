@@ -408,7 +408,9 @@ function upgradeBox(client, deps) {
     const n = r.unopened.length;
     const pw = h('input.input', { id: 'drive-retire-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024' });
     const label = h('label.field-label', { for: 'drive-retire-pw', text: 'Your password, to confirm' });
-    canUsePasskey().then((ok) => { label.textContent = confirmLabel('Your password, to confirm', ok); }).catch(() => {});
+    let withPasskey = false;
+    (deps.canUsePasskey || canUsePasskey)().then((ok) => { withPasskey = !!ok; label.textContent = confirmLabel('Your password, to confirm', ok); }).catch(() => {});
+    const confirm = deps.confirm || ((input) => confirmStep(input, deps.profile?.user?.username, !input.value && withPasskey));
     const go = h('button.btn.danger', { type: 'submit', id: 'drive-retire-btn', text: `Retire ${n === 1 ? 'this link' : 'these links'}` });
     const form = h('form.form.drive-unlock-form', { id: 'drive-retire-form', novalidate: true },
       h('p', { text: `${n} “Receive files” link${n === 1 ? '' : 's'} of the previous release could not be opened with your Drive’s old key (${n === 1 ? 'its' : 'their'} key is damaged, or was sealed under a Drive you started over). The upgrade finishes once ${n === 1 ? 'it is' : 'they are'} retired: ${n === 1 ? 'the link ends, its key is removed' : 'the links end, their keys are removed'}, and files received but not taken in are listed as failed, to be deleted. Files already in your Drive are not affected.` }),
@@ -418,7 +420,7 @@ function upgradeBox(client, deps) {
       e.preventDefault();
       go.disabled = true;
       try {
-        const step = await confirmStep(pw, deps.user.username ?? deps.profile?.user?.username, !pw.value && await canUsePasskey());
+        const step = await confirm(pw);
         const upgrade = await loadUpgrade();
         bar.set('Finishing…', 0.9);
         const x = await upgrade.retireLinks({ ids: r.unopened, step, onProgress: progress });
