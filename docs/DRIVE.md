@@ -310,10 +310,13 @@ row or an escrow wrap) as `pending` (`drive_migration`).
 - **While a Drive waits,** the old wraps are kept current as before: a spent recovery code's wrap
   goes (handed once to that sign-in, `driveSpent`), the wraps of removed passkeys and replaced
   codes go, and an admin reset removes the old password wrap when another wrap of the user's own
-  remains (else it is marked stale). The owner's own old wraps stay while any Drive waits (after
-  an AUTHN owner recovery, regenerated codes or a removed passkey alike: the owner's old DK opens
-  every user's escrow wrap, and the paper recovery codes still open their wraps); they go with
-  the escrow clean-up.
+  remains (else it is marked stale). This holds for the owner too: a passkey the owner removes,
+  or codes the owner replaces, lose their wrap at once (Account notes, while Drives wait, that
+  they can still be upgraded with the owner's other sign-in methods and the escrow). An AUTHN
+  owner recovery keeps the owner's old wraps while any Drive waits (the owner's old DK opens every
+  user's escrow wrap, and the paper recovery codes still open their wraps): they are marked held
+  (`wrapsHeld`), a later passkey or code change leaves them, and they go with the escrow
+  clean-up.
 - **The owner's archive** of the release before (a Drive started over, with the uploads its
   paused links had received) is kept as it was, is not counted in the capacity, and opens with
   nothing here. The owner deletes it in Admin → Security → Keys (`DELETE
@@ -351,8 +354,13 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   null = no limit up to a hard 100 GiB); `driveMaxFileBytes` (bytes, nullable, default null).
 - Drive shares obey the same share options as file shares: `files`, `maxViews`,
   `allowUnlimitedViews`, `maxExpireSec`, `maxFilesPerShare`, `openerDelete`, file-type rules,
-  quotas (kind `files`), receipts, and the CAPTCHA (`shareCaptcha` / `shareCaptchaDefault`:
+  quotas (kinds `drive`, `files` and `all`), receipts, and the CAPTCHA (`shareCaptcha` / `shareCaptchaDefault`:
   SECURITY.md, *CAPTCHA on shares*). The owner has no limits. The public account has no Drive.
+- Uploads: each file added by an upload (a folder upload: each of its files) is counted by the
+  role's quotas of kind `drive-upload` when `POST /api/private/drive/files` reserves it
+  (`429 quota_exceeded` at the quota), and given back when the Drive refuses it or the upload
+  never completes (the browser deletes the unfinished file, or the purge removes it). Files
+  taken in from reverse shares are counted under Receive (docs/REVERSE.md §6.2), not here.
 - Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
   `reverseMaxExpireSec`, `reverseNoExpiry`, `reverseMaxViews`, `reverseAllowUnlimitedViews`,
   `reversePassword`, `reversePasswordDefault`, `reverseEdit`, `reverseCaptcha`,
@@ -613,8 +621,8 @@ leave open:
   server drops the wraps of passkeys and codes the account no longer has (a passkey removed,
   codes regenerated, a code spent at sign-in, the owner's "remove all passkeys"); a password
   change marks the `pw` wrap stale; an admin reset drops it when a passkey or recovery wrap
-  remains; the owner's own stay while any Drive waits (an AUTHN owner recovery, regenerated codes
-  or a removed passkey alike). Nothing writes a new
+  remains; the owner's wraps an AUTHN owner recovery kept stay while any Drive waits (a removed
+  passkey or replaced codes of the owner still lose theirs at once). Nothing writes a new
   wrap.
 - **Shares.** A folder id in `nodes` is refused (`400 not_a_file`); files must be finalized
   (`409 not_ready`). `acc`, when sent both inside `paste` and next to it, must be the same. The

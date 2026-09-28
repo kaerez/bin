@@ -81,18 +81,20 @@ function keyFields(body) {
 
 /**
  * Drop the Drive wraps (of the release before: a Drive still waiting for its
- * upgrade) of passkeys and recovery codes the account no longer has. → the
- * wraps removed (a recovery code spent at sign-in comes back once, so that
- * sign-in can still open the old Drive key for the upgrade).
+ * upgrade) of passkeys and recovery codes the account no longer has: a removed
+ * passkey or replaced codes lose theirs at once, the owner's too, while Drives
+ * wait (the escrow and the owner's other sign-in methods still open the old
+ * Drive key). Only the wraps an AUTHN owner recovery kept (driveOwnerRecovered)
+ * stay while any Drive waits. → the wraps removed (a recovery code spent at
+ * sign-in comes back once, so that sign-in can still open the old Drive key
+ * for the upgrade).
  */
 export async function syncCredentialWraps(env, uid) {
   const dir = directory(env);
   const c = await dir.credentialRefs(uid);
   if (!c || !c.drive) return [];
-  // The owner's old wraps stay while any Drive waits, as after an AUTHN owner recovery (driveOwnerRecovered):
-  // the owner's old DK opens every waiting user's escrow wrap (audit v2r, the M4 leftover).
-  if (c.owner && (await dir.migrationList()).some((r) => r.state !== 'done')) return [];
-  return (await driveStub(env, uid).pruneWraps(uid, { passkey: c.passkeys, recovery: c.recovery })).wraps;
+  const held = c.owner && (await dir.migrationList()).some((r) => r.state !== 'done');
+  return (await driveStub(env, uid).pruneWraps(uid, { passkey: c.passkeys, recovery: c.recovery, held })).wraps;
 }
 
 const nodeId = (s) => (s === ROOT || NODE_ID_RE.test(s) ? s : null);
@@ -211,11 +213,25 @@ export async function handleDrive(request, env, url) {
     const keys = await userKeys(env, uid);
     const mfp = await checkNewItem(uid, keys, { kind: 'file', ...kf, name, meta, dek });
     const uploadToken = genToken();
-    const r = await drive().createFile(uid, {
-      id, parent, name, meta, size: body.size, dek, ...kf, mfp, uploadHash: await hashToken(uploadToken),
-      capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: pol.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: pol.pendingSec,
-    });
-    if (!r.ok) return withAuth(a, fromDir(r));
+    // One file added to the Drive: the quotas of kind drive-upload count it
+    // now, and give it back when the Drive refuses it (below) or the upload
+    // never completes (deleted unfinished, or purged: the Drive reports it).
+    const quota = await dir.authorizeDriveUpload(uid);
+    if (!quota.ok) return withAuth(a, fromDir(quota));
+    let r;
+    try {
+      r = await drive().createFile(uid, {
+        id, parent, name, meta, size: body.size, dek, ...kf, mfp, uploadHash: await hashToken(uploadToken),
+        capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: pol.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: pol.pendingSec,
+      });
+    } catch (e) {
+      await dir.refund(uid, quota.refund);
+      throw e;
+    }
+    if (!r.ok) {
+      await dir.refund(uid, quota.refund);
+      return withAuth(a, fromDir(r));
+    }
     await dir.setDriveUsed(uid, r.used);
     return withAuth(a, json({ id: r.id, uploadToken, chunks: r.chunks }, 201));
   }
@@ -297,6 +313,7 @@ export async function handleDrive(request, env, url) {
       binding(env, 'FILES'); // never report a delete that left ciphertext in R2
       const r = await drive().deleteNode(uid, id);
       if (!r.ok) return withAuth(a, fromDir(r));
+      if (r.unfinished?.length) await dir.refundAt(uid, 'drive-upload', r.unfinished);
       await endShares(env, dir, uid, r.shares, actorId(a));
       // Reverse shares of a deleted folder end with it (no FileShare record to revoke).
       if (r.reverse.length) await dir.endDriveShares(uid, r.reverse, actorId(a));
@@ -922,8 +939,9 @@ async function nodeShares(env, dir, uid, id) {
 
 /**
  * A Drive share: a FileShare record referencing Drive files, authorized
- * exactly like a file share (limits, file policy declarations, quotas of kind
- * "files"), recorded in My shares as kind "drive".
+ * exactly like a file share (limits, file policy declarations; counted by the
+ * quotas of kind "drive", "files" and "all"), recorded in My shares as kind
+ * "drive".
  */
 async function createShare(request, env, dir, a) {
   const uid = a.user.id;
@@ -1050,6 +1068,7 @@ export async function driveOwnerRecovered(env, ownerId) {
   const dir = directory(env);
   const c = await dir.credentialRefs(ownerId);
   if (!c || !c.drive) return;
-  if ((await dir.migrationList()).some((r) => r.state !== 'done')) return;
+  // Kept, and marked so that a later passkey or code change does not prune them while a Drive waits.
+  if ((await dir.migrationList()).some((r) => r.state !== 'done')) { await driveStub(env, ownerId).holdWraps(ownerId); return; }
   await syncCredentialWraps(env, ownerId);
 }

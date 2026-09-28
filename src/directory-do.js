@@ -29,6 +29,7 @@ import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
 import { publicStatement } from '../public/js/a11ystatement.js';
+import { ACTIONS, quotaCovers, shareAction, kindWhat } from '../public/js/quotakinds.js';
 import {
   deriveKek, deriveUserKey, deriveFieldKey, keyFingerprint, keyCheckValue, saltCheckValue, sameCheck, sealSubMek, openSubMek,
   newMekId, newKey, newSalt, KEY_RE, MEK_ID_RE, effectiveAt, mekStatus, checkTimeline,
@@ -470,6 +471,9 @@ function cleanLabel(s) {
   const v = s.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
   return v.length <= 100 ? v : null;
 }
+
+/** A quota in the audit log: "10 uploads received per 1d [receive-upload]" (and "via the API" for an API-only one). */
+const quotaText = (q) => `${q.max} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''} [${q.kind}]`;
 
 function cleanDetail(s) {
   // eslint-disable-next-line no-control-regex
@@ -1241,6 +1245,8 @@ export class Directory extends DurableObject {
       required: this.#needsSecondFactor(u),
       max: this.#passkeyMax(u),
       recoveryLeft: this.#recoveryLeft(uid),
+      // The owner's: Drives still waiting for their upgrade (Account notes that they stay upgradable).
+      drivesWaiting: u.role === 'owner' ? this.sql.exec("SELECT COUNT(*) AS c FROM drive_migration WHERE state != 'done'").one().c : 0,
       passkeys: this.sql.exec('SELECT id, name, created, last_used, backed_up FROM passkeys WHERE user_id = ? ORDER BY created', uid).toArray()
         .map((p) => ({ id: p.id, name: p.name, created: p.created, lastUsed: p.last_used, synced: !!p.backed_up })),
     };
@@ -1470,7 +1476,9 @@ export class Directory extends DurableObject {
   // ── creation authorization + quotas ──────────────────────────────────────
   /**
    * Check capabilities/limits and consume quota for one creation, atomically.
-   * req: { kind:'text'|'files', views:int|null, expireSec, bytes?, files?, maxFile? }
+   * req: { kind:'text'|'files', fmt? (a note's), drive? (a Drive share), views:int|null, expireSec, bytes?, files?, maxFile? }
+   * The quotas count it as a note, link, credential, file share or Drive
+   * share (public/js/quotakinds.js shareAction).
    * Returns { ok, refund, limits } or a failure with a specific reason.
    */
   async authorizeCreate(uid, channel, req) {
@@ -1538,32 +1546,12 @@ export class Directory extends DurableObject {
     if (!hc.ok) return fail(hc.error === 'invalid_captcha' ? 400 : 403, hc.error, hc.message);
     if (u.role === 'owner') return { ok: true, refund: [], pendingSec: s['files.pendingSec'], captcha: hc.captcha };
 
-    const ts = now();
-    const applicable = this.#applicableQuotas(uid).filter((q) => (q.kind === 'all' || q.kind === req.kind) && (q.channel === 'all' || ch === 'api'));
     // Who is counted: the account itself, or — for the public account — each
     // anonymous subject. `mode: 'all'` refuses when every subject is over
     // (both-permissive); otherwise any subject over refuses.
-    const keys = pub ? req.subjects.keys.slice(0, 4).map(String) : [uid];
-    const needAll = pub && req.subjects.mode === 'all';
-    const hits = [];
-    for (const q of applicable) {
-      const bucket = quotaBucket(q, ts);
-      const over = keys.map((k) => {
-        const row = this.sql.exec('SELECT count FROM usage WHERE quota_id = ? AND user_id = ? AND bucket = ?', q.id, k, bucket).toArray()[0];
-        return (row ? row.count : 0) >= q.max;
-      });
-      if (needAll ? over.every(Boolean) : over.some(Boolean)) {
-        const what = q.kind === 'all' ? 'shares' : q.kind === 'text' ? 'notes' : 'file shares';
-        return fail(429, 'quota_exceeded', `Quota reached: ${q.max} ${what} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''}.`, { quota: { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max } });
-      }
-      for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k });
-    }
-    this.ctx.storage.transactionSync(() => {
-      for (const h of hits) {
-        this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, 1, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + 1',
-          h.quota_id, h.key, h.bucket, ts);
-      }
-    });
+    const q = this.#chargeQuotas(uid, ch, shareAction(req), pub ? { keys: req.subjects.keys.slice(0, 4).map(String), needAll: req.subjects.mode === 'all' } : {});
+    if (!q.ok) return q;
+    const hits = q.hits;
     return { ok: true, refund: hits, pendingSec: this.#caps(u, eff.all, s).pendingSec, captcha: hc.captcha };
   }
 
@@ -1574,6 +1562,88 @@ export class Directory extends DurableObject {
       const key = typeof h.key === 'string' && uid === PUBLIC_ID && h.key.startsWith('pub:') ? h.key : uid;
       this.sql.exec('UPDATE usage SET count = MAX(0, count - 1) WHERE quota_id = ? AND user_id = ? AND bucket = ?', h.quota_id, key, h.bucket);
     }
+  }
+
+  /**
+   * Check and count one `action` (public/js/quotakinds.js ACTIONS) against
+   * every quota of the account that covers it, atomically (nothing here
+   * awaits): refused (429 quota_exceeded, naming the quota) when a quota is
+   * reached, else counted in each quota's current window → { ok, hits } (the
+   * hits give it back: refund). `channel` 'api' also counts the API-only
+   * quotas. `keys`: who is counted (the public account's anonymous subjects;
+   * by default the account); `needAll`: refused only when every key is over.
+   * The owner is never counted.
+   */
+  #chargeQuotas(uid, channel, action, { keys = [uid], needAll = false } = {}) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'owner') return { ok: true, hits: [] };
+    const ts = now();
+    const applicable = this.#applicableQuotas(uid).filter((q) => quotaCovers(q.kind, action) && (q.channel === 'all' || channel === 'api'));
+    const hits = [];
+    for (const q of applicable) {
+      const bucket = quotaBucket(q, ts);
+      const over = keys.map((k) => {
+        const row = this.sql.exec('SELECT count FROM usage WHERE quota_id = ? AND user_id = ? AND bucket = ?', q.id, k, bucket).toArray()[0];
+        return (row ? row.count : 0) >= q.max;
+      });
+      if (needAll ? over.every(Boolean) : over.some(Boolean)) {
+        return fail(429, 'quota_exceeded', `Quota reached: ${q.max} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''}.`, { quota: { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max } });
+      }
+      for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k });
+    }
+    this.ctx.storage.transactionSync(() => {
+      for (const h of hits) {
+        this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, 1, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + 1',
+          h.quota_id, h.key, h.bucket, ts);
+      }
+    });
+    return { ok: true, hits };
+  }
+
+  /**
+   * Give back actions counted at `times` (seconds; one entry per action) when
+   * the Worker no longer holds their hits: a Drive upload that never
+   * completed (cancelled, or purged unfinished) and a Receive upload session
+   * that ended having sent nothing. Each is given back in the window it was
+   * counted in, for the quotas that cover it now (never below zero).
+   */
+  async refundAt(uid, action, times) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'owner' || u.role === 'public' || !ACTIONS.includes(action) || !Array.isArray(times)) return { ok: true };
+    const list = times.filter((t) => Number.isSafeInteger(t) && t > 0).slice(0, 10000);
+    if (!list.length) return { ok: true };
+    const applicable = this.#applicableQuotas(uid).filter((q) => q.channel === 'all' && quotaCovers(q.kind, action));
+    this.ctx.storage.transactionSync(() => {
+      for (const q of applicable) {
+        for (const t of list) this.sql.exec('UPDATE usage SET count = MAX(0, count - 1) WHERE quota_id = ? AND user_id = ? AND bucket = ?', q.id, uid, quotaBucket(q, t));
+      }
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Count one file added to the Drive by an upload (not one taken in from a
+   * Receive link) against the quotas of kind drive-upload (the Drive has no
+   * API channel) → { ok, refund } or 429 quota_exceeded.
+   */
+  async authorizeDriveUpload(uid) {
+    const u = this.#user(uid);
+    if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
+    const q = this.#chargeQuotas(uid, 'all', 'drive-upload');
+    return q.ok ? { ok: true, refund: q.hits } : q;
+  }
+
+  /**
+   * Count one upload session through a Receive link of `uid` (the link's
+   * user, never the anonymous uploader) against the quotas of kind
+   * receive-upload and receive → { ok, refund } or 429 quota_exceeded (the
+   * Worker tells the uploader only that the link cannot accept uploads now).
+   */
+  async authorizeReceiveUpload(uid) {
+    const u = this.#user(uid);
+    if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
+    const q = this.#chargeQuotas(uid, 'all', 'receive-upload');
+    return q.ok ? { ok: true, refund: q.hits } : q;
   }
 
   // ── public access: profile, trackers, subjects ────────────────────────────
@@ -3149,11 +3219,17 @@ export class Directory extends DurableObject {
     const cap = Math.min(MAX_REVERSE_ACTIVE, L.reverseMaxActive ?? MAX_REVERSE_ACTIVE);
     if (active >= cap) return fail(409, 'too_many_reverse', `At most ${cap} active reverse shares at once.`, { max: cap });
     const expires = expireSec === null ? NO_EXPIRY : ts + expireSec;
+    // The quotas of kind receive-link and receive (given back when the claim does not complete: releaseReverse).
+    const q = this.#chargeQuotas(uid, 'all', 'receive-link');
+    if (!q.ok) return q;
     const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh, captcha)
       VALUES (?, ?, 'reverse', ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(id) DO NOTHING`,
       id, uid, cleanLabel(label) ?? '', ts, expires, views, typeof lh === 'string' && lh.length <= 64 ? lh : null, hc.captcha ? 1 : 0).rowsWritten;
-    if (!w) return fail(409, 'exists', 'A share with this id already exists.');
-    return { ok: true, maxBytes: maxBytes ?? roleMax, captcha: hc.captcha };
+    if (!w) {
+      await this.refund(uid, q.hits);
+      return fail(409, 'exists', 'A share with this id already exists.');
+    }
+    return { ok: true, maxBytes: maxBytes ?? roleMax, captcha: hc.captcha, refund: q.hits };
   }
 
   /**
@@ -3217,9 +3293,13 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
-  /** A claim that did not complete (confirmation refused, the Drive refused): the id is free again. */
-  async releaseReverse(uid, id) {
-    this.sql.exec("DELETE FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse' AND status = 'pending'", id, uid);
+  /**
+   * A claim that did not complete (confirmation refused, the Drive refused):
+   * the id is free again, and `refund` (the claim's quota hits) is given back.
+   */
+  async releaseReverse(uid, id, refund = null) {
+    const w = this.sql.exec("DELETE FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse' AND status = 'pending'", id, uid).rowsWritten;
+    if (w && refund) await this.refund(uid, refund);
     return { ok: true };
   }
 
@@ -3491,7 +3571,7 @@ export class Directory extends DurableObject {
     const scopeUserId = sc.key;
     if (!Array.isArray(list) || list.length > 50) return fail(400, 'invalid', 'quotas must be a list (max 50)');
     let clean;
-    try { clean = list.map(checkQuota); } catch (e) { return fail(400, 'invalid_quota', e.message); }
+    try { clean = list.map((q) => checkQuota(q, { publicAccount: scopeUserId === PUBLIC_ID })); } catch (e) { return fail(400, 'invalid_quota', e.message); }
     this.ctx.storage.transactionSync(() => {
       const old = this.sql.exec('SELECT id FROM quotas WHERE user_id = ?', scopeUserId).toArray();
       for (const o of old) this.sql.exec('DELETE FROM usage WHERE quota_id = ?', o.id);
@@ -3502,7 +3582,7 @@ export class Directory extends DurableObject {
       // Saving a role's list means the role uses it (instead of Default's).
       if (scopeUserId.startsWith('r:')) this.sql.exec('UPDATE roles SET own_quotas = 1, updated = ? WHERE id = ?', now(), scopeUserId.slice(2));
     });
-    this.#log(actorId, scopeUserId === PUBLIC_ID ? PUBLIC_ID : null, 'quotas.updated', `${sc.label}: ${clean.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`).join('; ') || 'none'}`);
+    this.#logChunks(actorId, scopeUserId === PUBLIC_ID ? PUBLIC_ID : null, 'quotas.updated', `${sc.label}: `, clean.length ? clean.map(quotaText) : ['none']);
     return { ok: true };
   }
 
@@ -4143,7 +4223,7 @@ export class Directory extends DurableObject {
         replaceScope('', sys.limits, sys.quotas, sys.viewerRules);
         materializeDefaultRole(this.sql); // the Default role keeps a value for every option
         for (const ch of ['all', 'api']) this.#logChunks(actorId, null, 'limits.updated', `import Default role ${ch}: `, Object.entries(sys.limits[ch]).map(([k, v]) => `${k}=${JSON.stringify(v)}`).concat(Object.keys(sys.limits[ch]).length ? [] : ['none']));
-        this.#logChunks(actorId, null, 'quotas.updated', 'import Default role: ', sys.quotas.length ? sys.quotas.map((q) => `${q.max}/${q.n}${q.unit} ${q.kind} ${q.channel}`) : ['none']);
+        this.#logChunks(actorId, null, 'quotas.updated', 'import Default role: ', sys.quotas.length ? sys.quotas.map(quotaText) : ['none']);
         this.#log(actorId, null, 'viewer_rules.updated', `import Default role: ${sys.viewerRules.length} rules`);
         for (const r of sys.roles) {
           let row = this.sql.exec('SELECT * FROM roles WHERE name = ?', r.name).toArray()[0];

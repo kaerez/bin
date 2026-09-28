@@ -54,11 +54,13 @@ const GONE = 'This link no longer accepts files: it has expired, was revoked, or
 // The owner started over: the link's key is in the archive until a kit restores it (docs/DRIVE.md §3.2).
 const PAUSED = 'This link is not accepting files right now.';
 const pausedRes = () => err(409, 'paused', PAUSED);
+// The user's receive-upload quota is reached (its details stay the user's).
+const NOT_ACCEPTING = 'This link can’t accept more uploads right now. Try again later.';
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const invalid = (message) => err(400, 'invalid', message);
 const fromDo = (r) => {
   const extra = {};
-  for (const k of ['max', 'used', 'refused']) if (r[k] !== undefined) extra[k] = r[k];
+  for (const k of ['max', 'used', 'refused', 'quota']) if (r[k] !== undefined) extra[k] = r[k];
   return err(r.status, r.error, r.message, Object.keys(extra).length ? extra : undefined);
 };
 const eqB64 = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
@@ -242,7 +244,7 @@ async function createReverse(request, env, dir, a) {
       const step = await stepUpFrom(body, new URL(request.url));
       const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
       if (!v.ok) {
-        await dir.releaseReverse(uid, body.id);
+        await dir.releaseReverse(uid, body.id, claim.refund);
         return afterRefusal(env, g, v, fromDo(v));
       }
     }
@@ -254,16 +256,17 @@ async function createReverse(request, env, dir, a) {
       opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types },
     });
   } catch (e) {
-    await dir.releaseReverse(uid, body.id); // the id is free again
+    await dir.releaseReverse(uid, body.id, claim.refund); // the id is free again, and the quota
     throw e;
   }
   if (!r.ok) {
-    await dir.releaseReverse(uid, body.id);
+    await dir.releaseReverse(uid, body.id, claim.refund);
     return fromDo(r);
   }
   const act = await dir.activateReverse(uid, body.id, { created: r.created, expires: r.expires }, actorId(a));
   if (!act.ok) {
     await driveStub(env, uid).endReverse(uid, body.id);
+    await dir.refund(uid, claim.refund);
     return fromDo(act);
   }
   return json({ id: body.id, expires: apiExpiry(r.expires), views, captcha: claim.captcha === true }, 201);
@@ -496,10 +499,24 @@ export async function handleReversePublic(request, env, url) {
         await verifyCaptcha(env, g, request, TURNSTILE_ACTIONS.reverse);
       } else throw captchaRequired(true);
     }
+    // The user's quotas of kind receive-upload and receive count this session
+    // (given back below when it does not start, and when it ends having sent
+    // nothing). At the quota the uploader learns only that the link cannot
+    // take uploads now, never the user's quota.
+    const quota = await dir.authorizeReceiveUpload(uid);
+    if (!quota.ok) return quota.status === 429 ? err(429, 'not_accepting', NOT_ACCEPTING) : err(410, 'gone', GONE);
     const grant = genToken();
     // The password is checked in the Drive, with the link's lockout (all networks).
     const proofHash = r.ph && isProof(kp) ? await proofHashOf(kp) : null;
-    const s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec, { net: g.key, proofHash, human });
+    let s;
+    try {
+      s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec, { net: g.key, proofHash, human });
+    } catch (e) {
+      await dir.refund(uid, quota.refund);
+      throw e;
+    }
+    if (s.status !== 'ok') await dir.refund(uid, quota.refund);
+    if (s.lapsed?.length) await dir.refundAt(uid, 'receive-upload', s.lapsed); // sessions that sent nothing
     if (s.status === 'captcha_used') throw captchaRequired(true);
     if (s.status === 'bad_password') {
       await dir.reverseEvent(id, 'bad_password');
@@ -522,6 +539,7 @@ export async function handleReversePublic(request, env, url) {
     const r = await drive.reverseDone(uid, id, await hashToken(grant));
     if (r.status !== 'ok') return failed(env, g, err(403, 'bad_grant', 'This upload session has ended.'));
     if (r.files > 0) await dir.reverseEvent(id, 'received', { files: r.files, bytes: r.bytes });
+    else if (r.started) await dir.refundAt(uid, 'receive-upload', [r.started]); // it sent nothing: not counted
     return json({ files: r.files, bytes: r.bytes });
   }
 

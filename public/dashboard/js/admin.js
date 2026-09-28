@@ -12,6 +12,7 @@ import { toast, copyText, flashCopied, keepFocus, tablistKeys } from '../../js/u
 import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
 import { STATEMENT_FIELDS, MAIN, ALT, guessDir } from '../../js/a11ystatement.js';
+import { KINDS, QUOTA_GROUPS, QUOTA_KINDS, PUBLIC_QUOTA_KINDS, kindLabel } from '../../js/quotakinds.js';
 import { ready } from './nav.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { renderShares } from './admin-shares.js';
@@ -483,15 +484,42 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
   return box;
 }
 
-function quotasEditor(scope, list) {
+/**
+ * The kind of a quota: a select with one <optgroup> per group (Outgoing
+ * shares, Drive, Receive: public/js/quotakinds.js), offering `allowed` only
+ * (the public account's list has no Drive or Receive). A kind this page does
+ * not offer stays shown as it is (the server says why it is refused).
+ */
+function quotaKindSelect(value, allowed) {
+  const groups = QUOTA_GROUPS.map((g) => [g.label, g.kinds.filter((k) => allowed.includes(k))]).filter(([, ks]) => ks.length);
+  const opt = (k) => h('option', { value: k, text: kindLabel(k) });
+  const sel = h('select.input', { 'aria-label': 'Kind' },
+    ...groups.map(([label, ks]) => h('optgroup', { label }, ...ks.map(opt))),
+    ...(allowed.includes(value) ? [] : [h('optgroup', { label: 'Not available here' }, opt(value))]));
+  sel.value = value;
+  return sel;
+}
+
+function quotasEditor(scope, list, { publicAccount = false } = {}) {
+  const allowed = publicAccount ? PUBLIC_QUOTA_KINDS : QUOTA_KINDS;
   const box = h('div.stack');
   const rows = h('div.stack');
   const addRow = (q = { channel: 'all', kind: 'all', n: 1, unit: 'd', max: 10 }) => {
     const channel = h('select.input', { 'aria-label': 'Via (channel)' }, ...[['all', 'GUI + API'], ['api', 'API only']].map(([v, t]) => h('option', { value: v, text: t, selected: q.channel === v })));
-    const kind = h('select.input', { 'aria-label': 'Kind' }, ...[['all', 'all shares'], ['text', 'notes'], ['files', 'file shares']].map(([v, t]) => h('option', { value: v, text: t, selected: q.kind === v })));
+    channel.value = q.channel;
+    const kind = quotaKindSelect(q.kind, allowed);
+    // Drive shares, the Drive and Receive are used in the web app only: an "API only" quota of them would count nothing.
+    const syncChannel = () => {
+      const webOnly = !!KINDS[kind.value]?.gui;
+      channel.querySelector('option[value="api"]').disabled = webOnly;
+      if (webOnly && channel.value === 'api') channel.value = 'all';
+    };
+    kind.addEventListener('change', syncChannel);
+    syncChannel();
     const max = h('input.input.opt-num', { type: 'number', min: '0', value: String(q.max), 'aria-label': 'Max' });
     const n = h('input.input.opt-num', { type: 'number', min: '1', value: String(q.n), 'aria-label': 'Per (period)' });
     const unit = h('select.input', { 'aria-label': 'Period unit' }, ...[['s', 'seconds'], ['m', 'minutes'], ['h', 'hours'], ['d', 'days'], ['mo', 'months'], ['y', 'years']].map(([v, t]) => h('option', { value: v, text: t, selected: q.unit === v })));
+    unit.value = q.unit;
     const row = h('div.toolbar.quota-row', {}, labelled(max), labelled(kind), labelled(n, 'Per (period)'), labelled(unit, 'Period unit'), labelled(channel, 'Via (channel)'),
       h('button.btn', { type: 'button', text: 'Remove', on: { click: () => row.remove() } }));
     row.read = () => ({ channel: channel.value, kind: kind.value, n: Number(n.value), unit: unit.value, max: Number(max.value) });
@@ -503,8 +531,16 @@ function quotasEditor(scope, list) {
     h('button.btn', { type: 'button', text: 'Add quota', on: { click: () => addRow() } }),
     h('button.btn', { type: 'button', text: 'Save quotas', on: { click: () => guard(() => admin.quotas(scope, [...rows.children].map((r) => r.read())), 'Quotas saved.') } })));
   box.appendChild(h('p.mono.muted', { text: 'Fixed windows (months/years are UTC calendar periods). GUI and API creations count together; an "API only" quota can only restrict API use further.' }));
+  box.appendChild(h('p.mono.muted', { text: QUOTA_HELP.outgoing }));
+  box.appendChild(h('p.mono.muted', { text: publicAccount ? 'The public account has no Drive, so only outgoing shares it can make are counted: notes, links, credentials and file shares.' : QUOTA_HELP.webOnly }));
   return box;
 }
+
+// What each group of kinds counts (Admin → Roles → Quotas).
+const QUOTA_HELP = {
+  outgoing: 'Outgoing shares: "All outgoing shares" counts every note, link, credential, file share and Drive share (never Drive uploads or Receive). "Notes, links and credentials" and "File and Drive shares" count those together; the other kinds count one type each (a note is plain text, Markdown or code).',
+  webOnly: 'Drive: "Files uploaded" counts each file uploaded to the Drive (a folder upload counts every file; files taken in from Receive links do not count), given back when the upload does not complete. Receive: "New links" counts each Receive link created; "Uploads received" counts each upload session that sends files through one of the user\'s links (counted for the user, never the sender); "All receive" counts both. Drive shares, the Drive and Receive are used in the web app only, so their quotas are GUI + API.',
+};
 
 function rulesEditor(scope, list, { withPresets = true } = {}) {
   const box = h('div.stack');
@@ -870,7 +906,7 @@ async function publicRole(box, reopen) {
 
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities, limits, viewer, file shares' }),
     limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, inherited: overview.defaults.inherited, onSaved: reopen, omit: PUBLIC_OMIT })));
-  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas (counted per anonymous sender, in addition to global quotas)' }), quotasEditor(PUBLIC_ID, detail.quotas)));
+  box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas (counted per anonymous sender, in addition to global quotas)' }), quotasEditor(PUBLIC_ID, detail.quotas, { publicAccount: true })));
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Viewer rules (used when "Use this role\'s own viewer rules" is yes)' }), rulesEditor(PUBLIC_ID, detail.viewerRules)));
 
   const t = data.trackers;

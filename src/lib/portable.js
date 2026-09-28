@@ -83,7 +83,8 @@ function limitsBlock(v, where) {
   return out;
 }
 
-const quotas = (v, where) => list(v, where, 50).map((q, i) => wrap(`${where}[${i}]`, () => checkQuota(q)));
+// The public account's list takes only the kinds it can use (no Drive, no Receive).
+const quotas = (v, where, opts) => list(v, where, 50).map((q, i) => wrap(`${where}[${i}]`, () => checkQuota(q, opts)));
 const viewerRules = (v, where) => list(v, where, 200).map((r, i) => wrap(`${where}[${i}]`, () => checkViewerRule(r)));
 
 function ipRule(r, where) {
@@ -173,7 +174,7 @@ function system(v) {
     keys(v.public, 'system.public', ['limits', 'quotas', 'viewerRules']);
     out.public = {
       limits: limitsBlock(v.public.limits, 'system.public.limits'),
-      quotas: quotas(v.public.quotas, 'system.public.quotas'),
+      quotas: quotas(v.public.quotas, 'system.public.quotas', { publicAccount: true }),
       viewerRules: viewerRules(v.public.viewerRules, 'system.public.viewerRules'),
     };
     out.parts.push('public');

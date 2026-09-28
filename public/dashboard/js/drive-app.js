@@ -1361,9 +1361,12 @@ function mountApp(mount, client, deps) {
     const status = h('p.msg', { role: 'status', text: 'Loading…' });
     const d = openDialog({ title: `Shares of “${it.name}”`, sub: 'Links that include this item. Revoking a link ends it for everyone; the item stays in your Drive.', body: [status], wide: true, fallback: focusPane });
     d.setActions(h('a.btn.modal-btn', { href: '/dashboard/shares/', text: 'All my shares' }), btn('Close', () => d.close(), 'modal-btn'));
+    // A folder's "Receive files" links are its shares too (they upload into it).
+    const isDir = it.kind === 'dir';
     let rows;
     try {
-      rows = await client.shares(it.id);
+      const [out, rev] = await Promise.all([client.shares(it.id), isDir ? client.reverseShares(it.id) : []]);
+      rows = [...out, ...rev.map((r) => ({ ...r, kind: 'reverse' }))];
     } catch (e) {
       status.textContent = '';
       d.error(friendlyError(e));
@@ -1371,24 +1374,37 @@ function mountApp(mount, client, deps) {
     }
     if (!d.open) return;
     const draw = () => {
-      if (!rows.length) { d.setBody(h('p.msg', { id: 'drive-shares-empty', text: 'No shares of this item yet. Select it and choose Share… to create one.' })); return; }
+      if (!rows.length) {
+        d.setBody(h('p.msg', { id: 'drive-shares-empty', text: isDir
+          ? 'No shares or upload links of this folder yet. Select it and choose Share… or Receive files… to create one.'
+          : 'No shares of this item yet. Select it and choose Share… to create one.' }));
+        return;
+      }
       const now = Math.floor(Date.now() / 1000);
       const tb = h('tbody');
       for (const s of rows) {
+        const rev = s.kind === 'reverse';
         const active = s.status === 'active';
-        const views = viewsText(s);
+        // A paused upload link has not ended: it can be revoked too.
+        const live = active || (rev && s.status === 'paused');
+        const views = rev ? `${s.files} file${s.files === 1 ? '' : 's'} received` : viewsText(s);
         const expires = s.expires ? (active && s.expires > now ? `in ${formatCoarse(s.expires - now)}` : formatDate(s.expires)) : '—';
         const cell = h('td.cell-actions');
-        if (active && s.locked) cell.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
-        else if (active) {
-          const rv = h('button.btn.danger.tree-btn', { type: 'button', text: 'Revoke', 'aria-label': `Revoke ${s.label || 'this share'}` });
+        const btns = h('div.btn-row');
+        if (rev && s.url && active) {
+          btns.appendChild(h('button.btn.tree-btn', { type: 'button', text: 'Copy link', 'aria-label': `Copy link${s.label ? ` ${s.label}` : ''}`, on: { click: async (e) => flashCopied(e.currentTarget, (await copyText(s.url)) ? 'copied' : 'failed') } }));
+        }
+        if (live && s.locked) btns.appendChild(h('span.mono.muted', { text: 'Locked by the administrator.' }));
+        else if (live) {
+          const rv = h('button.btn.danger.tree-btn', { type: 'button', text: 'Revoke', 'aria-label': `Revoke ${s.label || (rev ? 'this link' : 'this share')}` });
           armConfirm(rv, 'Revoke now — irreversible', async () => {
             rv.disabled = true;
-            try { await deps.revoke(s.id); s.status = 'revoked'; toast('Share revoked.'); draw(); d.box.focus(); } catch (e) { rv.disabled = false; d.error(friendlyError(e)); }
+            try { await deps.revoke(s.id); s.status = 'revoked'; toast(rev ? 'Link revoked. Files already received stay.' : 'Share revoked.'); draw(); d.box.focus(); } catch (e) { rv.disabled = false; d.error(friendlyError(e)); }
           });
-          cell.appendChild(rv);
+          btns.appendChild(rv);
         }
-        tb.appendChild(h('tr', { dataset: { status: s.status || '' } },
+        cell.appendChild(btns);
+        tb.appendChild(h('tr', { dataset: { status: s.status || '', kind: s.kind || '' } },
           h('td', { dataset: { label: 'Label' }, text: s.label || '(no label)' }),
           h('td.mono', { dataset: { label: 'Type' }, text: KIND_NAMES[s.kind] || 'drive' }),
           h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),

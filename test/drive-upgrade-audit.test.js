@@ -7,6 +7,9 @@
 //   M2  a link the old key does not open (damaged, or paused by a start over)
 //       is retired (the step-up) so that the upgrade finishes;
 //   M4  AUTHN owner recovery keeps the owner's old wraps while a Drive waits;
+//       a passkey the owner removes, or codes the owner replaces, lose theirs
+//       at once all the same (the maintainer's rule), and a waiting Drive
+//       still upgrades through the escrow;
 //   L1  a finished upgrade stays finished (a late PUT is refused);
 //   L2  a disabled account's Drive is upgraded too; deleting the last waiting
 //       account cleans the escrow of the release before up;
@@ -328,6 +331,45 @@ describe('the upgrade, after the audit (in order: the escrow material stays unti
     expect(await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec('SELECT COUNT(*) AS c FROM recovery_codes WHERE user_id = ?', ownerId).one().c)).toBe(0);
     expect(await wrapsOf(ownerId)).toEqual(['passkey', 'recovery']);
     expect(AUTHN).toBeTruthy();
+  });
+
+  // The maintainer's rule after the re-audit: a credential the owner removes loses its old wrap at once, even
+  // while Drives wait; only the wraps an AUTHN owner recovery kept stay. The waiting Drives still upgrade.
+  it('owner wrap pruning: a passkey the owner removes, and codes the owner replaces, lose their wraps while a Drive waits; the recovery\'s held wraps stay; a waiting Drive still upgrades through the escrow', async () => {
+    const later = await makeUser('waits-for-escrow');
+    await enableDrive(later.id);
+    const laterDrive = await legacyDrive(later.id, main.createDriveKey(), { items: 1, link: false });
+    const wrapRefs = () => runInDurableObject(driveOf(ownerId), (i, s) => s.storage.sql.exec('SELECT kind, ref FROM wraps ORDER BY kind, ref').toArray().map((w) => `${w.kind}:${w.ref}`));
+    const held = await wrapRefs(); // kept by the AUTHN recovery above (their credentials are gone)
+    expect(held.map((x) => x.split(':')[0])).toEqual(['passkey', 'recovery']);
+    // Two new passkeys and a code, each with an old wrap (as the release before would have made them).
+    const code2 = await main.recoveryRef('WXYZ-2345-6789-ABCD');
+    await runInDurableObject(dirStub(), (i, s) => {
+      for (const id of ['ownerpasskeyBBBB', 'ownerpasskeyCCCC']) s.storage.sql.exec("INSERT INTO passkeys (id, user_id, name, public_key, alg, created) VALUES (?, ?, 'key', 'x', -7, ?)", id, ownerId, now());
+      s.storage.sql.exec('INSERT INTO recovery_codes (user_id, hash, created) VALUES (?, ?, ?)', ownerId, code2, now());
+    });
+    const extra = [await main.wrapPrf(ownerDk, randomBytes(32), 'ownerpasskeyBBBB'), await main.wrapPrf(ownerDk, randomBytes(32), 'ownerpasskeyCCCC'), await main.wrapRecovery(ownerDk, 'WXYZ-2345-6789-ABCD', code2)];
+    await runInDurableObject(driveOf(ownerId), (i, s) => { for (const w of extra) s.storage.sql.exec('INSERT INTO wraps (kind, ref, data) VALUES (?, ?, ?)', w.kind, w.ref, w.data); });
+    expect(await migrationRow(later.id)).toBe('pending');
+    // Account says so before the removal.
+    expect((await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json()).drivesWaiting).toBeGreaterThan(0);
+    // The owner removes a passkey: its wrap goes at once; the others stay.
+    const rm = await post('/api/private/me/passkeys/ownerpasskeyBBBB/remove', ownerStep());
+    expect(rm.status, await rm.clone().text()).toBe(200);
+    expect(await wrapRefs()).toEqual([...held, 'passkey:ownerpasskeyCCCC', `recovery:${code2}`].sort());
+    // The owner replaces the recovery codes: the old code's wrap goes at once.
+    const regen = await post('/api/private/me/recovery-codes', ownerStep());
+    expect(regen.status, await regen.clone().text()).toBe(200);
+    expect(await wrapRefs()).toEqual([...held, 'passkey:ownerpasskeyCCCC'].sort());
+    // The waiting Drive still upgrades: the owner's old key (open in this tab) opens the escrow.
+    await actAs(oc);
+    expect(loadLegacyKey(ownerId)).not.toBeNull();
+    const up = await upgradeUserDrive({ ownerId, userId: later.id, step: ownerStep() });
+    expect(up).toMatchObject({ unopened: [], done: true });
+    expect(await migrationRow(later.id)).toBe('done');
+    const n = (await (await node(later.cookie, laterDrive.folders[0])).json()).node;
+    expect(n).toBeTruthy();
+    expect(await wrapRefs()).toEqual([...held, 'passkey:ownerpasskeyCCCC'].sort()); // a Drive still waits (never-signs-in)
   });
 
   it('L2: deleting the last waiting account cleans up the escrow of the release before; then the owner\'s tab drops its old key', async () => {

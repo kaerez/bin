@@ -109,6 +109,7 @@ const ASSET_SHA256 = Object.freeze({
   "/js/pwa.js": "RRoIXd9pwebwhUYv2P3JVCgJ9uS1RinGU85NcDdaExE=",
   "/js/pwauth.js": "CLgKLPN5pwpoJ5+an/1BRCB+zif01x6mylxPiIGgP/M=",
   "/js/qrcode.js": "eeyG+ChWAFsciHkFz8z8++w4Icphx/1alS+qX3ePeRw=",
+  "/js/quotakinds.js": "NQN/0TYfCY7UJHD4dS0ibs4prET3JoSAkr+iICk0/EQ=",
   "/js/refsmanifest.js": "Imfq/Ose9AgATi/sgaDlOYKAQ/looI7EV8MunPNwyck=",
   "/js/reverse.js": "ff7+Ow256URt6PE1LHJw9H1P+gPZ8YUaHRaLp4LgSog=",
   "/js/reverseclient.js": "yHUcgrnvSdkYI8L3bWzoBQg7sASAZGkelmJD2UMe4o8=",

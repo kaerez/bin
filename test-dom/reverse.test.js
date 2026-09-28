@@ -398,6 +398,39 @@ describe('Drive: Receive…', () => {
     expect($('#drive-rev-copy')).not.toBeNull();
   });
 
+  it('a folder\'s "Shares" lists its upload links too, with Copy link and Revoke', async () => {
+    await server();
+    const { id } = await existingReverse(ids.get('Documents'));
+    await existingReverse('root'); // another folder's link: not listed
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const tr = [...document.querySelectorAll('#drive-rows tr')].find((x) => x.children[1].textContent.trim() === 'Documents');
+    button(tr, 'Shares').click();
+    await until(() => dialog()?.querySelector('#drive-shares-table'));
+    const rows = [...dialog().querySelectorAll('#drive-shares-table tbody tr')];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dataset.kind).toBe('reverse');
+    expect(rows[0].textContent).toMatch(/old/);
+    expect(rows[0].textContent).toMatch(/receive/);
+    expect(rows[0].textContent).toMatch(/0 files received/);
+    expect(button(rows[0], 'Copy link')).toBeDefined();
+    const rv = button(rows[0], 'Revoke');
+    rv.click(); // arms
+    rv.click();
+    await until(() => /revoked/.test(dialog().querySelector('#drive-shares-table tbody tr').textContent));
+    expect(S.reverse.find((x) => x.id === id).status).toBe('revoked');
+  });
+
+  it('a folder with no shares or upload links says how to make one', async () => {
+    await server();
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const tr = [...document.querySelectorAll('#drive-rows tr')].find((x) => x.children[1].textContent.trim() === 'Documents');
+    button(tr, 'Shares').click();
+    await until(() => dialog()?.querySelector('#drive-shares-empty'));
+    expect(dialog().querySelector('#drive-shares-empty').textContent).toMatch(/Share… or Receive files…/);
+  });
+
   it('the owner acting as the user is not asked to confirm (the server asks for nothing then)', async () => {
     await server();
     S.impersonatedBy = 'owner';

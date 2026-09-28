@@ -163,6 +163,19 @@ SPEC.md §10). The ones specific to keys and shares:
 | 429 | `rate_limited` | too many CAPTCHA checks from your network (30 per 10 minutes) |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
 
+`429 quota_exceeded` names the quota it reached: `{ error: "quota_exceeded", message: "Quota
+reached: 10 notes per 1d via the API.", quota: { channel, kind, n, unit, max } }`. `channel` is
+`all` (GUI and API together) or `api` (API only); `kind` is what it counts — outgoing shares:
+`all` (every note, link, credential, file share and Drive share), `text` (notes, links and
+credentials), `note` (plain text, Markdown or code), `url`, `secret`, `files` (file and Drive
+shares), `file`, `drive`; the Drive: `drive-upload` (each file uploaded); Receive: `receive`
+(both below), `receive-link` (a new reverse share), `receive-upload` (an upload session that
+sends files through one of your links). A key only ever meets the outgoing kinds (the Drive and
+Receive are for browser sessions). The message's words for each kind: outgoing shares; notes,
+links and credentials; notes; links; credentials; file and Drive shares; file shares; Drive
+shares; files uploaded to the Drive; Receive links and uploads received; new Receive links;
+uploads received.
+
 ## Examples
 
 The same examples are on **Account → API keys → Using the API**, with your server's address
@@ -512,12 +525,12 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
 | `GET /api/private/drive/nodes/:id/shares` | → `{ shares }` — the active shares of the item |
 | `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `201 { id }` |
-| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `201 { id, uploadToken, chunks }` |
+| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `201 { id, uploadToken, chunks }`; counted by the quotas of kind `drive-upload` (`429 quota_exceeded`), given back when the Drive refuses the file or the upload never completes (deleted unfinished, or purged) |
 | `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok, ch }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth?, captcha? }` → `201 { id, deletetoken, expires, captcha }` (`captcha` as above) |
-| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, views?, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; below) — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above) |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, views?, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; below) — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above); counted by the quotas of kind `receive-link` and `receive` (`429 quota_exceeded`; given back when the creation does not complete) |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
 | `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
 | `POST /api/private/drive/received/:id` | `{ parent, name, meta, dek, ks, mek }` → `{ ok }` — a received file re-sealed into the Drive under the user's current KEK |

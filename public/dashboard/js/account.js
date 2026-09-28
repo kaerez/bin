@@ -19,6 +19,7 @@ import { copyText, flashCopied, toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
 import { apiExamples, API_LANGS } from './apiexamples.js';
 import { humanCheck } from '../../js/turnstile.js';
+import { kindWhat } from '../../js/quotakinds.js';
 // The Drive keys are never in the tab's storage (each page asks the server);
 // with the human check on, loading its script also moves the old Drive key of
 // the release before, if the tab has one, out of sessionStorage into memory
@@ -169,8 +170,7 @@ function renderLimits() {
   if (profile.quotas.length) {
     q.appendChild(h('h3.field-label', { text: 'Quotas' }));
     for (const x of profile.quotas) {
-      const what = x.kind === 'all' ? 'shares' : x.kind === 'text' ? 'notes' : 'file shares';
-      q.appendChild(h('p.mono', { text: `${x.used} / ${x.max} ${what} per ${x.n}${x.unit}${x.channel === 'api' ? ' (API)' : ''}` }));
+      q.appendChild(h('p.mono', { text: `${x.used} / ${x.max} ${kindWhat(x.kind)} per ${x.n}${x.unit}${x.channel === 'api' ? ' (API)' : ''}` }));
     }
   }
 }
@@ -419,6 +419,9 @@ async function renderPasskeys() {
     ? `${st.recoveryLeft} of 20 recovery codes left.${st.required ? ' You sign in with your password and a passkey (or a code).' : ''}`
     : 'Adding your first passkey gives you 20 one-time recovery codes.';
   $('#recovery-regen').hidden = !has;
+  // The owner, while Drives wait for their upgrade: removing a credential drops its old Drive wrap (docs/DRIVE.md §3.3).
+  const driveNote = $('#passkeys-drive-note');
+  if (driveNote) driveNote.hidden = !(st.drivesWaiting > 0);
   $('#passkey-add').disabled = st.passkeys.length >= st.max;
   refocus();
 }
