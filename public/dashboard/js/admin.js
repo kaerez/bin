@@ -6,7 +6,7 @@
 
 import '../../js/kdf-progress.js';
 import { admin } from '../../js/api.js';
-import { newCredential, checkOwnerPassword, describePolicy, loginProof } from '../../js/pwauth.js';
+import { newCredential, checkOwnerPassword, describePolicy } from '../../js/pwauth.js';
 import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds, reducedMotion, labelled } from '../../js/common.js';
 import { toast, copyText, flashCopied, keepFocus, tablistKeys } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
@@ -1278,8 +1278,9 @@ async function renderSecurity() {
 // ── audit ────────────────────────────────────────────────────────────────────
 /**
  * Clear some or all of the activity log: everything, or one account's
- * entries, optionally only those older than a date. Needs the owner's
- * password again; nothing records that it happened.
+ * entries, optionally only those older than a date. Needs the owner to
+ * confirm again (the password, or a passkey with the field left empty);
+ * nothing records that it happened.
  */
 function clearLogsCard(onDone) {
   const scope = h('select.input', { 'aria-label': 'Which log entries' },
@@ -1287,7 +1288,8 @@ function clearLogsCard(onDone) {
   const who = h('select.input', { 'aria-label': 'Account', hidden: true });
   const olderOn = h('input', { type: 'checkbox' });
   const date = h('input.input', { type: 'date', 'aria-label': 'Older than', disabled: true });
-  const mine = h('input.input', { type: 'password', autocomplete: 'current-password', 'aria-label': 'Your password, to confirm' });
+  const mineLabel = 'Your password (or leave it empty to confirm with a passkey)';
+  const mine = h('input.input', { type: 'password', autocomplete: 'current-password', 'aria-label': mineLabel });
   const go = h('button.btn.danger', { type: 'button', text: 'Delete log entries' });
   scope.onchange = async () => {
     who.hidden = scope.value !== 'user';
@@ -1298,12 +1300,11 @@ function clearLogsCard(onDone) {
   };
   olderOn.onchange = () => { date.disabled = !olderOn.checked; };
   armConfirm(go, 'Delete for good?', async () => {
-    if (!mine.value) return msg('Enter your password to confirm.', true);
     if (olderOn.checked && !date.value) return msg('Pick the date.', true);
     const before = olderOn.checked ? Math.floor(Date.parse(`${date.value}T00:00:00Z`) / 1000) : null;
-    const current = await loginProof(profile.user.username, mine.value);
-    const r = await guard(() => admin.clearLogs({ current, scope: scope.value, user: scope.value === 'user' ? who.value : undefined, before }));
-    mine.value = '';
+    let step;
+    try { step = await confirmStep(mine, profile.user.username, !mine.value && await canUsePasskey()); } catch (e) { return msg(friendlyError(e), true); }
+    const r = await guard(() => admin.clearLogs({ ...step, scope: scope.value, user: scope.value === 'user' ? who.value : undefined, before }));
     if (r) {
       toast(`${r.deleted} log entr${r.deleted === 1 ? 'y' : 'ies'} deleted.`);
       onDone();

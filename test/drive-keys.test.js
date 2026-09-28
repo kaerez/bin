@@ -495,6 +495,78 @@ describe('Import / export: the keys parts (secbin-keys-export/1)', () => {
     expect((await adminAudit()).some((r2) => r2.action === 'drive.keys_imported' && r2.subject_id === u.id)).toBe(true);
   });
 
+  it('verify: read-only, with the step-up; check values (DEKs on their first chunk); mismatches reported; no key returned', async () => {
+    const doc = (await (await post(`${K}/export`, { root: true, subs: 'all', salts: [u.id], users: [{ id: u.id, keks: true, deks: 'all' }], ...STEP })).json()).document;
+    // What the browser sends (keysclient.js verifyKeysExport): check values, and the DEKs.
+    const bodyOf = async (d) => ({
+      root: d.root ? await keyCheckValue(keyBytes(d.root.key), 'mek') : null,
+      subs: d.subs ? Object.fromEntries(await Promise.all(d.subs.map(async (s) => [s.id, await keyCheckValue(keyBytes(s.key), 'mek')]))) : null,
+      users: await Promise.all(d.users.map(async (x) => ({
+        id: x.id, salt: await saltCheckValue(d.salts[x.id], x.id),
+        keks: Object.fromEntries(await Promise.all(x.keks.map(async (k) => [k.mekId, await keyCheckValue(keyBytes(k.kek), 'kek')]))),
+        deks: x.deks,
+      }))),
+    });
+    const verify = (body, step = STEP, cookie = oc) => post(`${K}/export/verify`, { ...body, ...step }, cookie);
+    // Everything the server holds for keys and for this Drive, before and after.
+    const snapshot = async () => ({
+      dir: await runInDurableObject(dirStub(), (i, s) => ({
+        meks: s.storage.sql.exec('SELECT * FROM meks ORDER BY id').toArray(),
+        meta: s.storage.sql.exec("SELECT * FROM meta WHERE k LIKE 'mek.%' ORDER BY k").toArray(),
+        salts: s.storage.sql.exec('SELECT * FROM user_salts ORDER BY user_id').toArray(),
+      })),
+      drive: await runInDurableObject(driveOf(u.id), (i, s) => s.storage.sql.exec('SELECT * FROM nodes ORDER BY id').toArray()),
+      status: { ...(await status()), now: null }, // the clock is not state
+    });
+    const good = await bodyOf(doc);
+    // The step-up: none, a wrong password.
+    const none = await verify(good, {});
+    expect([none.status, await errorOf(none)]).toEqual([400, 'reauth_required']);
+    const wrong = await verify(good, { current: proofFor('not-the-owner-password') });
+    expect([wrong.status, await errorOf(wrong)]).toEqual([403, 'wrong_password']);
+    // A user cannot.
+    expect((await verify(good, { current: proofFor(USER_PW) }, u.cookie)).status).toBe(403);
+    const before = await snapshot();
+    const ok = await (await verify(good)).json();
+    const st = await status();
+    expect(ok).toMatchObject({ ok: true, matches: true, root: { result: 'match', fp: st.root.fp }, subs: { inFile: true, unknown: [] } });
+    expect(ok.subs.list.map((s) => [s.id, s.result])).toEqual(st.subs.map((s) => [s.id, 'match']));
+    expect(ok.users).toEqual([{ id: u.id, username: 'keys-port', salt: 'match', keks: st.subs.map(() => ({ mekId: expect.any(String), result: 'match' })), deks: { total: 1, opens: 1, fails: 0, missing: 0, empty: 0, unchecked: 0, failed: [], missingIds: [] } }]);
+    // A tampered copy: another root, an unknown sub-MEK, a wrong KEK, a broken DEK, a DEK for no file.
+    const ghostSub = `m${'Z'.repeat(11)}`;
+    const ghostNode = 'Q'.repeat(22);
+    const tampered = {
+      ...doc,
+      root: { ...doc.root, key: b64urlFromBytes(randomBytes(32)) },
+      subs: [...doc.subs, { id: ghostSub, key: b64urlFromBytes(randomBytes(32)), from: 0, until: 0 }],
+      users: [{ ...doc.users[0], keks: doc.users[0].keks.map((k, n) => (n === 0 ? { ...k, kek: b64urlFromBytes(randomBytes(32)) } : k)), deks: [{ id: real.id, dek: b64urlFromBytes(randomBytes(32)) }, { id: ghostNode, dek: b64urlFromBytes(randomBytes(32)) }] }],
+    };
+    const bad = await (await verify(await bodyOf(tampered))).json();
+    expect(bad).toMatchObject({ ok: true, matches: false, root: { result: 'mismatch' }, subs: { unknown: [ghostSub] } });
+    expect(bad.users[0].keks[0]).toEqual({ mekId: doc.users[0].keks[0].mekId, result: 'mismatch' });
+    expect(bad.users[0].keks.slice(1).every((k) => k.result === 'match')).toBe(true);
+    expect(bad.users[0].deks).toMatchObject({ total: 2, opens: 0, fails: 1, missing: 1, failed: [real.id], missingIds: [ghostNode] });
+    // A file with fewer sub-MEKs: the others are "missing"; a wrong salt; an account that is not here.
+    const partial = await (await verify({ subs: {}, users: [{ id: u.id, salt: await saltCheckValue(newSalt(), u.id) }, { id: 'nobodynobodynob1' }] })).json();
+    expect(partial).toMatchObject({ matches: false, root: { result: 'absent' } });
+    expect(partial.subs.list.every((s) => s.result === 'missing')).toBe(true);
+    expect(partial.users).toEqual([{ id: u.id, username: 'keys-port', salt: 'mismatch', keks: [] }, { id: 'nobodynobodynob1', username: null, salt: 'unknown', keks: [] }]);
+    // A key sent instead of a check value is compared, never used.
+    expect((await (await verify({ root: doc.root.key })).json()).root.result).toBe('mismatch');
+    // Nothing changed, and no key value in any answer.
+    expect(await snapshot()).toEqual(before);
+    const secrets = [doc.root.key, ...doc.subs.map((s) => s.key), doc.salts[u.id], ...doc.users[0].keks.map((k) => k.kek), ...doc.users[0].deks.map((d) => d.dek)];
+    for (const text of [JSON.stringify(ok), JSON.stringify(bad), JSON.stringify(partial)]) for (const k of secrets) expect(text).not.toContain(k);
+    // The admin audit: the result, the root's fingerprint and counts, never a key.
+    const rows = (await adminAudit()).filter((r) => r.action === 'keys.export_verified');
+    expect(rows.length).toBe(4);
+    expect(rows.some((r) => r.detail.startsWith('matches:') && r.detail.includes(st.root.fp) && r.detail.includes('DEKs 1/1 open'))).toBe(true);
+    for (const r of rows) for (const k of secrets) expect(r.detail).not.toContain(k);
+    // The owner acting as a user: never.
+    const imp = await impersonate(u.id);
+    expect(await errorOf(await verify(good, STEP, imp))).toBe('impersonating');
+  });
+
   it('one user’s keys for the owner (masked in the page): their salt and KEKs, or their files’ DEKs with names', async () => {
     const view = (body) => post(`${K}/users/${u.id}/view`, body);
     expect((await view({ what: 'keks' })).status).toBe(400);

@@ -4,7 +4,8 @@
 // undefined (or false) argument into that text, where h() would skip it. The
 // pages are the real public/dashboard/*/index.html markup and controllers
 // (My shares, Account, every Admin tab, Admin → Import / export with a file
-// open); the Drive page's views are checked in drive.test.js.
+// open, and the Drive keys card's Verify with every kind of result); the
+// Drive page's views are checked in drive.test.js.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -17,6 +18,7 @@ const fx = vi.hoisted(() => {
   return {
     now,
     fileDoc: null,
+    keys: false,
     profile: {
       user: { id: 'o'.repeat(16), username: 'owner', role: 'owner' },
       impersonatedBy: null,
@@ -71,9 +73,22 @@ vi.mock('../public/js/api.js', async () => {
     revokeShare: vi.fn(async () => ({})),
     listKeys: vi.fn(async () => ({ keys: [{ id: 'k1', name: 'laptop', created: fx.now, last_used: null, expires: null }] })),
     myActivity: vi.fn(async () => ({ rows: [{ id: 1, ts: fx.now, action: 'login', detail: 'ok' }] })),
-    createKey: vi.fn(), revokeKey: vi.fn(), changePassword: vi.fn(), prelogin: vi.fn(),
+    createKey: vi.fn(), revokeKey: vi.fn(), changePassword: vi.fn(), prelogin: vi.fn(async () => ({ salt: 'S'.repeat(22), t: 3 })),
     myPasskeys: vi.fn(async () => ({ ok: true, mode: 'any', mfa: false, required: false, max: 10, recoveryLeft: 20, passkeys: [{ id: 'p1', name: 'phone', created: fx.now, lastUsed: null, synced: true }] })),
     passkeyRegisterOptions: vi.fn(), addPasskey: vi.fn(), removePasskey: vi.fn(), regenerateRecoveryCodes: vi.fn(), setSecondFactor: vi.fn(),
+    // The Drive keys card (Admin → Import / export): its sub-MEKs, and a Verify with every kind of result.
+    keysApi: {
+      // Only for that test (fx.keys): elsewhere the keyring is unavailable, as before.
+      status: vi.fn(async () => { if (!fx.keys) throw new ApiError('unavailable'); return { subs: [{ id: 'mAAAAAAAAAAA', fp: 'abcdefghijk', status: 'current' }] }; }),
+      verifyExport: vi.fn(async () => ({
+        ok: true, now: fx.now, matches: false, root: { result: 'mismatch', fp: null },
+        subs: { inFile: true, list: [{ id: 'mAAAAAAAAAAA', fp: null, from: 0, until: null, status: 'current', result: 'missing' }, { id: 'mBBBBBBBBBBB', fp: 'abcdefghijk', from: 0, until: 0, status: 'retired', result: 'mismatch' }], unknown: ['mZZZZZZZZZZZ'] },
+        users: [
+          { id: 'b'.repeat(16), username: 'bob', salt: 'none', keks: [{ mekId: 'mAAAAAAAAAAA', result: 'unchecked' }, { mekId: 'mZZZZZZZZZZZ', result: 'unknown' }], deks: { total: 3, opens: 0, fails: 1, missing: 1, empty: 1, unchecked: 0, failed: ['N'.repeat(22)], missingIds: [] } },
+          { id: 'c'.repeat(16), username: null, salt: 'unknown', keks: [] },
+        ],
+      })),
+    },
     admin: {
       overview: vi.fn(async () => structuredClone(overview)),
       users: vi.fn(async () => ({ users })),
@@ -207,6 +222,31 @@ describe('no dashboard page shows a stray "null" or "undefined"', () => {
     [...imp.querySelectorAll('button')].find((b) => b.textContent === 'Decrypt').click();
     for (let i = 0; i < 50 && !imp.querySelector('table.part-table'); i++) await settle();
     expect(imp.querySelector('table.part-table')).not.toBeNull();
+    expect(strayText()).toEqual([]);
+  });
+
+  it('Admin → Import / export → Drive keys: the Verify results, with missing names, fingerprints and origin', async () => {
+    const { renderPortable } = await import('../public/dashboard/js/admin-portable.js');
+    document.body.innerHTML = '<div id="toast" role="status"></div>';
+    const panel = document.body.appendChild(document.createElement('div'));
+    fx.keys = true;
+    try { await renderPortable(panel, fx.profile); } finally { fx.keys = false; }
+    expect(panel.querySelector('#kv-set')).not.toBeNull();
+    expect(strayText()).toEqual([]);
+    // A file whose parts are partly malformed, with no origin and a user without a name.
+    fx.fileDoc = {
+      format: 'secbin-keys-export/1', created: 1, root: { key: 'A'.repeat(43) },
+      subs: [{ id: 'mZZZZZZZZZZZ', key: 'not a key' }], salts: { ['b'.repeat(16)]: 'B'.repeat(43), ['c'.repeat(16)]: null },
+      users: [{ id: 'b'.repeat(16), keks: [{ mekId: 'mAAAAAAAAAAA', kek: 'C'.repeat(43) }], deks: [{ id: 'N'.repeat(22), dek: 'D'.repeat(43) }, { id: 'M'.repeat(22) }, {}] }, { id: 'c'.repeat(16) }],
+    };
+    const file = panel.querySelector('#kv-file');
+    Object.defineProperty(file, 'files', { configurable: true, value: [{ size: 10, text: async () => '{}' }] });
+    file.dispatchEvent(new Event('change'));
+    panel.querySelector('#kv-confirm').value = 'pw';
+    panel.querySelector('#kv-verify').click();
+    for (let i = 0; i < 50 && !panel.querySelector('#kv-verdict'); i++) await settle();
+    expect(panel.querySelector('#kv-verdict').dataset.verdict).toBe('incomplete');
+    expect(panel.querySelectorAll('#kv-results li').length).toBeGreaterThan(5);
     expect(strayText()).toEqual([]);
   });
 });

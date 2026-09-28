@@ -95,14 +95,14 @@ const KEYS_ROUTES = [
   dj('POST', '/api/private/admin/keys/root/undo'), dj('POST', '/api/private/admin/keys/root/drop-old'),
   dj('POST', '/api/private/admin/keys/jobs'), dj('DELETE', '/api/private/admin/keys/jobs'), dj('POST', '/api/private/admin/keys/jobs/step'),
   dj('POST', '/api/private/admin/keys/kit'), dj('POST', '/api/private/admin/keys/verify'), dj('POST', '/api/private/admin/keys/restore'),
-  dj('POST', '/api/private/admin/keys/export'), dj('POST', '/api/private/admin/keys/import'),
+  dj('POST', '/api/private/admin/keys/export'), dj('POST', '/api/private/admin/keys/export/verify'), dj('POST', '/api/private/admin/keys/import'),
   dj('POST', `/api/private/admin/keys/users/${DRIVE_USER}/view`), dj('POST', `/api/private/admin/keys/users/${DRIVE_USER}/kit-restore`),
 ];
 const KEYS_PATHS = [
   '/api/private/admin/keys', '/api/private/admin/keys/usage', '/api/private/admin/keys/candidate', '/api/private/admin/keys/subs',
   `/api/private/admin/keys/subs/${KEYS_MEK}`, `/api/private/admin/keys/subs/${KEYS_MEK}/current`, `/api/private/admin/keys/subs/${KEYS_MEK}/show`,
   '/api/private/admin/keys/root', '/api/private/admin/keys/root/show', '/api/private/admin/keys/root/undo', '/api/private/admin/keys/root/drop-old', '/api/private/admin/keys/jobs', '/api/private/admin/keys/jobs/step',
-  '/api/private/admin/keys/kit', '/api/private/admin/keys/verify', '/api/private/admin/keys/restore', '/api/private/admin/keys/export',
+  '/api/private/admin/keys/kit', '/api/private/admin/keys/verify', '/api/private/admin/keys/restore', '/api/private/admin/keys/export', '/api/private/admin/keys/export/verify',
   '/api/private/admin/keys/import', `/api/private/admin/keys/users/${DRIVE_USER}/view`, `/api/private/admin/keys/users/${DRIVE_USER}/kit-restore`,
 ];
 const KEYS_READS = ['/api/private/admin/keys', '/api/private/admin/keys/usage'];

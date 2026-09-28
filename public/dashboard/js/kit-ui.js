@@ -109,11 +109,18 @@ export async function takeFile(input, passInput, sync = () => {}) {
 /** "Pass" / "Warning" / "Fail" / "Not applicable": the status in words, not only in colour. */
 const STATUS = { pass: 'Pass', warn: 'Warning', fail: 'Fail', skip: 'Not applicable' };
 
-/** A kit check's result list (`res`: { verdict, checks: [{ id, status, label, detail }], fixes? }). */
-export function verifyResults(res, id = 'kit-verify') {
-  const verdict = res.verdict === 'complete' ? 'Complete: this kit covers everything in use' : res.verdict === 'failed' ? 'This kit cannot be used' : 'Incomplete: see below';
+const KIT_VERDICTS = { complete: 'Complete: this kit covers everything in use', failed: 'This kit cannot be used', incomplete: 'Incomplete: see below' };
+
+/**
+ * A kit check's result list (`res`: { verdict, checks: [{ id, status, label,
+ * detail }], summary?, fixes? }); `verdicts`: the heading for each verdict
+ * (a kit's by default).
+ */
+export function verifyResults(res, id = 'kit-verify', verdicts = KIT_VERDICTS) {
+  const verdict = verdicts[res.verdict] ?? verdicts.incomplete;
   return h('section.kit-results', { id: `${id}-results`, 'aria-labelledby': `${id}-verdict` },
     h('h3.section-title', { id: `${id}-verdict`, tabindex: '-1', dataset: { verdict: res.verdict }, text: verdict }),
+    res.summary ? h('p', { id: `${id}-summary`, text: res.summary }) : null,
     h('ul.kit-checks', {}, ...res.checks.map((c) => h('li', { dataset: { check: c.id, status: c.status } },
       h(`strong.kit-${c.status}`, { text: `${STATUS[c.status] || c.status}: ` }), `${c.label}. `, h('span.muted', { text: c.detail || '' })))),
     res.fixes && res.fixes.length ? h('ul.plan-list', { 'aria-label': 'What to do' }, ...res.fixes.map((f) => h('li', { text: f }))) : null);

@@ -3026,6 +3026,60 @@ export class Directory extends DurableObject {
     return { ok: true, parts: out };
   }
 
+  /**
+   * Verify a keys export, read-only (Admin → Import / export → Drive keys):
+   * the browser sends check values (keyCheckValue / saltCheckValue), never
+   * these keys, and each is compared here in constant time with what this
+   * server holds or derives. `root`: a check value or null (not in the file);
+   * `subs`: { id: check } or null (no sub-MEKs in the file); `users`: [{ id,
+   * salt?: check, keks?: { mekId: check } }]. → { root: { result, fp }, subs:
+   * { inFile, list: [{ id, fp, from, until, status, result }], unknown },
+   * users: [{ id, username, salt, keks: [{ mekId, result }] }] }; results are
+   * match | mismatch | absent (not in the file) | missing (here, not in the
+   * file) | unknown (in the file, not here) | none (no salt here) |
+   * unchecked (a KEK this server cannot derive now). Nothing
+   * is written but the rate-limit counter (as the kit's Verify).
+   */
+  async keysExportVerify(ownerId, sid, { root = null, subs = null, users = [] } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const rl = this.#hit(`mek.xverify:${sid}`, KIT_VERIFY_MAX, KIT_VERIFY_SEC);
+    if (!rl.ok) return fail(429, 'rate_limited', 'Too many checks: try again in a few minutes.', { retryAfter: rl.retryAfter });
+    const r = this.#keyRoot();
+    const old = this.#keyRoot('mek.rootOld');
+    const rows = this.#mekRows();
+    const opened = await this.#openSubs(r, rows);
+    const t = now();
+    const same = async (given, key, kind) => typeof given === 'string' && !!key && sameCheck(given, await keyCheckValue(key, kind));
+    const out = { root: { result: 'absent', fp: r ? r.fp : null }, subs: { inFile: !!subs, list: [], unknown: [] }, users: [] };
+    if (typeof root === 'string') out.root.result = (await same(root, r?.key, 'mek')) ? 'match' : 'mismatch';
+    for (const m of rows) {
+      const given = subs && typeof subs[m.id] === 'string' ? subs[m.id] : null;
+      const result = given === null ? (subs ? 'missing' : 'absent') : (await same(given, opened.get(m.id).key, 'mek')) ? 'match' : 'mismatch';
+      out.subs.list.push({ id: m.id, fp: m.fp, from: m.from, until: m.until, status: mekStatus(rows, m, t), result });
+    }
+    out.subs.unknown = Object.keys(subs || {}).filter((id) => !rows.some((m) => m.id === id)).slice(0, 200);
+    for (const x of users.slice(0, 5000)) {
+      const u = this.#user(x.id);
+      if (!u || !['owner', 'user'].includes(u.role)) { out.users.push({ id: x.id, username: null, salt: 'unknown', keks: [] }); continue; }
+      const salt = this.#saltOf(u.id);
+      const res = { id: u.id, username: u.username, salt: 'absent', keks: [] };
+      if (typeof x.salt === 'string') res.salt = !salt ? 'none' : sameCheck(x.salt, await saltCheckValue(salt, u.id)) ? 'match' : 'mismatch';
+      for (const [mekId, given] of Object.entries(x.keks || {}).slice(0, 500)) {
+        const s = opened.get(mekId);
+        let result = s ? 'unchecked' : 'unknown'; // unchecked: this server cannot derive it (no salt, or a broken key)
+        if (s && s.key && salt && r) {
+          // During a root change, a KEK under the previous root matches too (items not re-sealed yet open with it).
+          const hit = (await same(given, await deriveKek(r.key, s.key, salt, u.id), 'kek'))
+            || (!!old && (await same(given, await deriveKek(old.key, s.key, salt, u.id), 'kek')));
+          result = hit ? 'match' : 'mismatch';
+        }
+        res.keks.push({ mekId, result });
+      }
+      out.users.push(res);
+    }
+    return { ok: true, now: t, ...out };
+  }
+
   // ── the upgrade of Drives made before the key model v2 ───────────────────
   /** Every account whose Drive was (or may be) made before it, with its state. */
   async migrationList() {

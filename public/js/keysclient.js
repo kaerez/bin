@@ -3,13 +3,14 @@
 // (docs/DRIVE.md §3.1), in the browser: the server hands the key material
 // after the step-up, and it is sealed here under a passphrase (drivekit.js
 // for the kit, exportcrypt.js for an export) before it is saved. Verify
-// sends check values only (never a key); Restore and Import send what the
-// file holds, and the server takes only what is missing or broken there.
+// sends check values only (never a key; an export's DEKs excepted, each
+// tried on its file's first chunk); Restore and Import send what the file
+// holds, and the server takes only what is missing or broken there.
 
 import { keysApi, ApiError } from './api.js';
 import { sealDriveKit, parseDriveKit, openDriveKit, DriveKitError } from './drivekit.js';
 import { sealExport, openExport, ExportCryptError } from './exportcrypt.js';
-import { keyBytes, keyCheckValue, saltCheckValue, effectiveAt, KEY_RE, MEK_ID_RE } from './drivekeys.js';
+import { keyBytes, keyCheckValue, keyFingerprint, saltCheckValue, effectiveAt, KEY_RE, MEK_ID_RE } from './drivekeys.js';
 
 export const KEYS_EXPORT_FORMAT = 'secbin-keys-export/1';
 /** A key's fingerprint as the pages show it (xxxx-xxxx-xxx). */
@@ -132,6 +133,109 @@ export async function openKeysExport(text, passphrase = '') {
   const doc = await openExport(text, passphrase);
   if (!doc || doc.format !== KEYS_EXPORT_FORMAT) throw new ExportCryptError('The decrypted file is not a Drive keys export.');
   return doc;
+}
+
+const UID_RE = /^[A-Za-z0-9_-]{16}$/;
+const has = (v) => (Array.isArray(v) ? v.length > 0 : !!v);
+
+/**
+ * Verify a keys export `doc` (opened here) against this server, read-only:
+ * the root MEK, the sub-MEKs, the user salts and the KEKs go as check values
+ * (never the keys), the DEKs as they are (the server tries each on its file's
+ * first chunk). `step`: the step-up. `date` (seconds; default now): the
+ * sub-MEK in effect then, and whether the file holds it (as a sub-MEK or as
+ * the users' KEKs). → { verdict: 'complete' | 'incomplete', summary, checks,
+ * result } (checks as verifyKeyKit's).
+ */
+export async function verifyKeysExport({ doc, step = {}, date = null } = {}) {
+  // A malformed value in the file is sent as "invalid" (never a match), not an error.
+  const safe = async (fn, fallback) => { try { return await fn(); } catch { return fallback; } };
+  const cv = (key, kind) => safe(() => keyCheckValue(keyBytes(key), kind), 'invalid');
+  const fp = (key) => safe(() => keyFingerprint(keyBytes(key)), null);
+  const users = new Map();
+  const entry = (id) => { if (!users.has(id)) users.set(id, { id }); return users.get(id); };
+  for (const [uid, v] of Object.entries(doc.salts || {})) {
+    const salt = typeof v === 'string' ? v : v && v.salt;
+    if (UID_RE.test(uid)) entry(uid).salt = await safe(() => saltCheckValue(salt, uid), 'invalid');
+  }
+  const names = new Map();
+  for (const u of Array.isArray(doc.users) ? doc.users : []) {
+    if (!UID_RE.test(u?.id ?? '')) continue;
+    const e = entry(u.id);
+    if (typeof u.username === 'string') names.set(u.id, u.username);
+    if (Array.isArray(u.keks)) {
+      e.keks = {};
+      for (const k of u.keks) if (MEK_ID_RE.test(k?.mekId ?? '')) e.keks[k.mekId] = await cv(k.kek, 'kek');
+    }
+    if (Array.isArray(u.deks)) e.deks = u.deks.map((d) => ({ id: d?.id, dek: d?.dek }));
+  }
+  let subs = null;
+  if (has(doc.subs)) {
+    subs = {};
+    for (const s of doc.subs) if (MEK_ID_RE.test(s?.id ?? '')) subs[s.id] = await cv(s.key, 'mek');
+  }
+  const r = await keysApi.verifyExport({ root: doc.root ? await cv(doc.root.key, 'mek') : null, subs, users: [...users.values()], ...step });
+
+  const checks = [];
+  const add = (id, status, label, detail) => checks.push({ id, status, label, detail });
+  add('format', 'pass', 'Decrypts: a Drive keys export', `Made on ${doc.origin || 'an unknown origin'}; the passphrase is right and the file is unchanged.`);
+  if (doc.root) {
+    const mine = fpText(await fp(doc.root.key));
+    add('root', r.root.result === 'match' ? 'pass' : 'fail', 'Root MEK', r.root.result === 'match'
+      ? `It is this server’s root MEK (${mine}).`
+      : `The file’s root MEK (${mine}) is not this server’s (${fpText(r.root.fp)}).`);
+  } else add('root', 'skip', 'Root MEK', 'Not in the file.');
+  if (subs) {
+    for (const s of r.subs.list) {
+      const label = `Sub-MEK ${s.id} (${fpText(s.fp)})`;
+      if (s.result === 'match') add(`sub:${s.id}`, 'pass', label, 'Matches this server’s.');
+      else if (s.result === 'mismatch') add(`sub:${s.id}`, 'fail', label, 'The file’s key with this id is not this server’s.');
+      else add(`sub:${s.id}`, 'warn', label, 'On this server, missing from the file: items sealed under it do not open with the file’s sub-MEKs.');
+    }
+    for (const id of r.subs.unknown) add(`sub:${id}`, 'fail', `Sub-MEK ${id}`, 'In the file, unknown here: this server has no sub-MEK with this id.');
+  } else add('subs', 'skip', 'Sub-MEKs', 'Not in the file.');
+  const SALT = { match: 'the user salt matches', mismatch: 'the user salt differs from this server’s', none: 'this account has no user salt here', unknown: 'no such account here' };
+  for (const u of r.users) {
+    const bits = [];
+    let bad = u.username === null;
+    const sent = users.get(u.id) || {};
+    if (SALT[u.salt]) bits.push(SALT[u.salt]);
+    if (['mismatch', 'none'].includes(u.salt)) bad = true;
+    if (sent.keks) {
+      const by = (res) => u.keks.filter((k) => k.result === res).map((k) => k.mekId);
+      const off = [['differ', by('mismatch')], ['are for no sub-MEK here', by('unknown')], ['cannot be derived here', by('unchecked')]].filter(([, ids]) => ids.length);
+      bits.push(`KEKs: ${by('match').length} of ${u.keks.length} match${off.map(([what, ids]) => `; ${ids.length} ${what} (${ids.join(', ')})`).join('')}`);
+      if (off.length) bad = true;
+    }
+    if (u.deks) {
+      const d = u.deks;
+      const off = [[d.fails, `do not open it${d.failed.length ? ` (${d.failed.join(', ')})` : ''}`], [d.missing, `are for no file here${d.missingIds.length ? ` (${d.missingIds.join(', ')})` : ''}`], [d.unchecked, 'were not checked (one check tries 10,000 at most)']].filter(([n]) => n);
+      bits.push(`DEKs: ${d.opens} of ${d.total} open their file’s first chunk${off.map(([n, what]) => `; ${n} ${what}`).join('')}${d.empty ? `; ${d.empty} for empty files (nothing to check)` : ''}`);
+      if (off.length) bad = true;
+    }
+    const name = u.username ?? names.get(u.id) ?? 'unknown account';
+    add(`user:${u.id}`, bad ? 'fail' : u.deks?.empty ? 'warn' : 'pass', `${name} (${u.id})`, `${bits.join('; ') || 'nothing to check'}.`);
+  }
+  // The date: the sub-MEK in effect then, as a sub-MEK of the file or as the KEKs of its users.
+  const withKeks = r.users.filter((u) => users.get(u.id)?.keks);
+  if (subs || withKeks.length) {
+    const t = Number.isSafeInteger(date) ? date : r.now;
+    const eff = effectiveAt(r.subs.list.map((s) => ({ id: s.id, from: s.from, until: s.until, created: 0 })), t);
+    const hit = eff ? r.subs.list.find((s) => s.id === eff.id) : null;
+    if (!hit) add('date', 'warn', 'The sub-MEK in effect on the chosen date', 'No sub-MEK is in effect on that date.');
+    else {
+      const asSub = hit.result === 'match';
+      const keks = withKeks.filter((u) => u.keks.some((k) => k.mekId === hit.id && k.result === 'match')).length;
+      const inFile = asSub || (withKeks.length > 0 && keks === withKeks.length);
+      add('date', inFile ? 'pass' : 'warn', 'The sub-MEK in effect on the chosen date', `${hit.id} (${fpText(hit.fp)}) — ${asSub ? 'in this file.' : withKeks.length ? `its KEK is in this file for ${keks} of ${withKeks.length} user${withKeks.length === 1 ? '' : 's'}.` : 'not in this file.'}`);
+    }
+  }
+  const fails = checks.filter((c) => c.status === 'fail');
+  const notes = checks.filter((c) => c.status === 'warn').length;
+  const summary = fails.length
+    ? `What does not match: ${fails.map((c) => c.label).join('; ')}.`
+    : `Everything in this file matches this server.${notes ? ` ${notes} note${notes === 1 ? '' : 's'} below.` : ''}`;
+  return { verdict: fails.length ? 'incomplete' : 'complete', summary, checks, result: r };
 }
 
 /** Import (a dry run by default) the chosen parts of a keys export. */

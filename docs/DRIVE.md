@@ -251,7 +251,7 @@ needs the step-up (the password, or a passkey), and is in the admin audit by fin
 with a key (`keys.created`, `keys.candidate`, `keys.added`, `keys.rotated`, `keys.dates`,
 `keys.current`, `keys.removed`, `keys.viewed`, `keys.root_changed`, `keys.root_change_done`,
 `keys.root_old_dropped`, `keys.kit_exported`, `keys.kit_verified`, `keys.restored`,
-`keys.exported`, `keys.imported`).
+`keys.exported`, `keys.export_verified`, `keys.imported`).
 After a change the page says to download a fresh key kit.
 
 **Import / export** (Admin → Import / export → Drive keys): a file of its own
@@ -260,8 +260,22 @@ export passphrase (optional; the page warns when it is empty). The parts: the ro
 sub-MEKs (all, or those chosen); the user salts of the users picked; and for those users their
 KEKs and, optionally, their files' DEKs (all, or the file ids listed). Users are picked with a
 search, Select all / Deselect all (of those shown), an uploaded id list (one per line, or a JSON
-array) and a download of the chosen ids. The server builds the document after the step-up; the
-page shows it masked (each value behind "Show") before it is sealed and saved. An import is
+array) and a download of the chosen ids (a plain text list of user ids, one per line, with no
+keys, to choose the same users again later). "Build the export" puts the parts ticked into it;
+the server builds the document after the step-up; the page shows it masked (each value behind
+"Show"), and "Encrypt and download" seals it under the export passphrase and saves it.
+**Verify** (read-only) checks a saved file before it is relied on: it is decrypted in the
+browser, and after the step-up the server compares it with its own keys and changes nothing.
+The root MEK, the sub-MEKs, the user salts and the KEKs are sent as check values (never the
+keys), compared in constant time with what the Directory holds or derives; each DEK is sent and
+tried on its file's first chunk (the GCM check). The page lists, per part: the root MEK (match
+or not, with both fingerprints); each sub-MEK (match, differs, unknown here, or here but missing
+from the file); each user in the file (the salt, each KEK, and how many DEKs open their file,
+fail, are for no file here, or are for empty files); and, for a chosen date (today by default),
+whether the file holds the sub-MEK in effect then (as a sub-MEK, or as each user's KEK). The
+verdict is "Everything in this file matches this server", or what does not match. No key value
+is returned; the admin audit (`keys.export_verified`) holds the result, the root's fingerprint
+and counts only. An import is
 decrypted in the browser, previewed (a dry run, with the step-up: it checks KEKs and names the
 users), then applied with the step-up; it never
 replaces working keys: the root MEK, sub-MEKs and salts as a key-kit restore; a KEK is derived,
@@ -414,6 +428,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `POST /api/private/admin/keys/jobs` · `POST …/jobs/step` · `DELETE …/jobs` | a re-seal job (`{ from, remove?, current \| reauth }`), or the root change's again (`{ kind: 'root', current \| reauth }`, while the previous root is kept); its next step → `{ job: { kind, from, drives, drive, phase, done, failed, failedIds, pass, verifying, finished, result } }` (`phase` `items`, `atrest`, then for a root change `verify` and `verifyrest`); cancel, with the step-up (not a root change that runs) |
 | `POST /api/private/admin/keys/root/undo` · `…/root/drop-old` | a root change that could not finish (§3), each with the step-up: go back to the previous root (→ `{ fp, job }`; `409 unproven_root` for a previous root put back from a kit that opens nothing here); remove the previous root (`{ confirm: <its fingerprint> }` → `{ lost, ids }`, the count from the root change's check; `409 not_checked` before one) |
 | `POST /api/private/admin/keys/kit` · `…/verify` · `…/restore` | the key kit's content after the step-up (`{ kit, material: { made, current, root, rootOld?, subs, salts } }`); a read-only check by check values (at most 30 per session per 10 minutes); a restore (`{ root?, rootOld?, subs?, salts?, useRoot?, dryRun }`, with the step-up, the preview too → `{ root, rootOld, subs: [{ id, result }], salts: { restored, same, kept, wrong, unknown } }`; `409 in_use` for `useRoot` on an instance with items or link keys) |
+| `POST /api/private/admin/keys/export/verify` | a keys export checked, read-only, with the step-up (§3.2): `{ root?: check, subs?: { id: check }, users: [{ id, salt?: check, keks?: { mekId: check }, deks?: [{ id, dek }] }] }` (check values: drivekeys.js `keyCheckValue` / `saltCheckValue`) → `{ matches, root: { result, fp }, subs: { inFile, list: [{ id, fp, from, until, status, result }], unknown: [ids] }, users: [{ id, username, salt, keks: [{ mekId, result }], deks?: { total, opens, fails, missing, empty, unchecked, failed, missingIds } }] }`; results `match` · `mismatch` · `absent` (not in the file) · `missing` (here, not in the file) · `unknown` (in the file, not here) · `none` (no salt here) · `unchecked`; nothing written (a per-session rate limit, as the kit's Verify); no key returned |
 | `POST /api/private/admin/keys/export` · `…/import` | the keys parts of Import / export (§3.2): `{ root?, subs?: 'all' \| [ids], salts?: [userIds], users?: [{ id, keks, deks: 'all' \| [nodeIds] \| false }] }` → `{ document }` (at most 10 000 DEKs per user); `{ document, take, useRoot?, dryRun }` (with the step-up, the preview too) → `{ keys, users: [{ keks: { match, mismatch, unknown }, deks: { restored, working, failed, missing } }] }` |
 | `POST /api/private/admin/keys/users/<userId>/view` | the owner, with the step-up: `{ what: 'keks' }` → the user's salt and KEKs; `{ what: 'deks', after? }` → a page of their files (id, name, DEK) (`drive.keys_viewed`) |
 | `POST /api/private/admin/keys/users/<userId>/kit-restore` | the owner, with the step-up for every call (§3.1): `{ kit: { id, salt, keks: [{ mekId, kek }] }, resume?: { mek, after } }` (the personal kit as the owner's browser opened it; `400 kit_mismatch` when `kit.id` is not `userId`) → `{ salt: 'restored' \| 'same' \| 'kept' \| 'wrong' \| 'absent', unreadable: [mekIds the server cannot open], done, failed, left: [lost mekIds the kit has no KEK for], next: null \| { mek, after } }` (`next`: call again with it as `resume`); `drive.kit_restored`, `drive.salt_restored` in the admin audit |

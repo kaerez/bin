@@ -2,22 +2,24 @@
 // server for the signed-in owner and encrypted HERE, with a passphrase, before
 // they are saved (public/js/exportcrypt.js); imports are decrypted here,
 // previewed (a dry run on the server) and then applied all-or-nothing. Both
-// ask for the owner's password again. Every part is chosen per user (a table
-// of users × parts, the owner as one of the rows, with Select all / Deselect
-// all per column) when exporting and again when importing. The owner's row
-// holds only its passkeys and recovery codes, never its password, role or API
-// keys. An import never changes an existing account's password, recovery
-// codes, API keys or passkeys: it only sets its role and adds passkeys, so the
-// parts that cannot apply to an existing account are shown but disabled.
+// ask the owner to confirm again: the password, or (the field left empty) a
+// passkey (confirm.js, as for the Drive keys below). Every part is chosen per
+// user (a table of users × parts, the owner as one of the rows, with Select
+// all / Deselect all per column) when exporting and again when importing. The
+// owner's row holds only its passkeys and recovery codes, never its password,
+// role or API keys. An import never changes an existing account's password,
+// recovery codes, API keys or passkeys: it only sets its role and adds
+// passkeys, so the parts that cannot apply to an existing account are shown
+// but disabled.
 // The Drive keys (admin-keysport.js) are a card of their own here, in a file
 // of their own, never part of the account export.
 
 import { admin, ApiError } from '../../js/api.js';
-import { loginProof } from '../../js/pwauth.js';
 import { sealExport, openExport, ExportCryptError } from '../../js/exportcrypt.js';
 import { h, clear, showMsg, formatDate, friendlyError } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { keysPortCard } from './admin-keysport.js';
+import { confirmStep, canUsePasskey } from './confirm.js';
 
 // The label's text is the control's name (2.5.3); a hint sits beside it, outside the label.
 const field = (label, control, hint) => {
@@ -52,6 +54,10 @@ const OWNER_NOTE = 'Only your passkeys and recovery codes can be exported (off b
 const EXISTING = { user: ['role', 'passkeys'], owner: ['passkeys'] };
 const NOT_EXISTING = 'an existing account keeps its own';
 const pw = (label, autocomplete) => h('input.input', { type: 'password', autocomplete, 'aria-label': label, maxlength: '256' });
+/** The step-up field's label: an empty field confirms with a passkey (confirm.js). */
+const MINE = 'Your password (or leave it empty to confirm with a passkey)';
+/** `{ current }` from the typed password (the field is cleared), or `{ reauth }` from a passkey when it is empty. */
+const stepFrom = async (input, profile) => confirmStep(input, profile.user.username, !input.value && await canUsePasskey());
 
 /** Select all / Deselect all for a set of checkboxes (a part column, or the users). */
 function bulk(label, what, boxes) {
@@ -110,7 +116,7 @@ function exportCard(users, profile) {
   const syncNoPass = () => { noPass.hidden = pass1.value !== ''; };
   pass1.addEventListener('input', syncNoPass);
   syncNoPass();
-  const mine = pw('Your password', 'current-password');
+  const mine = pw(MINE, 'current-password');
   const msg = h('p.msg', { role: 'status', hidden: true });
   const go = h('button.btn', { type: 'button', text: 'Encrypt and download' });
 
@@ -123,18 +129,17 @@ function exportCard(users, profile) {
     if (empty) return showMsg(msg, `Choose what to export for "${empty.r.name}", or leave it out.`);
     const owner = chosen.find((c) => c.r.owner)?.parts ?? [];
     if (pass1.value !== pass2.value) return showMsg(msg, 'The two passphrases differ.');
-    if (!mine.value) return showMsg(msg, 'Enter your password to confirm.');
     go.disabled = true;
     showMsg(msg, 'Exporting and encrypting…', false);
     try {
-      const current = await loginProof(profile.user.username, mine.value);
-      const { document } = await admin.exportData({ current, system: anySys ? system : false, owner, users: chosen.filter((c) => !c.r.owner).map((c) => ({ id: c.r.u.id, parts: c.parts })) });
+      const step = await stepFrom(mine, profile);
+      const { document } = await admin.exportData({ ...step, system: anySys ? system : false, owner, users: chosen.filter((c) => !c.r.owner).map((c) => ({ id: c.r.u.id, parts: c.parts })) });
       const text = await sealExport(document, pass1.value);
       download(text, `secbin-export-${location.hostname}-${new Date().toISOString().slice(0, 10)}.json`);
       const what = `Exported ${document.system ? 'the system configuration, ' : ''}${document.owner ? `your ${Object.keys(document.owner).map((k) => (k === 'passkeys' ? 'passkeys' : 'recovery codes')).join(' and ')}, ` : ''}${plural(document.users.length, 'user')}.`;
       showMsg(msg, pass1.value ? `${what} Keep the file and its passphrase apart.` : `${what} No passphrase: anyone with the file can read it.`, false);
       toast('Export saved.');
-      pass1.value = pass2.value = mine.value = '';
+      pass1.value = pass2.value = '';
       syncNoPass();
     } catch (e) {
       showMsg(msg, e instanceof ExportCryptError ? e.message : friendlyError(e));
@@ -150,7 +155,7 @@ function exportCard(users, profile) {
     h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
     h('fieldset.range', {}, h('legend', { text: 'Users (you included) and what to export for each' }), bulks, table, partNotes()),
     h('div.toolbar', {}, field('Export passphrase', pass1, 'Optional'), field('Repeat export passphrase', pass2)), noPass,
-    field('Your password', mine, 'Confirms that it is you.'),
+    field(MINE, mine, 'Confirms that it is you.'),
     h('div.btn-row', {}, go), msg);
 }
 
@@ -297,7 +302,7 @@ function renderReview(out, doc, users, profile) {
       ...pb.cells(u),
       h('td', { dataset: { label: 'Here' } }, status)));
   }
-  const mine = pw('Your password', 'current-password');
+  const mine = pw(MINE, 'current-password');
   const msg = h('p.msg', { role: 'status', hidden: true });
   const planBox = h('div.stack');
   const preview = h('button.btn', { type: 'button', text: 'Preview' });
@@ -337,12 +342,12 @@ function renderReview(out, doc, users, profile) {
     const d = decisions();
     if (d.empty) return showMsg(msg, `Choose what to import for "${d.empty}", or skip it.`);
     if (!d.system && !d.owner && !Object.keys(d.users).length) return showMsg(msg, 'Nothing selected to import.');
-    if (!mine.value) return showMsg(msg, 'Enter your password to confirm.');
     preview.disabled = apply.disabled = true;
     showMsg(msg, dryRun ? 'Checking…' : 'Importing…', false);
     try {
-      const current = await loginProof(profile.user.username, mine.value);
-      const r = await admin.importData({ current, document: doc, decisions: d, dryRun });
+      // The preview too (it names the accounts and what changes), and again for the import.
+      const step = await stepFrom(mine, profile);
+      const r = await admin.importData({ ...step, document: doc, decisions: d, dryRun });
       renderPlan(planBox, r.plan);
       if (dryRun) {
         previewed = JSON.stringify(d);
@@ -351,7 +356,6 @@ function renderReview(out, doc, users, profile) {
       } else {
         showMsg(msg, 'Imported.', false);
         toast('Import applied.');
-        mine.value = '';
         previewed = null;
       }
     } catch (e) {
@@ -375,7 +379,7 @@ function renderReview(out, doc, users, profile) {
     rows.length ? h('fieldset.range', {}, h('legend', { text: 'Users (the owner included) and what to import for each' }), bulks,
       h('div.table-wrap', {}, h('table.table.part-table', {}, h('thead', {}, h('tr', {}, ...['User', 'Import as', 'Action', ...cols.map(([, label]) => label), 'Here'].map((t) => h('th', { text: t })))), body)),
       partNotes()) : null,
-    field('Your password', mine, 'Confirms that it is you.'),
+    field(MINE, mine, 'Confirms that it is you, for the preview and again for the import.'),
     h('div.btn-row', {}, preview, apply), msg, planBox].filter(Boolean));
 }
 

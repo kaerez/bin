@@ -15,8 +15,9 @@ import { fakeServer, seedTree } from './drive-fake-server.js';
 import * as drive from '../public/js/driveclient.js';
 import { clearSessionKey } from '../public/js/drivekeys.js';
 import { parseDriveKit, openDriveKit, sealDriveKit } from '../public/js/drivekit.js';
-import { openExport } from '../public/js/exportcrypt.js';
+import { openExport, sealExport } from '../public/js/exportcrypt.js';
 import { resetThrottle } from '../public/dashboard/js/kit-ui.js';
+import { b64urlFromBytes } from '../public/js/bytes.js';
 
 // "Confirm it's you" (confirm.js): the typed password becomes a { current } proof; an empty field is refused.
 vi.mock('../public/dashboard/js/confirm.js', () => ({
@@ -553,7 +554,7 @@ describe('Admin → Import / export → Drive keys', () => {
     await until(() => checked().length === 1);
     expect(checked()).toEqual(['carolcarolcarol1']);
     const saves = captureSaves();
-    button(card, 'Download the chosen ids').click();
+    button(card, 'Download the chosen ids (a list of user ids, no keys)').click();
     expect(await saves[0].blob.text()).toBe('carolcarolcarol1\n');
     // Build: the step-up, then the masked view.
     $('#kx-root').checked = true;
@@ -600,4 +601,103 @@ describe('Admin → Import / export → Drive keys', () => {
     await until(() => S.importBodies.length === 2);
     expect(S.importBodies[1]).toMatchObject({ dryRun: false, current: 'proof:pw' });
   }, 120000);
+
+  it('the labels say what the id list and the build hold', async () => {
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    const { keysPortCard } = await import('../public/dashboard/js/admin-keysport.js');
+    const card = mount(await keysPortCard({ user: S.user }));
+    expect(button(card, 'Download the chosen ids')).toBeUndefined();
+    expect(button(card, 'Download the chosen ids (a list of user ids, no keys)')).toBeTruthy();
+    expect(card.textContent).toMatch(/a plain text file of the chosen user ids, one per line, with no keys: choose it here again later/);
+    expect($('#kx-build').getAttribute('aria-describedby')).toBe('kx-build-hint');
+    const hint = $('#kx-build-hint').textContent;
+    expect(hint).toMatch(/the chosen users’ salts, KEKs and DEKs \(as ticked\)/);
+    expect(hint).toMatch(/“Encrypt and download” then encrypts it with the export passphrase/);
+  });
+
+  it('verify: a saved export, read-only after the step-up (check values and the DEKs only); a tampered copy shows what does not match', async () => {
+    S = fakeServer({ role: 'owner' });
+    S.otherUsers = [{ id: 'bobbobbobbobbob1', username: 'bob', role: 'user' }];
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    await seedTree(S, { 'a.txt': new TextEncoder().encode('verify me, synthetic') });
+    const { keysPortCard } = await import('../public/dashboard/js/admin-keysport.js');
+    mount(await keysPortCard({ user: S.user }));
+    // An export of everything for the owner's own account.
+    pick($('#kx-ids-file'), [new File([`${S.user.id}\n`], 'ids.txt')]);
+    await until(() => document.querySelector(`#kx-users li[data-id="${S.user.id}"] input`).checked);
+    for (const id of ['#kx-root', '#kx-salts', '#kx-keks']) $(id).checked = true;
+    $('#kx-subs').value = 'all';
+    $('#kx-deks').value = 'all';
+    $('#kx-confirm').value = 'pw';
+    $('#kx-build').click();
+    await until(() => $('#kx-view ul'));
+    const saves = captureSaves();
+    $('#kx-pass').value = 'vp';
+    $('#kx-pass2').value = 'vp';
+    $('#kx-save').click();
+    await until(() => saves.length === 1, 60000);
+    const text = await saves[0].blob.text();
+    const doc = await openExport(text, 'vp');
+    expect(doc.users[0].deks).toHaveLength(1);
+    // The Verify form: the file, its passphrase, the date, the step-up.
+    const set = $('#kv-set');
+    expect(set.querySelector('legend').textContent).toBe('Verify a Drive keys export');
+    expect([...set.querySelectorAll('.field-label')].map((x) => x.textContent)).toEqual(['Drive keys export file to verify', 'Its passphrase', 'The sub-MEK in effect on', 'Your password (or leave it empty to confirm with a passkey)']);
+    expect($('#kv-date').type).toBe('date');
+    expect($('#kv-verify').disabled).toBe(true);
+    const run = async (fileText, password) => {
+      pick($('#kv-file'), [new File([fileText], 'keys.json')]);
+      expect($('#kv-verify').disabled).toBe(false);
+      $('#kv-pass').value = 'vp';
+      $('#kv-confirm').value = password;
+      $('#kv-verify').click();
+    };
+    // Without the step-up: refused, nothing sent.
+    await run(text, '');
+    await until(() => /password/.test($('#kv-msg').textContent));
+    expect(S.xverifyBodies).toBeUndefined();
+    expect($('#kv-out').childElementCount).toBe(0);
+    await run(text, 'pw');
+    await until(() => $('#kv-verdict'), 60000);
+    expect($('#kv-verdict').dataset.verdict).toBe('complete');
+    expect($('#kv-verdict').textContent).toBe('Everything in this file matches this server');
+    expect(document.activeElement).toBe($('#kv-verdict'));
+    expect($('#kv-summary').textContent).toMatch(/^Everything in this file matches this server\./);
+    const status = (id) => $(`#kv-results [data-check="${id}"]`).dataset.status;
+    expect(status('root')).toBe('pass');
+    expect(S.subs.every((x) => status(`sub:${x.id}`) === 'pass')).toBe(true);
+    expect(status(`user:${S.user.id}`)).toBe('pass');
+    expect($(`#kv-results [data-check="user:${S.user.id}"]`).textContent).toMatch(/the user salt matches; KEKs: 1 of 1 match; DEKs: 1 of 1 open their file’s first chunk/);
+    expect(status('date')).toBe('pass');
+    // Only check values went, and the DEKs (tried on their files); the passphrase and password fields are cleared.
+    const sent = S.xverifyBodies[0];
+    expect(sent.current).toBe('proof:pw');
+    const json = JSON.stringify(sent);
+    for (const k of [doc.root.key, ...doc.subs.map((x) => x.key), doc.salts[S.user.id], ...doc.users[0].keks.map((x) => x.kek)]) expect(json).not.toContain(k);
+    expect(sent.users[0].deks).toEqual(doc.users[0].deks);
+    expect([$('#kv-pass').value, $('#kv-confirm').value]).toEqual(['', '']);
+    expect(S.audit.at(-1)).toEqual({ action: 'keys.export_verified', detail: 'matches' });
+    // A tampered copy: another root MEK, a wrong KEK, a broken DEK, a sub-MEK unknown here.
+    const other = () => b64urlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
+    const tampered = await sealExport({
+      ...doc, root: { ...doc.root, key: other() }, subs: [...doc.subs, { id: `m${'Z'.repeat(11)}`, key: other(), from: 0, until: 0 }],
+      users: [{ ...doc.users[0], keks: doc.users[0].keks.map((x) => ({ ...x, kek: other() })), deks: doc.users[0].deks.map((x) => ({ ...x, dek: other() })) }],
+    }, 'vp');
+    await run(tampered, 'pw');
+    await until(() => $('#kv-verdict')?.dataset.verdict === 'incomplete', 60000);
+    expect($('#kv-verdict').textContent).toBe('Not everything in this file matches this server');
+    expect(status('root')).toBe('fail');
+    expect(status(`sub:m${'Z'.repeat(11)}`)).toBe('fail');
+    expect(status(`user:${S.user.id}`)).toBe('fail');
+    expect($(`#kv-results [data-check="user:${S.user.id}"]`).textContent).toMatch(/KEKs: 0 of 1 match; 1 differ .*DEKs: 0 of 1 open their file’s first chunk; 1 do not open it/);
+    expect($('#kv-summary').textContent).toMatch(/^What does not match: Root MEK; Sub-MEK mZ{11}; owner \(owner1ownerowner\)\.$/);
+    // The statuses are in words too, not only in colour.
+    expect($(`#kv-results [data-check="root"] strong`).textContent).toBe('Fail: ');
+    // The results go when the session ends.
+    window.dispatchEvent(new Event('secbin:session-ended'));
+    expect($('#kv-out').childElementCount).toBe(0);
+  }, 180000);
 });

@@ -240,7 +240,8 @@ working.
   decrypting it locally: the parts chosen again per user, a preview (dry run), per-user
   skip/create/update or rename, then an all-or-nothing import. An import never removes or
   overwrites an existing account's credentials: an existing account (the owner included) only
-  gets its role set and the imported passkeys added. Both need the owner's password again.
+  gets its role set and the imported passkeys added. Both need the owner to confirm again (the
+  password, or a passkey).
 - **Public access** (off by default) — a built-in `(public)` account that cannot sign in,
   be deleted or hold API keys. When enabled, the home page shows a composer limited to that
   account's limits and quotas (seeded conservatively: notes only, ≤ 10 views, ≤ 7 days, 10 per

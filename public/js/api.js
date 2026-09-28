@@ -423,6 +423,8 @@ export const keysApi = {
   verify: (body) => request(`${K}/verify`, { method: 'POST', headers: INTENT, body }),
   restore: (body) => request(`${K}/restore`, { method: 'POST', headers: INTENT, body }),
   exportKeys: (body) => request(`${K}/export`, { method: 'POST', headers: INTENT, body }),
+  // A keys export checked against this server, read-only (check values, and the DEKs for their files' first chunk).
+  verifyExport: (body) => request(`${K}/export/verify`, { method: 'POST', headers: INTENT, body }),
   importKeys: (body) => request(`${K}/import`, { method: 'POST', headers: INTENT, body }),
   userView: (uid, body) => request(`${K}/users/${enc(uid)}/view`, { method: 'POST', headers: INTENT, body }),
   // A user's personal kit (opened in the owner's browser): only what the server lost comes back.
