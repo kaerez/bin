@@ -316,13 +316,12 @@ function disabledNotice() {
 function unavailableNotice(e, deps) {
   const owner = deps.user && deps.user.role === 'owner' && !deps.user.impersonating;
   const text = e.reason === 'salt_missing'
-    ? 'This account’s user salt, one of the values its Drive keys are made from, is missing on the server. Nothing was deleted. It comes back from your personal kit (Account → Drive personal kit → Restore) or from the administrator’s key kit.'
+    ? 'This account’s user salt, one of the values its Drive keys are made from, is missing on the server. Nothing was deleted. The administrator puts it back from your personal kit or from the key kit (Admin → Security → Keys).'
     : 'The server’s Drive keys are missing, so no Drive can be opened right now. Nothing was deleted. The administrator restores them from the key kit (Admin → Security → Keys).';
   return h('div.card.drive-notice', { id: 'drive-unavailable', dataset: { reason: e.reason || '' } },
     h('h2.section-title', { text: 'Your Drive cannot be opened right now' }),
     h('p.msg.error', { text }), // content: the page's status line says the title
-    h('div.btn-row', {}, e.reason === 'salt_missing' ? h('a.btn', { href: '/dashboard/account/#drive-kit', text: 'Personal kit' }) : null,
-      owner ? h('a.btn', { href: '/dashboard/admin/#keys', text: 'Admin → Security → Keys' }) : null));
+    owner ? h('div.btn-row', {}, h('a.btn', { href: '/dashboard/admin/#keys', text: 'Admin → Security → Keys' })) : null);
 }
 
 /** The page's status line (startDrive), when there is one. */

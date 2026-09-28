@@ -1,6 +1,7 @@
 // kit-ui.js — the pieces both Drive kits share (docs/DRIVE.md §3.1): the
-// personal kit on Account (userkit.js) and the key kit in Admin → Security →
-// Keys (admin-keys.js). A kit is sealed and opened only in this browser; its
+// personal kit on Account (userkit.js: Download and Verify), and the key kit
+// and the restore of a user's personal kit in Admin → Security → Keys
+// (admin-keys.js). A kit is sealed and opened only in this browser; its
 // FILE is never sent (Verify and Restore read the file the person selects,
 // never a copy kept by the page, and clear it and its passphrase once done).
 // Failed openings are throttled here: two free tries, then 5 s, 10 s, 20 s…

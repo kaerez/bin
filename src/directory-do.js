@@ -347,7 +347,7 @@ const SQL_BATCH = 90;
  * user's own in their activity with the real actor in the admin audit.
  */
 /** The owner's direct actions on a user's Drive keys (admin audit only; driveAdminAction). */
-const ADMIN_DRIVE_ACTIONS = ['drive.escrow_used', 'drive.migrated', 'drive.keys_viewed', 'drive.keys_imported', 'drive.links_retired', 'drive.archive_deleted'];
+const ADMIN_DRIVE_ACTIONS = ['drive.escrow_used', 'drive.migrated', 'drive.keys_viewed', 'drive.keys_imported', 'drive.kit_restored', 'drive.links_retired', 'drive.archive_deleted'];
 /** A generated key candidate (Admin → Security → Keys) is kept this long for the owner's session. */
 const MEK_CANDIDATE_SEC = 600;
 /** Key kit checks per owner session and window (seconds). */
@@ -359,8 +359,9 @@ const KIT_VERIFY_SEC = 600;
 // files arrive, so one row per file could push the user's other entries out.
 const RECEIVED_ACTIONS = ['drive.received_taken_in', 'drive.received_failed', 'drive.received_retried'];
 const DRIVE_ACTIONS = ['drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted',
-  // The personal kit (the user's own), and the user's own browser upgrading their Drive.
-  'drive.kit_exported', 'drive.kit_verified', 'drive.kit_restored', 'drive.migrated', 'drive.links_retired',
+  // The personal kit (the user's own; only the owner restores from one, driveAdminAction), and the
+  // user's own browser upgrading their Drive.
+  'drive.kit_exported', 'drive.kit_verified', 'drive.migrated', 'drive.links_retired',
   ...RECEIVED_ACTIONS];
 const RECEIVED_DETAIL_RE = /^(id=r[A-Za-z0-9_-]{22} )files=([1-9]\d{0,8})$/;
 // A user's own file reads (one row per opened file) are throttled so that they
@@ -2257,7 +2258,8 @@ export class Directory extends DurableObject {
    * it opens something of the Drive's — the KEK for sub-MEK `probe.mek`
    * and / or the field key for `probe.field`, under the root and (during a
    * root change) the previous one (`kekOld`, `fieldKeyOld`); with it: the salt
-   * stored. `extra` (the owner restoring a key kit or an import, `ownerId`):
+   * stored, by the owner only (`ownerId`: a personal kit restored from Admin →
+   * Security → Keys; in the admin audit). `extra` (the owner restoring a key kit or an import, `ownerId`):
    * the kit's own root MEK and sub-MEKs, used where this server has none (or
    * its copy does not open), so that keys lost together are checked together.
    */
@@ -2266,8 +2268,9 @@ export class Directory extends DurableObject {
     if (!u || u.role === 'public' || typeof salt !== 'string' || !KEY_RE.test(salt)) return fail(400, 'invalid', 'Invalid salt.');
     if (this.#saltOf(uid)) return fail(409, 'exists', 'This account has a user salt.');
     if (write) {
+      if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
       const w = this.sql.exec('INSERT OR IGNORE INTO user_salts (user_id, salt, created) VALUES (?, ?, ?)', uid, salt, now()).rowsWritten;
-      if (w) this.#log(uid, uid, 'drive.salt_restored', 'from the personal kit');
+      if (w) this.#log({ id: ownerId, adm: true }, uid, 'drive.salt_restored', 'from the personal kit');
       return { ok: true, written: !!w };
     }
     if (!probe) return { ok: true, kek: null };
@@ -3081,8 +3084,9 @@ export class Directory extends DurableObject {
    * only: opening the user's Drive key of the release before through the
    * escrow for its upgrade (`drive.escrow_used`), the upgrade itself
    * (`drive.migrated`, also a system event in the user's activity), viewing
-   * or importing the user's keys (`drive.keys_viewed`, `drive.keys_imported`;
-   * ids and counts only).
+   * or importing the user's keys (`drive.keys_viewed`, `drive.keys_imported`),
+   * restoring from the user's personal kit (`drive.kit_restored`); ids and
+   * counts only.
    */
   async driveAdminAction(ownerId, userId, action, detail = '') {
     const o = this.#user(ownerId);

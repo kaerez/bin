@@ -184,11 +184,13 @@ with no minimum; the page warns when it is empty or short.
 - **Personal kit** (`secbin-user-kit/2`, Account → Drive personal kit, every user, the owner
   included): the account id, username, user salt and the KEK of every sub-MEK the Drive uses
   (and the current one). With a copy of the stored ciphertext it opens that user's files and
-  reverse-share links offline; on this server it restores the user salt when the server has none
-  (only if the kit's salt opens one of the Drive's items), and items sealed under a sub-MEK the
-  server lost (opened in the browser with the kit's KEK and sealed under the current one).
-  Downloading it needs the step-up (`drive.kit_exported` in the user's activity); the owner
-  acting as a user cannot download, verify or restore one (`403 impersonating`).
+  reverse-share links offline. The Account page offers Download and Verify only, the same for
+  every account (the owner's own included): only the owner restores from a personal kit, in
+  Admin → Security → Keys ("Restore a user's personal kit", below), so no user can change what
+  opens a Drive (and lock the owner out of its files). Downloading it needs the step-up
+  (`drive.kit_exported` in the user's activity); the owner acting as a user cannot download or
+  verify one (`403 impersonating`), and the Account routes of a restore
+  (`…/drive/kit/restore`, `…/drive/kit/items`) answer `403 owner_only` to everyone.
 - **Key kit** (`secbin-key-kit/1`, Admin → Security → Keys): the root MEK, every sub-MEK with its
   dates and every user salt. It restores everything. The download needs the step-up and is
   recorded (`keys.kit_exported`, and what it covers: after a change to the keys or a new account
@@ -200,8 +202,8 @@ with no minimum; the page warns when it is empty or short.
   date picker (today by default; a future date too) shows the sub-MEK in effect then and whether
   the kit holds it. At most 30 checks per session per 10 minutes (`429 rate_limited`); failed
   openings are throttled in the page.
-- **Restore** (both): only what the server lost comes back; working keys are never replaced. For
-  the key kit: the root MEK when there is none (or none of the sub-MEKs opens under the one
+- **Restore** (both, the owner only, in Admin → Security → Keys): only what the server lost comes
+  back; working keys are never replaced. For the key kit: the root MEK when there is none (or none of the sub-MEKs opens under the one
   there), or — with "Use the kit's root MEK" — on an instance with no Drive item or link key yet
   (never during a root change); the previous root MEK of a kit made during a root change, when
   this server has none and an item, a link key or a link key's field layer here opens under it
@@ -214,6 +216,22 @@ with no minimum; the page warns when it is empty or short.
   `wrong`, not written). Keys lost together are checked together (the kit's root and sub-MEKs
   stand in for those this server lacks). The preview and the restore both need the step-up (the
   preview tells which of the file's keys match this server's).
+  For a user's personal kit ("Restore a user's personal kit"): the owner picks the user, then the
+  kit file and its passphrase. The kit opens in the owner's browser for that user only (another
+  account's kit fails there, and the server refuses a kit whose id is not the chosen user's:
+  `400 kit_mismatch`); its salt and KEKs are sent, never the file. The server puts the user salt
+  back only when the account has none and only when it opens one of that Drive's items, link keys
+  or received files (or the Drive holds nothing sealed under it: else `wrong`, not written — the
+  same salt proof as the key kit's); then it opens, with the kit's KEK, the items and link keys
+  sealed under a sub-MEK it can no longer open (missing, or not opening under the root) and seals
+  them again under the current one — the key jobs' re-seal step, compare-and-set; what does not
+  open with the kit stays as it is. Items under a sub-MEK the server still opens are never
+  touched, and the kit's KEKs are never kept. Each call needs the step-up and works a few seconds
+  at most; a large Drive takes more calls, each resuming where the last one stopped (the page
+  asks a password once, a passkey again for each call). Admin audit: `drive.kit_restored` and
+  `drive.salt_restored`, ids and counts only. Neither the key-kit restore nor the import covers
+  this: a personal kit holds KEKs, not the sub-MEKs they are made from, and an import only checks
+  a KEK; the salt check (`saltCheck`) and the re-seal step (`sealStep`) are the same code.
 
 ### 3.2 Admin → Security → Keys
 
@@ -222,8 +240,8 @@ text: the **root MEK** (fingerprint and date; Show; Change root…), the **sub-M
 fingerprint, dates, status — current, scheduled, retired or overlapped —, how many items use
 each; Show, Edit dates, Set as current, Re-seal, Delete; "Add a sub-MEK…" from a date, "Rotate
 now…"), the key kit (Download, Verify, Restore), the upgrade of Drives made before the key
-model v2 (§3.3) and one user's keys (their salt and KEKs, or their files' DEKs with names:
-masked until "Show", hidden again after 60 seconds). A new key is either **generated** by the
+model v2 (§3.3), one user's keys (their salt and KEKs, or their files' DEKs with names:
+masked until "Show", hidden again after 60 seconds) and "Restore a user's personal kit" (§3.1). A new key is either **generated** by the
 server (a candidate shown with its fingerprint: "Use this key" or "Generate another"; kept for
 10 minutes for that session only, used once and only for what it was made for — a root MEK or a
 sub-MEK, `409 candidate_purpose` otherwise; an unused one is deleted once its 10 minutes are over,
@@ -377,8 +395,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `POST /api/private/drive/keys` | `{}` → the session's KEKs (§3): `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — every sub-MEK the Drive's items use, and the current one (`kekOld` while the owner changes the root MEK; `missing` / `broken`: sub-MEKs the Directory does not have or cannot open). `503 keys_missing` without a root MEK, `409 salt_missing` without the account's salt. Not to another site (`403`). The owner acting as the user gets the user's (`drive.keys_used`) |
 | `POST /api/private/drive/kit` | the personal kit's content after the step-up (`current` \| `reauth`): `{ kit: { id, username, userSalt, current, keks: [{ mekId, fp, from, until, kek }] }, missing, broken }` (`drive.kit_exported`); `403 impersonating` for the owner acting as the user (as every kit route) |
 | `POST /api/private/drive/kit/verify` | `{ keks: { mekId: check }, salt: check }` (check values, §3) → `{ complete, salt, keks: [{ mekId, fp, from, until, inUse, current, result }], extra, now }` (`match` \| `mismatch` \| `absent`; read-only, `drive.kit_verified`); at most 30 per session per 10 minutes (`429 rate_limited`) |
-| `POST /api/private/drive/kit/restore` | `{ salt?, current \| reauth }` → `{ salt: 'restored' \| 'same' \| 'kept' \| 'wrong' \| 'absent', unreadable: [mekIds the server cannot open] }` (`drive.kit_restored`; the salt must open one of the Drive's items, link keys or received files, or the Drive holds nothing sealed under it) |
-| `GET /api/private/drive/kit/items?mek=&after=` · `PUT /api/private/drive/kit/items` | the items (with `from`: their sealed fields as stored) and link keys sealed under a sub-MEK the server can no longer open (`409 readable` otherwise), and the same re-sealed in the browser with the kit's KEK under the current one (each checked; compare-and-set on `fromMek`, `fromKs` and `from`) |
+| `POST /api/private/drive/kit/restore` · `GET`, `PUT /api/private/drive/kit/items` | `403 owner_only` for everyone, the owner's own session and the owner acting as a user included: only the owner restores from a personal kit, with `…/admin/keys/users/<userId>/kit-restore` |
 | `GET /api/private/drive/migrate` · `GET …/migrate/items?after=` · `PUT …/migrate` · `POST …/migrate/finish` · `POST …/migrate/retire` | the upgrade of the user's own Drive (§3.3): what is left and the user's own old wraps and salt (for the owner also the sealed escrow keys: with a stolen session they allow offline guessing of the old password, as the release before's `GET /drive` did, only while the Drive waits, and never while impersonating); a page of old items (link keys as the release before sealed them, the field layer taken off); `{ items: [{ id, ks, mek, name, meta?, dek? }], links: [{ id, mek, priv }] }` re-sealed (each checked; `409 mek_not_current`, `400 bad_seal`, `409 already_upgraded` once the Drive is upgraded) → `{ done, skipped, v1Items, v1Links }`; the verification a page per call → `{ verified, next }` or `{ done: true, left, cleanup }` (`409 not_upgraded`, `409 verify_failed`); `{ ids, current \| reauth }` → the links of the release before that the old key does not open, retired → `{ retired, failed, v1Items, v1Links }` (`drive.links_retired`). `403 impersonating` for the owner acting as the user |
 | `GET /api/private/drive/nodes/<id>` | the node and its children: `{ node, children: [...], path: [...ancestors] }` (`root` for the top; `path` root first). Each node: `{ id, parent, kind: 'dir' \| 'file', name, meta, ks, mek, mfp, size, chunks, state, dek, ch, created, updated }` with the sealed fields as stored; an item of the release before has `v1: true` and `fk` instead of `ks`, `mek`, `mfp`, `dek` and `ch`. 404 for an unknown id |
 | `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `{ id }` (`id` chosen by the browser; 409 if taken; every seal checked, §3) |
@@ -397,6 +414,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `POST /api/private/admin/keys/kit` · `…/verify` · `…/restore` | the key kit's content after the step-up (`{ kit, material: { made, current, root, rootOld?, subs, salts } }`); a read-only check by check values (at most 30 per session per 10 minutes); a restore (`{ root?, rootOld?, subs?, salts?, useRoot?, dryRun }`, with the step-up, the preview too → `{ root, rootOld, subs: [{ id, result }], salts: { restored, same, kept, wrong, unknown } }`; `409 in_use` for `useRoot` on an instance with items or link keys) |
 | `POST /api/private/admin/keys/export` · `…/import` | the keys parts of Import / export (§3.2): `{ root?, subs?: 'all' \| [ids], salts?: [userIds], users?: [{ id, keks, deks: 'all' \| [nodeIds] \| false }] }` → `{ document }` (at most 10 000 DEKs per user); `{ document, take, useRoot?, dryRun }` (with the step-up, the preview too) → `{ keys, users: [{ keks: { match, mismatch, unknown }, deks: { restored, working, failed, missing } }] }` |
 | `POST /api/private/admin/keys/users/<userId>/view` | the owner, with the step-up: `{ what: 'keks' }` → the user's salt and KEKs; `{ what: 'deks', after? }` → a page of their files (id, name, DEK) (`drive.keys_viewed`) |
+| `POST /api/private/admin/keys/users/<userId>/kit-restore` | the owner, with the step-up for every call (§3.1): `{ kit: { id, salt, keks: [{ mekId, kek }] }, resume?: { mek, after } }` (the personal kit as the owner's browser opened it; `400 kit_mismatch` when `kit.id` is not `userId`) → `{ salt: 'restored' \| 'same' \| 'kept' \| 'wrong' \| 'absent', unreadable: [mekIds the server cannot open], done, failed, left: [lost mekIds the kit has no KEK for], next: null \| { mek, after } }` (`next`: call again with it as `resume`); `drive.kit_restored`, `drive.salt_restored` in the admin audit |
 | `GET /api/private/admin/drive/migration` · `POST …/drive/migrate/<userId>/escrow` · `GET`/`PUT …/drive/migrate/<userId>[/items]` · `POST …/finish` · `POST …/retire` | the owner: every Drive waiting for its upgrade (disabled accounts too), with what is left (it also runs the escrow clean-up once nothing waits); the user's escrow wrap of the release before and their current KEK, with the step-up (`drive.escrow_used`); the upgrade routes above for that user (retire: the owner's step-up, `drive.links_retired` in the admin audit) |
 | `GET`/`DELETE /api/private/admin/drive/archive` | the owner's archive of the release before (§3.3): `{ items, bytes, received, links }`; deleted with `{ confirm: <username>, current \| reauth }` → `{ items, bytes, links }` (`drive.archive_deleted`) |
 
@@ -469,17 +487,18 @@ stand-in. What each side relies on:
 - **Opening:** `openDrive()` resolves to a `DriveClient` or throws `DriveDisabled` (the page says
   "Drive is not enabled for your account") or `DriveUnavailable` with `reason` `keys_missing`
   (the server's keyring is missing: the administrator restores it from the key kit) or
-  `salt_missing` (the account's salt is missing: the personal kit or the key kit restores it).
+  `salt_missing` (the account's salt is missing: the administrator restores it from the user's
+  personal kit or the key kit; the page names no restore of the user's own).
   There is no unlock, set-up or recovery screen. `client.migration` holds what the upgrade of a
   Drive made before the key model v2 still has to do (§3.3): the page shows its progress
   (`#drive-upgrade`) and runs it; items still sealed the old way are `upgrading` and shown as
   "(waiting for the upgrade)".
 - **The personal kit** is on the Account page (`public/dashboard/js/userkit.js`, the shared
-  pieces in `kit-ui.js`), the key kit and the keyring in Admin → Security → Keys
-  (`admin-keys.js`), the keys parts of Import / export in `admin-keysport.js`. The client
-  functions: `buildPersonalKit`, `verifyPersonalKit`, `restorePersonalKit` (`driveclient.js`),
-  `buildKeyKit`, `verifyKeyKit`, `restoreKeyKit`, `exportKeys`, `openKeysExport`, `importKeys`
-  (`keysclient.js`), `upgradeOwnDrive`, `upgradeUserDrive` (`driveupgrade.js`).
+  pieces in `kit-ui.js`: Download and Verify), the key kit, the keyring and "Restore a user's
+  personal kit" in Admin → Security → Keys (`admin-keys.js`), the keys parts of Import / export
+  in `admin-keysport.js`. The client functions: `buildPersonalKit`, `verifyPersonalKit`
+  (`driveclient.js`), `buildKeyKit`, `verifyKeyKit`, `restoreKeyKit`, `restoreUserKit`,
+  `exportKeys`, `openKeysExport`, `importKeys` (`keysclient.js`), `upgradeOwnDrive`, `upgradeUserDrive` (`driveupgrade.js`).
 - `list(id)` → `{ node, path, children }`: `path` is `[{ id, name }]` from the root (`id` `root`,
   name "Drive", shown as "My Drive") down to and including the node; `children` are decoded
   nodes `{ id, parent, kind: 'dir' | 'file', name, type, mtime, size, chunks, created, updated }`
@@ -548,8 +567,7 @@ stand-in. What each side relies on:
   - the user's own activity (`GET /api/private/me/activity`) lists their Drive actions —
     `drive.folder_created`, `drive.file_uploaded`, `drive.file_read` (a file opened: its first
     chunk read), `drive.item_changed` (renamed, moved), `drive.item_deleted`, the personal kit
-    (`drive.kit_exported`, `drive.kit_verified`, `drive.kit_restored`), `drive.salt_restored`,
-    `drive.migrated` (a system event), and for received files of a reverse share
+    (`drive.kit_exported`, `drive.kit_verified`), `drive.migrated` (a system event), and for received files of a reverse share
     `drive.received_taken_in`, `drive.received_failed`, `drive.received_retried` (one row per
     link, per actor, per hour, adding up the files; [`REVERSE.md`](./REVERSE.md) §7) — and their
     Drive shares (`share.created`, `share.updated`, `share.revoked`). Node ids only, never names.
@@ -562,6 +580,7 @@ stand-in. What each side relies on:
   - the owner's use of a user's keys is the owner's own action, in the admin audit only:
     `drive.keys_used` (the user's KEKs handed to the owner acting as the user; `imp` and `adm`),
     `drive.keys_viewed` (Security → Keys, or an export), `drive.keys_imported`,
+    `drive.kit_restored` and `drive.salt_restored` (a restore from the user's personal kit),
     `drive.escrow_used` (the upgrade through the escrow of the release before),
     `drive.migrated`, `drive.links_retired` and `drive.archive_deleted`; the keyring's actions
     (`keys.*`, §3.2) and `drive.migration_done`, with no subject. Deleting an account's Drive
@@ -685,7 +704,8 @@ API (`test-dom/drive-fake-server.js`), which must stay in step with the server.
 10. **Recipients:** `POST /api/file/<id>/open` adds `refs: [{ chunks, size }]` in `nodes` order;
     `GET /api/file/<id>/chunk/<ref>/<i>` under `X-Download-Grant`.
 11. **Kits:** check values only on verify; the kit file never leaves the browser; the step-up on
-    download and restore.
+    download and restore; a restore is the owner's only (Admin → Security → Keys), for the key kit
+    and for a user's personal kit, and the Account routes of one answer `403 owner_only`.
 12. **Upgrade:** `GET …/migrate` / `…/items` / `PUT …/migrate` / `POST …/migrate/finish` (own, or
     the owner's `…/admin/drive/migrate/<userId>…`); a recovery-code sign-in's response carries
     `driveSpent` while a Drive waits (the spent code's wrap, for the sign-in to open the old key).

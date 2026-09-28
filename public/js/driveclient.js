@@ -915,8 +915,8 @@ function reverseUrl(id, pub) {
 // A file the user downloads and keeps offline: their id, username, user salt
 // and the KEK of every sub-MEK their Drive uses (secbin-user-kit/2), sealed
 // here under a passphrase (drivekit.js). With a copy of the ciphertext, it
-// opens that user's files and reverse-share links offline; on this server it
-// restores their salt and their items if the server lost a sub-MEK.
+// opens that user's files and reverse-share links offline. Only the owner
+// restores from one, on this server (Admin → Security → Keys, keysclient.js).
 
 /** A sub-MEK's fingerprint as the pages show it (xxxx-xxxx-xxx). */
 export const fpText = (fp) => (typeof fp === 'string' && fp.length >= 8 ? `${fp.slice(0, 4)}-${fp.slice(4, 8)}-${fp.slice(8)}` : '—');
@@ -991,68 +991,6 @@ export async function verifyPersonalKit({ user, text, passphrase = '', date = nu
     : 'No sub-MEK is in effect on that date.');
   const verdict = checks.some((c) => c.status === 'fail') ? 'incomplete' : 'complete';
   return { verdict, checks, atDate, keks: r.keks };
-}
-
-/**
- * Restore from a personal kit: the user salt when the server has none, and
- * the items sealed under a sub-MEK the server lost — opened here with the
- * kit's KEK and sealed again under the current one (checked by the server).
- * `step`: the confirmation. → { salt, items, links, left }.
- */
-export async function restorePersonalKit({ user, text, passphrase = '', step, onProgress } = {}) {
-  const u = await whoAmI(user);
-  if (u.impersonating) throw new ApiError('A personal kit is the user’s own: return to your account first.', 403, 'impersonating');
-  const kit = await readPersonalKit(text, passphrase, u);
-  try {
-    const r = await api.kitRestore({ salt: kit.userSalt, ...(step || {}) });
-    const out = { salt: r.salt, items: 0, links: 0, left: [] };
-    const lost = Array.isArray(r.unreadable) ? r.unreadable : [];
-    if (!lost.length) return out;
-    const keys = await fetchKeys(u);
-    const cur = { mek: keys.current, kek: keys.keks.get(keys.current)[0] };
-    for (const mek of lost) {
-      const k = kit.keks.get(mek);
-      if (!k) { out.left.push(mek); continue; }
-      for (let after = null, n = 0; n < 1000; n++) {
-        const page = await api.kitItems(mek, after);
-        const items = [];
-        for (const it of page.items || []) {
-          const at = { userId: u.id, mekId: mek, salt: it.ks };
-          try {
-            const name = await openName(k.kek, at, 'name', sealed(it.name));
-            const meta = it.meta ? await openName(k.kek, at, 'meta', sealed(it.meta)) : null;
-            const dek = it.kind === 'file' ? await openDek(k.kek, at, sealed(it.dek)) : null;
-            const ks = newSalt();
-            const to = { userId: u.id, mekId: cur.mek, salt: ks };
-            items.push({
-              id: it.id, fromMek: mek, fromKs: it.ks, from: it.from, ks, mek: cur.mek, name: await sealName(cur.kek, to, 'name', name),
-              ...(meta ? { meta: await sealName(cur.kek, to, 'meta', meta) } : {}), ...(dek ? { dek: await sealDek(cur.kek, to, dek) } : {}),
-            });
-            if (dek) dek.fill(0);
-          } catch { /* does not open with the kit either */ }
-        }
-        const links = [];
-        for (const l of page.links || []) {
-          try {
-            const pkcs8 = await openLinkKey(k.kek, { userId: u.id, mekId: mek, linkId: l.id }, l.priv);
-            links.push({ id: l.id, mek: cur.mek, fromMek: mek, from: l.from, priv: await sealLinkKey(cur.kek, { userId: u.id, mekId: cur.mek, linkId: l.id }, pkcs8) });
-            pkcs8.fill(0);
-          } catch { /* does not open with the kit either */ }
-        }
-        if (items.length || links.length) {
-          const w = await api.kitItemsPut({ items, links });
-          out.items += items.length;
-          out.links += links.length;
-          if (onProgress) onProgress(out.items + out.links, w);
-        }
-        after = page.next;
-        if (!after) break;
-      }
-    }
-    return out;
-  } finally {
-    for (const k of kit.keks.values()) k.kek.fill(0);
-  }
 }
 
 // Byte helpers some pages use with the kit.
