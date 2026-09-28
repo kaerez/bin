@@ -498,7 +498,7 @@ function banners(client, deps) {
   if (n.kind === 'escrow_changed') {
     const accept = h('button.btn', { type: 'button', id: 'drive-escrow-accept', text: 'Trust the new key' });
     const box = h('div.card.drive-notice', { id: 'drive-escrow-notice', role: 'status' },
-      h('h2.section-title', { text: 'The administrator’s escrow key changed' }),
+      h('h2.section-title', { text: n.tampered ? 'Your Drive’s escrow record does not match' : 'The administrator’s escrow key changed' }),
       h('p', { text: n.text }),
       h('p.muted', { text: `Only trust it if your administrator told you they replaced it; otherwise, tell them. New key fingerprint: ${n.kid}.` }),
       h('div.btn-row', {}, accept), msg);

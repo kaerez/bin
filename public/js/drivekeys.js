@@ -319,10 +319,11 @@ export function sameEscrowKey(a, b) {
 /**
  * What this Drive trusts, sealed under DK (field `escrowPin`, node "drive"):
  * `{ escrow, sign }` — the kid of the escrow key its escrow wrap is for, and
- * the kid of the owner's signing key (null when there was none). A user's
- * browser pins them the first time (trust on first use) and re-wraps to
- * another escrow key only when the pinned signing key signed it (or when the
- * user accepts it).
+ * the kid of the owner's signing key (null when there was none), plus the
+ * owner-reset `epoch` it has seen. A user's browser pins them at the Drive's first
+ * set-up and re-wraps to another escrow key only when the pinned signing key
+ * signed it (or when the user accepts it, or once for an owner reset:
+ * driveclient.js resetApplies).
  */
 export async function sealEscrowPin(dk, pin) {
   const { names } = await deriveSubkeys(dk);

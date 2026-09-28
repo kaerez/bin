@@ -102,19 +102,40 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     `drive.archive_restored`, `drive.archive_deleted`;
   - **maintainer-accepted weakening:** after a start over, users' browsers move their Drives to
     the new escrow key **automatically**, once per owner reset (an epoch one more than the pinned
-    one, the key signed by the reset's signing key), with a one-time notice and
-    `drive.escrow_rewrapped` in the user's activity and the admin audit. During that window,
-    anyone able to change the server's responses could substitute an escrow key; every other
-    unsigned change keeps the notice and "Trust the new key";
+    one, the key signed by the reset's signing key; every time, with no time limit), with a
+    one-time notice and `drive.escrow_rewrapped` in the user's activity and the admin audit.
+    This is not limited to a window after a real reset: anyone able to change the server's
+    responses can report a fabricated reset at any time (and again at each later epoch), and so
+    can anyone with access to the Worker's `AUTHN` secret configuration (AUTHN recovery, then a
+    start over); every other unsigned change keeps the notice and "Trust the new key";
   - **Drives the owner sets up**: creating an account (or resetting the password of a user with no
     Drive yet) with the owner's Drive unlocked sets the user's Drive up in the owner's browser
     (`pw` and `escrow` wraps, the pin; `drive.created_by_owner`); otherwise it waits for the
-    user's first sign-in, and the create form says which. Imports and impersonation never do;
+    user's first sign-in, and the create form says which. For a role without the Drive the
+    owner's browser makes no Drive request (the create response says whether the role has one)
+    and the form says "Drive is not enabled for this role, so no Drive was created."; the
+    server's `409 drive_disabled` stays as a guard. Imports and impersonation never do;
   - **the Drive key never changes**: a password change opens the Drive key first (the old
     password or the passkey's PRF) and writes the new password wrap at once; an admin reset asks
     the owner to unlock their own Drive inline and re-wraps through the escrow (or continues
     without, with a warning). A new password wrap is accepted only with the Drive key's check
     value (`kcv`, HMAC under the key's "files" sub-key), kept since the first set-up.
+- **Drive, security audit round 5** (docs/DRIVE.md §3, §3.1, §3.2, §6; SECURITY.md "Drive keys"):
+  - a user's browser never treats a missing pin, a missing escrow wrap or an escrow wrap for
+    another key than the pinned one as a first use: it shows a tamper notice and re-wraps
+    nothing (only the genuine first set-up pins); a signing key is never added to a pin silently;
+  - the Drive key's check value is required at every first set-up (the user's own, one the
+    owner makes, the owner's own, starting over) and with every later wrap or pin, and is never
+    taken from a later change; a Drive without one takes no key;
+  - replacing a passkey, recovery-code or escrow wrap needs the step-up, as removing one does;
+  - first set-ups and starting over are atomic (a compare-and-set in the Drive object, one key
+    check value, one archive, one reset epoch): of two at once, the second gets `409`, and a
+    browser that lost a first set-up opens the Drive that won;
+  - a Drive with content (or keys) but no wrap takes no first set-up (`409 drive_keyless`): only
+    a kit restore or starting over, each with the step-up;
+  - the owner's own Drive takes no escrow wrap; the admin escrow route returns only the escrow
+    wrap; a user's move to a reset's key is recorded once per epoch, and `escrowReset` and the
+    kit check (`kit/probe`, 30 per session per 10 minutes) are rate limited.
 - **Drive, security audit round 2** (docs/DRIVE.md §3, §6, §10; SECURITY.md "Drive keys"):
   - the owner's escrow key pair changes only with the owner's password or a passkey (the first
     one excepted), and a new escrow key must be signed by the owner's signing key (ECDSA P-256,

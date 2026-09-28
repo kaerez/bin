@@ -492,20 +492,27 @@ async function renderUsersInto() {
 
 /** What happened to a new user's Drive (shown on the create form). */
 let createNote = '';
+const NO_DRIVE_NOTE = 'Drive is not enabled for this role, so no Drive was created.';
 
 /**
  * A new user's Drive (docs/DRIVE.md §3): set up now in this browser, which
- * knows the password just set, when the owner's Drive is unlocked here and
- * the escrow key checks out; else at the user's first sign-in.
+ * knows the password just set, when their role has the Drive (the create
+ * response says so), the owner's Drive is unlocked here and the escrow key
+ * checks out; else at the user's first sign-in. A role without the Drive gets
+ * no request at all (the server's 409 drive_disabled is only a guard, e.g.
+ * against a role change at the same moment, and is handled as the same case).
  */
 async function driveForNewUser(u, password) {
   let r;
-  try { r = await ownerSetsUpUserDrive({ ownerId: profile.user.id, userId: u.id, password }); } catch { r = 'failed'; }
+  if (u.drive?.enabled !== true) r = 'disabled';
+  else {
+    try { r = await ownerSetsUpUserDrive({ ownerId: profile.user.id, userId: u.id, password }); } catch { r = 'failed'; }
+  }
   return {
     created: `${u.username}: their Drive is set up now; they open it with the password you set.`,
     locked: `${u.username}: their Drive is set up at their first sign-in (your own Drive is not unlocked in this tab).`,
     no_escrow: `${u.username}: their Drive is set up at their first sign-in (there is no escrow key yet: open your own Drive once).`,
-    disabled: `${u.username}: their role has no Drive.`,
+    disabled: `${u.username}: ${NO_DRIVE_NOTE}`,
     exists: `${u.username}: they already have a Drive.`,
     mismatch: `${u.username}: their Drive is set up at their first sign-in (the escrow key on the server does not check out: open your own Drive to review it).`,
     failed: `${u.username}: their Drive could not be set up now; it is set up at their first sign-in.`,
@@ -528,11 +535,12 @@ async function driveAfterReset(userId, newPassword) {
   const note = {
     ok: 'Their Drive now opens with the new password (the same Drive key).',
     created: 'They had no Drive yet: it is set up now, with the new password.',
+    disabled: NO_DRIVE_NOTE, // their role lost the Drive at the same moment (the server's 409 guard)
     locked: 'Their Drive was not re-keyed (your own Drive is locked in this tab): they open it with a recovery code or a passkey.',
     failed: 'Their Drive could not be re-keyed: they open it with a recovery code or a passkey.',
     mismatch: 'Their Drive was not re-keyed: the escrow public key on the server is not yours (it may have been replaced). Open your own Drive to review it.',
   }[r];
-  if (note) toast(note, r === 'ok' ? {} : { error: true });
+  if (note) toast(note, r === 'ok' || r === 'created' || r === 'disabled' ? {} : { error: true });
 }
 
 async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
@@ -548,7 +556,8 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   const setBtn = h('button.btn', { type: 'button', text: 'Set password' });
   // The user's Drive keeps its key: the new password's wrap is made here
   // through your escrow key, which needs your own Drive unlocked in this tab.
-  const withDrive = d.effective?.all?.driveEnabled !== false;
+  // A role without the Drive: nothing is asked and no Drive request is made.
+  const withDrive = d.effective?.all?.driveEnabled === true;
   const ownerLocked = () => withDrive && !loadSessionKey(profile.user.id);
   const unlockPw = h('input.input', { type: 'password', id: 'reset-own-pw', autocomplete: 'current-password', 'aria-label': 'Your password, to unlock your own Drive', maxlength: '1024' });
   const skip = h('input', { type: 'checkbox', id: 'reset-skip-drive' });

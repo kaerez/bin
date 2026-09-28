@@ -308,7 +308,7 @@ describe('cache policy (Workers Caching)', () => {
     record('POST /api/private/drive/folders (no Drive, 403)', await get('/api/private/drive/folders', { method: 'POST', cookie: noDrive.cookie, body: {} }));
     record('GET /api/private/drive (user, 200)', await get('/api/private/drive', { cookie: dc }));
     record('GET /api/private/drive (key, 403)', await get('/api/private/drive', { headers: { authorization: `Bearer ${all}` } }));
-    record('PUT /api/private/drive/keys (first set-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }, await escrowWrap()] } }));
+    record('PUT /api/private/drive/keys (first set-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: wrapData() }, await escrowWrap()], escrowPin: enc(40), kcv: KCV } }));
     record('PUT /api/private/drive/keys (replace without step-up, 400)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }] } }));
     record('PUT /api/private/drive/keys (step-up, 200)', await get('/api/private/drive/keys', { method: 'PUT', cookie: dc, headers: intent, body: { set: [{ kind: 'pw', ref: 'pw', data: wrapData() }], current: proofFor(USER_PW), kcv: KCV } }));
     record('GET /api/private/drive/keys (405)', await get('/api/private/drive/keys', { cookie: dc }));

@@ -4,7 +4,7 @@
 // finalize) with the real client crypto.
 import { env, SELF, runInDurableObject } from 'cloudflare:test';
 import { makeUser, fetchJson, intent, ORIGIN, proofFor, USER_PW, salt16 } from './helpers.js';
-import { enableDrive, escrowWrap } from './drive-helpers.js';
+import { enableDrive, escrowWrap, enc, KCV } from './drive-helpers.js';
 import {
   setReverseStretcher, createReverseKey, sealReversePriv, linkProof, linkHash, passwordGate, passwordProof,
   sealNote, sealUpload, newReverseId, newNodeId,
@@ -33,12 +33,13 @@ export async function receiver(name, limits = {}, { keys = true } = {}) {
 
 /**
  * Set up the Drive as the user's browser does at sign-in (docs/DRIVE.md §3):
- * the salt, a password wrap and the escrow wrap for the owner's current key
- * (opaque stand-ins: the server only checks their form).
+ * the salt, a password wrap, the escrow wrap for the owner's current key, the
+ * sealed escrow pin and the key check value (a first set-up needs both;
+ * opaque stand-ins: the server only checks their form).
  */
 export async function setUpDrive(cookie) {
   const pw = { kind: 'pw', ref: 'pw', data: `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}` };
-  const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie, headers: intent, body: { driveSalt: salt16(), set: [pw, await escrowWrap()] } });
+  const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie, headers: intent, body: { driveSalt: salt16(), set: [pw, await escrowWrap()], escrowPin: enc(40), kcv: KCV } });
   if (r.status !== 200) throw new Error(`drive set-up: ${r.status} ${await r.text()}`);
 }
 

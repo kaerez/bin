@@ -70,7 +70,7 @@ describe('the owner recovery kit (server)', () => {
     o.s = await createSigningKeyPair();
     o.sealed1 = await sealEscrowPriv(o.dk, o.e1.privateKey);
     const r = await keys(oc, {
-      driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], escrowPub: o.e1.publicJwk, escrowPriv: o.sealed1,
+      driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], kcv: KCV, escrowPub: o.e1.publicJwk, escrowPriv: o.sealed1,
       escrowSignPub: o.s.publicJwk, escrowSignPriv: await sealSigningKey(o.dk, o.s.privateKey), escrowSig: await endorseEscrowKey(o.s.privateKey, o.e1.publicJwk),
     });
     expect(r.status).toBe(200);
@@ -82,10 +82,10 @@ describe('the owner recovery kit (server)', () => {
     a.u = await makeUser('kit-a');
     await enableDrive(a.u.id);
     a.dk = createDriveKey();
-    expect((await keys(a.u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, await wrapEscrow(a.dk, o.e1.publicJwk)], escrowPin: await sealEscrowPin(a.dk, { escrow: o.kid1, sign: null }) })).status).toBe(200);
-    // A user's re-wrap to the same key changes no escrow key and no version.
+    expect((await keys(a.u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, await wrapEscrow(a.dk, o.e1.publicJwk)], escrowPin: await sealEscrowPin(a.dk, { escrow: o.kid1, sign: null }), kcv: KCV })).status).toBe(200);
+    // A user's re-wrap to the same key (a replacement: the step-up) changes no escrow key and no version.
     const before = await publicKeys();
-    expect((await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e1.publicJwk)] })).status).toBe(200);
+    expect((await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e1.publicJwk)], kcv: KCV, current: proofFor(USER_PW) })).status).toBe(200);
     expect(await publicKeys()).toEqual(before);
     // The user sees no owner-only kit data.
     const ust = await drive(a.u.cookie);
@@ -291,7 +291,7 @@ describe('the owner recovery kit (server)', () => {
   it('a user\'s move to the reset\'s key is recorded in their activity (system event) and the admin audit', async () => {
     const bad = await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e3.publicJwk)], escrowReset: 2 });
     expect(bad.status).toBe(400);
-    const r = await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e3.publicJwk)], escrowPin: await sealEscrowPin(a.dk, { escrow: await escrowKeyId(o.e3.publicJwk), sign: null, epoch: 1 }), escrowReset: 1 });
+    const r = await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e3.publicJwk)], escrowPin: await sealEscrowPin(a.dk, { escrow: await escrowKeyId(o.e3.publicJwk), sign: null, epoch: 1 }), escrowReset: 1, kcv: KCV });
     expect(r.status).toBe(200);
     const mine = (await activity(a.u.cookie)).find((x) => x.action === 'drive.escrow_rewrapped');
     expect(mine).toBeTruthy();
@@ -393,6 +393,27 @@ describe('the owner sets up a new user’s Drive (Admin → Users)', () => {
     // The pw wrap after a reset: only as a wrap of the same DK.
     const bad = await adminKeys(oc, c.id, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], kcv: KCV.replace(/^./, KCV[0] === 'A' ? 'B' : 'A') });
     expect(await errorOf(bad)).toBe('kcv_mismatch');
+  });
+
+  it('the create response says whether the role has the Drive; for a role without one the server still refuses (409 drive_disabled) and stores nothing', async () => {
+    const created = async (username) => {
+      const r = await fetchJson('/api/private/admin/users', { method: 'POST', cookie: oc, body: { username, salt: salt16(), t: 3, proof: proofFor(USER_PW) } });
+      expect(r.status).toBe(201);
+      return (await r.json()).user;
+    };
+    // The Default role has no Drive: the owner's browser makes no set-up request for it.
+    const u = await created('kit-create-nodrive');
+    expect(u.drive).toEqual(expect.objectContaining({ enabled: false, used: 0 }));
+    // Were it sent anyway (a race with a role change), the guard stays: 409, no wrap, no pin, no audit entry.
+    const dk = createDriveKey();
+    const r = await adminKeys(oc, u.id, await firstBody(dk, await escrowNow()));
+    expect(r.status).toBe(409);
+    expect(await errorOf(r)).toBe('drive_disabled');
+    expect(await rows(u.id, 'SELECT kind FROM wraps')).toEqual([]);
+    expect((await audit(u.id)).some((x) => x.action === 'drive.created_by_owner')).toBe(false);
+    // With the Drive on its role, the same request sets it up.
+    await enableDrive(u.id);
+    expect((await adminKeys(oc, u.id, await firstBody(dk, await escrowNow()))).status).toBe(200);
   });
 
   it('refused while impersonating, and for a role without a Drive; an imported account has no Drive until it signs in', async () => {

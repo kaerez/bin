@@ -276,7 +276,9 @@ many files arrive.
 - The owner's links' private keys are sealed under the owner's DK. When the owner starts over
   without a recovery kit, the old DK goes into the archive with the rest of the Drive, so every
   link of the owner's Drive is tied to that archive (`reverse.agen = gen`; a link an earlier
-  archive already holds stays with it) and the active ones are **paused** (`status = 'paused'`):
+  archive already holds stays with it) and the active ones are **paused** (`status = 'paused'`),
+  in the same Drive-object step that archives the Drive and writes the new keys (a second start
+  over at the same moment gets `409 drive_unlockable` and pauses nothing):
   - `open` and `begin` answer `409 paused` once the link proof matches (no session, no human
     check, no password check); the uploader page shows "This link is not accepting files right
     now"; any other uploader route answers as for an ended session (`403 bad_grant`, counted);

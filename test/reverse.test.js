@@ -31,7 +31,19 @@ import {
 } from './reverse-helpers.js';
 
 let oc;
-beforeAll(async () => { oc = await owner(); });
+beforeAll(async () => {
+  oc = await owner();
+  // The owner's Drive, set up as the owner's browser does at the first sign-in
+  // (one request: the salt, a pw wrap, the key check value and the escrow key
+  // pair; stand-ins, the server only checks their form), before any user's
+  // Drive needs the escrow key. An owner Drive holding escrow keys but no wrap
+  // takes no later first set-up (R5-L4).
+  const escrowPub = { kty: 'EC', crv: 'P-256', x: b64urlFromBytes(randomBytes(32)), y: b64urlFromBytes(randomBytes(32)) };
+  const escrowPriv = `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(150))}`;
+  const pw = { kind: 'pw', ref: 'pw', data: `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}` };
+  const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [pw], kcv: KCV, escrowPub, escrowPriv } });
+  expect(r.status).toBe(200);
+});
 afterEach(() => vi.useRealTimers());
 
 const audit = async (subject) => (await (await fetchJson(`/api/private/admin/audit?user=${subject}`, { cookie: oc })).json()).rows;
@@ -687,8 +699,8 @@ describe('the owner starting over: reverse links paused, resumed, revoked', () =
 
   it('pauses the owner\'s links: no new session or upload (409 paused), open sessions end, received items kept exactly as they arrived; other users\' links go on', async () => {
     o.id = (await (await fetchJson('/api/private/me', { cookie: oc })).json()).user.id;
-    // The owner's Drive, set up under DK (the helpers' key), with a folder and a link on it.
-    expect((await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }], kcv: KCV } })).status).toBe(200);
+    // The owner's Drive (set up at the first sign-in, beforeAll; links sealed under DK, the helpers' key), with a folder and a link on it.
+    expect((await drive(oc)).wraps.map((w) => w.kind)).toEqual(['pw']);
     o.folder = (await mkdir(oc)).id;
     o.link = await newReverse(oc, { folder: o.folder, confirm: false, current: proofFor(o.pw), label: 'inbox' });
     expect(o.link.res.status).toBe(201);

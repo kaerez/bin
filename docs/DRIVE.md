@@ -96,12 +96,20 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
      confirmation.
      **Pin.** Each user's browser pins `{ escrow, sign }` — the kid of the escrow key its wrap is
      for and the kid of the signing key that signed it (null when there was none) — sealed under
-     DK as the Drive's `escrowPin` (the names key, field `escrowPin`, node id `drive`), on first
-     use. It re-wraps to a new escrow key by itself only when the pinned signing key signed it;
-     otherwise the Drive page shows the user a notice with the new key's fingerprint and "Trust
-     the new key", which re-wraps and re-pins. The one exception, accepted by the maintainer, is
-     an owner reset (starting over without a kit, §3.2): the pin also holds the owner-reset
-     epoch it has seen, and a user's browser moves to the reset's key by itself once per reset.
+     DK as the Drive's `escrowPin` (the names key, field `escrowPin`, node id `drive`), at the
+     Drive's first set-up (the server requires it then). It re-wraps to a new escrow key by
+     itself only when the pinned signing key signed it; otherwise the Drive page shows the user
+     a notice with the new key's fingerprint and "Trust the new key", which re-wraps and
+     re-pins. A signing key is never added to a pin silently. **Only the genuine first set-up in
+     this browser trusts without a pin:** every Drive has a pin and an escrow wrap from its
+     first set-up, and the wrap is always for the pinned key (both change in the same request),
+     so at a later unlock a Drive without a pin (or with one that does not open), without an
+     escrow wrap, or whose wrap is for another kid than the pinned one gets the tamper notice
+     ("Your Drive's escrow record does not match") and nothing is re-wrapped or re-pinned; "Trust
+     the new key" then writes the pin (and a wrap, unless the wrap is already for that key). The
+     one exception, accepted by the maintainer, is an owner reset (starting over without a kit,
+     §3.2): the pin also holds the owner-reset epoch it has seen, and a user's browser moves to
+     a reset's key by itself once per reset, every time (no time limit).
      **Rotation.** The owner replaces the escrow key pair from the Drive page (with the step-up);
      the new key is signed by the owner's signing key, so each user's browser re-wraps to it at
      its next unlock. Until then the old private key stays in the owner's Drive, **sealed under the
@@ -115,7 +123,10 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   `passkey`; recovery code → `recovery`), then keeps DK in the tab's `sessionStorage`
   (`secbin_dk`, base64url, with the user id in `secbin_dk_uid` so another account's page — e.g.
   while impersonating — never uses it) until sign-out or the tab closes. If none works, the
-  Drive page asks. A Drive whose root has content but no wraps is never given a new key.
+  Drive page asks. A Drive whose root has content but no wraps is never given a new key: the
+  browser does not try, and the server refuses a first set-up of a Drive with content, a key
+  check value or sealed owner keys but no wrap (`409 drive_keyless`); the ways out are a kit
+  restore and, for the owner, starting over, each with the step-up.
 - **Automatic set-up.** At a user's first successful sign-in while their role has the Drive
   (no wraps yet), the login page creates DK with no user action: a `pw` wrap (the password just
   accepted), the `escrow` wrap for the owner's current escrow key with the pin, and a `passkey`
@@ -138,9 +149,15 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   while impersonating), only for a user whose role has the Drive and whose Drive has no wrap
   yet, and only with exactly one `pw` and one `escrow` wrap for the current kid, the salt, the
   pin and the key check value (below); it is `drive.created_by_owner` in the admin audit and a
-  system event (no detail) in the user's activity. When the owner's Drive is locked or there is
-  no escrow key yet, the account is still created and its Drive is set up at the user's first
-  sign-in; the create form says which happened. Imported accounts (a verifier, never a
+  system event (no detail) in the user's activity. The owner's browser first checks that the
+  user's role has the Drive (the create response's `user.drive.enabled`; for a reset, the user's
+  role options): when it does not, it makes no Drive request for that user and the create form
+  says "Drive is not enabled for this role, so no Drive was created."; if the role gets the
+  Drive later, it is set up at the user's first sign-in. The server's `409 drive_disabled`
+  stays as the guard (a role changed at the same moment), and the page shows it as the same
+  case. When the owner's Drive is locked or there is no escrow key yet, the account is still
+  created and its Drive is set up at the user's first sign-in; the create form says which
+  happened. Imported accounts (a verifier, never a
   password) and a user the owner impersonates never get a Drive this way.
 - **The Drive key never changes.** A password change by the user and an admin reset keep the
   same DK: only the `pw` wrap is replaced, so file keys, passkey, recovery-code and escrow
@@ -153,11 +170,25 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   continue without unlocking: the reset goes through, DK is untouched, and the form says the
   user then opens the Drive with a recovery code, a passkey or a recovery kit (or the owner
   resets again with the Drive unlocked). **Key check value (`kcv`):** `HMAC-SHA-256(the raw
-  HKDF "files" sub-key of DK, "secbin-drive/v1 kcv")`, base64url. The browser sends it with
-  the first set-up and with every later `pw` wrap; the server keeps the first one it gets and
-  accepts a later `pw` wrap (the user's own change, an admin reset, a restore) only with the
-  same value, compared in constant time (`400 kcv_required`, `409 kcv_mismatch`). It reveals
+  HKDF "files" sub-key of DK, "secbin-drive/v1 kcv")`, base64url. It is required with every
+  first set-up (the user's own, one the owner makes, the owner's own, starting over) and stored
+  with the first wraps in the same transaction; it is never taken from a later change. Every
+  later wrap or pin written (a `pw` wrap after the user's own change, an admin reset or a
+  restore; a passkey, recovery-code or escrow wrap; the pin) must carry the same value,
+  compared in constant time in the Worker and again in the Drive object (`400 kcv_required`,
+  `409 kcv_mismatch`); a Drive without one takes no key at all (`409 kcv_missing`). It reveals
   nothing about DK and stops a wrap of another key. No route replaces or removes DK itself.
+  **Replacing a wrap** — a passkey or recovery-code wrap with other data, or the escrow wrap
+  with another wrap for the same escrow key — needs the step-up, as removing one does; a re-wrap
+  to a new escrow key is not a replacement. The owner's own Drive has no escrow wrap
+  (`400 escrow_own`).
+- **Races.** Every first set-up is a compare-and-set in the Drive object on "a new Drive" (no
+  wrap, no content, no key check value, no sealed owner key), with the first wraps, the pin and
+  the key check value in one transaction: of two at once (two tabs; or the owner setting up a
+  new account's Drive while the user's first sign-in does) one wins and the other gets
+  `409 drive_exists`; the browser that lost opens the Drive that won with its password (or
+  passkey). The owner's first escrow key is a compare-and-set in the Drive object and the
+  Directory (`409 escrow_exists`).
 - **Pages with third-party script.** The Account page (Turnstile) moves the tab's keys out of
   `sessionStorage` into its module's memory before anything can load the Turnstile script
   (`holdSessionKeys`), uses them from there, and puts them back only when the server has no
@@ -244,7 +275,9 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   file, then `POST /api/private/drive/kit { event: "exported", current | reauth }`: the server
   checks the step-up (as on Account), records `kit: { version, kid, at }` of the current escrow
   key in the owner's Drive, and `drive.kit_exported` (with the version) in the admin audit; the
-  file is given out only then.
+  file is given out only then. The step-up gates only that record and the page's download: the
+  file is sealed in the page from the DK already in the tab, so script in the tab has DK
+  anyway.
 - **Status and notice.** The export screen and the owner's Drive page show the escrow key's
   version, its kid's short fingerprint (`xxxx-xxxx`) and creation date, and the latest kit (its
   version and download date, or "never"). When the recorded kit's kid is not the current escrow
@@ -265,7 +298,7 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   one ("Current", or "Older version N: still works through the Drive key, but download a fresh
   kit for a complete snapshot"); and, as a live proof, one user's escrow wrap per kid in use
   opens (`GET /api/private/drive/kit/probe`, each recorded as `drive.escrow_used`, the DK found
-  discarded at once). The verdict is "Complete backup" or what is missing or stale, with the
+  discarded at once; at most 30 calls per owner session per 10 minutes, `429 rate_limited`). The verdict is "Complete backup" or what is missing or stale, with the
   fix (download a fresh kit). Nothing is written but the audit: `POST …/kit { event:
   "verified", verdict, issues?, version? }` → `drive.kit_verified`.
 - **Restore from kit** (the export screen, the Drive page, and the Drive page's unlock screen;
@@ -277,12 +310,16 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   missing or wrong is re-sealed from the snapshot under DK and put back
   (`PUT /api/private/drive/kit/keys`, with the step-up, `drive.kit_keys_restored`): the escrow
   key only for `escrowPub`, the signing key only for `escrowSignPub`, an earlier key only for a
-  kid still in `drive.escrowKid:*`; nothing public changes (no key, no version, no wrap). DK goes
+  kid still in `drive.escrowKid:*`; nothing public changes (no key, no version, no wrap). The
+  server checks the public key the browser claims for each sealed key; it cannot check that the
+  sealed data is that key (only a browser with DK can), so a wrong blob sent with the step-up
+  replaces a good one and the owner's next unlock shows the escrow-key alert. DK goes
   into the tab's slot and a fresh `pw` wrap is written (with the key check value; no second
   confirmation after AUTHN recovery, which marks it stale). A kit for the Drive **before a start
   over** restores that archive instead (§3.2). A kit that does not match is refused with a clear
   error and nothing is written; failed openings are throttled in the page (two free tries, then
-  5 s, 10 s, 20 s… up to a minute).
+  5 s, 10 s, 20 s… up to a minute). That throttle is in the page's memory only (a reload starts
+  it again); guessing a kit's passphrase offline needs only the file.
 - **AUTHN owner recovery** still removes the owner's passkeys and recovery codes; it also drops
   their Drive wraps and marks the owner's Drive `pwStale` (the old `pw` wrap opens only with the
   old password), and changes no key. After it, the owner's Drive page (nothing the owner signs
@@ -307,21 +344,37 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   escrow pair counts as a rotation (the version goes up); the Directory records the **owner
   reset** `drive.ownerReset { epoch, kid, signPub, at }` (public; the epoch is one more than the
   last); `drive.owner_reset` goes to the admin audit; the fresh-kit notice follows. No user's
-  Drive or wrap is touched.
+  Drive or wrap is touched. **Atomic:** the Drive object re-checks "nothing opens it", archives,
+  pauses the owner's reverse links (docs/REVERSE.md §9) and writes the new keys and key check
+  value in one step, then the Directory sets the new
+  public keys and the reset in one transaction, a compare-and-set on the epoch the request read
+  (`409 reset_conflict`); a second start over at the same moment gets `409 drive_unlockable`:
+  one archive, one epoch. A failure between the two steps leaves the owner's Drive on the new
+  keys and the Directory on the old public key: the owner's next unlock shows the escrow-key
+  alert, and users get the notice rather than an automatic move.
 - **Users move automatically** (the maintainer's accepted exception to the signed-key pin, for
-  this case only). At a user's next unlock their browser re-wraps DK to the new escrow key and
-  re-pins `{ escrow, sign, epoch }` by itself only when the server reports an owner reset whose
-  epoch is exactly one more than the pinned one (a pin without an epoch counts as 0), whose
-  signing key is the server's `escrowSignPub`, and whose signing key signed the escrow key. The
-  epoch in the sealed pin means the same reset never applies twice. The user sees once "Your
-  administrator rotated a security key; nothing for you to do."; the server records
-  `drive.escrow_rewrapped` (the new key's fingerprint) as a system event in the user's activity
-  and, with the user, in the admin audit (`escrowReset: <epoch>` on the key change). Any other
-  unsigned change — no reset, a skipped epoch, a signature by another key — keeps the notice and
-  "Trust the new key", with no re-wrap. Signed rotations stay automatic as before. During that
-  window, anyone able to change the server's responses (a compromised Cloudflare account, a
-  malicious deploy or an insider) could substitute an escrow key and receive users' Drive keys
-  at their next unlock; in every other case the signed-key pin applies.
+  this case only; all its rules are in `resetApplies`, `public/js/driveclient.js`). At a user's
+  next unlock their browser re-wraps DK to the new escrow key and re-pins `{ escrow, sign,
+  epoch }` by itself only when the server reports an owner reset whose epoch is exactly one
+  more than the pinned one (a pin without an epoch counts as 0) and whose signing key is the
+  server's `escrowSignPub` and signed the escrow key. There is no time limit (the maintainer's
+  decision: automatic, with no user approval, every time): a second genuine reset soon after
+  the first moves the Drive again. The epoch in the sealed pin means the same reset never
+  applies twice. The user sees once "Your administrator rotated a security key; nothing
+  for you to do."; the server records `drive.escrow_rewrapped` (the new key's fingerprint) as a
+  system event in the user's activity and, with the user, in the admin audit (`escrowReset:
+  <epoch>` on the key change), once per user and epoch (a repeat writes nothing; at most 5
+  `escrowReset` requests per user per 10 minutes, `429 rate_limited`). Any other unsigned change
+  — no reset, a skipped or repeated epoch, a signature by another key — keeps the notice and
+  "Trust the new key", with no re-wrap. Signed rotations stay automatic as before (and keep the
+  pinned epoch).
+- **What the exception allows.** It is not limited to a window after a genuine reset: nothing
+  a user's browser holds ties a reported reset to a real start over. Anyone able to change the
+  server's responses (a compromised Cloudflare account, a malicious deploy or an insider) can
+  report a fabricated reset at any time, with their own signing and escrow keys, and receive
+  users' Drive keys at their next unlock, and again at each later epoch. So can anyone able to complete AUTHN owner recovery and then start over, which
+  means anyone with access to the Worker's `AUTHN` secret configuration. The signed-key pin
+  applies to every other unsigned change.
 - **The archive back.** A kit for the old DK brings it back with "Restore from kit": the
   browser finds the archive whose sealed escrow key opens with the kit's DK
   (`GET /api/private/drive/archive/<gen>?after=` pages its items and sealed keys), opens the
@@ -375,7 +428,8 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
     `parent = NULL` and id `root`; a folder cannot become its own descendant.
   - `wraps(kind TEXT, ref TEXT, data TEXT, PRIMARY KEY(kind, ref))` (kinds `pw`, `recovery`,
     `passkey`, `escrow`) and `meta(k, v)` for `driveSalt`, `escrowPin`, `pwStale`, `kcv` (the
-    key check value), and for the owner only `escrowPriv`, `escrowSignPriv` and `escrowPrivOld`
+    key check value), `rl` (rate-limit counters: `escrowReset`, the owner's kit check per
+    session), and for the owner only `escrowPriv`, `escrowSignPriv` and `escrowPrivOld`
     (each sealed under the owner's DK) and the public records `escrowVer`, `kit` and
     `archiveGen`. Nothing else: no key the server could use to open a Drive.
   - the owner's archives after starting over (§3.2): `archive_nodes(gen, …the nodes columns,
@@ -386,7 +440,9 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
 - R2 objects: `d/<userId>/<nodeId>/<i>` (never under `f/`). Only the Drive DO deletes them.
 - The owner's escrow **public** key lives in the Directory (`meta` key `drive.escrowPub`, JWK),
   with `drive.escrowSignPub`, `drive.escrowSig`, each user's escrow kid
-  (`drive.escrowKid:<userId>`) and the latest owner reset (`drive.ownerReset`): public data only.
+  (`drive.escrowKid:<userId>`; never the owner's), the latest owner reset (`drive.ownerReset`)
+  and the latest reset each user's browser moved to (`drive.resetApplied:<userId>`): public data
+  only.
 - Pending uploads older than the role's `filePendingSec` are purged by the Drive DO's alarm.
 
 ## 5. Role options (Admin → Roles; `LIMITS` in `src/lib/settings.js`)
@@ -406,11 +462,11 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | Method and path | Purpose |
 |---|---|
 | `GET /api/private/drive` | `{ enabled, capacity, used, driveSalt, wraps: [{kind, ref, data}], escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the ones with `?` for the owner only; while impersonating, the `escrow` wrap's `data` is null; `capacity` null = no limit; `driveSalt`, `escrowPub`, `escrowPin` null until set). A role without a Drive: `200 { enabled: false, wraps: [] }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
-| `PUT /api/private/drive/keys` | set wraps: `{ driveSalt?, set: [{kind, ref, data}], remove: [{kind, ref}], escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, kcv?, escrowReset?, current? \| reauth? }` (`kcv` with the first set-up and with every later `pw` wrap: `400 kcv_required`, `409 kcv_mismatch`; `escrowReset`: the owner reset a user's browser moved the Drive to, §3.2) (the `escrow…` keys owner only; the step-up `current` / `reauth` where §3 says, `400 reauth_required` without it; a user's first set-up `409 escrow_not_ready` before the owner's escrow key exists, `400` without an escrow wrap for the current key and a wrap of the user's own; `403 escrow_required` for removing the escrow wrap; `409 last_wrap` / `last_own_wrap`) |
+| `PUT /api/private/drive/keys` | set wraps: `{ driveSalt?, set: [{kind, ref, data}], remove: [{kind, ref}], escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, kcv?, escrowReset?, current? \| reauth? }` (`kcv` with the first set-up and with every later wrap or pin: `400 kcv_required`, `409 kcv_mismatch`, `409 kcv_missing`; a first set-up is a compare-and-set, `409 drive_exists`, and refused for a Drive with content or keys but no wrap, `409 drive_keyless`; `escrowReset`: the owner reset a user's browser moved the Drive to, §3.2, recorded once per epoch, `429 rate_limited` after 5 in 10 minutes; `400 escrow_own` for an escrow wrap in the owner's own Drive) (the `escrow…` keys owner only; the step-up `current` / `reauth` where §3 says, `400 reauth_required` without it; a user's first set-up `409 escrow_not_ready` before the owner's escrow key exists, `400` without an escrow wrap for the current key and a wrap of the user's own; `403 escrow_required` for removing the escrow wrap; `409 last_wrap` / `last_own_wrap`) |
 | `POST /api/private/drive/kit` | the owner (not impersonating): `{ event: "exported", current \| reauth }` → `{ ok, kit }` (records `{ version, kid, at }`; `409 no_escrow` without an escrow key); `{ event: "used", version?, current \| reauth }`; `{ event: "verified", verdict: "complete" \| "incomplete" \| "failed", issues?, version? }` (§3.1; all in the admin audit); a user `403 owner_only`, impersonating `403 impersonating` (as every kit, start-over and archive route) |
-| `GET /api/private/drive/kit/probe` | the owner: `{ probes: [{ kid, wrap }] }` — one user's escrow wrap per kid in use, each `drive.escrow_used` (the check's live proof) |
+| `GET /api/private/drive/kit/probe` | the owner: `{ probes: [{ kid, wrap }] }` — one user's escrow wrap per kid in use, each `drive.escrow_used` (the check's live proof); at most 30 per session per 10 minutes (`429 rate_limited`) |
 | `PUT /api/private/drive/kit/keys` | the owner, with the step-up: `{ escrowPriv?: { pub, data }, escrowSignPriv?: { pub, data }, escrowPrivOld?: { <kid>: { pub, data } } }` — sealed escrow keys put back from a kit, only for `escrowPub`, `escrowSignPub` and kids in use (`400 key_mismatch`) |
-| `POST /api/private/drive/start-over` | the owner, §3.2: `{ confirm, driveSalt, set: [pw], escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv, current \| reauth }` → `{ ok, escrowVersion, archive, ownerReset }` (`409 drive_unlockable`, `400 confirm_required`) |
+| `POST /api/private/drive/start-over` | the owner, §3.2: `{ confirm, driveSalt, set: [pw], escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv, current \| reauth }` → `{ ok, escrowVersion, archive, ownerReset }` (`409 drive_unlockable`, also for the second of two at once; `409 reset_conflict`; `400 confirm_required`) |
 | `GET /api/private/drive/archive/<gen>?after=<id>` | the owner: `{ gen, at, escrowPriv, escrowSignPriv, escrowPrivOld, items, nodes, next }` |
 | `PUT /api/private/drive/archive/<gen>/nodes` | the owner, with the step-up: `{ nodes: [{ id, name, meta?, fk? }] }` (at most 500, folders first) → `{ ok, restored, left }` |
 | `POST /api/private/drive/archive/<gen>/finish` | the owner, with the step-up: `{ escrowPrivOld?: { <kid>: { pub, data } } }` (`409 archive_not_empty`) |
@@ -426,8 +482,8 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `DELETE /api/private/drive/nodes/<id>` | recursive; ends referencing shares; frees capacity; also used by the client to drop a failed upload's `pending` node |
 | `POST /api/private/drive/shares` | `{ nodes: [file ids], views, expire, deletable?, label?, types?, depth?, paste, acc }` → `{ id, deletetoken }`: `nodes` lists **files** (the browser flattens folders), and `refs[i]` is `nodes[i]`; `types` / `depth` are the file-policy declaration, sent only when a policy applies (as for file shares); `paste` is the `encryptPaste` body (`acc` is also inside it) |
 | `GET /api/private/drive/nodes/<id>/shares` | shares referencing the node — for a folder, every share that references a file under it: `{ shares: [{ id, label, kind: 'drive', created, expires, views_total, left, status, locked }] }` (My shares' row fields; `views_total` / `left` null = unlimited) |
-| `POST /api/private/admin/drive/escrow/<userId>` | owner: `{ reason }` → `{ wrap, wraps }` (`wrap` = the user's `escrow` wrap or null), recorded `drive.escrow_used` |
-| `PUT /api/private/admin/drive/keys/<userId>` | owner, after resetting the user's password: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }], kcv }` (only a `pw` wrap of the same DK, nothing removed), recorded `drive.pw_rewrapped`; for a user with no wrap yet: `{ first: true, driveSalt, set: [pw, escrow], escrowPin, kcv }` (§3, "Drives the owner sets up"; `409 drive_exists`, `409 drive_disabled`), recorded `drive.created_by_owner` |
+| `POST /api/private/admin/drive/escrow/<userId>` | owner: `{ reason }` → `{ wrap, wraps }` (`wrap` = the user's `escrow` wrap or null; `wraps` = how many wraps the Drive has, never their data), recorded `drive.escrow_used` |
+| `PUT /api/private/admin/drive/keys/<userId>` | owner, after resetting the user's password: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }], kcv }` (only a `pw` wrap of the same DK, nothing removed), recorded `drive.pw_rewrapped`; for a user with no wrap yet: `{ first: true, driveSalt, set: [pw, escrow], escrowPin, kcv }` (§3, "Drives the owner sets up"; `409 drive_exists`, `409 drive_keyless`, `409 drive_disabled`), recorded `drive.created_by_owner`; a pw wrap for a Drive without a key check value is refused (`409 kcv_missing`) |
 
 While the owner impersonates a user, every Drive route works for the owner as for the user,
 except that `PUT /api/private/drive/keys` accepts only wraps **added** for credentials the owner
@@ -649,7 +705,8 @@ leave open:
   the owner's summary and the impersonation escrow route drop from it every kid no user's wrap
   is for.
 - **Owner routes.** The escrow route needs a `reason` of 3–500 characters, records every call
-  (`drive.escrow_used`, with the reason) and answers `wrap: null` when the user has none;
+  (`drive.escrow_used`, with the reason) and answers only the escrow wrap (`wrap: null` when the
+  user has none) and the number of wraps;
   `PUT /api/private/admin/drive/keys/<userId>` refuses the owner's own id (use one's own Drive)
   and records `drive.pw_rewrapped`. Both are direct admin actions: in the admin audit, never in
   the user's own activity.
@@ -717,7 +774,8 @@ API (`test-dom/drive-fake-server.js`), which must stay in step with the server.
 10. **Recipients:** `POST /api/file/<id>/open` adds `refs: [{ chunks, size }]` in `nodes` order;
     `GET /api/file/<id>/chunk/<ref>/<i>` under `X-Download-Grant`.
 11. **Owner:** `POST /api/private/admin/drive/escrow/<userId>` `{ reason }` → `{ wrap, wraps }`
-    (`wrap: null` → the client reports `no_wrap`); `PUT /api/private/admin/drive/keys/<userId>`
+    (`wraps`: a count; `wrap: null` → the client reports `no_wrap`, or sets the Drive up when
+    `wraps` is 0); `PUT /api/private/admin/drive/keys/<userId>`
     with only a `pw` wrap and `driveSalt`; impersonating, `POST /api/private/drive/escrow` →
     `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }`.
 12. **Sign-in:** a recovery-code sign-in's response carries `driveSpent` (the spent code's wrap,
