@@ -88,6 +88,10 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
 - **The Drive** (see the Drive section below): the shape of each user's folder tree (node
   ids, parents, file or folder), each file's exact size and chunk count, times, and which shares
   reference which items — never names, types, contents, file keys or the Drive key.
+- **Reverse shares** (see "Reverse shares" below): which folder a link targets, its limits,
+  label, times and counters, whether it has a password, and each received file's exact size,
+  chunk count and time — never the link key, the note to the uploader, the password, the files'
+  names, types, folders or contents.
 
 Tokens (delete, upload, download grant) and proofs travel in request **headers**, never URLs,
 so they do not land in logged request URLs.
@@ -285,7 +289,10 @@ api_key_not_allowed`).
     Drive there, and a change on Account that re-wraps it (password, passkey, recovery codes)
     uses it there;
   - on the home page, what an anonymous sender types and the link, with its key, that it
-    produces.
+    produces;
+  - on a reverse share's uploader page (`/r/<id>`), the link key in `location.hash` (it reads the
+    note and uploads to the link; it opens nothing received) and the files being sent, before
+    they are encrypted.
 
   Recipients' pages (`/p/*`) and signed-in composers never load it. secbin already runs on
   Cloudflare, so this adds no new trusted party, but it is a second code origin. Leave Turnstile
@@ -432,6 +439,17 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
          or a `DELETE` without the header, gets `400 missing_intent`;
       3. the token (`403 csrf_mismatch`).
 
+      This covers the Drive and reverse shares too: creating a reverse link (`POST
+      /api/private/drive/reverse`), taking a received file in (`POST …/received/<id>`), marking
+      it failed (`POST …/received/<id>/failed`) and retrying it (`DELETE …/received/<id>/failed`),
+      and extending, revoking and locking a link through My shares and Admin → Shares
+      (`/api/private/shares/<id>`, `/api/private/admin/shares/<id>`). They all go through
+      `authenticate()`, so the token and the shape check come before the step-up (the password or
+      passkey that creating a link needs) and before anything is claimed in the share index. The
+      Drive page sends the page's recorded token through `api.js`. The workerd suite
+      (`test/csrf.test.js`) reads `src/routes/reverse.js` and fails if a cookie-authenticated
+      reverse route or method is missing from its sweep.
+
       1 and 2 apply with the `csrfTokens` setting off too. So a refused request has changed
       nothing, counted no failure (lockouts, network blocks) and spent no single-use token, and
       it can be retried as it is. The comparison is timing-safe
@@ -473,6 +491,19 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
         prelogin and setup. There is no session to bind a token to. They keep their own guards
         (the cross-site check, JSON bodies or custom headers, access proofs and tokens,
         Turnstile, rate limits).
+      - The reverse-share uploader: the `/r/<id>` page and its calls under `/api/reverse/<id>/`
+        (`open`, `begin` (the session start), `files` (reserve), `files/<node>/chunk/<i>`,
+        `files/<node>/finalize`, cancel (`DELETE files/<node>`) and `done`). The uploader is
+        anonymous: these routes never read the session cookie, so a forged request gains no
+        user's authority, and a signed-in user's cookie in the same browser changes nothing. What
+        they act on is held by the link, not by a session: the link proof (derived from the key
+        in the `#fragment`), then the session grant and the per-file upload token. They keep
+        their own guards: the cross-site check (before any Guard accounting), a non-simple
+        request (the intent header, a JSON or `application/octet-stream` body, or the
+        `X-Reverse-Grant` and `X-Upload-Token` headers), Turnstile on `begin` (before the password),
+        the per-link password lockout, the Guard's `invalid` scope and the per-network session
+        limit (see "Reverse shares"). The uploader page's client (`public/js/reverseclient.js`,
+        through `api.js`'s `reverseApi`) sends no token and never asks `/api/private/me`.
     - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default,
       server-wide). Off, the server stops requiring `X-Secbin-CSRF` (the header is ignored); the
       cookie is still issued, and every other guard above stays enforced. The value is read
@@ -831,7 +862,8 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
   its own password. The owner's first escrow key (which needs no step-up) is a compare-and-set in
   the Drive object and in the Directory (`409 escrow_exists` once one exists). Starting over is
   one step in the Drive object (it re-checks that nothing the owner signs in with opens the
-  Drive, archives, and writes the new keys and key check value), then one in the Directory (the
+  Drive, archives, pauses the owner's reverse links, and writes the new keys and key check
+  value), then one in the Directory (the
   new public keys and the reset record, a compare-and-set on the epoch the request read): one
   archive, one key check value and one epoch per start over; a second one at the same moment
   gets `409 drive_unlockable`. The two objects are separate, so a failure between the two steps
@@ -1159,6 +1191,144 @@ under "Drive keys" above.
   (`archive_nodes`, `archive_wraps`, `archive_meta` in the owner's Drive object; its R2 objects
   untouched), sealed under the old DK, counted in the owner's capacity, and reachable only by
   the owner's archive routes (never as Drive items).
+
+### Reverse shares ("Receive files")
+
+Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
+
+- **Keys.** Each reverse share has its own ECDH P-256 key pair, made in the user's browser. The
+  raw public key is the link's `#fragment` (never sent to the server). The private key is stored
+  sealed with the user's Drive key (its `files` sub-key, bound to the share id), so only the
+  user's unlocked Drive can open it; the owner can open it through owner escrow of the user's
+  Drive key (in the admin audit, see above), including while acting as the user ("Log in as").
+- **The owner acting as the user** can do everything the user can, reverse shares included (the
+  maintainer's rule), and the server cannot tell whether a new link's sealed private key was
+  sealed with the user's Drive key. So the owner acting as the user, or anyone holding that
+  impersonation session, can create through the API a link in the user's name whose private key
+  they keep: files sent to it are readable by whoever holds that key, without escrow and without
+  the user's Drive key. The user's browser cannot open that link's key (the Drive shows no link
+  for it, and its received files are listed as failed), and the admin audit records the creation
+  with the real actor.
+- **Link ids.** The browser chooses a link's id; the server claims it in the share index first,
+  in one step with the role's checks and the count of active links (so `reverseMaxActive` holds
+  under concurrent creates), and refuses an id any account already holds (`409`). An index row
+  never moves to another account and its link hash is never replaced (for every share kind). An
+  id that was ever a reverse share is never claimed again, even after its index row is pruned
+  (30 days after it ended) or its account is deleted: the Directory keeps a SHA-256 of every
+  created reverse-share id for good (`reverse_ids`; a hash only, not the id, the account or the
+  link), so an old link never opens a later share or shows a later note. A claim that never
+  became a link (its confirmation refused) leaves no tombstone.
+- **Creating a link** adds key material to the Drive (a key pair that can place files in it), so
+  the user confirms it with the account password or a passkey, as for API keys: a stolen session
+  alone cannot create one. Failed confirmations count like every other failed confirmation. The
+  owner acting as the user confirms nothing, as for every other change to the account; the
+  user's activity shows the action as the user's, and the owner-only admin audit records the
+  owner as the real actor.
+- **What an uploader's browser sends.** Each file is encrypted with a random file key exactly
+  like a Drive file (8 MiB chunks, AES-256-GCM, no padding); its relative path and `{ type,
+  mtime, size }` are sealed with a random metadata key; both keys are wrapped to the link's public
+  key (an ephemeral ECDH key, HKDF, AES-GCM), bound to the share id and the node id. The server
+  stores these values and cannot open them. It sees each file's exact size and chunk count, the
+  uploader's network address (as for every request) and the number of files per session; not the
+  names, the folder structure of an upload or the types. Files are not padded.
+- **CSRF.** The user's routes (create, take in, mark failed, retry; extend, revoke and lock
+  through the shares routes) are cookie-authenticated and need the session's CSRF token and the
+  request shape check, before the step-up and before the id is claimed. The uploader's routes
+  under `/api/reverse/<id>/` are anonymous and exempt (they read no session); the link proof, the
+  session grant, the upload token, Turnstile, the password lockout and the Guard guard them (see
+  "CSRF" above).
+- **Declared file types.** When the user limits a link to some file types, the uploader's
+  browser declares each file's `{ extension, MIME type }`; the server checks it against the
+  link's rules and does not store it (as for file shares: a modified client could lie).
+- **Taking files in.** The user's browser opens each received file with the link's private key
+  and re-wraps its name, metadata and file key under the Drive key; the content chunks are not
+  re-encrypted. Until then a received file is counted in the Drive's capacity (its content and
+  its sealed path, metadata and wrap, which are capped at 1400, 1024 and a fixed size) but is not
+  part of the tree (not listed, readable, movable or shareable). A file that cannot be taken in
+  (it does not open, its name cannot be used, the Drive refuses its place) is recorded as failed
+  on the server and leaves the queue, so it never holds up later files; the Drive lists it by
+  link, size and time, to delete or try again. Received names are cleaned (bidi overrides and
+  isolates, U+200B, U+FEFF and the line separators removed, then NFC; real names in any script
+  stay), and a renamed file is marked so; a path creates at most 8 folder levels below the link's
+  folder and one take-in at most 200 new folders (deeper or further files go into the deepest
+  folder allowed), so an uploader cannot make the user's browser build a folder flood.
+- **The link proof and the password gate.** The server stores the SHA-256 of a link proof
+  derived from the public key: an id alone (it appears in request paths) opens nothing and does
+  not reveal the note or whether a password is set. Its status codes do tell a reverse-share id
+  from an unknown one (`404` for an unknown id; `400`, `403`, `423` or `410` for a reverse
+  share); ids are 128-bit random and each `404` counts in the Guard. The optional password only gates the uploader: its proof
+  is Argon2id (64 MiB, t = 3) → HKDF with the link's public key as salt, and the server stores the
+  SHA-256 of the proof, the salt and the cost. Because the public key is only in the link, the
+  server's data alone cannot be used to test password guesses offline. The password does not
+  protect the files: they are always encrypted to the user's key, and the user never needs it.
+- **Guessing and abuse.** Unknown ids, wrong link proofs, wrong passwords, bad session grants and
+  bad upload tokens count in the Guard's `invalid` scope and block the network like invalid share
+  fetches; a late visitor to an ended link with the right link proof is not counted. Cross-site
+  requests are refused before any accounting. Wrong passwords are logged for the user
+  (`reverse.bad_password`, at most one entry per link per minute). When Turnstile is configured,
+  starting an upload session needs a token for the `reverse-upload` action, checked before the
+  password, so no password guess is answered without one (the uploader page shows the widget and
+  keeps Send disabled until it passes; it gets the Turnstile CSP, and the strict one otherwise).
+  Besides the per-network Guard, each link has its own lockout: 10 wrong passwords within 15
+  minutes, from any networks, lock its password for 15 minutes (the right one too). The lockout
+  is per link on purpose, so that guesses spread over many networks are stopped too; the
+  consequence is that one network holding the link can keep its password locked for everyone:
+  10 wrong guesses every 15 minutes are well under the Guard's per-network limit (60 invalid
+  requests per 10 minutes), so that network is not blocked, and with Turnstile on each guess costs
+  one solved challenge. An upload session's deadline slides: while it has a file reserved and
+  not finished it stays open for the role's `filePendingSec` after its last progress; as soon as
+  nothing is unfinished (the file finished or was cancelled) it is idle again and lapses 10
+  minutes later, and it never lasts more than 24 hours after it began. A network may hold at most
+  5 open sessions per link (counted by 24 bits of a hash of the link id and the network; no key,
+  and the address itself is not stored), besides 100 per link, so idle sessions give their slots
+  back and cannot easily lock a link for everyone else.
+- **Limits.** Per link: expiry (at most the role's `maxExpireSec`), files, total bytes, largest
+  file, file types; per role: `reverseEnabled` (with `driveEnabled`), `reverseMaxActive`,
+  `reverseMaxBytes`; always the Drive's capacity and largest file. The role's current
+  `reverseMaxBytes` applies to existing links too: a link is held to the smaller of its own
+  byte limit and the role's (lowering the role's cap takes effect at once; raising it does not
+  raise a link's own). A file's sealed path, metadata and wrap count towards the link's bytes, so
+  empty files are not free. Every limit is checked
+  atomically in the user's Drive object when a file is reserved; chunk sizes are checked exactly.
+  Only the session that reserved a file may finalize or cancel it, and a reservation must finish
+  within 24 hours however often its chunks are re-sent (a session, too, ends 24 hours after it
+  began).
+  Upload-session grants and upload tokens are 256-bit and stored as SHA-256 hashes; unfinished
+  uploads are purged after the role's `filePendingSec` without progress and give their
+  reservation back. A chunk whose write to R2 is still in flight blocks that file's finalize
+  (`409 busy`), so a late chunk write never lands on, or is deleted from, a finished file; a
+  write that finishes after its upload ended (cancelled, revoked, purged) is deleted. An uploader can fill the user's Drive up to the link's limits: the user
+  chooses those limits, and revokes the link at any time.
+- **Ending.** Revoking a link, its expiry, an admin lock (paused), the role losing the option, or
+  deleting its folder stops uploads at once; unfinished uploads are deleted; files already
+  received stay. Deleting the account deletes everything.
+- **The owner starting over** (docs/REVERSE.md §9): the owner's links' private keys stay sealed
+  under the old Drive key, in the archive; the links are paused (`409 paused` only after the link
+  proof matches, before the human check and the password; open sessions end; unfinished uploads
+  go) and their received items stay in the archive exactly as they arrived. Nothing new opens
+  them: a restore needs a kit for the old Drive key, the step-up, and re-seals each link's key in
+  the owner's browser (the server never sees a link's private key); received items come back
+  only as they were (no field of theirs can be replaced), and none is offered for taking in
+  until its link's key is re-sealed. Deleting the archive revokes the paused links and deletes
+  their items. `reverse.paused`, `reverse.resumed` and `reverse.revoked` are logged per link,
+  the owner as the actor. No other user's link is touched.
+- **Audit.** `share.created` (`kind=reverse`) and `share.revoked`, `reverse.received` (count and
+  bytes only; one entry per link per hour adding up that hour's sessions, so uploads cannot flood
+  the user's log or the server-wide log limit), `reverse.bad_password`, and
+  the Drive actions on received files: `drive.received_taken_in` (taken into the Drive),
+  `drive.received_failed` (could not be taken in) and `drive.received_retried` (put back to try
+  again), each one entry per link, per actor, per hour adding up the files, for the same reason.
+  Creating, revoking, taking in, marking failed and retrying while the owner acts as the user are
+  logged as the Drive actions are: as the user's own in their activity, with the owner as the
+  real actor in the owner-only admin audit (`imp`, not `adm`).
+- **What uploaders can see of each other.** `open` returns a limited link's `filesLeft` and
+  `bytesLeft` to anyone with the link, before any session or human check. Every uploader of a
+  link with a file or byte limit can therefore poll it and see when other uploads are reserved,
+  and how large they are: a file's exact size plus the length of its sealed path, metadata and
+  wrap (which grows with the length of its path). Names, types and content are not revealed. A
+  link without limits returns `null` for both.
+- **The uploader page** (`/r/<id>`) is built with DOM calls only (no `innerHTML`), shows the
+  user's note as text, and is never cached by the service worker.
 
 ### API surface hardening
 

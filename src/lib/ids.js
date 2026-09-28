@@ -37,6 +37,23 @@ export function parseId(id) {
   return { cls, burn: cls === 'b', file: cls === 'f' };
 }
 
+/**
+ * Any share id in the index ("My shares"): a note / file share (parseId), or
+ * a reverse share ("r" + 16 bytes, chosen by the user's browser; docs/REVERSE.md),
+ * which lives in its user's Drive and has no public read path. → info or null.
+ */
+export function shareInfo(id) {
+  const info = parseId(id);
+  if (info) return { ...info, reverse: false };
+  if (typeof id !== 'string' || id.length !== ID_B64_LEN + 1 || id[0] !== 'r') return null;
+  try {
+    if (bytesFromB64url(id.slice(1)).length !== ID_RANDOM_BYTES) return null;
+  } catch {
+    return null;
+  }
+  return { cls: 'r', burn: false, file: false, reverse: true };
+}
+
 /** Generate a 256-bit token (delete / upload / grant) as base64url. */
 export function genDeleteToken() {
   return b64urlFromBytes(randomBytes(TOKEN_BYTES));

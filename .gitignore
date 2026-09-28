@@ -26,3 +26,7 @@ Desktop.ini
 *.swo
 *~
 
+
+# Python bytecode (the examples)
+__pycache__/
+*.pyc

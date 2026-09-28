@@ -16,9 +16,14 @@ import { encryptPaste } from '../public/js/crypto.js';
 import {
   ORIGIN, owner, makeUser, login, fetchJson, cookieOf, csrfFor, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16,
 } from './helpers.js';
-import { driveLimits } from './drive-helpers.js';
+import { driveLimits, KCV, enc } from './drive-helpers.js';
+import { receiver, newReverse, received } from './reverse-helpers.js';
+import { linkProof, sealUpload, newNodeId as newReverseNode } from '../public/js/reversekeys.js';
+import { randomBytes, utf8, b64urlFromBytes } from '../public/js/bytes.js';
+import { CHUNK, encryptChunk, importFileKey } from '../public/js/files.js';
 import driveSrc from '../src/routes/drive.js?raw';
 import adminSrc from '../src/routes/admin.js?raw';
+import reverseSrc from '../src/routes/reverse.js?raw';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -68,6 +73,38 @@ const DRIVE_PATHS = [
   `/api/private/drive/files/${DRIVE_ID}/finalize`, `/api/private/drive/nodes/${DRIVE_ID}`, `/api/private/drive/nodes/${DRIVE_ID}/shares`,
   '/api/private/drive/shares', `/api/private/admin/drive/escrow/${DRIVE_USER}`, `/api/private/admin/drive/keys/${DRIVE_USER}`,
 ];
+
+// ── reverse shares (src/routes/reverse.js, docs/REVERSE.md) ──
+// The user's routes are cookie-authenticated (reached through the Drive router,
+// or My shares / Admin → Shares for extend, revoke and lock) and must pass the
+// CSRF check. The anonymous uploader's routes (/api/reverse/<id>/…) carry no
+// user session and are exempt; they keep their own guards.
+const REV_ID = 'rAAAAAAAAAAAAAAAAAAAAAA';
+const REVERSE_ROUTES = [
+  dj('POST', '/api/private/drive/reverse'), // create a link
+  dj('POST', `/api/private/drive/received/${DRIVE_ID}`), // take a received file in
+  dj('POST', `/api/private/drive/received/${DRIVE_ID}/failed`), // mark it failed
+  da('DELETE', `/api/private/drive/received/${DRIVE_ID}/failed`), // retry it
+];
+/**
+ * Every cookie-authenticated path reverse.js (and the Drive router's dispatch
+ * to it) names, one concrete path each, with the methods it allows, in the
+ * order handleReverseOwner answers them (its methodNotAllowed calls).
+ */
+const REVERSE_METHODS = {
+  '/api/private/drive/reverse': 'GET, POST',
+  '/api/private/drive/received': 'GET',
+  [`/api/private/drive/received/${DRIVE_ID}/failed`]: 'POST, DELETE',
+  [`/api/private/drive/received/${DRIVE_ID}`]: 'POST',
+};
+const REVERSE_PATHS = Object.keys(REVERSE_METHODS);
+/** A reverse link's changes through the shares routes (src/routes/private.js, admin.js): extend, revoke, lock. */
+const REVERSE_SHARE_ROUTES = [
+  dj('PATCH', `/api/private/shares/${REV_ID}`), da('POST', `/api/private/shares/${REV_ID}/revoke`),
+  dj('PATCH', `/api/private/admin/shares/${REV_ID}`), da('POST', `/api/private/admin/shares/${REV_ID}/revoke`), dj('POST', `/api/private/admin/shares/${REV_ID}/lock`),
+];
+/** The anonymous uploader's actions (the /api/reverse/<id>/… router): exempt, by design. */
+const REVERSE_ANON_ACTIONS = ['open', 'begin', 'files', 'done'];
 
 describe('the token and its cookie', () => {
   it('comes with every new session: a readable __Host- cookie next to the HttpOnly session cookie', async () => {
@@ -224,6 +261,7 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
       json('POST', '/api/private/admin/logs/clear'), json('POST', '/api/private/admin/ip-rules'), act('DELETE', `/api/private/admin/ip-rules/${id}`),
       json('POST', '/api/private/admin/guard/unblock'), json('POST', '/api/private/admin/guard/block'),
       ...DRIVE_ROUTES,
+      ...REVERSE_ROUTES, ...REVERSE_SHARE_ROUTES,
       act('POST', '/api/auth/logout'),
     ];
     for (const r of routes) {
@@ -253,8 +291,10 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
     }
     expect(paths.size).toBeGreaterThan(10);
     expect(patterns.length).toBe(4); // files/…/chunk|finalize, nodes/…(/shares), archive/…(/nodes|/finish), admin/drive/(escrow|keys)/…
+    // The Drive router also dispatches the reverse-share paths (to reverse.js): the reverse sweep names those.
+    const known = [...DRIVE_PATHS, ...REVERSE_PATHS];
     for (const lit of paths) {
-      const covered = lit.endsWith('/') ? DRIVE_PATHS.some((x) => x.startsWith(lit)) : DRIVE_PATHS.includes(lit);
+      const covered = lit.endsWith('/') ? known.some((x) => x.startsWith(lit)) : known.includes(lit);
       expect(covered, lit).toBe(true);
     }
     for (const re of patterns) expect(DRIVE_PATHS.some((x) => re.test(x)), String(re)).toBe(true);
@@ -265,7 +305,7 @@ describe('refused without the session’s token (403 csrf_mismatch, nothing chan
     for (const x of DRIVE_PATHS) if (!reads.includes(x)) expect(DRIVE_ROUTES.some((r) => r.path === x), x).toBe(true);
   });
 
-  it('every state-changing method on every Drive path is refused for its token before routing (no 404 / 405 / 403 of the route first)', async () => {
+  it('every state-changing method on every Drive path is refused for its token before routing (no 404 / 405 / 403 of the route first)', { timeout: 60000 }, async () => {
     for (const path of [...DRIVE_PATHS, '/api/private/drive/no-such-route', `/api/private/admin/drive/other/${DRIVE_USER}`]) {
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
         const res = await send(method, path, { body: {}, headers: intent });
@@ -627,5 +667,161 @@ describe('audit I5: POST /api/auth/passkey/options has the same guards as the ot
     const ok = await options({ 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' }, '{}');
     expect(ok.status).toBe(200);
     expect(typeof (await ok.json()).challengeId).toBe('string');
+  });
+});
+
+// ── reverse shares (src/routes/reverse.js; docs/REVERSE.md, SECURITY.md "CSRF") ──
+describe('reverse shares: the user’s routes need the token; the anonymous uploader’s are exempt', () => {
+  beforeAll(async () => {
+    // The owner's Drive, set up as the owner's browser does at the first
+    // sign-in (stand-ins; the server only checks their form), before any
+    // user's Drive needs the escrow key (as in test/reverse.test.js).
+    const escrowPub = { kty: 'EC', crv: 'P-256', x: b64urlFromBytes(randomBytes(32)), y: b64urlFromBytes(randomBytes(32)) };
+    const escrowPriv = `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(150))}`;
+    const pw = { kind: 'pw', ref: 'pw', data: `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}` };
+    const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie: oc, headers: intent, body: { driveSalt: salt16(), set: [pw], kcv: KCV, escrowPub, escrowPriv } });
+    expect(r.status).toBe(200);
+  });
+
+  it('the sweep names every cookie-authenticated route reverse.js has, and its anonymous router has only the exempt actions', () => {
+    const lits = [...new Set([...reverseSrc.matchAll(/'(\/api\/[^']*)'/g)].map((m) => m[1]))];
+    const pats = [...reverseSrc.matchAll(/\.match\(\/(\^\\\/api\\\/.*?\$)\/\)/g)].map((m) => m[1]);
+    expect(lits.length).toBeGreaterThanOrEqual(2); // /api/private/drive/reverse, /api/private/drive/received
+    expect(pats.length).toBe(2); // received/<id>(/failed), and the anonymous /api/reverse/<id>/…
+    // Every route is either the user's (cookie-authenticated, /api/private/) or
+    // the anonymous uploader's (/api/reverse/): a route under any other prefix
+    // must be classified here first.
+    for (const x of [...lits, ...pats]) expect(/^\^?\\?\/api\\?\/(private|reverse)\\?\//.test(x), x).toBe(true);
+    const privLits = lits.filter((x) => x.startsWith('/api/private/'));
+    const privPats = pats.filter((x) => x.startsWith('^\\/api\\/private\\/')).map((x) => new RegExp(x));
+    for (const lit of privLits) expect(REVERSE_PATHS, lit).toContain(lit);
+    for (const re of privPats) expect(REVERSE_PATHS.some((x) => re.test(x)), String(re)).toBe(true);
+    for (const r of REVERSE_ROUTES) expect(REVERSE_PATHS, r.path).toContain(r.path);
+    // Each route's methods, as the user's handler allows them: a new route or
+    // method there changes this list, and every state-changing one must be in
+    // the sweep.
+    const owner = reverseSrc.slice(0, reverseSrc.indexOf('export async function handleReversePublic'));
+    expect([...owner.matchAll(/methodNotAllowed\('([^']+)'\)/g)].map((m) => m[1])).toEqual(Object.values(REVERSE_METHODS));
+    for (const [path, allowed] of Object.entries(REVERSE_METHODS)) {
+      for (const method of allowed.split(', ').filter((x) => x !== 'GET')) {
+        expect(REVERSE_ROUTES.some((r) => r.path === path && r.method === method), `${method} ${path}`).toBe(true);
+      }
+    }
+    // The anonymous router: exactly the exempt actions (a new one must be added here, deliberately).
+    const anon = pats.filter((x) => x.startsWith('^\\/api\\/reverse\\/'));
+    expect(anon).toHaveLength(1);
+    const actions = /\\\/\(([a-z|]+)\)/.exec(anon[0])?.[1].split('|').sort();
+    expect(actions).toEqual([...REVERSE_ANON_ACTIONS].sort());
+  });
+
+  it('every state-changing method on every reverse path is refused for its token before routing (the owner, a user without the Drive, a user with reverse shares)', { timeout: 60000 }, async () => {
+    const none = await makeUser('csrf-rev-none');
+    const rec = await receiver('csrf-rev-sweep');
+    for (const cookie of [oc, none.cookie, rec.cookie]) {
+      for (const path of REVERSE_PATHS) {
+        for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+          const res = await send(method, path, { cookie, body: {}, headers: intent });
+          expect(`${method} ${path} → ${res.status} ${await errorOf(res)}`).toBe(`${method} ${path} → 403 csrf_mismatch`);
+        }
+      }
+      for (const r of [...REVERSE_ROUTES, ...REVERSE_SHARE_ROUTES]) {
+        const res = await send(r.method, r.path, { cookie, body: r.body, headers: r.headers });
+        expect(`${r.method} ${r.path} → ${res.status} ${await errorOf(res)}`).toBe(`${r.method} ${r.path} → 403 csrf_mismatch`);
+        // A simple (form-style) request is refused for its shape first.
+        const plain = await fetchJson(r.path, { method: r.method, cookie, csrf: false, ip: freshIp(), headers: { 'content-type': 'text/plain' } });
+        const want = r.method === 'DELETE' ? '400 missing_intent' : '415 unsupported_media_type';
+        expect(`${r.method} ${r.path} → ${plain.status} ${await errorOf(plain)}`).toBe(`${r.method} ${r.path} → ${want}`);
+      }
+    }
+  });
+
+  it('create, extend, revoke, take in, mark failed and retry: refused without the token (nothing changes), done with it; the uploader needs none, even with a session cookie present', { timeout: 60000 }, async () => {
+    const u = await makeUser('csrf-rev-flow');
+    const rec = await receiver('csrf-rev-flow-r');
+    const token = await csrfFor(rec.cookie);
+    const links = async () => (await (await fetchJson('/api/private/drive/reverse', { cookie: rec.cookie })).json()).reverse;
+
+    // Create: as the page does (fetchJson sends the session's token), 201.
+    const before = (await links()).length;
+    const link = await newReverse(rec.cookie);
+    expect(link.res.status).toBe(201);
+    expect((await links()).length).toBe(before + 1);
+    // Another link's body without the token (or with a wrong one, or another
+    // account's): refused, nothing is claimed or created; with it, 201.
+    const again = { ...link.body, id: `r${b64urlFromBytes(randomBytes(16))}` };
+    for (const t of [undefined, 'A'.repeat(43), await csrfFor(u.cookie)]) {
+      const r = await send('POST', '/api/private/drive/reverse', { cookie: rec.cookie, token: t, body: again, headers: intent });
+      expect(`${r.status} ${await errorOf(r)}`).toBe('403 csrf_mismatch');
+    }
+    expect((await links()).length).toBe(before + 1);
+    const ok = await send('POST', '/api/private/drive/reverse', { cookie: rec.cookie, token, body: again, headers: intent });
+    expect(ok.status).toBe(201);
+    expect((await links()).length).toBe(before + 2);
+
+    // Extend and revoke (My shares): refused without the token.
+    const expiresOf = async (id) => (await (await fetchJson(`/api/private/shares/${id}`, { cookie: rec.cookie })).json()).share;
+    const was = await expiresOf(again.id);
+    const later = was.expires + 3600;
+    expect(await errorOf(await send('PATCH', `/api/private/shares/${again.id}`, { cookie: rec.cookie, body: { expires: later } }))).toBe('csrf_mismatch');
+    expect(await errorOf(await send('POST', `/api/private/shares/${again.id}/revoke`, { cookie: rec.cookie, headers: intent }))).toBe('csrf_mismatch');
+    expect(await expiresOf(again.id)).toMatchObject({ expires: was.expires, status: 'active' });
+    expect((await send('PATCH', `/api/private/shares/${again.id}`, { cookie: rec.cookie, token, body: { expires: later } })).status).toBe(200);
+    expect((await send('POST', `/api/private/shares/${again.id}/revoke`, { cookie: rec.cookie, token, headers: intent })).status).toBe(200);
+    expect(await expiresOf(again.id)).toMatchObject({ expires: later, status: 'revoked' });
+
+    // The uploader (anonymous): with the user's session cookie in the browser
+    // and no token (or a wrong one), every call works; the anonymous guards
+    // (cross-site, intent header, link proof) still apply.
+    const ip = freshIp();
+    const anon = (path, { method = 'POST', headers = {}, body, csrf } = {}) => fetchJson(`/api/reverse/${link.id}${path}`, {
+      method, body, ip, cookie: rec.cookie, csrf: false, headers: { ...intent, ...(csrf ? { 'x-secbin-csrf': csrf } : {}), ...headers },
+    });
+    const lp = await linkProof(link.pub);
+    expect(`${(await anon('/open', { headers: { 'x-link-proof': lp, 'sec-fetch-site': 'cross-site' } })).status}`).toBe('403');
+    expect(await errorOf(await fetchJson(`/api/reverse/${link.id}/open`, { method: 'POST', ip, cookie: rec.cookie, csrf: false, headers: { 'x-link-proof': lp } }))).toBe('missing_intent');
+    expect(await errorOf(await anon('/open', { headers: { 'x-link-proof': b64urlFromBytes(randomBytes(32)) } }))).toBe('bad_link');
+    expect((await anon('/open', { headers: { 'x-link-proof': lp } })).status).toBe(200);
+    const b = await anon('/begin', { headers: { 'x-link-proof': lp }, csrf: 'A'.repeat(43) });
+    expect(b.status).toBe(200);
+    const { grant } = await b.json();
+    const reserveOne = async (bytes) => {
+      const node = newReverseNode();
+      const fk = randomBytes(32);
+      const sealed = await sealUpload(link.pub, link.id, node, fk, { path: 'a.txt', type: 'text/plain', mtime: 1700000000000, size: bytes.length });
+      const r = await anon('/files', { headers: { 'x-reverse-grant': grant }, body: { id: node, ...sealed, size: bytes.length } });
+      expect(r.status).toBe(201);
+      return { node, fk, ...(await r.json()) };
+    };
+    const bytes = utf8('hello from the uploader');
+    const f = await reserveOne(bytes);
+    const key = await importFileKey(b64urlFromBytes(f.fk));
+    for (let i = 0; i < f.chunks; i++) {
+      const ct = await encryptChunk(key, i, f.chunks, bytes.slice(i * CHUNK, (i + 1) * CHUNK));
+      const pr = await SELF.fetch(`${ORIGIN}/api/reverse/${link.id}/files/${f.node}/chunk/${i}`, {
+        method: 'PUT', body: ct, headers: { cookie: rec.cookie, 'content-type': 'application/octet-stream', 'x-upload-token': f.uploadToken, 'cf-connecting-ip': ip },
+      });
+      expect(pr.status).toBe(200);
+    }
+    expect((await anon(`/files/${f.node}/finalize`, { headers: { 'x-reverse-grant': grant, 'x-upload-token': f.uploadToken } })).status).toBe(200);
+    const g = await reserveOne(utf8('cancelled'));
+    expect((await anon(`/files/${g.node}`, { method: 'DELETE', headers: { 'x-reverse-grant': grant, 'x-upload-token': g.uploadToken } })).status).toBe(200);
+    expect((await anon('/done', { headers: { 'x-reverse-grant': grant } })).status).toBe(200);
+
+    // Take in, mark failed, retry: refused without the token (the item stays where it was), done with it.
+    const queued = async () => (await received(rec.cookie)).items.map((i) => i.id);
+    expect(await queued()).toEqual([f.node]);
+    const takeIn = { parent: 'root', name: enc(), meta: enc(), fk: enc(32) };
+    expect(await errorOf(await send('POST', `/api/private/drive/received/${f.node}`, { cookie: rec.cookie, body: takeIn, headers: intent }))).toBe('csrf_mismatch');
+    expect(await errorOf(await send('POST', `/api/private/drive/received/${f.node}/failed`, { cookie: rec.cookie, body: { reason: 'unreadable' }, headers: intent }))).toBe('csrf_mismatch');
+    expect(await queued()).toEqual([f.node]);
+    const failedList = async () => (await (await fetchJson('/api/private/drive/received?failed=1', { cookie: rec.cookie })).json()).items.map((i) => i.id);
+    expect((await send('POST', `/api/private/drive/received/${f.node}/failed`, { cookie: rec.cookie, token, body: {}, headers: intent })).status).toBe(200);
+    expect(await failedList()).toEqual([f.node]);
+    expect(await errorOf(await send('DELETE', `/api/private/drive/received/${f.node}/failed`, { cookie: rec.cookie, headers: intent }))).toBe('csrf_mismatch');
+    expect(await failedList()).toEqual([f.node]);
+    expect((await send('DELETE', `/api/private/drive/received/${f.node}/failed`, { cookie: rec.cookie, token, headers: intent })).status).toBe(200);
+    expect(await queued()).toEqual([f.node]);
+    expect((await send('POST', `/api/private/drive/received/${f.node}`, { cookie: rec.cookie, token, body: takeIn, headers: intent })).status).toBe(200);
+    expect(await queued()).toEqual([]);
   });
 });

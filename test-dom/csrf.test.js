@@ -222,6 +222,14 @@ describe('the Drive API: every call goes through the same token path', () => {
     archiveDelete: () => api.drive.archiveDelete(1, { confirm: 'alice' }),
     escrow: () => api.drive.escrow(UID, 'a reason'),
     setUserKeys: () => api.drive.setUserKeys(UID, { set: [] }),
+    // Reverse shares (the Drive's "Receive files"): create a link, list, and the received files.
+    createReverse: () => api.drive.createReverse({ id: 'rAAAAAAAAAAAAAAAAAAAAAA', folder: 'root' }),
+    reverse: () => api.drive.reverse('root'),
+    received: () => api.drive.received(),
+    acceptReceived: () => api.drive.acceptReceived(ID, { parent: 'root' }),
+    receivedFailed: () => api.drive.receivedFailed(ID, 'unreadable'),
+    receivedFailedList: () => api.drive.receivedFailedList(),
+    receivedRetry: () => api.drive.receivedRetry(ID),
   };
   const shapeOk = (c) => {
     const ct = (c.headers['content-type'] || '').split(';')[0].trim();
@@ -245,8 +253,8 @@ describe('the Drive API: every call goes through the same token path', () => {
     }
     const changes = seen.filter((c) => c.method !== 'GET');
     expect(changes.map((c) => c.name).sort()).toEqual([
-      'archiveDelete', 'archiveFinish', 'archiveNodes', 'createFile', 'escrow', 'finalize', 'impersonationEscrow', 'kit', 'kitKeys', 'kitProbe',
-      'mkdir', 'putChunk', 'remove', 'setKeys', 'setUserKeys', 'share', 'startOver', 'update',
+      'acceptReceived', 'archiveDelete', 'archiveFinish', 'archiveNodes', 'createFile', 'createReverse', 'escrow', 'finalize', 'impersonationEscrow', 'kit', 'kitKeys', 'kitProbe',
+      'mkdir', 'putChunk', 'receivedFailed', 'receivedRetry', 'remove', 'setKeys', 'setUserKeys', 'share', 'startOver', 'update',
     ]);
     for (const c of changes) {
       expect(c.path, c.name).toMatch(/^\/api\/private\/(drive|admin\/drive)(\/|$)/);
@@ -283,6 +291,70 @@ describe('the Drive API: every call goes through the same token path', () => {
     handler = (path) => (path === '/api/private/me' ? json(200, bob()) : mismatch());
     expect(api.isSessionChanged(await api.drive.remove(ID).catch((x) => x))).toBe(true);
     expect(trail()).toEqual([`DELETE /api/private/drive/nodes/${ID}`, 'GET /api/private/me']);
+  });
+});
+
+// ── reverse shares (the Drive's links; the anonymous uploader) ─────────────
+describe('reverse shares', () => {
+  const RID = 'rAAAAAAAAAAAAAAAAAAAAAA';
+  const NODE = 'AAAAAAAAAAAAAAAAAAAAAA';
+  // One call per method of reverseApi (public/js/reverseclient.js uses only these), for a given api.js module.
+  const uploader = (m) => ({
+    open: () => m.reverseApi.open(RID, 'L'.repeat(43)),
+    begin: () => m.reverseApi.begin(RID, { linkProof: 'L'.repeat(43), keyProof: 'K'.repeat(43), turnstile: 'ts' }),
+    createFile: () => m.reverseApi.createFile(RID, 'G'.repeat(43), { id: NODE }),
+    putChunk: () => m.reverseApi.putChunk(RID, NODE, 0, new Uint8Array(4), 'U'.repeat(43)),
+    finalize: () => m.reverseApi.finalize(RID, 'G'.repeat(43), NODE, 'U'.repeat(43)),
+    cancel: () => m.reverseApi.cancel(RID, 'G'.repeat(43), NODE, 'U'.repeat(43)),
+    done: () => m.reverseApi.done(RID, 'G'.repeat(43)),
+  });
+
+  it('the test names every uploader method', () => {
+    expect(Object.keys(uploader(api)).sort()).toEqual(Object.keys(api.reverseApi).sort());
+  });
+
+  it('the anonymous uploader (/api/reverse/…) sends no token and never asks /api/private/me, even with a session cookie in the browser or a page whose session ended', async () => {
+    handler = () => json(200, { ok: true, grant: 'G'.repeat(43), id: NODE, chunks: 1, uploadToken: 'U'.repeat(43) });
+    jar = `__Host-secbin_csrf=${TOKEN_A}`; // a signed-in user's cookie, in the same browser
+    for (const state of ['unbound', 'bound', 'ended']) {
+      vi.resetModules();
+      const fresh = await import('../public/js/api.js');
+      if (state === 'bound') fresh.bindSession(profile());
+      if (state === 'ended') fresh.forgetSession();
+      calls = [];
+      for (const call of Object.values(uploader(fresh))) await call(); // none is refused here (no "session changed")
+      expect(calls, state).toHaveLength(7); // one request each: no /api/private/me
+      for (const c of calls) {
+        expect(c.path, state).toMatch(/^\/api\/reverse\//);
+        expect(tokenOf(c), `${state} ${c.method} ${c.path}`).toBeUndefined();
+      }
+    }
+  });
+
+  it('the Drive’s reverse-link calls carry the page’s recorded token and a shape the server accepts; the uploader page’s call module is api.js', async () => {
+    api.bindSession(profile());
+    handler = () => json(200, { ok: true, id: RID, expires: 1 });
+    jar = `__Host-secbin_csrf=${TOKEN_C}`; // the shared cookie is someone else's now
+    await api.drive.createReverse({ id: RID, folder: 'root' });
+    await api.drive.acceptReceived(NODE, { parent: 'root' });
+    await api.drive.receivedFailed(NODE, 'unreadable');
+    await api.drive.receivedRetry(NODE);
+    await api.updateShare(RID, { expires: 2000000000 }); // extend (My shares)
+    await api.revokeShare(RID); // revoke (the Drive's list and My shares)
+    expect(trail()).toEqual([
+      'POST /api/private/drive/reverse', `POST /api/private/drive/received/${NODE}`, `POST /api/private/drive/received/${NODE}/failed`,
+      `DELETE /api/private/drive/received/${NODE}/failed`, `PATCH /api/private/shares/${RID}`, `POST /api/private/shares/${RID}/revoke`,
+    ]);
+    for (const c of calls) expect(tokenOf(c), `${c.method} ${c.path}`).toBe(TOKEN_B);
+    expect(calls.filter((c) => c.method === 'DELETE' || c.path.endsWith('/revoke')).every((c) => c.headers['x-secbin-intent'] === '1')).toBe(true);
+    // A reverse-link change on a page whose browser is now someone else's is not retried.
+    calls = [];
+    handler = (path) => (path === '/api/private/me' ? json(200, bob()) : mismatch());
+    expect(api.isSessionChanged(await api.drive.createReverse({ id: RID }).catch((x) => x))).toBe(true);
+    expect(trail()).toEqual(['POST /api/private/drive/reverse', 'GET /api/private/me']);
+    const src = await import('../public/js/reverseclient.js?raw');
+    expect(src.default).toMatch(/from '\.\/api\.js'/);
+    expect(src.default).not.toMatch(/\bfetch\(/); // every uploader request goes through api.js
   });
 });
 

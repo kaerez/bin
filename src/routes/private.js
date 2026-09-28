@@ -8,8 +8,8 @@ import { json, err, HttpError, readJsonBody, readCappedBody, assertIntent, asser
 import { csrfTokenFor, csrfCookie } from '../lib/csrf.js';
 import { authenticate, issueSession, actorId } from '../lib/auth.js';
 import { directory, cachedSettings, ipContext } from '../lib/guard.js';
-import { genId, parseId, genDeleteToken, genToken, genApiKey, hashToken } from '../lib/ids.js';
-import { ttlSeconds, MAX_BODY, MAX_BURN_RECORD, kvExists, kvPut, kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
+import { genId, parseId, shareInfo, genDeleteToken, genToken, genApiKey, hashToken } from '../lib/ids.js';
+import { ttlSeconds, MAX_BODY, MAX_BURN_RECORD, kvExists, kvPut, kvGet, kvDelete, burnStub, fileStub, driveStub } from '../lib/store.js';
 import { validateCreate, FormatError, MAX_CT_B64, expireSeconds, MAX_VIEWS, MAX_TTL } from '../../public/js/format.js';
 import { MAX_CHUNK_CT, HARD_MAX_SHARE_BYTES, PAD } from '../../public/js/files.js';
 import { r2Key } from '../fileshare-do.js';
@@ -254,7 +254,7 @@ async function handleShares(request, env, url) {
   const sm = p.match(/^\/api\/private\/shares\/([^/]+)(\/revoke|\/opens)?$/);
   if (!sm) return err(404, 'not_found', 'Not found.');
   const id = decodePathSegment(sm[1]);
-  const info = id && parseId(id);
+  const info = id && shareInfo(id);
   if (!info) return err(404, 'not_found', 'Share not found.');
   if (sm[2] === '/opens') {
     // Read receipts: times always, details as the admin allows this account.
@@ -270,7 +270,7 @@ async function handleShares(request, env, url) {
   if (request.method === 'GET') {
     const row = await dir.getShare(a.user.id, id);
     if (!row) return err(404, 'not_found', 'Share not found.');
-    const [share] = await withLiveStatus(env, dir, [row]);
+    const [share] = await withLiveStatus(env, dir, [row], a.user.id);
     delete share.user_id;
     return withAuth(a, json({ share }));
   }
@@ -327,8 +327,17 @@ export async function createNote(request, env, a) {
     throw e;
   }
   const kind = fmt === 'url' || fmt === 'secret' ? fmt : 'text';
-  await dir.recordShare({ id, uid: a.user.id, kind, label: a.noLabel ? '' : body.label, created, expires, views, lh: clean.acc.lh }, actorId(a));
+  indexed(await dir.recordShare({ id, uid: a.user.id, kind, label: a.noLabel ? '' : body.label, created, expires, views, lh: clean.acc.lh }, actorId(a)));
   return json({ id, deletetoken: deleteToken, expires }, 201);
+}
+
+/**
+ * The share index refused to record a (server-chosen) id because another
+ * account holds it (src/directory-do.js recordShare): never take it over.
+ */
+function indexed(r) {
+  if (r && r.ok === false) throw new Error('share id already indexed for another account');
+  return r;
 }
 
 // ── file uploads ───────────────────────────────────────────────────────────
@@ -413,14 +422,16 @@ export async function finalizeFile(request, env, a, id) {
   if (r.status === 'mismatch') return err(400, 'invalid_format', 'The manifest’s view limit, expiry and recipient-delete setting must match the upload.');
   if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
   if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
-  await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: a.noLabel ? '' : body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null, lh: clean.acc.lh }, actorId(a));
+  indexed(await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: a.noLabel ? '' : body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null, lh: clean.acc.lh }, actorId(a)));
   return json({ ok: true, id, expires: r.expires });
 }
 
 // ── My shares ──────────────────────────────────────────────────────────────
-async function liveStatus(env, id) {
-  const info = parseId(id);
+async function liveStatus(env, id, uid) {
+  const info = shareInfo(id);
   if (!info) return { status: 'gone' };
+  // A reverse share: its user's Drive keeps the counters (files and bytes received).
+  if (info.reverse) return uid ? driveStub(env, uid).reverseStatus(uid, id) : { status: 'gone' };
   if (info.file) return fileStub(env, id).status();
   if (info.burn) return burnStub(env, id).status();
   const rec = await kvGet(env, id);
@@ -428,15 +439,25 @@ async function liveStatus(env, id) {
 }
 
 /** Refresh active rows from their live store (views left, expiry, gone). */
-export async function withLiveStatus(env, dir, rows) {
+export async function withLiveStatus(env, dir, rows, uid = null) {
   return Promise.all(rows.map(async (r) => {
-    if (r.status !== 'active') return { ...r, left: null };
-    const s = await liveStatus(env, r.id);
-    if (s.status === 'gone') {
-      await dir.markShareEnded(r.id, 'ended');
-      return { ...r, status: 'ended', left: 0 };
+    const received = r.kind === 'reverse' ? { received: { files: 0, bytes: 0 } } : {};
+    if (r.status !== 'active') {
+      if (r.kind === 'reverse') {
+        const s = await liveStatus(env, r.id, r.user_id ?? uid);
+        received.received = { files: s.files ?? 0, bytes: s.bytes ?? 0 };
+      }
+      return { ...r, left: null, ...received };
     }
-    return { ...r, views_total: s.views ?? r.views_total, left: s.left ?? null, expires: s.expires ?? r.expires };
+    const s = await liveStatus(env, r.id, r.user_id ?? uid);
+    if (r.kind === 'reverse') received.received = { files: s.files ?? 0, bytes: s.bytes ?? 0 };
+    if (s.status === 'gone') {
+      await dir.markShareEnded(r.id, s.state === 'expired' ? 'expired' : 'ended');
+      return { ...r, status: s.state === 'expired' ? 'expired' : 'ended', left: 0, ...received };
+    }
+    // A paused reverse link (the owner started over; docs/DRIVE.md §3.2) is still active: it resumes on a restore.
+    if (s.paused) received.paused = true;
+    return { ...r, views_total: s.views ?? r.views_total, left: s.left ?? null, expires: s.expires ?? r.expires, ...received };
   }));
 }
 
@@ -446,7 +467,7 @@ async function listShares(env, a, url) {
   const offset = Number(url.searchParams.get('offset')) || 0;
   const dir = directory(env);
   const { rows, total } = await dir.listShares(a.user.id, { q, status, limit: 50, offset });
-  return { rows: await withLiveStatus(env, dir, rows), total };
+  return { rows: await withLiveStatus(env, dir, rows, a.user.id), total };
 }
 
 async function updateShare(request, env, a, id, info) {
@@ -473,6 +494,7 @@ export async function changeShare(env, dir, row, info, body, { uid, actor, admin
   const change = {};
   if (body.views !== undefined) {
     if (body.views !== null && !(Number.isSafeInteger(body.views) && body.views >= 1 && body.views <= MAX_VIEWS)) return err(400, 'invalid_views', 'Invalid views.');
+    if (info.reverse) return err(400, 'invalid', 'A reverse share has no views: set its file and byte limits when creating it.');
     if (!info.burn && !info.file) return err(400, 'invalid', 'This note already has unlimited views.');
     change.views = body.views;
   }
@@ -494,6 +516,7 @@ export async function changeShare(env, dir, row, info, body, { uid, actor, admin
     let r;
     if (info.file) r = await fileStub(env, id).extend(change);
     else if (info.burn) r = await burnStub(env, id).extend(change);
+    else if (info.reverse) r = await driveStub(env, row.user_id ?? uid).extendReverse(row.user_id ?? uid, id, change.expires);
     else r = await extendKv(env, id, change);
     if (r.status === 'invalid') return err(400, 'invalid', r.message);
     if (r.status !== 'ok') {
@@ -535,8 +558,14 @@ async function revokeShare(env, a, id, info) {
   return json({ ok: true });
 }
 
-export async function purgeShare(env, id, info = parseId(id)) {
+export async function purgeShare(env, id, info = shareInfo(id)) {
   if (!info) return;
+  if (info.reverse) {
+    // Uploads stop; unfinished ones are deleted; received files stay in the Drive.
+    const uid = await directory(env).shareOwner(id);
+    if (uid) await driveStub(env, uid).endReverse(uid, id, 'revoked');
+    return;
+  }
   if (info.file) binding(env, 'FILES'); // never report a revoke that left ciphertext in R2
   if (info.file) await fileStub(env, id).revoke();
   else if (info.burn) await burnStub(env, id).revoke();

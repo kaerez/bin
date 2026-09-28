@@ -77,7 +77,19 @@ function svg(tag, attrs = {}, ...children) {
 
 /** The one wording for "this field is stored in plaintext" — keep it in one place. */
 /** Share index kinds → the words the UI uses. */
-export const KIND_NAMES = Object.freeze({ text: 'note', files: 'files', url: 'link', secret: 'credential', drive: 'drive' });
+export const KIND_NAMES = Object.freeze({ text: 'note', files: 'files', url: 'link', secret: 'credential', drive: 'drive', reverse: 'receive' });
+
+/**
+ * The "Views" column of a share row: views left of the total, "unlimited",
+ * or — for a reverse share, which has no views — the files it has received.
+ */
+export function viewsText(r) {
+  if (r && r.kind === 'reverse') {
+    const f = r.received && Number.isSafeInteger(r.received.files) ? r.received.files : 0;
+    return `${f} file${f === 1 ? '' : 's'} received`;
+  }
+  return r.views_total === null || r.views_total === undefined ? 'unlimited' : `${r.left ?? '—'} left of ${r.views_total}`;
+}
 
 export const UNENCRYPTED_HINT_TEXT = 'Not encrypted — visible to the server and admins. Don’t put secrets here.';
 

@@ -41,7 +41,11 @@ async function readJson(res) {
 //     SESSION_CHANGED with a Reload button (onSessionChanged). A page loaded
 //     for one user never changes another user's account.
 // The header goes only where the server checks it (/api/private and logout);
-// anonymous routes have no session and ignore it.
+// anonymous routes have no session and ignore it. That includes the reverse-
+// share uploader (reverseApi, /api/reverse/…): it sends no token and never
+// asks /api/private/me, whatever this page has recorded. The Drive's own
+// reverse-share calls (drive.createReverse, acceptReceived, receivedFailed,
+// receivedRetry) are under /api/private and carry the page's token.
 export const CSRF_COOKIE = '__Host-secbin_csrf';
 const CSRF_HEADER = 'x-secbin-csrf';
 const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -298,6 +302,15 @@ export const drive = {
   remove: (id) => request(`${D}/nodes/${enc(id)}`, { method: 'DELETE', headers: INTENT }),
   share: (body) => request(`${D}/shares`, { method: 'POST', headers: INTENT, body }),
   shares: (id) => request(`${D}/nodes/${enc(id)}/shares`),
+  // Reverse shares (docs/REVERSE.md §6.1) and the files they received.
+  createReverse: (body) => request(`${D}/reverse`, { method: 'POST', headers: INTENT, body }),
+  reverse: (folder) => request(`${D}/reverse${folder ? `?folder=${enc(folder)}` : ''}`),
+  received: (after = null) => request(`${D}/received${after ? `?after=${enc(after)}` : ''}`),
+  acceptReceived: (id, body) => request(`${D}/received/${enc(id)}`, { method: 'POST', headers: INTENT, body }),
+  // Received files the browser could not take in: recorded (they leave the queue), listed, put back.
+  receivedFailed: (id, reason) => request(`${D}/received/${enc(id)}/failed`, { method: 'POST', headers: INTENT, body: { reason } }),
+  receivedFailedList: (after = null) => request(`${D}/received?failed=1${after ? `&after=${enc(after)}` : ''}`),
+  receivedRetry: (id) => request(`${D}/received/${enc(id)}/failed`, { method: 'DELETE', headers: INTENT }),
   // The owner acting as this user: their escrow wrap and the owner's sealed escrow key (admin audit).
   impersonationEscrow: () => request(`${D}/escrow`, { method: 'POST', headers: INTENT, body: {} }),
   // The owner's recovery kit (made and read in the browser only): record a
@@ -316,6 +329,21 @@ export const drive = {
   // The owner, for a user: open their escrow wrap (admin audit) / write their `pw` wrap after a reset.
   escrow: (userId, reason) => request(`${A}/drive/escrow/${enc(userId)}`, { method: 'POST', headers: INTENT, body: { reason } }),
   setUserKeys: (userId, body) => request(`${A}/drive/keys/${enc(userId)}`, { method: 'PUT', headers: INTENT, body }),
+};
+
+// ── reverse shares: the anonymous uploader (docs/REVERSE.md §6.2) ────────────
+const R = (id) => `/api/reverse/${enc(id)}`;
+const grantH = (grant) => ({ 'x-reverse-grant': grant });
+export const reverseApi = {
+  open: (id, linkProof) => request(`${R(id)}/open`, { method: 'POST', headers: { ...INTENT, 'x-link-proof': linkProof } }),
+  begin: (id, { linkProof, keyProof, turnstile }) => request(`${R(id)}/begin`, {
+    method: 'POST', headers: { ...INTENT, 'x-link-proof': linkProof, ...(keyProof ? { 'x-key-proof': keyProof } : {}), ...human(turnstile) },
+  }),
+  createFile: (id, grant, body, signal) => request(`${R(id)}/files`, { method: 'POST', headers: grantH(grant), body, signal }),
+  putChunk: (id, node, i, bytes, uploadToken, signal) => putChunkTo(`${R(id)}/files/${enc(node)}/chunk/${i}`, bytes, uploadToken, signal),
+  finalize: (id, grant, node, uploadToken) => request(`${R(id)}/files/${enc(node)}/finalize`, { method: 'POST', headers: { ...INTENT, ...grantH(grant), 'x-upload-token': uploadToken } }),
+  cancel: (id, grant, node, uploadToken) => request(`${R(id)}/files/${enc(node)}`, { method: 'DELETE', headers: { ...INTENT, ...grantH(grant), 'x-upload-token': uploadToken } }),
+  done: (id, grant) => request(`${R(id)}/done`, { method: 'POST', headers: { ...INTENT, ...grantH(grant) } }),
 };
 
 /** Binary chunk upload (kept separate: `request` is JSON-only). */

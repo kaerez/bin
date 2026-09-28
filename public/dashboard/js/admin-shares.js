@@ -7,7 +7,7 @@
 // activity (unlike impersonation, which acts as the user).
 
 import { admin } from '../../js/api.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, viewsText } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { opensButton } from './receipts.js';
 
@@ -59,7 +59,7 @@ export async function renderShares(p) {
 
   const userSel = h('select.input.multi', { multiple: true, size: String(Math.min(6, Math.max(3, users.length))), 'aria-label': 'Users (none selected = all)' },
     ...users.map((u) => h('option', { value: u.id, text: u.username })));
-  const kind = h('select.input', { 'aria-label': 'Type' }, h('option', { value: '', text: 'any type' }), h('option', { value: 'text', text: 'notes' }), h('option', { value: 'url', text: 'links' }), h('option', { value: 'secret', text: 'credentials' }), h('option', { value: 'files', text: 'files' }), h('option', { value: 'drive', text: 'drive' }));
+  const kind = h('select.input', { 'aria-label': 'Type' }, h('option', { value: '', text: 'any type' }), h('option', { value: 'text', text: 'notes' }), h('option', { value: 'url', text: 'links' }), h('option', { value: 'secret', text: 'credentials' }), h('option', { value: 'files', text: 'files' }), h('option', { value: 'drive', text: 'drive' }), h('option', { value: 'reverse', text: 'receive' }));
   const status = h('select.input', { 'aria-label': 'Status' }, h('option', { value: '', text: 'any status' }),
     ...['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'].map((s) => h('option', { value: s, text: s })));
   const locked = h('select.input', { 'aria-label': 'Lock' }, h('option', { value: '', text: 'locked or not' }), h('option', { value: 'true', text: 'locked only' }), h('option', { value: 'false', text: 'unlocked only' }));
@@ -124,7 +124,7 @@ export async function renderShares(p) {
 
   function rowFor(r) {
     const active = r.status === 'active';
-    const views = r.views_total === null || r.views_total === undefined ? 'unlimited' : `${r.left ?? '—'} left of ${r.views_total}`;
+    const views = viewsText(r);
     const expires = r.expires ? (active && r.expires > now() ? `in ${formatCoarse(r.expires - now())}` : formatDate(r.expires)) : '—';
     const hintId = `adm-label-hint-${r.id}`;
     const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': `Label of ${r.id}`, placeholder: '(no label)', 'aria-describedby': hintId });

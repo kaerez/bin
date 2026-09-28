@@ -11,7 +11,7 @@ import { verifierFrom } from './auth.js';
 import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib/turnstile.js';
-import { parseId } from '../lib/ids.js';
+import { shareInfo } from '../lib/ids.js';
 import { MAX_SHARE_FILTER_USERS } from '../directory-do.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
 import { escrowRoute, adminSetUserKeys, syncCredentialWraps, destroyDrive, drivePasswordChanged } from './drive.js';
@@ -23,7 +23,7 @@ const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 const SCOPE_RE = /^(global|role:default|role:[A-Za-z0-9_-]{16}|[A-Za-z0-9_-]{16})$/;
 const SCOPE_MSG = 'scope must be "global", "role:<id>" or the public account';
 const now = () => Math.floor(Date.now() / 1000);
-const SHARE_KINDS = ['text', 'files', 'url', 'secret', 'drive'];
+const SHARE_KINDS = ['text', 'files', 'url', 'secret', 'drive', 'reverse'];
 const SHARE_STATUSES = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'];
 
 /** Parse the admin share-list filters from the query string (all optional). */
@@ -89,7 +89,7 @@ export async function handleAdmin(request, env, url) {
   const sm = p.match(/^\/api\/private\/admin\/shares\/([A-Za-z0-9_-]{16,32})(?:\/(revoke|lock))?$/);
   if (sm) {
     const id = sm[1];
-    const info = parseId(id);
+    const info = shareInfo(id);
     if (!info) return err(404, 'not_found', 'Share not found.');
     const row = await dir.adminShare(id);
     if (!row) return err(404, 'not_found', 'Share not found.');

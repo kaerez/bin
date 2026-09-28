@@ -88,7 +88,9 @@ describe('starting over, the reset and races', () => {
     const userBefore = JSON.stringify(await sql(driveOf(u.acc.id), 'SELECT kind, ref, data FROM wraps ORDER BY kind'));
     expect((await startOver(oc, (await startOverBody()).body)).status).toBe(409); // a usable wrap is left
     await authnRecovery('recovered-owner-pw-5');
-    const nodesBefore = JSON.stringify(await sql(driveOf(o.id), "SELECT * FROM nodes WHERE id != 'root' ORDER BY id"));
+    // What an archive keeps of each item: every column but rsess (the session reserving an unfinished file; those go).
+    const cols = 'id, parent, kind, name, meta, size, chunks, fk, state, done, upload_hash, created, updated, rs, rfail, rwhy';
+    const nodesBefore = JSON.stringify(await sql(driveOf(o.id), `SELECT ${cols} FROM nodes WHERE id != 'root' ORDER BY id`));
     const wrapsBefore = JSON.stringify(await sql(driveOf(o.id), 'SELECT kind, ref, data FROM wraps ORDER BY kind, ref'));
     const A = await startOverBody();
     const B = await startOverBody();
@@ -109,7 +111,6 @@ describe('starting over, the reset and races', () => {
     expect(JSON.parse(dm['drive.escrowSignPub'])).toEqual(won.s.publicJwk);
     expect(JSON.parse(dm['drive.ownerReset']).epoch).toBe(1);
     // The archive holds the owner's Drive exactly as it was; no user's Drive changed.
-    const cols = 'id, parent, kind, name, meta, size, chunks, fk, state, done, upload_hash, created, updated';
     expect(JSON.stringify(await sql(driveOf(o.id), `SELECT ${cols} FROM archive_nodes WHERE gen = 1 ORDER BY id`))).toBe(nodesBefore);
     expect(JSON.stringify(await sql(driveOf(o.id), 'SELECT kind, ref, data FROM archive_wraps WHERE gen = 1 ORDER BY kind, ref'))).toBe(wrapsBefore);
     expect(await env.FILES.get(driveChunkKey(o.id, o.file.id, 0))).not.toBeNull();

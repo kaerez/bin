@@ -93,6 +93,9 @@ const LIMIT_SECTIONS = [
     ['driveEnabled', 'Drive allowed', 'bool'],
     ['driveMaxBytes', 'Drive capacity', 'bytes'],
     ['driveMaxFileBytes', 'Drive: largest file', 'bytes'],
+    ['reverseEnabled', 'Receive files (reverse shares: anyone with the link uploads to a Drive folder)', 'bool'],
+    ['reverseMaxActive', 'Receive files: active links at once', 'int'],
+    ['reverseMaxBytes', 'Receive files: most bytes one link may receive', 'bytes'],
   ]],
 ];
 const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
@@ -1083,7 +1086,7 @@ const PUBLIC_ID = 'public-user-0000';
 // or log of its own); the server refuses them too (PUBLIC_NA_LIMITS).
 const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs', 'receiptLanguages',
   'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec',
-  'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes'];
+  'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes', 'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],
   ['ip', 'Network address only', 'Counts per IP address (IPv6 per the tracking prefix), stored only as a keyed hash. Nothing is stored in the browser; people behind one address share the limits.'],

@@ -13,7 +13,8 @@ anything in this file is a coordinated change: update it first.
   share goes; the drive data stays**. Shares reference the drive's stored ciphertext; nothing is
   copied or re-encrypted.
 - Deleting a drive item ends every share that references it (recipients get "gone").
-- Later (task #24, reverse share): anonymous uploads land in a drive folder the user chooses.
+- **Reverse shares** ("Receive files…", [`REVERSE.md`](./REVERSE.md)): anonymous uploads land in
+  a Drive folder the user chooses, encrypted to that user's key.
 - Terminology: the person who owns a drive is the **user**; "owner" means the admin.
 
 ## 2. What the server sees
@@ -343,8 +344,9 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   escrow pair counts as a rotation (the version goes up); the Directory records the **owner
   reset** `drive.ownerReset { epoch, kid, signPub, at }` (public; the epoch is one more than the
   last); `drive.owner_reset` goes to the admin audit; the fresh-kit notice follows. No user's
-  Drive or wrap is touched. **Atomic:** the Drive object re-checks "nothing opens it", archives
-  and writes the new keys and key check value in one step, then the Directory sets the new
+  Drive or wrap is touched. **Atomic:** the Drive object re-checks "nothing opens it", archives,
+  pauses the owner's reverse links (docs/REVERSE.md §9) and writes the new keys and key check
+  value in one step, then the Directory sets the new
   public keys and the reset in one transaction, a compare-and-set on the epoch the request read
   (`409 reset_conflict`); a second start over at the same moment gets `409 drive_unlockable`:
   one archive, one epoch. A failure between the two steps leaves the owner's Drive on the new
@@ -388,9 +390,18 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   its R2 objects, items, wraps and sealed keys go and its shares end; no kit can restore it
   afterwards (`DELETE /api/private/drive/archive/<gen>`, `drive.archive_deleted`). Archive
   numbers never repeat.
-- Reverse shares do not exist yet (task #24): when they do, starting over pauses the owner's
-  reverse links (no new uploads, "not accepting files right now"; received items kept, in the
-  archive) and a restore of the archive resumes them.
+- **The owner's reverse links** ([`REVERSE.md`](./REVERSE.md) §9): their private keys are sealed
+  under the old DK, so starting over ties each of them to the archive (`reverse.agen`) and
+  **pauses** the active ones: no new session or upload (`409 paused`; the uploader page says
+  "This link is not accepting files right now"), their open sessions end and their unfinished
+  uploads go; the items they received stay in the archive exactly as they arrived, sealed to
+  the link's key. A restore of the archive with a kit for the old DK brings those items back as
+  they are (`{ id }` only in `PUT …/nodes`), re-seals each link's private key under the Drive's
+  DK now (`reverse` in `POST …/finish`) and resumes the links; the kept items are then taken in
+  like any received file. Deleting the archive revokes the paused links and deletes their
+  received items. Logged as `reverse.paused`, `reverse.resumed` and `reverse.revoked`
+  (`reason=archive_deleted`), one entry per link, in the owner's activity and the admin audit.
+  No other user's link changes.
 - **Changes that need the step-up** (`PUT /api/private/drive/keys` with `current` or `reauth`,
   as on Account): removing a wrap, replacing the `pw` wrap, replacing `driveSalt`, and any
   change of the owner's escrow key pair — except the Drive's first set-up (no wraps yet), a
@@ -421,7 +432,8 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
     session), and for the owner only `escrowPriv`, `escrowSignPriv` and `escrowPrivOld`
     (each sealed under the owner's DK) and the public records `escrowVer`, `kit` and
     `archiveGen`. Nothing else: no key the server could use to open a Drive.
-  - the owner's archives after starting over (§3.2): `archive_nodes(gen, …the nodes columns)`,
+  - the owner's archives after starting over (§3.2): `archive_nodes(gen, …the nodes columns,
+    rs, rfail, rwhy)` (a received item keeps its link),
     `archive_wraps(gen, kind, ref, data)`, `archive_meta(gen, k, v)` (the old salt, pin, key
     check value, sealed keys, kit record, and `at`) — all as they were, sealed under the old DK.
   - `refs(share_id TEXT, node_id TEXT)`: which shares reference which nodes.
@@ -622,7 +634,10 @@ stand-in. What each side relies on:
   - the user's own activity (`GET /api/private/me/activity`) lists their Drive actions —
     `drive.keys_changed` (wraps added or removed, the salt), `drive.folder_created`,
     `drive.file_uploaded`, `drive.file_read` (a file opened: its first chunk read),
-    `drive.item_changed` (renamed, moved), `drive.item_deleted` — and their Drive shares
+    `drive.item_changed` (renamed, moved), `drive.item_deleted`, and for received files of a
+    reverse share `drive.received_taken_in`, `drive.received_failed`, `drive.received_retried`
+    (one row per link, per actor, per hour, adding up the files; [`REVERSE.md`](./REVERSE.md)
+    §7) — and their Drive shares
     (`share.created`, `share.updated`, `share.revoked`). Node ids only, never names. A user's own
     file reads are throttled in the log (one row per file per minute, at most 30 a minute), so
     they cannot push other entries out;
@@ -708,6 +723,13 @@ leave open:
   limit), and a Drive share that ends in any way (revoked by the user or the admin, deleted by
   its recipient, used up, expired) is dropped from the Drive's `refs`, so the per-item limit of
   1 000 shares counts live ones.
+- **Received files** (reverse shares, [`REVERSE.md`](./REVERSE.md)). `nodes.rs` names the
+  reverse share of a file an anonymous uploader sent and the user's browser has not yet
+  re-wrapped; such files count in the capacity (their content and, until re-wrapped, their
+  sealed path, metadata and wrap) but are left out of `children`, cannot be read,
+  moved, renamed or shared, and are listed by `GET /api/private/drive/received` until re-wrapped
+  (`POST /api/private/drive/received/<id>`). Their `fk` is `{ kind: 'rs', data }`. Deleting a
+  folder ends the reverse shares that target it or anything below it.
 - **Accounts.** Deleting an account first ends every share of its Drive, then deletes the Drive
   (every R2 object, its state), each step retried; only then is the account deleted. If the Drive
   cannot be removed the account stays (`503`), and deleting it again retries. The
