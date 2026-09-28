@@ -247,7 +247,7 @@ describe('links that open a new tab say so', () => {
     expect(a.querySelector('.sr-only').textContent).toBe(' (opens in a new tab)');
   });
   it('in every page footer, which is the same on every page (3.2.3, 3.2.6)', () => {
-    const pages = ['index.html', 'accessibility/index.html', 'dashboard/index.html',
+    const pages = ['index.html', 'accessibility/index.html', 'r/index.html', 'dashboard/index.html',
       ...readdirSync(join(ROOT, 'public/dashboard'), { withFileTypes: true }).filter((d) => d.isDirectory() && existsSync(join(ROOT, 'public/dashboard', d.name, 'index.html'))).map((d) => `dashboard/${d.name}/index.html`)];
     const foots = new Set();
     for (const p of pages) {

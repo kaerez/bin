@@ -27,6 +27,7 @@ import { RefsReader, saveFile, saveZip } from './downloads.js';
 import { buildRefsManifest, refChunks } from './refsmanifest.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
 import { passkeyPrfOnly } from './passkeys.js';
+import { createReverseKey, sealReversePriv, openReversePriv, linkHash, passwordGate, sealNote, fragmentOf, openUpload, newReverseId } from './reversekeys.js';
 
 /**
  * No usable DK in this tab (`reason`: 'locked' | 'wrong' | 'setup' |
@@ -42,11 +43,13 @@ import { passkeyPrfOnly } from './passkeys.js';
  * Drive wrap, so a page can offer the passkey unlock only when one exists.
  */
 export class DriveLocked extends Error {
-  constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = [], { ownerRecovery = false } = {}) {
+  constructor(message = 'Unlock your Drive to continue.', reason = 'locked', credentialIds = [], { ownerRecovery = false, received = 0 } = {}) {
     super(message);
     this.name = 'DriveLocked';
     this.reason = reason;
     this.credentialIds = credentialIds;
+    /** Received files (reverse shares) waiting for the Drive to be unlocked. */
+    this.received = received;
     /**
      * The owner's Drive, and nothing the owner can sign in with opens it (no
      * passkey or recovery-code wrap; no password wrap, or only a stale one —
@@ -69,6 +72,16 @@ export const ROOT = 'root';
 const ROOT_NAME = 'Drive';
 const MAX_NAME_BYTES = 255;
 const MAX_DEPTH = 64;
+/**
+ * Folder levels a received file's path may create below its link's folder
+ * (never past MAX_DEPTH in all): deeper folders are flattened — the file goes
+ * into the deepest folder allowed. And new folders one take-in may create:
+ * past that, files go into the deepest of their folders that exists.
+ */
+export const RECEIVED_MAX_DEPTH = 8;
+export const RECEIVED_MAX_NEW_FOLDERS = 200;
+/** Pages of received files one take-in reads at most (500 each). */
+const RECEIVED_MAX_PAGES = 40;
 const newId = () => b64urlFromBytes(randomBytes(16));
 const malformed = () => new ApiError('Malformed response from the server.', 502, 'malformed');
 
@@ -181,7 +194,7 @@ export async function openDrive({ user } = {}) {
     throw new DriveLocked('Set up your Drive with your password.', 'setup');
   }
   const dk = loadSessionKey(u.id);
-  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st), { ownerRecovery: u.role === 'owner' && ownerCannotUnlock(st) });
+  if (!dk) throw new DriveLocked(undefined, 'locked', passkeyRefs(st), { ownerRecovery: u.role === 'owner' && ownerCannotUnlock(st), received: Number(st.received) || 0 });
   const client = await DriveClient.create(dk, u);
   await client.maintain(st).catch(() => {});
   return client;
@@ -779,8 +792,11 @@ async function findArchive(kit, st) {
  * key re-sealed under the Drive's DK (content is untouched: each file has its
  * own key); a top-level name the Drive already has gets " (2)"… (as uploads
  * do); the archive's escrow keys that users' wraps are still made for join
- * the owner's earlier keys, so those Drives open again. The kit's DK is not
- * kept.
+ * the owner's earlier keys, so those Drives open again. The archive's reverse
+ * links (paused when the owner started over) get their private keys re-sealed
+ * under the Drive's DK and resume; the items they received come back as they
+ * arrived (sealed to the link's key) and are taken in like any received file.
+ * The kit's DK is not kept.
  */
 async function restoreArchive(u, kit, st, arch, password, step) {
   const dk = loadSessionKey(u.id) || await unlockWithPassword(password, st.driveSalt, st.wraps);
@@ -810,6 +826,8 @@ async function restoreArchive(u, kit, st, arch, password, step) {
   const files = { from: from.files, to: to.files };
   const out = [];
   for (const n of all) {
+    // A received item: sealed to its link's key, not the DK — it comes back as it is.
+    if (n.rs) { out.push({ id: n.id }); continue; }
     const top = n.parent === ROOT;
     const x = { id: n.id, name: await reseal(names, 'name', n, n.name, (t) => (top ? uniqueName(taken, cleanName(t)) : t)) };
     if (n.meta) x.meta = await reseal(names, 'meta', n, n.meta);
@@ -833,7 +851,20 @@ async function restoreArchive(u, kit, st, arch, password, step) {
     if (k) old[kid] = { pub: k.publicJwk, data: await sealPrivateKeyBytes(dk, 'escrow', k.pkcs8) }; else missing.push(`earlier escrow key ${kidFingerprint(kid)}`);
   }
   for (const k of pool.values()) if (!kit.keys.has(k.kid)) k.pkcs8.fill(0);
-  await api.archiveFinish(arch.gen, { ...(Object.keys(old).length ? { escrowPrivOld: old } : {}), ...step });
+  // The archive's reverse links: each private key from the kit's DK to the Drive's DK.
+  const links = {};
+  for (const l of Array.isArray(arch.view.reverse) ? arch.view.reverse : []) {
+    let pkcs8 = null;
+    try {
+      pkcs8 = await openField(files.from, 'reversePriv', l.id, sealed(l.priv));
+      links[l.id] = await sealField(files.to, 'reversePriv', l.id, pkcs8);
+    } catch {
+      links[l.id] = l.priv; // does not open: kept as it was (the Drive shows no link for it)
+    } finally {
+      if (pkcs8) pkcs8.fill(0);
+    }
+  }
+  await api.archiveFinish(arch.gen, { ...(Object.keys(old).length ? { escrowPrivOld: old } : {}), ...(Object.keys(links).length ? { reverse: links } : {}), ...step });
   saveSessionKey(dk, u.id);
   await client.maintain(await loadState()).catch(() => {});
   return { client, missing, restored: { escrow: false, signing: false, earlier: Object.keys(old).length, archive: arch.gen, items: all.length } };
@@ -1194,6 +1225,7 @@ export class DriveClient {
         type = normalizeMime(m.type) || OCTET;
         mtime = Number.isSafeInteger(m.mtime) && m.mtime >= 0 ? m.mtime : 0;
         ok = Number.isSafeInteger(m.size) && m.size === base.size && base.chunks === refChunks(base.size);
+        if (m.renamed === true) renamed = true; // a received file whose name was cleaned when it was taken in
       } catch { /* missing or unreadable metadata */ }
       if (!ok) name = null;
     }
@@ -1523,4 +1555,206 @@ export class DriveClient {
     const r = await api.shares(nodeId);
     return Array.isArray(r.shares) ? r.shares : [];
   }
+
+  // ── reverse shares (docs/REVERSE.md) ───────────────────────────────────
+
+  /**
+   * A reverse share on folder `folderId` → { url, id, expires }: a new link key
+   * pair (its private key sealed with this Drive's key), the link proof's
+   * hash, the note sealed with the link key, and — with a password — the
+   * gate the server checks (it only lets the uploader in; it protects nothing).
+   * opts: label, note, password, expire ("7d"), maxFiles, maxBytes,
+   * maxFileBytes (null = none), types ({ mode, rules } or null), and `step`:
+   * the "confirm it's you" part ({ current } or { reauth }, as for API keys) —
+   * a link adds key material to the Drive, so the server asks for it.
+   */
+  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {} } = {}) {
+    const id = newReverseId();
+    const { pub, privateKey } = await createReverseKey();
+    const body = {
+      id, folder: folderId, priv: await sealReversePriv(this.dk, id, privateKey), lh: await linkHash(pub), expire,
+      maxFiles, maxBytes, maxFileBytes, types,
+    };
+    if (note) body.note = await sealNote(pub, id, note);
+    if (password) body.password = await passwordGate(password, pub);
+    if (label) body.label = label;
+    Object.assign(body, step);
+    const r = await api.createReverse(body);
+    if (r.id !== id) throw malformed();
+    return { url: reverseUrl(id, pub), id, expires: r.expires };
+  }
+
+  /**
+   * Reverse shares (of one folder, or all) → rows as the server lists them,
+   * each with `url` (the link, rebuilt from its private key here) or null.
+   */
+  async reverseShares(folderId = null) {
+    const r = await api.reverse(folderId);
+    const rows = Array.isArray(r.reverse) ? r.reverse : [];
+    return Promise.all(rows.map(async (x) => {
+      let url = null;
+      try { url = reverseUrl(x.id, (await openReversePriv(this.dk, x.id, x.priv)).pub); } catch { /* not this Drive's key */ }
+      const { priv, ...rest } = x; // eslint-disable-line no-unused-vars
+      return { ...rest, url };
+    }));
+  }
+
+  /**
+   * Take in the files reverse shares have received: open each with its
+   * share's private key, create (or reuse, by name) the upload's folders in
+   * the target folder, and re-wrap its name, metadata and key into the normal
+   * Drive format (the content is not touched) → { added, failed, renamed,
+   * flattened, deferred, more }.
+   * - Names are cleaned (files.js cleanName: direction overrides and
+   *   invisible separators removed, NFC); a file whose name changed is marked
+   *   `renamed` in its metadata, which the Drive shows.
+   * - At most RECEIVED_MAX_DEPTH folder levels (and MAX_DEPTH in all) are
+   *   created for a path, and RECEIVED_MAX_NEW_FOLDERS folders per take-in:
+   *   past either, the file lands in the deepest folder allowed (`flattened`).
+   * - An item that cannot be taken in (it does not open, its name is not
+   *   usable, the Drive refuses its place) is recorded as failed on the
+   *   server: it leaves the queue (the Drive lists it to delete or try again),
+   *   so it never holds up the items behind it. A network or server error
+   *   leaves it for the next time (`deferred`). The queue is read page by
+   *   page (`next`), so failures never hide later items.
+   */
+  async receivePending({ onItem } = {}) {
+    const keys = new Map(); // share id → private key, or null (does not open with this Drive's key)
+    // As uploadTree: an existing folder of a name is reused, a clashing file name gets " (2)"….
+    const folders = new Map(); // `${parent}\n${path}` → id
+    const inside = new Map(); // folder id → { dirs: Map(name → id), names: Set }
+    const depthOf = new Map(); // a link's folder → its depth in the tree
+    let newFolders = 0;
+    const contentOf = async (id) => {
+      if (!inside.has(id)) inside.set(id, await this.names(id).catch(() => ({ dirs: new Map(), names: new Set() })));
+      return inside.get(id);
+    };
+    // The folder for `dirPath` under `parent`, made where needed while the budget lasts; else the deepest one there is.
+    const ensure = async (parent, dirPath) => {
+      if (!dirPath) return parent;
+      const key = `${parent}\n${dirPath}`;
+      if (folders.has(key)) return folders.get(key);
+      const cut = dirPath.lastIndexOf('/');
+      const up = await ensure(parent, cut < 0 ? '' : dirPath.slice(0, cut));
+      const leaf = dirPath.slice(cut + 1);
+      const here = await contentOf(up);
+      let id = here.dirs.get(leaf);
+      if (!id) {
+        if (newFolders >= RECEIVED_MAX_NEW_FOLDERS) return up;
+        newFolders++;
+        id = await this.mkdir(up, uniqueName(here.names, leaf));
+        here.dirs.set(leaf, id);
+        inside.set(id, { dirs: new Map(), names: new Set() });
+      }
+      folders.set(key, id);
+      return id;
+    };
+    const levelsUnder = async (parent) => {
+      if (!depthOf.has(parent)) {
+        let d;
+        try { const r = await api.node(parent); d = Array.isArray(r.path) ? r.path.filter((x) => x && x.id !== parent).length : 0; } catch { d = MAX_DEPTH; }
+        depthOf.set(parent, d);
+      }
+      return Math.max(0, Math.min(RECEIVED_MAX_DEPTH, MAX_DEPTH - depthOf.get(parent)));
+    };
+    const failure = (reason) => Object.assign(new Error(reason), { receivedReason: reason });
+    // A refusal by the Drive (full, folder full, too deep) fails the item; being signed out or losing the Drive stops the take-in.
+    const refused = (e) => e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403;
+    const out = { added: 0, failed: 0, renamed: 0, flattened: 0, deferred: 0, more: false };
+    let after = null;
+    for (let page = 0; page < RECEIVED_MAX_PAGES; page++) {
+      const r = await api.received(after);
+      const items = Array.isArray(r.items) ? r.items : [];
+      for (const k of Array.isArray(r.keys) ? r.keys : []) {
+        if (keys.has(k.id)) continue;
+        try { keys.set(k.id, (await openReversePriv(this.dk, k.id, k.priv)).privateKey); } catch { keys.set(k.id, null); /* sealed under another key */ }
+      }
+      for (const it of items) {
+        try {
+          const priv = keys.get(it.rs);
+          if (!priv) throw failure('unreadable');
+          let got;
+          try { got = await openUpload(priv, it.rs, it); } catch { throw failure('unreadable'); }
+          // The uploader's sealed size must be the server's (the chunks follow from it): else it fails closed.
+          if (got.size !== it.size) throw failure('unreadable');
+          let path;
+          try {
+            path = checkPath(cleanName(got.path));
+            path.split('/').forEach(checkName);
+          } catch { throw failure('name'); }
+          const renamed = path !== got.path;
+          const segs = path.split('/');
+          const leafName = segs.pop();
+          const allowed = await levelsUnder(it.parent);
+          const want = segs.slice(0, allowed).join('/');
+          let parent;
+          try { parent = await ensure(it.parent, want); } catch (e) {
+            if (!(e instanceof ApiError)) throw failure('name'); // a folder name this Drive cannot store
+            throw refused(e) ? failure('place') : e;
+          }
+          // Deeper than allowed, or out of new folders: in the deepest folder there is.
+          const flattened = segs.length > allowed || (want !== '' && folders.get(`${it.parent}\n${want}`) !== parent);
+          const type = normalizeMime(got.type) || OCTET;
+          const { names: taken } = await contentOf(parent);
+          const leaf = uniqueName(taken, leafName);
+          const meta = { type, mtime: got.mtime, size: it.size, ...(renamed ? { renamed: true } : {}) };
+          try {
+            await api.acceptReceived(it.id, {
+              parent,
+              name: await sealField(this.keys.names, 'name', it.id, leaf),
+              // The server's size is the one the chunks have: the metadata says the same.
+              meta: await sealField(this.keys.names, 'meta', it.id, JSON.stringify(meta)),
+              fk: await sealField(this.keys.files, 'fk', it.id, got.fk),
+            });
+          } catch (e) {
+            taken.delete(leaf);
+            throw refused(e) ? failure('place') : e;
+          }
+          out.added++;
+          if (renamed) out.renamed++;
+          if (flattened) out.flattened++;
+          if (onItem) onItem({ id: it.id, path, name: leaf, parent, renamed, flattened });
+        } catch (e) {
+          if (!e || !e.receivedReason) {
+            if (e instanceof ApiError && (e.status === 401 || e.status === 403)) throw e; // signed out, or no Drive: stop
+            out.deferred++; // a network or server error: next time
+            continue;
+          }
+          out.failed++;
+          await api.receivedFailed(it.id, e.receivedReason).catch(() => {});
+        }
+      }
+      out.more = !!r.more;
+      after = typeof r.next === 'string' ? r.next : null;
+      if (!out.more || !after) break;
+    }
+    return out;
+  }
+
+  /**
+   * Received files that could not be taken in → { items: [{ id, rs, label,
+   * size, created, failed, reason }], more, next, total } (`total`, the count
+   * of all of them, on the first page only).
+   */
+  async failedReceived(after = null) {
+    let total;
+    if (!after) {
+      const st = await api.state();
+      total = Number.isSafeInteger(st.receivedFailed) ? st.receivedFailed : null;
+      if (total === 0) return { items: [], more: false, next: null, total };
+    }
+    const r = await api.receivedFailedList(after);
+    const items = Array.isArray(r.items) ? r.items : [];
+    return { items, more: !!r.more, next: typeof r.next === 'string' ? r.next : null, ...(after ? {} : { total: total ?? items.length }) };
+  }
+
+  /** Put a failed received file back in the queue (the next take-in tries it again). */
+  async retryReceived(id) {
+    await api.receivedRetry(id);
+  }
+}
+
+/** The uploader's link of a reverse share: /r/<id>#<the raw public key>. */
+function reverseUrl(id, pub) {
+  return `${location.origin}/r/${id}#${fragmentOf(pub)}`;
 }

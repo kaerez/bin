@@ -15,6 +15,60 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Reverse shares when the owner starts over** (docs/REVERSE.md §9, docs/DRIVE.md §3.2): the
+  owner's reverse links are **paused**, not revoked — no new session or upload (`409 paused`,
+  once the link proof matches; the uploader page says "This link is not accepting files right
+  now"), their open sessions end and unfinished uploads go, and the items they received stay in
+  the archive exactly as they arrived, with the links' private keys still sealed under the old
+  Drive key. A restore with a kit for the old Drive brings the items back as they are, re-seals
+  each link's key under the Drive's key now (`reverse` in `POST …/archive/<gen>/finish`) and
+  resumes the links; the kept items are then taken in. Deleting the archive revokes the paused
+  links and deletes their received items. `reverse.paused`, `reverse.resumed` and
+  `reverse.revoked` (`reason=archive_deleted`) in the owner's activity and the admin audit. No
+  other user's link changes. My shares shows a paused link as paused.
+- **Reverse shares, security audit round 4** (docs/REVERSE.md §3, §4, §5; SECURITY.md
+  "Reverse shares"):
+  - an upload session's deadline slides both ways: once nothing is unfinished (a file finished
+    or cancelled) it is idle again and lapses after 10 minutes, giving its per-network slot back
+    (it used to stay open for the role's `filePendingSec` after its first file); still at most 24
+    hours in all;
+  - lowering a role's `reverseMaxBytes` applies to existing links (the smaller of the link's own
+    limit and the role's current one);
+  - a reverse-share id is never claimed again, even after its index row is pruned or its account
+    deleted (a permanent SHA-256 tombstone of the id), so an old link never opens a later share;
+  - taking received files into the Drive, marking them failed and putting them back are logged
+    as Drive actions (`drive.received_taken_in`, `drive.received_failed`,
+    `drive.received_retried`; one entry per link, per actor, per hour); creating, revoking and
+    all three while the owner acts as the user are logged exactly like the Drive actions (the
+    user's own in their activity, the owner as the real actor in the admin audit: `imp`, not
+    `adm`); a reverse share needs a set-up Drive (`409 drive_not_set_up`), and follows the
+    Drive's rules (no hand-over wrap; the escrow wrap always present);
+  - documented: one network can keep a password-gated link locked (the lockout is per link on
+    purpose), and uploaders of a limited link can infer other uploads from `filesLeft` /
+    `bytesLeft`.
+- **Reverse shares, security audit round 3** (docs/REVERSE.md §3, §4, §6, §7; SECURITY.md
+  "Reverse shares"):
+  - a link's id is claimed in the share index before anything else, in one step with the role's
+    checks and the active-links count: another account can no longer take over an id (`409
+    exists`), and `reverseMaxActive` holds under concurrent creates; no share index row ever
+    moves to another account or gets another link hash;
+  - received files that cannot be taken in are recorded as failed on the server and leave the
+    queue (`GET /received` pages with `after` / `next`), so they never hold up later files; the
+    Drive lists them ("Review them") to delete or try again;
+  - the human check comes before the password on `begin`, and each link has its own lockout
+    (10 wrong passwords in 15 minutes, from any networks: 15 minutes);
+  - an upload session with nothing unfinished lapses after 10 minutes idle; at most 5 open
+    sessions per network per link (and still 100 per link);
+  - `reverse.received` is one log entry per link per hour, adding up that hour's sessions;
+  - received names are cleaned as everywhere (`cleanName`; Hebrew, Arabic, ZWNJ / ZWJ and LRM /
+    RLM stay) and a renamed file is marked; a received path creates at most 8 folder levels and a
+    take-in at most 200 new folders (deeper files go into the deepest folder allowed);
+  - finalize and cancel accept only the session that reserved the file; a file's sealed fields
+    count towards the link's byte limit (empty files included); a reservation must finish within
+    24 hours however often its chunks are re-sent;
+  - documentation: the status codes do tell a reverse-share id from an unknown one; the owner
+    acting as the user can create a link whose key the owner keeps; with Turnstile on, its script
+    can read the link key on the uploader page.
 - **Owner recovery kit, starting over, Drives the owner sets up** (docs/DRIVE.md §3, §3.1, §3.2;
   SECURITY.md "Drive keys"):
   - **owner recovery kit**: a file (`secbin-owner-kit/1`) with the owner's Drive key and a
@@ -257,6 +311,16 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     deletion, focus goes to a heading instead of the page (2.4.3).
   - a toast at the top of a short screen no longer covers the controls Tab reaches next: it
     moves to the other edge, or is put away when it would cover focus at both (2.4.11, 2.4.12).
+  - reverse shares (from `main`): the uploader page's "Sent …" and the Drive's received-files
+    line are said by status lines present from the start, and the unlock screen's count of waiting
+    files by the page's status line (4.1.3); the uploader's drop zone is a named group, not a Tab
+    stop, its buttons being the keyboard way (4.1.2); focus goes to "Cancel" while sending and to
+    "Choose files" after it (2.4.3); an ended or paused link names itself in the page title (2.4.2);
+    the uploader page has the same footer as every other page, after `<main>` (1.3.1, 3.2.3); in the
+    "Receive files…" dialog the file-type list has a visible label (3.3.2), "Copy link" keeps its
+    words in its name (2.5.3), "Accept files for" is no longer cut off with text spacing (1.4.12),
+    and "Show more" in the review keeps focus (2.4.3); the human check's container draws a focus
+    ring while focus is in the widget (2.4.7).
 
 
 - **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the
@@ -288,6 +352,27 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   script is `test-e2e/drive-int.mjs` (see `test-e2e/README.md`, not run in CI); Share… applies
   the file-type and folder-depth policy and can allow in-browser viewing, like the composer. My shares and Admin → Shares name drive shares
   "drive".
+- **Reverse shares ("Receive files…")** (docs/REVERSE.md): a user whose role allows it
+  (`reverseEnabled`, off by default, with the Drive; `reverseMaxActive`, default 10;
+  `reverseMaxBytes`, default 1 GiB; Directory migration 14 fills the Default role) creates an
+  upload link on a Drive folder: `/r/<id>#<key>`, with copy and a QR code. Anyone with it can
+  send files and folders into that folder without an account (file and folder pickers, drag and
+  drop, progress, the human check when Turnstile is on, Send disabled until it passes). Each
+  link has its own ECDH P-256 key pair made in the user's browser: the public key is the link's
+  fragment, the private key is sealed with the user's Drive key. The uploader's browser encrypts
+  each file like a Drive file and seals its path, type and key to the link's key; the user's
+  browser re-wraps received files into the Drive when it is unlocked (folders rebuilt from the
+  paths, clashing names get " (2)"). Options: expiry, most files, most bytes, largest file, file
+  types, a label, an encrypted note to the uploader, and an optional password that only gates
+  the uploader (Argon2id proof; the server keeps a hash; wrong ones count against the network's
+  Guard and are logged). Creating a link needs the account password or a passkey; the owner
+  acting as the user can do everything the user can, logged as the user's own action with the
+  owner as the real actor in the admin audit. Everything counts towards the Drive's capacity,
+  including a received file's sealed path and metadata until it is re-wrapped. Links are listed
+  in the dialog, in My shares (type "receive", files received) and Admin → Shares (filter
+  `reverse`); revoking, expiry, an admin lock or deleting the folder stops uploads, and files
+  already received stay. Logged: `share.created` / `share.revoked`, `reverse.received` (count
+  and size only), `reverse.bad_password`.
 - **Folder tree component** (`public/js/tree.js`): a WAI-ARIA tree (roving tabindex, arrow
   keys, Home/End, Enter/Space, `*`, type-ahead; `aria-expanded`/`aria-selected`/levels) with a
   right-pane folder browser. The composer's file list and the recipient's file view now show

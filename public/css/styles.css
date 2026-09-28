@@ -642,6 +642,9 @@ fieldset { min-inline-size: 0; }
 /* Cloudflare Turnstile: always shown, so the visitor sees the check pass. */
 .turnstile { display: flex; justify-content: center; max-width: 100%; }
 .turnstile[hidden] { display: none; }
+/* Focus inside the widget (Cloudflare's frame draws its own focus, or none): a ring around its
+   container too, so where focus is can always be seen (WCAG 2.4.7). */
+.turnstile:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
 .api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
 .receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
 .opens-box { padding: .5rem 0; }
@@ -770,6 +773,18 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 /* The whole link, wrapped (a scroller would need to be focusable). */
 .modal-body .linkrow .url { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .drive-qr { margin: 1rem auto 0; width: max-content; }
+/* Reverse shares ("Receive files", docs/REVERSE.md): the Drive dialog and the uploader page /r/. */
+.drive-reverse-form { display: flex; flex-direction: column; gap: .75rem; margin-top: 1rem; }
+.drive-reverse-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: .75rem 1rem; }
+/* "Accept files for" (a label, a number and a unit in one box) takes a whole row: in a 12rem cell it
+   was cut off once text spacing grows (WCAG 1.4.12). */
+.drive-reverse-grid > .opt { grid-column: 1 / -1; justify-self: start; max-width: 100%; }
+.drive-reverse-list { margin-top: 1rem; }
+.drive-received { margin: .5rem 0; }
+.reverse .dropzone { margin: 0; }
+.reverse-list { margin: 0; padding: 0 0 0 1.1rem; max-height: 280px; overflow: auto; font-size: .78rem; overflow-wrap: anywhere; }
+.reverse-list:empty { display: none; }
+.reverse-note-text { margin: .4rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .drive-layout { grid-template-columns: 1fr; }
   .drive-tree-toggle { display: inline-flex; justify-self: start; }

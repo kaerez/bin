@@ -32,9 +32,9 @@ const VERIFY_TIMEOUT_MS = 10000;
 /**
  * The form each token is issued for (the widget's `action`): `account` covers
  * every other change on the account page (username, passkeys, recovery codes,
- * sign-in steps, API keys).
+ * sign-in steps, API keys); `reverse` is the anonymous reverse-share upload.
  */
-export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', account: 'account', public: 'public-share' });
+export const TURNSTILE_ACTIONS = Object.freeze({ login: 'login', password: 'password', account: 'account', public: 'public-share', reverse: 'reverse-upload' });
 
 /** { sitekey, secret } when both are set and well-formed, else null (Turnstile off). */
 let warned = false;
