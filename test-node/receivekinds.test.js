@@ -15,6 +15,8 @@ import {
 import { RECEIVE_UPLOAD_ACTIONS, ACTIONS, KINDS, quotaCovers } from '../public/js/quotakinds.js';
 import { createReverseKey, sealUpload, openUpload, newReverseId, newNodeId, linkProof, fragmentOf } from '../public/js/reversekeys.js';
 import { buildRefsManifest, validateRefsManifest } from '../public/js/refsmanifest.js';
+import { cleanEntries } from '../public/js/files.js';
+import { memberName } from '../public/js/zip.js';
 import { openLink, checkItem, ITEM_OVERHEAD } from '../public/js/reverseclient.js';
 import { ApiError } from '../public/js/api.js';
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes } from '../public/js/bytes.js';
@@ -130,6 +132,16 @@ describe('the marker, sealed to the link\'s key', () => {
     const plain = { ...m.entries[0] };
     delete plain.item;
     expect(validateRefsManifest({ ...m, entries: [plain] }).entries[0].item).toBeUndefined(); // an ordinary file
+  });
+
+  it('item entries follow the ZIP-slip rules: cleaned, then checked; the marker survives cleaning', () => {
+    const fk = b64urlFromBytes(randomBytes(32));
+    const m = (path) => validateRefsManifest({ v: 3, kind: 'refs', entries: [{ path, size: 1, type: 'text/markdown', mtime: 0, ref: 0, fk, item: { kind: 'note', fmt: 'markdown' } }], dirs: [] });
+    const [e] = cleanEntries(m('Note\u200b from x.md').entries);
+    expect(e).toMatchObject({ path: 'Note from x.md', renamed: true, item: { kind: 'note', fmt: 'markdown' } });
+    expect(() => cleanEntries(m('.\u200b./Note.md').entries)).toThrow(); // becomes "../Note.md"
+    expect(() => cleanEntries(m('\u200b/Note.md').entries)).toThrow(); // becomes "/Note.md"
+    expect(memberName('Note from 2026-09-28 14:03.md')).toBe('Note from 2026-09-28 14:03.md'); // the default names are safe members
   });
 });
 
