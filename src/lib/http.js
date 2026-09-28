@@ -60,6 +60,9 @@ export const PERMISSIONS_POLICY = [
   'web-share=(self)', 'window-management=()', 'xr-spatial-tracking=()',
 ].join(', ');
 
+/** HTTPS only, for two years, subdomains included (on pages and every other Worker response). */
+export const HSTS = 'max-age=63072000; includeSubDomains; preload';
+
 export const SECURITY_HEADERS = {
   'content-security-policy': CSP,
   'x-content-type-options': 'nosniff',
@@ -71,7 +74,7 @@ export const SECURITY_HEADERS = {
   'cross-origin-embedder-policy': 'require-corp',
   'origin-agent-cluster': '?1',
   'x-permitted-cross-domain-policies': 'none',
-  'strict-transport-security': 'max-age=63072000; includeSubDomains; preload',
+  'strict-transport-security': HSTS,
 };
 
 const JSON_HEADERS = {
@@ -158,8 +161,8 @@ export const API_CSP = "default-src 'none'; frame-ancestors 'none'; sandbox";
  * The isolation headers on every response the Worker returns (API answers,
  * chunks, errors, redirects and pages alike), where the route set none of its
  * own: COOP same-origin (a window opened to it lands in its own browsing
- * context group), CORP same-origin, X-Frame-Options DENY, nosniff and no
- * referrer. The CSP: anything that is not HTML (JSON, chunks, plain-text
+ * context group), CORP same-origin, X-Frame-Options DENY, nosniff, no
+ * referrer, HSTS and the Permissions-Policy (as on pages). The CSP: anything that is not HTML (JSON, chunks, plain-text
  * errors, redirects) always gets API_CSP, which is stricter than any page
  * policy (a page policy there was only copied along with the page headers);
  * an HTML page keeps its own (the strict one, the Turnstile pages', the check
@@ -174,6 +177,8 @@ export function withBaselineHeaders(res) {
   setIfAbsent('x-frame-options', 'DENY');
   setIfAbsent('x-content-type-options', 'nosniff');
   setIfAbsent('referrer-policy', 'no-referrer');
+  setIfAbsent('strict-transport-security', HSTS);
+  setIfAbsent('permissions-policy', PERMISSIONS_POLICY);
   const html = /^\s*text\/html\b/i.test(h.get('content-type') || '');
   if (!html) h.set('content-security-policy', API_CSP);
   else if (!h.has('content-security-policy')) h.set('content-security-policy', CSP);

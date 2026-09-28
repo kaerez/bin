@@ -19,9 +19,12 @@
 //     password or create a share).
 // Cloudflare's published testing keys carry no hostname or action; their
 // results are accepted as they are (they always pass or always fail anyway).
+// Tokens siteverify rejects are counted per network: after TURNSTILE_VERIFY.max
+// in a window the network's tokens are refused without a call (the share grant
+// routes count theirs under CAPTCHA_VERIFY instead: human.js verifyCaptcha).
 
-import { HttpError } from './http.js';
-import { directory } from './guard.js';
+import { assertNotCrossSite, HttpError } from './http.js';
+import { directory, ipContext, isBlocked, rateLimit, TURNSTILE_VERIFY } from './guard.js';
 
 export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 const SITEVERIFY = `${TURNSTILE_ORIGIN}/turnstile/v0/siteverify`;
@@ -83,14 +86,33 @@ export function setSiteverify(fn) { const prev = siteverify; siteverify = fn; re
 
 /**
  * Throws HttpError unless the request carries a valid, unused token for
- * `action`. A no-op when Turnstile is not configured.
+ * `action`. A no-op when Turnstile is not configured. Unless the caller
+ * limits the calls itself (`limited: false`: verifyCaptcha's
+ * "captcha-verify"), every token siteverify rejects counts towards the
+ * network's "turnstile-verify" scope (TURNSTILE_VERIFY), and a network that
+ * reached it gets `429 rate_limited` without a call until the block ends or
+ * the owner lifts it. Accepted tokens are never counted: each one cost a
+ * solved CAPTCHA, so sign-ins behind one busy address never use it up. A
+ * cross-site request is refused first, so another site cannot count here.
  */
-export async function requireTurnstile(env, request, action) {
+export async function requireTurnstile(env, request, action, { limited = true } = {}) {
   const cfg = await turnstileKeys(env);
   if (!cfg) return;
   const token = (request.headers.get('x-secbin-turnstile') || '').trim();
   if (!token) throw new HttpError(403, 'turnstile_required', 'Complete the CAPTCHA and try again.');
   if (token.length > TOKEN_MAX) throw failed();
+  let g = null;
+  if (limited) {
+    assertNotCrossSite(request);
+    g = await ipContext(env, request);
+    const b = await isBlocked(env, g, 'turnstile-verify');
+    if (b.blocked) throw tooMany(b.until);
+  }
+  // A rejected token is counted (after its verdict: siteverify has been asked).
+  const rejected = async () => {
+    if (g) await rateLimit(env, g, 'turnstile-verify', TURNSTILE_VERIFY);
+    return failed();
+  };
   const form = new FormData();
   form.append('secret', cfg.secret);
   form.append('response', token);
@@ -104,9 +126,12 @@ export async function requireTurnstile(env, request, action) {
     // Fail closed: without a verdict the request is not let through.
     throw new HttpError(503, 'turnstile_unavailable', 'The CAPTCHA could not be verified right now. Try again in a moment.');
   }
-  if (!data || data.success !== true) throw failed();
+  if (!data || data.success !== true) throw await rejected();
   if (data.metadata?.result_with_testing_key === true) return;
-  if (data.hostname !== new URL(request.url).hostname || data.action !== action) throw failed();
+  if (data.hostname !== new URL(request.url).hostname || data.action !== action) throw await rejected();
 }
+
+const tooMany = (until) => new HttpError(429, 'rate_limited', 'Too many failed CAPTCHA checks from your network. Try again later.',
+  until ? { until } : undefined, { 'retry-after': String(TURNSTILE_VERIFY.blockSec) });
 
 const failed = () => new HttpError(403, 'turnstile_failed', 'The CAPTCHA failed or expired. Try again.');

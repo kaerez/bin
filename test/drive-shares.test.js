@@ -9,6 +9,7 @@ import { ORIGIN, owner, makeUser, fetchJson, intent, proofHeaders, freshIp } fro
 import { enableDrive, driveLimits, mkdir, createFile, uploadFile, del } from './drive-helpers.js';
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
+import { invalidateGuardCaches } from '../src/lib/guard.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -242,4 +243,40 @@ describe('Drive shares obey the role', () => {
     expect((await fetchJson(`/api/file/${t.id}`, { method: 'DELETE', headers: { 'x-delete-token': t.deletetoken } })).status).toBe(200);
     expect(await env.FILES.get(`d/${u.id}/${f.id}/0`)).not.toBeNull();
   });
+});
+
+describe('C1: Drive-share chunk fetches of a share that ended are never counted as invalid', () => {
+  it('revoked, or deleted by its token, during a download: the correct grant gets 410 on /chunk/<ref>/<i>, never a block', async () => {
+    const u = await makeUser('dsh-c1');
+    await enableDrive(u.id);
+    const settings = (patch) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: patch });
+    expect((await settings({ 'guard.invalid.max': 3 })).status).toBe(200);
+    invalidateGuardCaches();
+    try {
+      const recipient = freshIp();
+      const liveFile = await uploadFile(u.cookie, 'root', 20);
+      const live = await share(u.cookie, [liveFile.id]);
+      for (const end of ['revoke', 'delete']) {
+        const f = await uploadFile(u.cookie, 'root', 40);
+        const s = await share(u.cookie, [f.id]);
+        expect(s.res.status).toBe(201);
+        const { grant } = await (await open(s.id, s.fragment, '', recipient)).res.json();
+        const ok = await SELF.fetch(`${ORIGIN}/api/file/${s.id}/chunk/0/0`, { headers: { 'x-download-grant': grant, 'cf-connecting-ip': recipient } });
+        expect(ok.status).toBe(200);
+        await ok.arrayBuffer();
+        if (end === 'revoke') expect((await fetchJson(`/api/private/shares/${s.id}/revoke`, { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
+        else expect((await fetchJson(`/api/file/${s.id}`, { method: 'DELETE', headers: { 'x-delete-token': s.deletetoken } })).status).toBe(200);
+        for (let i = 0; i < 8; i++) {
+          const r = await SELF.fetch(`${ORIGIN}/api/file/${s.id}/chunk/0/0`, { headers: { 'x-download-grant': grant, 'cf-connecting-ip': recipient } });
+          expect(r.status, `${end} #${i}`).toBe(410);
+          expect((await r.json()).error).toBe('gone');
+        }
+      }
+      // The recipient's network still opens other shares with their links.
+      expect((await open(live.id, live.fragment, '', recipient)).res.status).toBe(200);
+    } finally {
+      await settings({ 'guard.invalid.max': 60 });
+      invalidateGuardCaches();
+    }
+  }, 60000);
 });

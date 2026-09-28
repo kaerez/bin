@@ -364,8 +364,10 @@ const KEY_INFO = Object.freeze({
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
 const TRACKER_RE = /^[A-Za-z0-9_-]{32}$/;
-// Hard ceiling on stored trackers (each costs one row in this singleton).
-const MAX_TRACKERS = 200000;
+// Hard ceiling on stored trackers (each costs one row in this singleton). When
+// it is reached, the TRACKER_EVICT least recently seen (unblocked) rows make room.
+export const MAX_TRACKERS = 200000;
+export const TRACKER_EVICT = 1000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
@@ -1910,8 +1912,11 @@ export class Directory extends DurableObject {
 
   /**
    * The quota subject for a create request's tracker. The first create by an
-   * id stores it, at most `public.newTrackersPerIp` new ids per network per
-   * `public.newTrackersWindowSec` (and `MAX_TRACKERS` in all).
+   * id stores it (`fresh: true`; the caller gives it back with dropNewTracker
+   * when that create is refused), at most `public.newTrackersPerIp` new ids
+   * per network per `public.newTrackersWindowSec`. At `MAX_TRACKERS` rows the
+   * least recently seen ones go first (never a blocked one, which must stay
+   * blocked), with their usage counters, as if they had idled out.
    */
   async trackerSubject(value, ipKey) {
     const t = await this.#checkTracker(value);
@@ -1933,10 +1938,26 @@ export class Directory extends DurableObject {
       return fail(429, 'tracker_rate_limited', 'Too many new anonymous senders from your network. Try again later.');
     }
     if (this.sql.exec('SELECT COUNT(*) AS c FROM trackers').one().c >= MAX_TRACKERS) {
-      return fail(429, 'busy', 'Anonymous sharing is at capacity. Try again later.');
+      const old = this.sql.exec('SELECT id_hash FROM trackers WHERE blocked = 0 ORDER BY last_seen, created LIMIT ?', TRACKER_EVICT).toArray();
+      if (!old.length) return fail(429, 'busy', 'Anonymous sharing is at capacity. Try again later.');
+      for (const r of old) {
+        this.sql.exec('DELETE FROM usage WHERE user_id = ?', `pub:t:${r.id_hash}`);
+        this.sql.exec('DELETE FROM trackers WHERE id_hash = ?', r.id_hash);
+      }
+      this.#log(null, PUBLIC_ID, 'tracker.evicted', `${old.length} least recently seen (the table was full)`);
     }
     this.sql.exec('INSERT INTO trackers (id_hash, created, last_seen, ip_hash) VALUES (?, ?, ?, ?)', t.h, ts, ts, ipHash);
-    return { ok: true, subject: `pub:t:${t.h}` };
+    return { ok: true, subject: `pub:t:${t.h}`, fresh: true };
+  }
+
+  /**
+   * Give back a tracker row stored by this request's trackerSubject when the
+   * create was refused: a row is kept only once its id has created a share.
+   * Kept anyway when it has been used or counted meanwhile (a parallel create).
+   */
+  async dropNewTracker(subject) {
+    if (typeof subject !== 'string' || !subject.startsWith('pub:t:')) return;
+    this.sql.exec('DELETE FROM trackers WHERE id_hash = ? AND uses = 0 AND blocked = 0 AND NOT EXISTS (SELECT 1 FROM usage WHERE user_id = ?)', subject.slice(6), subject);
   }
 
   /** Count one share created under a tracker subject (after it succeeded). */

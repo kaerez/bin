@@ -14,7 +14,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env, SELF, createExecutionContext, waitOnExecutionContext, runInDurableObject } from 'cloudflare:test';
 import worker from '../src/index.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
-import { CSP, TURNSTILE_CSP, API_CSP } from '../src/lib/http.js';
+import { CSP, TURNSTILE_CSP, API_CSP, HSTS, PERMISSIONS_POLICY } from '../src/lib/http.js';
 import { SCHEMA_VERSION } from '../src/directory-do.js';
 import { SHARE_GRANT_SEC, SHARE_GRANT_CAP_SEC } from '../src/lib/human.js';
 import publicRoutesSource from '../src/routes/public.js?raw';
@@ -908,28 +908,56 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
     }
   });
 
+  it('A-2: only this site\'s document navigations reach the check page and its rate limit; another site\'s requests are redirected back, uncounted', async () => {
+    const ip = freshIp();
+    const cross = [
+      { 'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors', 'sec-fetch-site': 'cross-site' }, // <img src>
+      { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'cross-site' }, // <iframe src>
+      { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'cross-site' }, // a link from another site
+      { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-site' },
+      { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin' },
+      {}, // no Fetch Metadata at all
+    ];
+    for (let i = 0; i < 70; i++) {
+      const res = await ts(`${paths[0]}?check`, { ip, headers: cross[i % cross.length] });
+      expect([res.status, res.headers.get('location')]).toEqual([302, paths[0]]);
+      expect(res.headers.get('content-security-policy')).toBe(API_CSP);
+      await res.arrayBuffer();
+    }
+    // Nothing was counted: the network's own navigations still get all 60.
+    for (let i = 0; i < 60; i++) {
+      const res = await ts(`${paths[i % 2]}?check`, { ip, headers: i % 2 ? back : nav });
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    const over = await ts(`${paths[0]}?check`, { ip, headers: nav });
+    expect(over.status).toBe(429);
+    await over.text();
+    expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'captcha-page', key: `${ip}/32` } })).status).toBe(200);
+  });
+
   it('F3: the check page is behind the Guard\'s block and a per-network rate limit (an unknown id is served the same: no share lookup)', async () => {
     const ip = freshIp();
     let status;
     for (let i = 0; i < 60; i++) {
-      const res = await ts(`${paths[0]}?check`, { ip });
+      const res = await ts(`${paths[0]}?check`, { ip, headers: nav });
       await res.text();
       status = res.status;
       if (status !== 200) break;
     }
     expect(status).toBe(200); // 60 in the window are served
-    const over = await ts(`${paths[0]}?check`, { ip });
+    const over = await ts(`${paths[0]}?check`, { ip, headers: nav });
     expect([over.status, over.headers.get('retry-after')]).toEqual([429, '600']);
     expect(over.headers.get('content-security-policy')).toBe(API_CSP); // no Turnstile script (no script at all) on the refusal
     expect(await over.text()).not.toContain('secbin-page-key');
     // Another network is not affected; the owner can lift the limit (a Guard scope like the others).
-    expect((await ts(`${paths[1]}?check`, { ip: freshIp() })).status).toBe(200);
+    expect((await ts(`${paths[1]}?check`, { ip: freshIp(), headers: nav })).status).toBe(200);
     expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'captcha-page', key: `${ip}/32` } })).status).toBe(200);
-    expect((await ts(`${paths[0]}?check`, { ip })).status).toBe(200);
+    expect((await ts(`${paths[0]}?check`, { ip, headers: nav })).status).toBe(200);
     // A network blocked for invalid requests gets no check page at all.
     const blocked = freshIp();
     expect((await fetchJson('/api/private/admin/guard/block', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: `${blocked}/32`, seconds: 600 } })).status).toBe(200);
-    const res = await ts(`${paths[1]}?check`, { ip: blocked });
+    const res = await ts(`${paths[1]}?check`, { ip: blocked, headers: nav });
     expect(res.status).toBe(429);
     expect(res.headers.get('content-security-policy')).toBe(API_CSP);
     await res.text();
@@ -946,6 +974,9 @@ describe('every Worker response carries the isolation headers (N2)', () => {
     expect(res.headers.get('x-content-type-options'), what).toBe('nosniff');
     expect(res.headers.get('referrer-policy'), what).toBe('no-referrer');
     expect(res.headers.get('content-security-policy'), what).toBeTruthy();
+    // A-5: HSTS and the Permissions-Policy on every response, not only on pages.
+    expect(res.headers.get('strict-transport-security'), what).toBe(HSTS);
+    expect(res.headers.get('permissions-policy'), what).toBe(PERMISSIONS_POLICY);
   };
   it('API answers, errors, chunks and redirects: COOP/CORP same-origin, XFO DENY and default-src \'none\'; frame-ancestors \'none\'; sandbox — pages keep their own CSP', async () => {
     expect(API_CSP).toBe("default-src 'none'; frame-ancestors 'none'; sandbox");
@@ -978,7 +1009,7 @@ describe('every Worker response carries the isolation headers (N2)', () => {
     expect(page.headers.get('content-security-policy')).toBe(CSP);
     expect(page.headers.get('cross-origin-opener-policy')).toBe('same-origin');
     await page.text();
-    const check = await ts(`/p/${unknown}?check`, { ip: freshIp() });
+    const check = await ts(`/p/${unknown}?check`, { ip: freshIp(), headers: { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin' } });
     baseline(check, 'check page');
     expect(check.headers.get('cross-origin-opener-policy')).toBe('same-origin-allow-popups');
     expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP.replace("worker-src 'self'", "worker-src 'none'"));

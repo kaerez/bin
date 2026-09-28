@@ -13,7 +13,7 @@
 
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
-import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig, rateLimit, EXTEND_DOWNLOADS } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig, rateLimit, EXTEND_DOWNLOADS, ENDED_CHUNKS } from '../lib/guard.js';
 import { parseUserAgent, parseLanguages } from '../lib/ua.js';
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
@@ -387,9 +387,24 @@ async function downloadChunk(request, env, g, id, i, ref = null, human = false) 
   const r = ref === null ? await stub.chunkAccess(await hashToken(grant), i, human) : await stub.chunkAccessRef(await hashToken(grant), ref, i, human);
   if (r.status === 'captcha') throw captchaRequired();
   if (r.status === 'bad_index') return err(404, 'not_found', 'No such chunk.');
-  if (r.status === 'gone' && !human) return failed(env, g, captchaRequired().toResponse()); // as a protected share (see goneFor)
-  if (r.status !== 'ok') return failed(env, g, err(r.status === 'bad_grant' ? 403 : 410, r.status === 'bad_grant' ? 'bad_grant' : 'gone',
-    r.status === 'bad_grant' ? 'The download window has expired — open the link again.' : GONE));
+  // A share that has ended (expired, used up, revoked, deleted) while a recipient was still
+  // downloading: its grants went with it, so the grant cannot be checked any more. As on the
+  // extend route, a share the index knows (or knew) is the right credential arriving late and is
+  // never counted as invalid (goneFor, without a link proof); an id that was never a share is.
+  // Without a CAPTCHA grant it answers as a protected share (see goneFor).
+  if (r.status === 'gone') {
+    // Every such request costs a lookup in the Directory and is never counted as invalid,
+    // so it has a generous limit of its own (ENDED_CHUNKS), checked first: a recipient
+    // arriving late makes a handful, only a loop reaches it.
+    const rl = await rateLimit(env, g, 'ended-chunks', ENDED_CHUNKS);
+    if (!rl.ok) {
+      const res = err(429, 'rate_limited', 'Too many requests for downloads that have ended from your network. Try again later.', rl.until ? { until: rl.until } : undefined);
+      res.headers.set('retry-after', String(ENDED_CHUNKS.blockSec));
+      return res;
+    }
+    return goneFor(env, g, id, err(410, 'gone', GONE), null, !human);
+  }
+  if (r.status !== 'ok') return failed(env, g, err(403, 'bad_grant', 'The download window has expired — open the link again.'));
   const obj = await binding(env, 'FILES').get(r.key);
   if (!obj) return err(410, 'gone', GONE);
   return new Response(obj.body, {

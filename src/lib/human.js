@@ -124,7 +124,7 @@ export async function verifyCaptcha(env, g, request, action) {
     throw new HttpError(429, 'rate_limited', 'Too many CAPTCHA checks from your network. Try again later.', rl.until ? { until: rl.until } : undefined, { 'retry-after': '600' });
   }
   try {
-    await requireTurnstile(env, request, action);
+    await requireTurnstile(env, request, action, { limited: false }); // counted above (captcha-verify)
   } catch (e) {
     if (e instanceof HttpError && (e.code === 'turnstile_failed' || e.code === 'turnstile_required')) {
       const b = await recordFailure(env, g, 'invalid');
