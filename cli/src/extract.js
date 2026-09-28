@@ -2,7 +2,9 @@
 //
 // The manifest is attacker-controlled data (the sender writes it), so even
 // though files.js already rejects "..", absolute paths, backslashes and control
-// characters, every write here is independently confined:
+// characters (and commands/get.js cleans every name first, files.js
+// cleanEntries), every write here is independently confined:
+//   • a name that still holds hidden characters (files.js cleanName) is refused;
 //   • each target is path.resolve(root, …segments) and must stay inside root;
 //   • every path component below root is lstat'ed immediately before use and
 //     must be a real directory — a symlink planted in the output directory is
@@ -15,7 +17,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { checkPath } from '../vendor/files.js';
+import { checkPath, cleanName } from '../vendor/files.js';
 import { UsageError } from './errors.js';
 
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -52,6 +54,8 @@ export function targetPath(root, rel, platform = process.platform) {
   } catch (e) {
     throw new UnsafePathError(`refusing unsafe path in the share (${e.message})`);
   }
+  // Received names are saved cleaned (commands/get.js cleans the manifest first).
+  if (cleanName(rel) !== rel) throw new UnsafePathError('refusing unsafe path in the share (hidden characters)');
   const segs = rel.split('/');
   if (platform === 'win32' && segs.some((s) => WIN_BAD.test(s) || WIN_RESERVED.test(s))) {
     throw new UnsafePathError(`refusing "${rel}": not a valid Windows file name`);

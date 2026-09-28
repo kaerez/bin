@@ -86,7 +86,8 @@ describe('new accounts: created from the chosen parts', () => {
     const { auth, codes } = await register(u.cookie);
     const doc = await exportDoc({ system: { roles: true }, users: [u.id], parts: ALL });
     const e = doc.users[0];
-    expect(Object.keys(e).sort()).toEqual(['apiKeys', 'credentials', 'passkeys', 'recoveryCodes', 'role', 'username']);
+    expect(Object.keys(e).sort()).toEqual(['apiKeys', 'credentials', 'id', 'passkeys', 'recoveryCodes', 'role', 'username']);
+    expect(e.id).toBe(u.id);
     expect(e.apiKeys).toHaveLength(1);
     expect(e.apiKeys[0]).toMatchObject({ name: 'cli', scopes: ['policy'] });
     expect(JSON.stringify(e)).not.toContain(key); // the hash only
@@ -325,16 +326,19 @@ describe('the owner', () => {
   it('its row exports only its passkeys and/or recovery codes, each chosen separately (never its password, role or API keys)', async () => {
     await register(oc, 'owner-password', 'Owner row key');
     const pk = await exportDoc({ owner: ['passkeys'], users: [] });
-    expect(Object.keys(pk.owner)).toEqual(['passkeys']);
+    // With the owner's user id (for the page's id lists; an import ignores it).
+    const ownerId = (await (await fetchJson('/api/private/me', { cookie: oc })).json()).user.id;
+    expect(Object.keys(pk.owner)).toEqual(['id', 'passkeys']);
+    expect(pk.owner.id).toBe(ownerId);
     expect(Object.keys(pk.owner.passkeys)).toEqual(['keys']); // its "Password and passkey" choice never travels
     expect(pk.owner.passkeys.keys.map((k) => k.name)).toContain('Owner row key');
     const rc = await exportDoc({ owner: ['recoveryCodes'], users: [] });
-    expect(Object.keys(rc.owner)).toEqual(['recoveryCodes']);
+    expect(Object.keys(rc.owner)).toEqual(['id', 'recoveryCodes']);
     const left = (await (await fetchJson('/api/private/me/passkeys', { cookie: oc })).json()).recoveryLeft;
     expect(rc.owner.recoveryCodes).toHaveLength(left);
     expect(rc.owner.recoveryCodes.every((h) => /^[0-9a-f]{64}$/.test(h))).toBe(true); // hashes only
     const both = await exportDoc({ owner: ['passkeys', 'recoveryCodes', 'credentials', 'role', 'apiKeys'], users: [] });
-    expect(Object.keys(both.owner)).toEqual(['passkeys', 'recoveryCodes']);
+    expect(Object.keys(both.owner)).toEqual(['id', 'passkeys', 'recoveryCodes']);
     expect(JSON.stringify(both)).not.toMatch(/verifier|salt|apiKeys|"role"/);
     expect((await exportDoc({ users: [] })).owner).toBeUndefined(); // off unless asked
     expect((await exportDoc({ owner: [], users: [] })).owner).toBeUndefined();

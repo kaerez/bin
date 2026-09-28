@@ -40,7 +40,8 @@ describe('admin export', () => {
     expect(doc.users.some((x) => x.username === 'owner')).toBe(false);
     expect(doc.owner).toBeUndefined(); // the owner's passkeys only when asked
     const e = doc.users.find((x) => x.username === 'ie-export');
-    expect(Object.keys(e).sort()).toEqual(['credentials', 'role', 'username']);
+    expect(Object.keys(e).sort()).toEqual(['credentials', 'id', 'role', 'username']);
+    expect(e.id).toBe(u.id); // the user id, for the page's id lists (an import ignores it)
     expect(Object.keys(e.credentials).sort()).toEqual(['disabled', 'salt', 't', 'verifier']);
     // A user's role, by name; the role travels in `system`.
     expect(e.role).toBe(`user ${u.id}`);
@@ -54,7 +55,7 @@ describe('admin export', () => {
     // Parts are optional.
     const onlyRole = await exportDoc({ users: [u.id], parts: ['role'] });
     expect(onlyRole.system).toBeUndefined();
-    expect(onlyRole.users).toEqual([{ username: 'ie-export', role: `user ${u.id}` }]);
+    expect(onlyRole.users).toEqual([{ id: u.id, username: 'ie-export', role: `user ${u.id}` }]);
     // No parts → no users; unknown part names are ignored.
     expect((await exportDoc({ users: [u.id], parts: [] })).users).toEqual([]);
     expect((await exportDoc({ users: [u.id], parts: ['config', 'password'] })).users).toEqual([]);
@@ -69,9 +70,10 @@ describe('admin export', () => {
     const b = await makeUser('ie-per-b');
     const doc = await exportDoc({ users: [{ id: a.id, parts: ['credentials'] }, { id: b.id, parts: ['role', 'recoveryCodes', 'passkeys'] }, { id: a.id, parts: ['role'] }] });
     expect(doc.users).toHaveLength(2); // a user appears once (its first entry)
-    expect(Object.keys(doc.users.find((x) => x.username === 'ie-per-a')).sort()).toEqual(['credentials', 'username']);
+    expect(Object.keys(doc.users.find((x) => x.username === 'ie-per-a')).sort()).toEqual(['credentials', 'id', 'username']);
     const eb = doc.users.find((x) => x.username === 'ie-per-b');
-    expect(Object.keys(eb).sort()).toEqual(['passkeys', 'recoveryCodes', 'role', 'username']);
+    expect(Object.keys(eb).sort()).toEqual(['id', 'passkeys', 'recoveryCodes', 'role', 'username']);
+    expect([doc.users[0].id, eb.id]).toEqual([a.id, b.id]);
     expect(eb.passkeys).toEqual({ mfa: false, keys: [] });
     expect(eb.recoveryCodes).toEqual([]);
     const audit = (await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json()).rows;
@@ -101,6 +103,10 @@ describe('admin import', () => {
     expect((await applied.json()).applied).toBe(true);
     const cookie = await login('ie-roundtrip', 'roundtrip-password-1');
     const me = await (await fetchJson('/api/private/me', { cookie })).json();
+    // The file's user id is only for the page's id lists: the account is created with a new one.
+    expect(doc.users[0].id).toBe(u.id);
+    expect(me.user.id).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    expect(me.user.id).not.toBe(u.id);
     expect(me.limits.maxViews).toBe(3);
     expect(me.quotas.some((q) => q.max === 4)).toBe(true);
     const audit = await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json();

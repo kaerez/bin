@@ -4,8 +4,8 @@
 // undefined (or false) argument into that text, where h() would skip it. The
 // pages are the real public/dashboard/*/index.html markup and controllers
 // (My shares, Account, every Admin tab, Admin → Import / export with a file
-// open, and the Drive keys card's Verify with every kind of result); the
-// Drive page's views are checked in drive.test.js.
+// open and its user id lists, and the Drive keys card's Verify with every
+// kind of result); the Drive page's views are checked in drive.test.js.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -236,6 +236,44 @@ describe('no dashboard page shows a stray "null" or "undefined"', () => {
     for (let i = 0; i < 50 && !imp.querySelector('table.part-table'); i++) await settle();
     expect(imp.querySelector('table.part-table')).not.toBeNull();
     expect(strayText()).toEqual([]);
+  });
+
+  it('Admin → Import / export: the user id lists (a search with no match, lists uploaded on export and import, a file with and without ids)', async () => {
+    const { renderPortable } = await import('../public/dashboard/js/admin-portable.js');
+    document.body.innerHTML = '<div id="toast" role="status"></div>';
+    const panel = document.body.appendChild(document.createElement('div'));
+    await renderPortable(panel, fx.profile);
+    const upload = (input, text) => {
+      Object.defineProperty(input, 'files', { configurable: true, get: () => [new File([text], 'ids.txt')] });
+      input.dispatchEvent(new Event('change'));
+    };
+    const exp = panel.querySelectorAll('.card')[0];
+    const search = exp.querySelector('#ax-search');
+    search.value = 'nobody here';
+    search.dispatchEvent(new Event('input'));
+    expect([...exp.querySelectorAll('#ax-users tr')].every((tr) => tr.hidden)).toBe(true);
+    upload(exp.querySelector('#ax-ids-file'), `${'b'.repeat(16)}\n${'z'.repeat(16)}\n`);
+    for (let i = 0; i < 50 && exp.querySelector('#ax-ids-file-msg').hidden; i++) await settle();
+    expect(exp.querySelector('#ax-ids-file-msg').textContent).toMatch(/^1 of 2 ids/);
+    expect(strayText()).toEqual([]);
+    const imp = panel.querySelectorAll('.card')[1];
+    const file = imp.querySelector('[aria-label="Export file"]');
+    Object.defineProperty(file, 'files', { value: [{ size: 10, text: async () => '{}' }] });
+    for (const doc of [
+      // Ids on some rows only, and an owner row.
+      { format: 'secbin-export/v1', created: 1, owner: { id: 'O'.repeat(16), passkeys: { keys: [] } }, users: [{ id: 'B'.repeat(16), username: 'bob', role: 'Default' }, { username: 'carol', role: 'Default' }] },
+      // No ids at all.
+      { format: 'secbin-export/v1', created: 1, users: [{ username: 'dave', role: 'Default' }] },
+    ]) {
+      fx.fileDoc = doc;
+      [...imp.querySelectorAll('button')].find((b) => b.textContent === 'Decrypt').click();
+      for (let i = 0; i < 50 && !imp.querySelector(`[aria-label="Action for ${doc.users[0].username}"]`); i++) await settle();
+      expect(imp.querySelector('#ai-ids-save')).not.toBeNull();
+      upload(imp.querySelector('#ai-ids-file'), `${'b'.repeat(16)}\n`);
+      for (let i = 0; i < 50 && imp.querySelector('#ai-ids-file-msg').hidden; i++) await settle();
+      expect(imp.querySelector('#ai-ids-file-msg').textContent).toMatch(/Nothing changes until you import\.$/);
+      expect(strayText()).toEqual([]);
+    }
   });
 
   it('Admin → Import / export → Drive keys: the Verify results, with missing names, fingerprints and origin', async () => {
