@@ -312,8 +312,9 @@ export const revokeShare = (id) => request(`/api/private/shares/${enc(id)}/revok
 const A = '/api/private/admin';
 export const admin = {
   overview: () => request(`${A}/overview`),
-  settings: (patch) => request(`${A}/settings`, { method: 'PATCH', body: patch }),
-  limits: (scope, channel, patch) => request(`${A}/limits`, { method: 'PATCH', body: { scope, channel, patch } }),
+  // `step`: { current } or { reauth }, for a change that weakens a security control (the server says when).
+  settings: (patch, step = {}) => request(`${A}/settings`, { method: 'PATCH', body: { ...patch, ...step } }),
+  limits: (scope, channel, patch, step = {}) => request(`${A}/limits`, { method: 'PATCH', body: { scope, channel, patch, ...step } }),
   quotas: (scope, list) => request(`${A}/quotas`, { method: 'PUT', body: { scope, list } }),
   viewerRules: (scope, list) => request(`${A}/viewer-rules`, { method: 'PUT', body: { scope, list } }),
   users: () => request(`${A}/users`),

@@ -4,15 +4,17 @@
 // Default. Accounts have no settings of their own any more.
 import { describe, it, expect, beforeAll } from 'vitest';
 import { SELF } from 'cloudflare:test';
-import { owner, makeUser, fetchJson, freshIp, proofFor, createNote, ORIGIN, USER_PW, csrfHeaders } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, proofFor, createNote, ORIGIN, USER_PW, csrfHeaders, OWNER_STEP } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
 
 // Straight to the Worker (helpers.fetchJson maps per-user scopes onto roles).
+// Role limits that loosen a control need the owner's step-up (sent with every limits write, as fetchJson does).
 const raw = async (path, { method = 'GET', body } = {}) => SELF.fetch(`${ORIGIN}${path}`, { method, redirect: 'manual',
-  headers: { cookie: oc, 'content-type': 'application/json', 'x-secbin-intent': '1', 'cf-connecting-ip': freshIp(), ...(await csrfHeaders(oc)) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  headers: { cookie: oc, 'content-type': 'application/json', 'x-secbin-intent': '1', 'cf-connecting-ip': freshIp(), ...(await csrfHeaders(oc)) },
+  body: body === undefined ? undefined : JSON.stringify(method === 'PATCH' && path === '/api/private/admin/limits' ? { ...body, ...OWNER_STEP } : body) });
 const roles = async () => (await (await raw('/api/private/admin/roles')).json()).roles;
 const newRole = async (name) => { const r = await raw('/api/private/admin/roles', { method: 'POST', body: { name } }); expect(r.status).toBe(201); return (await r.json()).id; };
 const assign = (uid, roleId) => raw(`/api/private/admin/users/${uid}/role`, { method: 'PUT', body: { roleId } });

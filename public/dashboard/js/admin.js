@@ -149,6 +149,53 @@ const guard = async (fn, okText) => {
   }
 };
 
+/**
+ * "Confirm it's you" for a save that may weaken a security control (turning
+ * CSRF tokens off or anonymous sharing on; loosening the lockout, the
+ * brute-force or rate limits, the sessions, the log retention; a role option
+ * that loosens sign-in or widens what its shares, links and API keys may be;
+ * an allow IP rule: weakenedSettings / weakenedLimits in src/lib/settings.js). Hidden until the server answers that this change does (400
+ * reauth_required, with what it weakens); then the owner's password, or a
+ * passkey with the field left empty, goes with the next save. A change that
+ * tightens, or weakens nothing, never asks.
+ */
+let stepUpSlots = 0;
+function stepUpSlot() {
+  const id = `stepup-${++stepUpSlots}`;
+  const why = h('p.mono.muted', { id: `${id}-why` });
+  const label = h('span.field-label', { text: 'Your password' });
+  const input = h('input.input', { type: 'password', id, autocomplete: 'current-password', 'aria-describedby': `${id}-why` });
+  const el = h('div.stack', { hidden: true }, why, h('label.field', {}, label, input));
+  let passkey = false;
+  /** Save with `call(step)` (step: {} unless confirming); resolves to its result, or null (the reason is shown). */
+  const save = async (call, okText) => {
+    let step = {};
+    if (!el.hidden) {
+      try { step = await confirmStep(input, profile.user.username, !input.value && passkey); } catch (e) { msg(friendlyError(e), true); return null; }
+    }
+    try {
+      const r = await call(step);
+      el.hidden = true;
+      if (okText) { msg(okText); toast(okText); }
+      return r;
+    } catch (e) {
+      if (e && e.code === 'reauth_required' && Array.isArray(e.extra?.weakens)) {
+        passkey = await canUsePasskey();
+        label.textContent = confirmLabel('Your password', passkey);
+        why.textContent = `${e.message} Then save again.`;
+        el.hidden = false;
+        input.focus();
+        msg(e.message, true);
+        return null;
+      }
+      msg(friendlyError(e), true);
+      toast(friendlyError(e), { error: true });
+      return null;
+    }
+  };
+  return { el, save };
+}
+
 (async () => {
   profile = await ready;
   for (const t of document.querySelectorAll('.tab[data-tab]')) {
@@ -481,10 +528,12 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
         patch[c.key] = read;
       }
     }
-    const ok = await guard(() => admin.limits(scope, channel, patch), 'Limits saved.');
+    const ok = await reconfirm.save((step) => admin.limits(scope, channel, patch, step), 'Limits saved.');
     if (ok && onSaved) onSaved(); // re-render so the "effective" column is current
   };
+  const reconfirm = stepUpSlot();
   if (keys.some(([k]) => k === 'fileTypeRules')) box.appendChild(h('p.mono.muted', { text: RULES_HINT }));
+  box.appendChild(reconfirm.el);
   box.appendChild(h('div.btn-row', {}, save));
   return box;
 }
@@ -842,6 +891,7 @@ async function ownerRole(box) {
     return h('div.limit-row', {}, h('span.field-label', { text: label }), mode, c, h('span.mono.muted', { text: `default: ${defs[key] === null ? 'keep forever' : limitText(type, defs[key])}` }));
   };
   const save = h('button.cta', { type: 'button', text: 'Save' });
+  const reconfirm = stepUpSlot();
   box.append(h('h2.section-title', { text: 'Owner role' }),
     h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
     h('p.mono.muted', { id: 'owner-captcha', text: `CAPTCHA: allowed on shares and on reverse shares — you choose for each one (the box starts off for shares and on for reverse shares).${overview.turnstile ? '' : ' Not active until Turnstile is configured (Security → CAPTCHA).'}` }),
@@ -852,7 +902,7 @@ async function ownerRole(box) {
       h('h3.field-label', { text: 'Your activity log' }),
       h('p.mono.muted', { text: 'Entries about you and entries you made (admin actions, including while logged in as a user) are never removed by the Settings or role limits. Keep them forever (the default), or delete the older ones, and the oldest beyond a number, automatically. Server-wide configuration changes (settings, roles and limits, IP rules, exports and imports, Turnstile) are never deleted automatically. You can always clear entries by hand under Activity log.' }),
       keep('log.ownerMaxAgeSec', 'Keep your entries for', 'dur'), keep('log.ownerMaxEntries', 'Keep at most this many of your entries', 'int'),
-      h('div.btn-row', {}, save)));
+      reconfirm.el, h('div.btn-row', {}, save)));
   save.onclick = async () => {
     const patch = {};
     for (const [k, label, read] of fields) {
@@ -860,7 +910,7 @@ async function ownerRole(box) {
       if (v !== null && !Number.isFinite(v)) return msg(`Enter a value for "${label}".`, true);
       patch[k] = v;
     }
-    await guard(() => admin.settings(patch), 'Owner role saved.');
+    await reconfirm.save((step) => admin.settings(patch, step), 'Owner role saved.');
   };
 }
 
@@ -891,6 +941,7 @@ async function publicRole(box, reopen) {
   const perWin = durationInput(s['public.newTrackersWindowSec'], { label: 'New senders per network: per' });
   const idle = durationInput(s['public.trackerIdleSec'], { label: 'Forget idle browser ids after' });
   const save = h('button.cta', { type: 'button', text: 'Save tracking and notice' });
+  const reconfirm = stepUpSlot();
   save.onclick = async () => {
     const mode = radios.map((l) => l.querySelector('input')).find((r) => r.checked)?.value || 'tracker';
     const patch = {
@@ -898,7 +949,7 @@ async function publicRole(box, reopen) {
       'public.newTrackersPerIp': perIp.read(), 'public.newTrackersWindowSec': perWin.read(), 'public.trackerIdleSec': idle.read(),
     };
     for (const [k, v] of Object.entries(patch)) if (typeof v === 'number' && !Number.isFinite(v)) return msg(`Enter a value for ${k}.`, true);
-    if (await guard(() => admin.settings(patch), 'Public role saved.')) reopen();
+    if (await reconfirm.save((step) => admin.settings(patch, step), 'Public role saved.')) reopen();
   };
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Counting anonymous senders' }),
     h('fieldset.range', {}, h('legend', { text: 'How anonymous creators are counted' }), ...radios),
@@ -907,7 +958,7 @@ async function publicRole(box, reopen) {
     h('div.limit-row', {}, h('span.field-label', { text: 'New senders (browser ids) per network' }), perIp, h('span.field-label', { text: 'per' }), perWin),
     h('div.limit-row', {}, h('span.field-label', { text: 'Forget idle browser ids after' }), idle),
     h('p.muted', { text: 'A browser id is stored only when it first creates a share; that is when the per-network limit is spent. Clearing browser storage gives a new id, so tracker mode allows up to (new senders × quota) shares per network per window.' }),
-    h('div.btn-row', {}, save)));
+    reconfirm.el, h('div.btn-row', {}, save)));
 
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities, limits, viewer, file shares' }),
     limitsEditor({ scope: PUBLIC_ID, channel: 'all', rows: detail.limits.all, effective: detail.effective.all, inherited: overview.defaults.inherited, onSaved: reopen, omit: PUBLIC_OMIT })));
@@ -1007,7 +1058,7 @@ async function renderSettings() {
   const int = (key, label, ctx = '') => { const c = numberInput(s[key], { label: ctx ? `${ctx}: ${label}` : label }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(String(defs[key]))); };
   const scopeRule = (scope, label) => h('div.card.stack', {}, h('h3.field-label', { text: label }),
     int(`guard.${scope}.max`, 'Failures allowed', label.split(':')[0]), dur(`guard.${scope}.windowSec`, 'Within', label.split(':')[0]), dur(`guard.${scope}.blockSec`, 'Then block the IP for', label.split(':')[0]));
-  p.appendChild(h('p.mono.muted', { text: 'Server-wide settings only. What accounts may do (sessions, file shares, the viewer, passkeys, password policy, quotas) is set per role under Roles; the owner\'s own session timeouts and file-share windows are on the Owner role, and anonymous sharing on the Public role.' }));
+  p.appendChild(h('p.mono.muted', { text: 'Server-wide settings only. What accounts may do (sessions, file shares, the viewer, passkeys, password policy, quotas) is set per role under Roles; the owner\'s own session timeouts and file-share windows are on the Owner role, and anonymous sharing on the Public role. Loosening a protection (CSRF tokens off, more failures allowed, a shorter window or block, longer sessions, a longer IPv6 prefix, less log kept), and in a role anything that loosens sign-in or lets its users share more, asks for your password or a passkey; tightening does not.' }));
   p.appendChild(h('div.stack', {}, h('h2.section-title', { text: 'Brute-force protection (per IP)' }),
     h('p.mono.muted', { text: 'Counts failures per network address (IPv6 per the tracking prefix below) and blocks that address for a while, whoever it is and whichever account it tries: it stops one source from guessing. Account lockout (below) is the other half: it counts wrong passwords per account, from any address, and locks only that account: it stops many sources guessing one account.' }),
     scopeRule('login', 'Login'), scopeRule('setup', 'Setup'),
@@ -1020,6 +1071,7 @@ async function renderSettings() {
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
     int('lockout.max', 'Failed logins allowed'), dur('lockout.windowSec', 'Within', 'Account lockout'), dur('lockout.lockSec', 'Then lock the account for')));
   const save = h('button.cta', { type: 'button', text: 'Save settings' });
+  const reconfirm = stepUpSlot();
   save.onclick = async () => {
     const patch = {};
     for (const [k, read] of fields) {
@@ -1027,8 +1079,9 @@ async function renderSettings() {
       if (!Number.isFinite(v)) return msg(`Enter a value for ${k}.`, true);
       patch[k] = v;
     }
-    await guard(() => admin.settings(patch), 'Settings saved.');
+    await reconfirm.save((step) => admin.settings(patch, step), 'Settings saved.');
   };
+  p.appendChild(reconfirm.el);
   p.appendChild(save);
   // Its own section, saved with its own button.
   p.appendChild(csrfEditor(s));
@@ -1040,14 +1093,15 @@ function csrfEditor(s) {
   const HELP = 'set-csrf-help';
   const on = h('input', { type: 'checkbox', id: 'set-csrf', checked: s.csrfTokens !== false, 'aria-describedby': HELP });
   const saveBtn = h('button.cta', { type: 'button', id: 'set-csrf-save', text: 'Save' });
+  const reconfirm = stepUpSlot(); // turning them off asks for the password or a passkey
   saveBtn.onclick = async () => {
-    const r = await guard(() => admin.settings({ csrfTokens: on.checked }), on.checked ? 'CSRF tokens are on.' : 'CSRF tokens are off.');
+    const r = await reconfirm.save((step) => admin.settings({ csrfTokens: on.checked }, step), on.checked ? 'CSRF tokens are on.' : 'CSRF tokens are off.');
     if (r) on.checked = r.settings.csrfTokens !== false;
   };
   return h('div.card.stack', {}, h('h2.section-title', { text: 'CSRF tokens' }),
     h('p.mono.muted', { id: HELP, text: 'CSRF tokens add a second check on every change made from the browser. With it off, the other protections still apply: SameSite cookies, the cross-site check, and the required JSON or intent header.' }),
     h('label.inline', {}, on, ' Require CSRF tokens'),
-    h('div.btn-row', {}, saveBtn));
+    reconfirm.el, h('div.btn-row', {}, saveBtn));
 }
 
 /**
@@ -1175,13 +1229,14 @@ async function renderPublic() {
   if (!overview) return;
   const on = h('input', { type: 'checkbox', checked: overview.settings['public.enabled'] });
   const save = h('button.cta', { type: 'button', text: 'Save' });
-  save.onclick = () => guard(() => admin.settings({ 'public.enabled': on.checked }), on.checked ? 'Anonymous sharing is on.' : 'Anonymous sharing is off.');
+  const reconfirm = stepUpSlot(); // turning it on asks for the password or a passkey
+  save.onclick = () => reconfirm.save((step) => admin.settings({ 'public.enabled': on.checked }, step), on.checked ? 'Anonymous sharing is on.' : 'Anonymous sharing is off.');
   const toRole = h('button.btn', { type: 'button', text: 'Edit the Public role', on: { click: () => { selectTab('roles'); renderRoles('public'); } } });
   p.appendChild(h('div.card.stack', {},
     h('h2.section-title', { text: 'Public (anonymous) sharing' }),
     h('p.subtitle', { text: 'When on, the home page offers the composer to anyone, as the built-in public account: no password, no dashboard, no API keys. What anonymous senders may do, how they are counted, the notice they see and their browser ids are set on the Public role (Roles).' }),
     h('label.inline', {}, on, ' Allow anonymous sharing'),
-    h('div.btn-row', {}, save, toRole)));
+    reconfirm.el, h('div.btn-row', {}, save, toRole)));
 }
 
 // ── security ─────────────────────────────────────────────────────────────────
@@ -1244,9 +1299,10 @@ async function renderSecurity() {
   const ttl = durationInput(null, { allowNull: true, label: 'Rule duration' });
   const note = h('input.input', { maxlength: '100', 'aria-label': 'Note (optional)' });
   const add = h('button.btn', { type: 'button', text: 'Add rule' });
+  const reconfirm = stepUpSlot(); // an allow rule asks for the password or a passkey
   add.onclick = async () => {
     const exp = ttl.read();
-    if (await guard(() => admin.addIpRule({ cidr: cidr.value.trim(), action: action.value, note: note.value, expiresInSec: exp || null }), 'Rule added.')) renderSecurity();
+    if (await reconfirm.save((step) => admin.addIpRule({ cidr: cidr.value.trim(), action: action.value, note: note.value, expiresInSec: exp || null, ...step }), 'Rule added.')) renderSecurity();
   };
   const rbody = h('tbody');
   for (const r of rules?.rules || []) {
@@ -1256,8 +1312,9 @@ async function renderSecurity() {
       h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Remove', on: { click: async () => { await guard(() => admin.removeIpRule(r.id), 'Rule removed.'); renderSecurity(); } } }))));
   }
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Manual IP rules' }),
-    h('p.mono.muted', { text: 'Block rules deny the whole API and dashboard. Allow beats block. Leave the duration empty for a permanent rule.' }),
+    h('p.mono.muted', { text: 'Block rules deny the whole API and dashboard. Allow beats block, and its addresses are never blocked or rate-limited, so adding an allow rule asks for your password or a passkey. Leave the duration empty for a permanent rule.' }),
     h('div.toolbar', {}, labelled(cidr), labelled(action), h('div.field-inline', { role: 'group', 'aria-labelledby': 'rule-ttl-l', 'aria-describedby': 'rule-ttl-h' }, h('span.field-label', { id: 'rule-ttl-l', text: 'Rule duration' }), ttl, h('span.mono.muted', { id: 'rule-ttl-h', text: 'empty: until removed' })), labelled(note), add),
+    reconfirm.el,
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Range', 'Action', 'Expires', 'Note', ''].map(th))), rbody))));
 
   const bbody = h('tbody');

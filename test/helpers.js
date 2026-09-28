@@ -16,6 +16,8 @@ setPasswordStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('test-stretch')))
 export const salt16 = () => b64urlFromBytes(randomBytes(16));
 /** A fake client-side Argon2id output for `password` (the server never sees the password). */
 export const proofFor = (password) => b64urlFromBytes(new Uint8Array(32).map((_, i) => (password.charCodeAt(i % password.length) + i) & 0xff));
+/** The owner's step-up (the password proof), for admin changes that weaken a security control. */
+export const OWNER_STEP = Object.freeze({ current: proofFor('owner-password') });
 
 let ipCounter = 1;
 /** A fresh client IP per test file/area so Guard state never bleeds between tests. */
@@ -61,7 +63,45 @@ export async function csrfHeaders(cookie, ip) {
   return t ? { 'x-secbin-csrf': t } : {};
 }
 
-export async function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip, csrf = true } = {}) {
+// Starting an impersonation revokes the owner's session it replaces (the
+// browser holds only the new cookie from then on). The suites keep one owner
+// cookie per file for the owner's own requests, so after an impersonation the
+// helpers sign the owner in again and send that session wherever the replaced
+// cookie is passed (`alias: false` sends the replaced cookie as it is, to
+// check that it was revoked).
+const IMPERSONATE = /^\/api\/private\/admin\/users\/[A-Za-z0-9_-]{16}\/impersonate$/;
+const replacedOwner = new Map();
+const ownerNow = (cookie) => { let c = cookie; while (c && replacedOwner.has(c)) c = replacedOwner.get(c); return c; };
+/** The owner session that stands for `cookie` now (itself, unless an impersonation replaced it): for requests made without fetchJson. */
+export const liveCookie = (cookie) => ownerNow(cookie);
+
+// Admin changes that weaken a security control need the owner's step-up
+// (src/lib/settings.js weakenedSettings / weakenedLimits; an allow IP rule).
+// Suites that set such options for what they test send the owner's password
+// proof with every settings, limits and IP-rule write (it is ignored when the
+// change weakens nothing, and refused for anyone but the owner); `step:
+// false` sends the body as it is, for the tests of the step-up itself
+// (audit-auth.test.js).
+const WEAKENING_WRITE = (method, path) => (method === 'PATCH' && (path === '/api/private/admin/settings' || path === '/api/private/admin/limits'))
+  || (method === 'POST' && path === '/api/private/admin/ip-rules');
+
+export async function fetchJson(path, { method = 'GET', body: asGiven, cookie: passed, headers = {}, ip, csrf = true, alias = true, step = true } = {}) {
+  const cookie = alias ? ownerNow(passed) : passed;
+  const plain = asGiven && typeof asGiven === 'object' && !Array.isArray(asGiven);
+  const body = step && plain && WEAKENING_WRITE(method, path) && asGiven.current === undefined && asGiven.reauth === undefined ? { ...asGiven, ...OWNER_STEP } : asGiven;
+  const res = await send(path, { method, body, cookie, headers, ip, csrf });
+  if (body !== asGiven && res.status === 403 && (await res.clone().json().catch(() => ({}))).error === 'wrong_password') {
+    throw new Error(`${method} ${path}: the owner's password is not "owner-password" here; send the step-up explicitly`);
+  }
+  if (alias && cookie && method === 'POST' && IMPERSONATE.test(path) && res.status === 200) {
+    const fresh = await login('owner', 'owner-password', ip);
+    replacedOwner.set(cookie, fresh);
+    if (ownerCookie === cookie) ownerCookie = fresh;
+  }
+  return res;
+}
+
+async function send(path, { method, body, cookie, headers, ip, csrf }) {
   if (ROLE_SCOPED.test(path) && body && typeof body.scope === 'string' && /^[A-Za-z0-9_-]{16}$/.test(body.scope) && body.scope !== 'public-user-0000') {
     body = { ...body, scope: `role:${await roleForUser(body.scope, cookie)}` };
   }
