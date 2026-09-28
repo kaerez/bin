@@ -321,18 +321,18 @@ describe('R5-I2: the kit check is rate limited per owner session', () => {
   it(`at most ${KIT_PROBE_MAX} calls per window; another session has its own budget`, async () => {
     await userWithDrive('r5-probe');
     const statuses = [];
-    for (let i = 0; i < KIT_PROBE_MAX + 5; i++) statuses.push((await fetchJson('/api/private/drive/kit/probe', { cookie: oc })).status);
+    for (let i = 0; i < KIT_PROBE_MAX + 5; i++) statuses.push((await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, headers: intent, body: {} })).status);
     expect(statuses.slice(0, KIT_PROBE_MAX).every((s) => s === 200)).toBe(true);
     expect(statuses.slice(KIT_PROBE_MAX).every((s) => s === 429)).toBe(true);
-    const last = await fetchJson('/api/private/drive/kit/probe', { cookie: oc });
+    const last = await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, headers: intent, body: {} });
     expect(await errorOf(last)).toBe('rate_limited');
     // A refused call writes no admin-audit row.
     const rows = async () => (await (await fetchJson('/api/private/admin/audit?limit=500', { cookie: oc })).json()).rows.filter((r) => r.action === 'drive.escrow_used' && /kit check/.test(r.detail)).length;
     const n = await rows();
-    await fetchJson('/api/private/drive/kit/probe', { cookie: oc });
+    await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, headers: intent, body: {} });
     expect(await rows()).toBe(n);
     const other = await login('owner', 'owner-password');
-    expect((await fetchJson('/api/private/drive/kit/probe', { cookie: other })).status).toBe(200);
+    expect((await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: other, headers: intent, body: {} })).status).toBe(200);
   });
 });
 
@@ -343,7 +343,7 @@ describe('R5 access control on the new routes (unchanged)', () => {
       ['POST', '/api/private/drive/kit', { event: 'exported' }],
       ['POST', '/api/private/drive/kit', { event: 'used' }],
       ['POST', '/api/private/drive/kit', { event: 'verified', verdict: 'complete' }],
-      ['GET', '/api/private/drive/kit/probe', undefined],
+      ['POST', '/api/private/drive/kit/probe', {}],
       ['PUT', '/api/private/drive/kit/keys', { escrowPriv: { pub: o.e.publicJwk, data: W() } }],
       ['POST', '/api/private/drive/start-over', { confirm: 'owner' }],
       ['GET', '/api/private/drive/archive/1', undefined],
@@ -375,7 +375,7 @@ describe('R5 access control on the new routes (unchanged)', () => {
       expect([400, 403]).toContain((await fetchJson(path, { method, cookie: oc, body })).status);
       expect((await fetchJson(path, { method, cookie: oc, headers: { ...intent, 'sec-fetch-site': 'cross-site' }, body })).status).toBe(403);
     }
-    expect((await fetchJson('/api/private/drive/kit/probe', { cookie: oc, headers: { 'sec-fetch-site': 'same-site' } })).status).toBe(403);
+    expect((await fetchJson('/api/private/drive/kit/probe', { method: 'POST', cookie: oc, headers: { ...intent, 'sec-fetch-site': 'same-site' }, body: {} })).status).toBe(403);
   });
 
   it('reset metadata cannot be written by a non-owner; escrowReset needs a real reset; start-over is owner-only', async () => {

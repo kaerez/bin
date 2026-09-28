@@ -13,6 +13,7 @@ import { deriveAccess, openPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { TAG } from '../public/js/files.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
+import { revokeShare } from '../public/js/api.js';
 
 const until = async (fn, ms = 5000) => {
   const t0 = Date.now();
@@ -63,7 +64,8 @@ function mountPoint() {
   return mount;
 }
 
-const deps = (extra = {}) => ({ drive, profile: PROFILE, user: S.user, revoke: (id) => fetch(`/api/private/shares/${id}/revoke`, { method: 'POST' }), ...extra });
+// `revoke` as the page passes it (drive.js): api.js, which sends the session's CSRF token.
+const deps = (extra = {}) => ({ drive, profile: PROFILE, user: S.user, revoke: revokeShare, ...extra });
 
 async function openApp(extra = {}) {
   await server();
@@ -599,7 +601,10 @@ describe('the client\'s progress and cancel for downloads', () => {
 describe('nav: Drive link', () => {
   it('driveAllowed reads caps.driveEnabled', async () => {
     vi.resetModules();
-    vi.doMock('../public/js/api.js', () => ({ me: () => new Promise(() => {}), logout: async () => {}, admin: {}, ApiError: class extends Error {} }));
+    vi.doMock('../public/js/api.js', () => ({
+      me: () => new Promise(() => {}), logout: async () => {}, admin: {}, ApiError: class extends Error {},
+      bindSession: () => {}, forgetSession: () => {}, onSessionChanged: () => {}, isSessionChanged: () => false, SESSION_CHANGED: '',
+    }));
     const { driveAllowed } = await import('../public/dashboard/js/nav.js');
     expect(driveAllowed({ caps: { driveEnabled: true } })).toBe(true);
     expect(driveAllowed({ caps: { driveEnabled: 1 } })).toBe(false);

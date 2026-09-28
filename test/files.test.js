@@ -5,7 +5,7 @@
 import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { MAX_ACTIVE_GRANTS, MAX_GRANTS_PER_CLIENT } from '../src/fileshare-do.js';
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
-import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent, csrfHeaders } from './helpers.js';
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
 import { layout, buildManifest, importFileKey, encryptChunk, decryptChunk, readStreamChunk, validateManifest, CHUNK } from '../public/js/files.js';
 import { utf8 } from '../public/js/bytes.js';
@@ -26,7 +26,7 @@ async function upload(cookie, files, { views = null, expire = '1h', password = '
   for (let i = 0; i < chunks; i++) {
     const ct = await encryptChunk(key, i, chunks, await readStreamChunk(sources, i, l.total));
     const r = await SELF.fetch(`${ORIGIN}/api/private/file/${id}/chunk/${i}`, {
-      method: 'PUT', headers: { ...(cookie ? { cookie } : {}), ...headers, 'content-type': 'application/octet-stream', 'x-upload-token': uploadtoken }, body: ct,
+      method: 'PUT', headers: { ...(cookie ? { cookie, ...(await csrfHeaders(cookie)) } : {}), ...headers, 'content-type': 'application/octet-stream', 'x-upload-token': uploadtoken }, body: ct,
     });
     if (r.status !== 200) throw new Error(`chunk ${i}: ${r.status} ${await r.text()}`);
   }
@@ -125,8 +125,8 @@ describe('upload validation and caps', () => {
   it('chunks must match their exact expected size and come from the uploader', async () => {
     const u = await makeUser('uploader-2');
     const init = await (await fetchJson('/api/private/file', { method: 'POST', cookie: oc, body: { views: null, expire: '1h', padded: 65536 } })).json();
-    const put = (cookie, bytes, token = init.uploadtoken) => SELF.fetch(`${ORIGIN}/api/private/file/${init.id}/chunk/0`, {
-      method: 'PUT', headers: { cookie, 'content-type': 'application/octet-stream', 'x-upload-token': token }, body: bytes });
+    const put = async (cookie, bytes, token = init.uploadtoken) => SELF.fetch(`${ORIGIN}/api/private/file/${init.id}/chunk/0`, {
+      method: 'PUT', headers: { cookie, ...(await csrfHeaders(cookie)), 'content-type': 'application/octet-stream', 'x-upload-token': token }, body: bytes });
     expect((await put(oc, new Uint8Array(100))).status).toBe(400); // wrong size
     expect((await put(u.cookie, new Uint8Array(65536 + 16))).status).toBe(403); // someone else
     expect((await put(oc, new Uint8Array(65536 + 16), 'B'.repeat(43))).status).toBe(403); // wrong token
@@ -138,7 +138,7 @@ describe('upload validation and caps', () => {
 
   it('the manifest must match what the upload was authorized for', async () => {
     const init = await (await fetchJson('/api/private/file', { method: 'POST', cookie: oc, body: { views: 3, expire: '1h', padded: 65536 } })).json();
-    await SELF.fetch(`${ORIGIN}/api/private/file/${init.id}/chunk/0`, { method: 'PUT', headers: { cookie: oc, 'content-type': 'application/octet-stream', 'x-upload-token': init.uploadtoken }, body: new Uint8Array(65536 + 16) });
+    await SELF.fetch(`${ORIGIN}/api/private/file/${init.id}/chunk/0`, { method: 'PUT', headers: { cookie: oc, ...(await csrfHeaders(oc)), 'content-type': 'application/octet-stream', 'x-upload-token': init.uploadtoken }, body: new Uint8Array(65536 + 16) });
     const { body } = await encryptPaste({ text: '{}', fmt: 'files', expire: '1h' }); // unlimited, not 3 views
     expect((await fetchJson(`/api/private/file/${init.id}/finalize`, { method: 'POST', cookie: oc, headers: { 'x-upload-token': init.uploadtoken }, body: { paste: body } })).status).toBe(400);
   });

@@ -15,6 +15,57 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **CSRF tokens (defence in depth)**, on top of the SameSite=Strict session cookie, the
+  `Sec-Fetch-Site` check, the JSON / `X-Secbin-Intent` requirement and the absence of CORS
+  (all kept as they were).
+  - **The token:** stateless and bound to the session, an HMAC of the session id and version
+    under a subkey of `SIG`. It is the same for every tab and request of a session and changes
+    with it (sign-in, sign-out, a session-version bump, impersonation start or end).
+  - **Delivery:** in a readable `__Host-secbin_csrf` cookie (Secure, SameSite=Strict, `Path=/`)
+    whenever the session cookie is set or refreshed and on every signed-in page load, and in
+    `GET /api/private/me` (`csrf`). The cookie never outlives the session cookie.
+  - **The check:** every cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` (and sign-out) must
+    send it in `X-Secbin-CSRF`. It is compared timing-safely. A mismatch gets
+    `403 csrf_mismatch`.
+  - **Order:** before anything else runs, the cross-site check, then the request shape (a JSON
+    body, a chunk or `X-Secbin-Intent`; `415` / `400 missing_intent` as before), then the token.
+    A refused request has changed nothing, counted no failure and spent no Turnstile token.
+    Every route with a human check also checks its request body before verifying the Turnstile
+    token (for a public share, the content type and declared size).
+  - **Exempt:** API keys (the CLI) and the anonymous routes.
+  - **The client** (`public/js/api.js`) acts for the session its page was loaded for: it sends
+    that session's token, recorded from `/api/private/me` at load. On a mismatch it asks
+    `/api/private/me` who is signed in now and retries once only for the same user in the same
+    impersonation state. Otherwise (another user signed in, impersonation started or ended in
+    another tab) it does not retry and shows "Your session changed in another tab; reload the
+    page." with a Reload button, so a stale tab never changes another user's account. Sign-out
+    uses the same path and no longer hides a failure. A dashboard page restored from the
+    back-forward cache re-checks its session.
+  - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default). Changes are
+    audited as `settings.csrf`; the setting is exported and imported with the settings, and the
+    import preview warns when it would be turned off.
+  - **Tighter guards:** `POST /api/private/me/reauth` and `POST /api/private/me/passkeys/options`
+    now need a JSON body (`{}`), like every other change. `POST /api/auth/passkey/options` now
+    has the cross-site check and needs a JSON body (`{}`), like the other auth routes.
+  - **The Drive:** every cookie-authenticated change under `/api/private/drive/*` and
+    `/api/private/admin/drive/*` (keys, folders, files, chunk uploads, finalize, rename / move,
+    delete, shares, the impersonation escrow, the owner's kit, kit keys, start over, archive and
+    the admin escrow and keys routes) goes through the same checks in `authenticate()`. The Drive
+    client sends the page's token through `api.js`; a raw chunk upload passes the shape check as
+    `application/octet-stream`, and finalize (no body) with the intent header. The kit check
+    `kit/probe`, which records escrow use in the admin audit, is now `POST` (`{}`, intent header)
+    instead of `GET`.
+  - **Reverse shares:** every cookie-authenticated change goes through the same checks in
+    `authenticate()`, before the step-up and before the id is claimed: creating a link, taking a
+    received file in, marking it failed and retrying it, and extending, revoking and locking a
+    link through My shares and Admin → Shares. The Drive page sends the page's token through
+    `api.js`. The anonymous uploader (`/r/<id>` and `/api/reverse/<id>/…`: open, begin, reserve,
+    chunk, finalize, cancel, done) is exempt: it reads no session, and keeps its own guards (link
+    proof, session grant and upload token, Turnstile, the password lockout, the Guard). The
+    workerd sweep reads `src/routes/reverse.js` and fails if a cookie-authenticated reverse route
+    or method is missing from it.
+  - **Tests:** workerd, DOM and end-to-end suites (`test/csrf.test.js`, `test-dom/csrf.test.js`,
+    `test-e2e/csrf.mjs`).
 - **Reverse shares when the owner starts over** (docs/REVERSE.md §9, docs/DRIVE.md §3.2): the
   owner's reverse links are **paused**, not revoked — no new session or upload (`409 paused`,
   once the link proof matches; the uploader page says "This link is not accepting files right

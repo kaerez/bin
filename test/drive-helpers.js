@@ -2,7 +2,7 @@
 // user (through a role of their own, as an admin would), encrypted-looking
 // fields, folder / file creation and a complete chunked upload.
 import { SELF } from 'cloudflare:test';
-import { ORIGIN, fetchJson, owner, intent } from './helpers.js';
+import { ORIGIN, fetchJson, owner, intent, csrfHeaders } from './helpers.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { driveChunkSize } from '../src/drive-do.js';
 import { escrowKid } from '../src/routes/drive.js';
@@ -45,10 +45,12 @@ export async function createFile(cookie, parent, size, { id } = {}) {
   return { res: r, ...(r.status === 201 ? await r.json() : {}) };
 }
 
-export const putChunk = (cookie, id, i, bytes, token, headers = {}) => SELF.fetch(`${ORIGIN}/api/private/drive/files/${id}/chunk/${i}`, {
-  method: 'PUT', headers: { cookie, 'content-type': 'application/octet-stream', 'x-upload-token': token, ...headers }, body: bytes,
+/** A raw chunk upload as the browser sends it: the session's CSRF token too (`headers` may override it). */
+export const putChunk = async (cookie, id, i, bytes, token, headers = {}) => SELF.fetch(`${ORIGIN}/api/private/drive/files/${id}/chunk/${i}`, {
+  method: 'PUT', headers: { cookie, ...(await csrfHeaders(cookie)), 'content-type': 'application/octet-stream', 'x-upload-token': token, ...headers }, body: bytes,
 });
-export const finalize = (cookie, id, token) => fetchJson(`/api/private/drive/files/${id}/finalize`, { method: 'POST', cookie, headers: { 'x-upload-token': token } });
+// As the browser sends it (api.js drive.finalize): no body, so the intent header (the request-shape check).
+export const finalize = (cookie, id, token) => fetchJson(`/api/private/drive/files/${id}/finalize`, { method: 'POST', cookie, headers: { ...intent, 'x-upload-token': token } });
 export const getChunk = (cookie, id, i) => SELF.fetch(`${ORIGIN}/api/private/drive/files/${id}/chunk/${i}`, { headers: { cookie } });
 
 /** Create + upload + finalize a file of `size` bytes of (random) ciphertext; returns its id and the chunks written. */
