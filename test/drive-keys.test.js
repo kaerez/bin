@@ -516,7 +516,7 @@ describe('Import / export: the keys parts (secbin-keys-export/1)', () => {
         salts: s.storage.sql.exec('SELECT * FROM user_salts ORDER BY user_id').toArray(),
       })),
       drive: await runInDurableObject(driveOf(u.id), (i, s) => s.storage.sql.exec('SELECT * FROM nodes ORDER BY id').toArray()),
-      status: await status(),
+      status: { ...(await status()), now: null }, // the clock is not state
     });
     const good = await bodyOf(doc);
     // The step-up: none, a wrong password.
