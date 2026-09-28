@@ -779,6 +779,30 @@ describe('WCAG 2.2: reverse shares', () => {
     expect(t.inert).toBe(false);
   });
 
+  // Security audit F6: when the session ends (session-timeout.js), an open Drive closes: its key
+  // leaves the client, its dialogs close (the page behind them no longer inert on their account)
+  // and what it showed (decrypted names) leaves the page.
+  it('the session ended: the Drive forgets its key, closes its dialogs and its contents, and offers a reload', async () => {
+    await server();
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const forget = vi.spyOn(drive.DriveClient.prototype, 'forget');
+    $('#drive-receive').click();
+    await until(() => dialog());
+    expect(document.getElementById('main').inert).toBe(true);
+    window.dispatchEvent(new CustomEvent('secbin:session-ended'));
+    // Every client on the page forgets (earlier tests' Drives are still listening, too).
+    expect(forget).toHaveBeenCalled();
+    for (const client of forget.mock.contexts) { expect(client.dk).toBeNull(); expect(client.keys).toBeNull(); }
+    forget.mockRestore();
+    expect(dialog()).toBeNull();
+    expect(document.getElementById('main').inert).toBe(false);
+    expect($('#drive-app')).toBeNull();
+    expect($('#drive-rows')).toBeNull();
+    expect($('#drive-closed h2').textContent).toBe('Your Drive was closed');
+    expect($('#drive-closed-reload')).not.toBeNull();
+  });
+
   it('received files taken in while a dialog is open: no toast outside the modal; the status line says it', async () => {
     await server();
     const rs = await existingReverse('root');

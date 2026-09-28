@@ -167,7 +167,7 @@ async function doOpen({ id, kind, head, fragment, password }) {
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
   if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
-  renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires, { id, grant: res.grant });
+  renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires, { id, grant: res.grant, serverNow: res.now });
   $('#files-delete-row').hidden = !canDeleteNow(paste.meta);
   wireDeleteNow($('#files-delete'), paste.meta, del, $('#files-msg'));
 }
@@ -423,7 +423,7 @@ function cleanManifest(manifest) {
 
 const renamedNote = (e) => (e.renamed ? h('span.tree-sub.mono.renamed-note', { text: 'renamed: hidden characters removed' }) : null);
 
-function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, grant } = {}) {
+function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, grant, serverNow } = {}) {
 
   showView('files');
   const pills = clear($('#files-pills'));
@@ -441,15 +441,21 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
   const keep = h('button.btn', { type: 'button', text: 'Keep downloads open', hidden: true });
   let extendable = !!(id && grant);
   let warned = 0; // the end already warned about
+  // The server's clock minus this browser's (the open and extend answers carry the server's
+  // `now`): the window's end on this browser's clock, so a clock that is off does not move the
+  // warning or the times shown.
+  let skew = Number.isFinite(serverNow) ? serverNow * 1000 - Date.now() : 0;
+  const endAt = () => grantExpires * 1000 - skew;
   keep.addEventListener('click', async () => {
     keep.disabled = true;
     try {
       const r = await extendDownloads(id, grant);
       grantExpires = r.grantExpires;
+      if (Number.isFinite(r.now)) skew = r.now * 1000 - Date.now();
       extendable = r.extensionsLeft > 0;
       warn.hidden = true;
       keep.hidden = true;
-      toast(`Downloads stay open until ${atTime(grantExpires * 1000)}.`);
+      toast(`Downloads stay open until ${atTime(endAt())}.`);
     } catch (e) {
       extendable = false;
       keep.hidden = true;
@@ -461,15 +467,15 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
   });
   clear($('#files-window-switch')).append(windowSwitch.el, warn, keep);
   const tick = () => {
-    const left = grantExpires * 1000 - Date.now();
+    const left = endAt() - Date.now();
     windowEl.textContent = left <= 0 ? 'The download window has closed — open the link again (if views remain).'
-      : windowSwitch.stopped() ? `Downloads available until ${atTime(grantExpires * 1000)}` : `Downloads available for ${formatDuration(left)}`;
+      : windowSwitch.stopped() ? `Downloads available until ${atTime(endAt())}` : `Downloads available for ${formatDuration(left)}`;
     windowSwitch.el.hidden = left <= 0;
     if (left > 0 && left <= WINDOW_WARN_MS && warned !== grantExpires) {
       warned = grantExpires;
       warn.textContent = extendable
-        ? `Downloads close at ${atTime(grantExpires * 1000)}, in under ${Math.ceil(WINDOW_WARN_MS / 60000)} minutes. Need more time?`
-        : `Downloads close at ${atTime(grantExpires * 1000)} and cannot be kept open longer.`;
+        ? `Downloads close at ${atTime(endAt())}, in under ${Math.ceil(WINDOW_WARN_MS / 60000)} minutes. Need more time?`
+        : `Downloads close at ${atTime(endAt())} and cannot be kept open longer.`;
       warn.hidden = false;
       keep.hidden = !extendable;
     }

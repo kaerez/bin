@@ -114,6 +114,10 @@ describe('pure helpers', () => {
     expect(pathOf({ node: { id: 'x', name: 'X' }, path: [{ id: 'root', name: 'Drive' }, { id: 'x', name: 'X' }] })).toEqual([{ id: 'root', name: 'Drive' }, { id: 'x', name: 'X' }]);
     expect(pathOf({ node: { id: 'root', name: 'Drive' }, path: [{ id: 'root', name: 'Drive' }] })).toEqual([{ id: 'root', name: 'Drive' }]);
     expect(successNote({ views: 1, expiryText: '1 hour', what: 'the file' })).toMatch(/open the file once/);
+    // Security audit F1: a view-limited share says that downloads can outlast the last view (up to 10 more windows).
+    expect(successNote({ views: 3, expiryText: '1 day', what: 'the files' })).toMatch(/After the last view, the recipient can still download while their download window is open, and can keep it open up to 10 more times, never past the expiry\./);
+    expect(successNote({ views: 1, expiryText: '1 day', what: 'the file' })).toMatch(/up to 10 more times/);
+    expect(successNote({ views: null, expiryText: '1 day', what: 'the file' })).not.toMatch(/last view/);
   });
 });
 

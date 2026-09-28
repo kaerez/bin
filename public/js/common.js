@@ -84,6 +84,27 @@ function svg(tag, attrs = {}, ...children) {
 
 /** The one wording for "this field is stored in plaintext" — keep it in one place. */
 /** Share index kinds → the words the UI uses. */
+/**
+ * What a sender is told about a file share with a view limit: after the last
+ * view, a download window that recipient opened may still be kept open, up to
+ * MAX_GRANT_EXTENSIONS (src/fileshare-do.js) more times, never past the expiry.
+ */
+export const LAST_VIEW_DOWNLOADS = 'After the last view, the recipient can still download while their download window is open, and can keep it open up to 10 more times, never past the expiry.';
+
+/**
+ * The first sentences under a new link (the composer and the Drive): who can
+ * open `what`, how often and until when; for files (`files`) with a view
+ * limit, also that downloads can outlast the last view (LAST_VIEW_DOWNLOADS).
+ */
+export function shareLifetimeNote({ what, views, expiryText, files = false }) {
+  return (views === null
+    ? `Anyone with this link can open ${what} any number of times until it self-destructs in ${expiryText}.`
+    : views === 1
+      ? `Anyone with this link can open ${what} once. Unopened, it self-destructs in ${expiryText}.`
+      : `Anyone with this link can open ${what} up to ${views} times. It self-destructs after the last view or in ${expiryText}, whichever comes first.`)
+    + (files && views !== null ? ` ${LAST_VIEW_DOWNLOADS}` : '');
+}
+
 export const KIND_NAMES = Object.freeze({ text: 'note', files: 'files', url: 'link', secret: 'credential', drive: 'drive', reverse: 'receive' });
 
 /**

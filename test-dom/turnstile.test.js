@@ -78,6 +78,34 @@ describe('humanCheck', () => {
     expect(el.classList.contains('focus-in')).toBe(false);
   });
 
+  // Security audit F7: the focus listeners are shared by every widget and go when the last one is torn down.
+  it('one set of focus listeners for every widget, removed when the last widget is torn down or leaves the page', async () => {
+    config = { turnstile: '0x4AAAAAAAsitekey' };
+    fakeTurnstile();
+    globalThis.turnstile.remove = () => {};
+    const count = (target, type) => {
+      const add = vi.spyOn(target, 'addEventListener');
+      const del = vi.spyOn(target, 'removeEventListener');
+      return () => { const n = add.mock.calls.filter((c) => c[0] === type).length - del.mock.calls.filter((c) => c[0] === type).length; add.mockRestore(); del.mockRestore(); return n; };
+    };
+    // Widgets of earlier tests left the page with their body: a focus change drops them first.
+    document.body.appendChild(document.createElement('input')).focus();
+    const focusin = count(document, 'focusin');
+    const blur = count(window, 'blur');
+    const a = document.body.appendChild(document.createElement('div'));
+    const b = document.body.appendChild(document.createElement('div'));
+    const ca = await humanCheck(a, 'account');
+    const cb = await humanCheck(b, 'account');
+    const added = document.addEventListener.mock.calls.filter((c) => c[0] === 'focusin').length;
+    expect(added).toBe(1); // one set for both widgets
+    ca.remove();
+    b.remove(); // a page re-rendering its card: the container leaves the page
+    document.body.appendChild(document.createElement('button')).focus(); // the next focus change drops it
+    expect(focusin()).toBe(0);
+    expect(blur()).toBe(0);
+    void cb;
+  });
+
   it('waits for a token that is not there yet', async () => {
     config = { turnstile: '0x4AAAAAAAsitekey' };
     const w = fakeTurnstile();

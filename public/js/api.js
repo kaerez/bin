@@ -97,6 +97,20 @@ export function bindSession(profile) {
 /** Stop acting for any session: every later change from this page is refused here, without a request. */
 export function forgetSession() { page = { ended: true }; }
 
+/**
+ * Whether `profile` (a /api/private/me answer) is the session this page acts
+ * for: the same user in the same impersonation state. False once the page has
+ * stopped acting for any session, or before it has recorded one.
+ */
+export function isPageSession(profile) {
+  if (!page || page.ended) return false;
+  const w = who(profile);
+  return !!w.userId && w.userId === page.userId && w.impersonatedBy === page.impersonatedBy;
+}
+
+/** The browser is now signed in as someone else: stop acting for any session and say so (onSessionChanged). */
+export function endPageSession() { sessionChanged(); }
+
 /** `fn()` runs when the page finds that the browser is now signed in as someone else. */
 export function onSessionChanged(fn) { sessionChangedHandler = typeof fn === 'function' ? fn : () => {}; }
 

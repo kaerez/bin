@@ -266,7 +266,7 @@ describe('extending a download window (WCAG 2.2.1)', () => {
   // Audit round 4, R4-L4: an unknown id answered 410 uncounted (a Directory
   // call and a new FileShare object each, never blocked); the chunk route
   // blocks the same pattern at guard.invalid.max.
-  it('an id that was never a share counts as invalid, as on the chunk route; a known share that ended does not (R4-L4)', async () => {
+  it('an id that was never a share counts as invalid, as on the chunk route; so does a known share that ended (R4-L4, F2)', async () => {
     const unknown = () => `f${b64urlFromBytes(randomBytes(16))}`; // well-formed, never created
     const ip = freshIp();
     let last;
@@ -284,15 +284,93 @@ describe('extending a download window (WCAG 2.2.1)', () => {
     for (let i = 0; i < 80; i++) { c = await getChunk(unknown(), 0, 'C'.repeat(43), ip2); if (c.status === 429) break; }
     expect(c.status).toBe(429);
     // A share that existed and ended (its only view spent, then purged): a late
-    // extend from the viewer's tab is a plain 410, never counted.
+    // extend from the viewer's tab is a 410, and counted: repeated ones end in 429
+    // (security audit F2: each one cost a call on the Directory, never blocked).
     const s = await upload(oc, [{ path: 'ended.txt', bytes: utf8('gone') }], { views: 1, expire: '1d' });
     const { grant } = await (await openShare(s.id, s.fragment)).res.json();
     vi.useFakeTimers({ now: Date.now() + 70 * 60 * 1000, toFake: ['Date'] }); // past the only window
     await runDurableObjectAlarm(env.FILESHARE.get(env.FILESHARE.idFromName(s.id)));
     expect(await env.FILES.get(`f/${s.id}/0`)).toBeNull();
     const ip3 = freshIp();
-    for (let i = 0; i < 70; i++) expect((await extend(s.id, grant, ip3)).status).toBe(410);
+    expect((await extend(s.id, grant, ip3)).status).toBe(410);
+    let e;
+    let k = 1;
+    for (; k < 80; k++) { e = await extend(s.id, grant, ip3); if (e.status === 429) break; expect(e.status).toBe(410); }
+    expect(e.status).toBe(429);
+    expect(k).toBeLessThanOrEqual(60);
   }, 120000);
+
+  // Security audit F2: past the tenth extension, every further call was answered 409 and never
+  // counted. Now it is counted like any refusal, so a loop ends in 429 (refused before the
+  // Directory); a recipient's own ten extensions and the one 409 the viewer sees do not block.
+  it('calls past the last extension count as invalid; a recipient\'s ten extensions and one 409 do not block', async () => {
+    const s = await upload(oc, [{ path: 'many.txt', bytes: utf8('many') }], { views: null, expire: '1d' });
+    const ip = freshIp();
+    const { grant } = await (await openShare(s.id, s.fragment, '', ip)).res.json();
+    for (let i = 0; i < MAX_GRANT_EXTENSIONS; i++) expect((await extend(s.id, grant, ip)).status).toBe(200);
+    expect((await extend(s.id, grant, ip)).status).toBe(409);
+    // The same network still opens and downloads.
+    const again = await openShare(s.id, s.fragment, '', ip);
+    expect(again.res.status).toBe(200);
+    expect((await getChunk(s.id, 0, (await again.res.json()).grant, ip)).status).toBe(200);
+    // A loop past the limit ends in 429, well within guard.invalid.max (60).
+    let r;
+    let n = 1;
+    for (; n < 80; n++) { r = await extend(s.id, grant, ip); if (r.status === 429) break; expect(r.status).toBe(409); }
+    expect(r.status).toBe(429);
+    expect(n).toBeLessThanOrEqual(60);
+  }, 120000);
+
+  // Security audit F1: every extension is in the share owner's activity log, with the share,
+  // which extension it was and the new end; never the grant.
+  it('records each extension in the share owner\'s activity log (share id, extension, new end), not the grant', async () => {
+    const u = await makeUser('extend-log');
+    const s = await upload(u.cookie, [{ path: 'log.txt', bytes: utf8('log') }], { views: 1, expire: '1d' });
+    const ip = freshIp();
+    const { grant } = await (await openShare(s.id, s.fragment, '', ip)).res.json();
+    const ends = [];
+    for (let i = 0; i < 2; i++) ends.push((await (await extend(s.id, grant, ip)).json()).grantExpires);
+    const { rows } = await (await fetchJson('/api/private/me/activity', { cookie: u.cookie })).json();
+    const ext = rows.filter((a) => a.action === 'share.download_extended');
+    expect(ext.map((a) => a.detail).sort()).toEqual([`id=${s.id} extension=1 until=${ends[0]}`, `id=${s.id} extension=2 until=${ends[1]}`].sort());
+    expect(JSON.stringify(rows)).not.toContain(grant);
+  });
+
+  // Security audit F3: a full grant table of extended grants no longer keeps a share busy for
+  // everyone: a grant past its first window gives way to a new open. Grants still in their first
+  // window keep the table full ("busy"), as before extensions existed.
+  it('a full table: a new open displaces a grant past its first window; grants in their first window still mean busy', async () => {
+    const s = await upload(oc, [{ path: 'full.txt', bytes: utf8('full') }], { views: null, expire: '1d' });
+    const first = await openShare(s.id, s.fragment, '', freshIp());
+    expect(first.res.status).toBe(200);
+    const stub = env.FILESHARE.get(env.FILESHARE.idFromName(s.id));
+    const t = Math.floor(Date.now() / 1000);
+    const fill = (f) => runInDurableObject(stub, async (_i, state) => {
+      const g = await state.storage.get('grants');
+      const fillers = Array.from({ length: MAX_ACTIVE_GRANTS - g.length }, (_, i) => ({ h: i.toString(16).padStart(64, '0'), exp: t + 3600, f, c: `x${i}` }));
+      await state.storage.put('grants', [...g, ...fillers]);
+    });
+    await fill(t + 600); // every grant in its first window
+    expect((await openShare(s.id, s.fragment, '', freshIp())).res.status).toBe(429);
+    await runInDurableObject(stub, async (_i, state) => { await state.storage.put('grants', (await state.storage.get('grants')).slice(0, 1)); });
+    await fill(t - 60); // every filler living on an extension
+    const o = await openShare(s.id, s.fragment, '', freshIp());
+    expect(o.res.status).toBe(200);
+    const after = await runInDurableObject(stub, (_i, state) => state.storage.get('grants'));
+    expect(after).toHaveLength(MAX_ACTIVE_GRANTS);
+    expect(after.filter((g) => g.f <= t)).toHaveLength(MAX_ACTIVE_GRANTS - 2);
+  });
+
+  // Security audit F4: the open and extend responses carry the server's time.
+  it('the open and extend responses carry the server\'s time (now)', async () => {
+    const s = await upload(oc, [{ path: 'now.txt', bytes: utf8('now') }], { views: null, expire: '1d' });
+    const ip = freshIp();
+    const o = await (await openShare(s.id, s.fragment, '', ip)).res.json();
+    const t = Math.floor(Date.now() / 1000);
+    expect(Math.abs(o.now - t)).toBeLessThanOrEqual(2);
+    const e = await (await extend(s.id, o.grant, ip)).json();
+    expect(Math.abs(e.now - t)).toBeLessThanOrEqual(2);
+  });
 
   it('after the last view, the purge waits for the extended window', async () => {
     const s = await upload(oc, [{ path: 'once.txt', bytes: utf8('last') }], { views: 1, expire: '1d' });

@@ -17,7 +17,7 @@
 // point (public/dashboard/js/drive.js passes the client module); it is
 // separate from the boot so it can be tested.
 
-import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, viewsText, nameEl } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, viewsText, nameEl, shareLifetimeNote } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { createTree, crumbTrail } from '../../js/tree.js';
 import { progressBar } from '../../js/progress.js';
@@ -154,11 +154,8 @@ const dirsOf = (r) => sortChildren(r.children.filter((c) => c.kind === 'dir')).m
 
 /** The text under a new link — the composer's wording. */
 export function successNote({ views, expiryText, what }) {
-  return (views === null
-    ? `Anyone with this link can open ${what} any number of times until it self-destructs in ${expiryText}.`
-    : views === 1
-      ? `Anyone with this link can open ${what} once. Unopened, it self-destructs in ${expiryText}.`
-      : `Anyone with this link can open ${what} up to ${views} times. It self-destructs after the last view or in ${expiryText}, whichever comes first.`)
+  // A Drive share is a file share: its download window can outlive the last view.
+  return shareLifetimeNote({ what, views, expiryText, files: true })
     + ' Keep the whole link private — the key that unlocks it is inside the link. Deleting the item from your Drive ends the link at once; ending the link keeps the item. Manage it later under “my shares”.';
 }
 
@@ -170,6 +167,9 @@ let dlgSeq = 0;
  * in and trapped, Escape or the scrim closes, the rest of the page inert, and
  * focus back on the opener (or `fallback()`) when it closes.
  */
+// The Drive dialogs open now (closed all at once when the session ends).
+const openDialogs = new Set();
+
 export function openDialog({ title, sub = '', body = [], wide = false, fallback = null, onClose = null }) {
   const id = `dlg-${++dlgSeq}`;
   const titleEl = h('h2.modal-title', { id: `${id}-t`, text: title });
@@ -198,6 +198,7 @@ export function openDialog({ title, sub = '', body = [], wide = false, fallback 
   function close() {
     if (!open) return;
     open = false;
+    openDialogs.delete(close);
     scrim.remove();
     for (const el of inerted) el.inert = false;
     document.removeEventListener('keydown', onKey, true);
@@ -213,6 +214,7 @@ export function openDialog({ title, sub = '', body = [], wide = false, fallback 
   document.body.appendChild(scrim);
   for (const el of inerted) el.inert = true;
   document.addEventListener('keydown', onKey, true);
+  openDialogs.add(close);
   const first = bodyEl.querySelector('input:not([type="checkbox"]):not([hidden]), select, textarea');
   (first || box).focus();
   return {
@@ -703,6 +705,21 @@ function mountApp(mount, client, deps) {
   let openSeq = 0;
   const selected = new Set();
   const recent = new Map(); // id → { at, promise }: one fetch serves the tree and the pane
+
+  // The session ended (session-timeout.js, which also clears the tab's key slots): the Drive
+  // closes. Its key goes from the client, and what it showed (decrypted names, open dialogs) from
+  // the page; opening it again takes a reload after signing in.
+  const onSessionEnded = () => {
+    window.removeEventListener('secbin:session-ended', onSessionEnded);
+    if (typeof client.forget === 'function') client.forget();
+    for (const close of [...openDialogs]) close();
+    const said = swap(mount, h('div.card.drive-notice', { id: 'drive-closed' },
+      h('h2.section-title', { text: 'Your Drive was closed' }),
+      h('p', { text: 'Your session ended, so this page closed your Drive and removed its key from this tab. Sign in again, then reload this page to open your Drive.' }),
+      h('div.btn-row', {}, h('button.btn', { type: 'button', id: 'drive-closed-reload', text: 'Reload', on: { click: () => location.reload() } }))));
+    if (said) said.textContent = 'Your Drive was closed';
+  };
+  window.addEventListener('secbin:session-ended', onSessionEnded);
 
   const fetchList = (id) => {
     const r = recent.get(id);

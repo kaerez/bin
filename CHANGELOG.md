@@ -378,6 +378,21 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - a Drive dialog opening puts away a toast from before it, and received files taken in while a
     dialog is open raise none (the Drive's status line says it), so nothing outside the modal
     dialog is shown or read.
+  - security review of this change (F1–F8):
+    - a sender creating a view-limited file share is told that downloads can outlast the last
+      view (the recipient can keep a download window open up to 10 more times, never past the
+      expiry), and every extension is recorded in the share owner's activity log
+      (`share.download_extended`: share id, extension number, new end);
+    - `POST /api/file/:id/extend`: calls past the tenth extension (409) and on a share that has
+      ended (410) count towards the network's "invalid" limit, so repeated calls end in 429;
+    - when the grant table is full, a grant living on an extension gives way to a new open;
+    - the session and download-window warnings go by the server's clock (`now` in `/me`'s
+      `session` and in the open and extend answers);
+    - when a session ends the page locks (hidden and inert; the tab's Drive keys cleared, an open
+      Drive closed, password fields emptied, the toast put away; "Log out" replaces "Close") and
+      unlocks only for the same user; another account signed in meanwhile gets "session changed";
+    - the CAPTCHA's focus listeners are shared and removed with the last widget (`remove()`);
+    - toasts, with their text, also go when the page is left or its history moves.
   - Admin: a tab opened while the page is still loading stays open (the default tab no longer
     replaces it when the loading finishes) (3.2.5).
   - the light theme's red (destructive actions and errors) is a shade darker, so an armed or

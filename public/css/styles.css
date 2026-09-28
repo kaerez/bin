@@ -646,6 +646,9 @@ fieldset { min-inline-size: 0; }
    container too, so where focus is can always be seen (WCAG 2.4.7). `.focus-in` is set from the
    focus events (public/js/turnstile.js): the widget's closed shadow root keeps :focus-within off. */
 .turnstile:focus-within, .turnstile.focus-in { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
+/* The session ended (session-timeout.js): the page stays in place, inert, hidden from sight and
+   from assistive technology, until the same user signs in again. */
+.session-locked { visibility: hidden !important; }
 .api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
 .receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
 .opens-box { padding: .5rem 0; }

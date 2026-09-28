@@ -25,7 +25,7 @@ const page = (p) => {
 };
 
 // ── api.js stand-in: me() / logout() and the activity hook ──────────────────
-const api = vi.hoisted(() => ({ me: null, activity: new Set(), logouts: 0, config: { turnstile: null } }));
+const api = vi.hoisted(() => ({ me: null, activity: new Set(), logouts: 0, config: { turnstile: null }, changed: 0 }));
 vi.mock('../public/js/api.js', () => {
   class ApiError extends Error { constructor(m, status) { super(m); this.status = status; } }
   return {
@@ -34,6 +34,9 @@ vi.mock('../public/js/api.js', () => {
     logout: async () => { api.logouts += 1; },
     onPrivateActivity: (fn) => { api.activity.add(fn); return () => api.activity.delete(fn); },
     fetchConfig: async () => api.config,
+    // The page acts for user u1 (a profile without a user is taken as u1).
+    isPageSession: (p) => !!p && (p.user ? p.user.id : 'u1') === 'u1',
+    endPageSession: () => { api.changed += 1; },
   };
 });
 
@@ -129,10 +132,102 @@ describe('watchSession — a warning before the session ends', () => {
     expect(a.getAttribute('target')).toBe('_blank');
     expect(a.textContent).toMatch(/opens in a new tab/);
     expect(location.href).toBe(href);
-    // Closed, it stays closed (the page keeps what was typed).
-    d.querySelector('button').click();
+    // Its other way on is "Log out"; Escape does not put it away (the page behind it is locked).
+    expect([...d.querySelectorAll('button')].map((x) => x.textContent)).toEqual(['Log out']);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     at(700);
+    expect(dialog()).not.toBeNull();
+  });
+
+  // Security audit F6 (PCI DSS 8.2.8): once the session has ended, nothing on the page stays usable
+  // or readable until the same user signs in again; what was typed stays (hidden), passwords do not.
+  const page = () => {
+    const main = document.body.appendChild(Object.assign(document.createElement('main'), { id: 'main' }));
+    const note = main.appendChild(Object.assign(document.createElement('textarea'), { id: 'note', value: 'my draft' }));
+    const pw = main.appendChild(Object.assign(document.createElement('input'), { id: 'pw', type: 'password', value: 'secret-pw' }));
+    const toastEl = document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast', className: 'show', textContent: 'Moved “salaries.xlsx”' }));
+    return { main, note, pw, toastEl };
+  };
+  it('when time is up the page locks: hidden and inert, the tab\'s Drive keys cleared, passwords emptied, the toast put away; the Drive is told', async () => {
+    const { saveSessionKey, loadSessionKey, saveImpersonationKey, loadImpersonationKey } = await import('../public/js/drivekeys.js');
+    saveSessionKey(new Uint8Array(32).fill(7), 'u1');
+    saveImpersonationKey(new Uint8Array(32).fill(8), 'u2');
+    const { main, note, pw, toastEl } = page();
+    let told = 0;
+    const onEnded = () => { told += 1; };
+    window.addEventListener('secbin:session-ended', onEnded);
+    t = 0;
+    start({ idleSec: 600, idleEndsAt: 600, endsAt: 86400, slideSec: 60 });
+    at(601);
+    window.removeEventListener('secbin:session-ended', onEnded);
+    expect(told).toBe(1);
+    expect(main.inert).toBe(true);
+    expect(main.classList.contains('session-locked')).toBe(true);
+    expect(loadSessionKey('u1')).toBeNull();
+    expect(loadImpersonationKey('u2')).toBeNull();
+    expect(pw.value).toBe('');
+    expect(note.value).toBe('my draft'); // what was typed is kept, hidden
+    expect(toastEl.classList.contains('show')).toBe(false);
+    expect(toastEl.textContent).toBe('');
+    expect(dialog().closest('.session-locked')).toBeNull();
+  });
+
+  it('back in the tab, signed in again as the same user: the page unlocks and carries on', async () => {
+    const { main, note } = page();
+    t = 0;
+    start({ idleSec: 600, idleEndsAt: 600, endsAt: 86400, slideSec: 60 });
+    at(601);
+    api.me = async () => ({ user: { id: 'u1' }, session: { idleSec: 600, idleEndsAt: 2000, endsAt: 90000 } });
+    window.dispatchEvent(new Event('focus'));
+    await vi.waitFor(() => expect(dialog()).toBeNull());
+    expect(main.inert).toBe(false);
+    expect(main.classList.contains('session-locked')).toBe(false);
+    expect(note.value).toBe('my draft');
+    expect(w.state.expired).toBe(false);
+  });
+
+  // Security audit F5: another account signed in in the new tab never takes over this page.
+  it('back in the tab, signed in as someone else: the page stays locked and says the session changed; nothing is adopted', async () => {
+    const { main } = page();
+    t = 0;
+    api.changed = 0;
+    start({ idleSec: 600, idleEndsAt: 600, endsAt: 86400, slideSec: 60 });
+    at(601);
+    api.me = async () => ({ user: { id: 'u2' }, session: { idleSec: 600, idleEndsAt: 5000, endsAt: 90000 } });
+    window.dispatchEvent(new Event('focus'));
+    await vi.waitFor(() => expect(api.changed).toBe(1));
+    expect(dialog()).toBeNull(); // the "session changed" banner (nav.js) takes over
+    expect(main.inert).toBe(true);
+    expect(main.classList.contains('session-locked')).toBe(true);
+    expect(w.state.idleEndsAt).toBe(600 * 1000); // not the other session's times
+    at(5000);
+    expect(dialog()).toBeNull(); // nothing more is watched
+  });
+
+  it('"Stay signed in" while someone else has signed in: the page locks and says the session changed', async () => {
+    const { main } = page();
+    t = 0;
+    api.changed = 0;
+    start({ idleSec: 600, idleEndsAt: 600, endsAt: 86400, slideSec: 60 });
+    at(600 - WARN_SEC + 1);
+    api.me = async () => ({ user: { id: 'u2' }, session: { idleSec: 600, idleEndsAt: 5000, endsAt: 90000 } });
+    dialog().querySelector('.send').click();
+    await vi.waitFor(() => expect(api.changed).toBe(1));
+    expect(main.classList.contains('session-locked')).toBe(true);
+    expect(w.state.idleEndsAt).toBe(600 * 1000);
+  });
+
+  // Security audit F4: the warning goes by the server's clock (the session's `now`), not this browser's.
+  it('with this browser\'s clock 5 minutes behind the server\'s, the warning still comes WARN_SEC before the end', () => {
+    t = -300 * 1000; // the browser says 5 minutes earlier than the server (whose now is 0)
+    start({ idleSec: 600, idleEndsAt: 600, endsAt: 86400, slideSec: 60, now: 0 });
+    at(600 - WARN_SEC - 300 - 1); // server time 600 - WARN_SEC - 1
     expect(dialog()).toBeNull();
+    at(600 - WARN_SEC - 300 + 1); // server time 600 - WARN_SEC + 1
+    expect(dialog()).not.toBeNull();
+    expect(dialog().textContent).toMatch(/still there/i);
+    at(601 - 300); // server time 601: signed out, not five minutes later
+    expect(dialog().textContent).toMatch(/signed out/);
   });
 });
 
@@ -223,6 +318,33 @@ describe('unobscure', () => {
 });
 
 // ── 2.4.2 / 2.4.3: showView keeps the person's focus and names the view ──────
+// Security audit F8: a toast may name decrypted items; it keeps no time limit (2.2.1) but goes,
+// its text too, on the next key press or click, when the page is left and when its history moves.
+describe('toast', () => {
+  it('is put away with its text on the next click, on pagehide, popstate and hashchange', async () => {
+    const { toast, dismissToast } = await import('../public/js/ui.js');
+    const el = document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast' }));
+    for (const ev of ['pagehide', 'popstate', 'hashchange']) {
+      toast('Moved “salaries.xlsx”.');
+      expect(el.classList.contains('show')).toBe(true);
+      window.dispatchEvent(new Event(ev));
+      expect(el.classList.contains('show'), ev).toBe(false);
+      expect(el.textContent, ev).toBe('');
+    }
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      toast('Saved as “plan.pdf”.');
+      vi.setSystemTime(Date.now() + 2000); // past the grace for the key that caused it
+      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(el.classList.contains('show')).toBe(false);
+      expect(el.textContent).toBe('');
+    } finally { vi.useRealTimers(); }
+    toast('x');
+    dismissToast();
+    expect(el.textContent).toBe('');
+  });
+});
+
 describe('showView', () => {
   it('leaves focus the person placed outside the views, and titles the page from data-title', () => {
     document.title = 'secbin · zero-knowledge sharing';

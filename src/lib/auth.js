@@ -60,10 +60,12 @@ export const accountDisabled = (headers) => new HttpError(403, 'account_disabled
  * does (WCAG 2.2.1): `idleEndsAt` without further activity (each request
  * slides it, at most once a minute), `endsAt` at the latest (the absolute
  * timeout; it cannot be extended). `idleSec` is the inactivity allowance.
+ * `now` is the server's time: the page measures its clock against it, so a
+ * browser clock that is off does not move the warning.
  */
-export function sessionTimes(c, { idleSec, absSec }) {
+export function sessionTimes(c, { idleSec, absSec, t = now() }) {
   const endsAt = Math.min(c.exp, c.iat + absSec);
-  return { idleSec, idleEndsAt: Math.min(c.lat + idleSec, endsAt), endsAt, slideSec: SLIDE_SEC };
+  return { idleSec, idleEndsAt: Math.min(c.lat + idleSec, endsAt), endsAt, slideSec: SLIDE_SEC, now: t };
 }
 
 /**
@@ -103,7 +105,7 @@ export async function readSession(request, env) {
   }
   const maxAgeSec = Math.min(claims.exp, claims.lat + idleSec, claims.iat + absSec) - t;
   // Fail closed: only an explicit `false` turns the token check off.
-  return { ok: true, user: res.user, actor: res.actor, claims: c, csrf: res.csrf !== false, maxAgeSec, setCookie, session: sessionTimes(claims, { idleSec, absSec }) };
+  return { ok: true, user: res.user, actor: res.actor, claims: c, csrf: res.csrf !== false, maxAgeSec, setCookie, session: sessionTimes(claims, { idleSec, absSec, t }) };
 }
 
 const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);

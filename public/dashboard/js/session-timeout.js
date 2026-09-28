@@ -8,13 +8,24 @@
 //   - inactivity: "Stay signed in" makes a request, which moves the end again,
 //     as often as needed; Escape does the same;
 //   - the absolute end cannot be moved: that dialog only says when it comes.
-// When the time is up the dialog says so. Nothing is lost and nothing changes
-// page on its own (3.2.5): "Sign in again" opens the login page in a new tab,
-// so what is typed here stays (2.2.5); coming back to this tab re-checks the
-// session and carries on.
+// When the time is up the dialog says so, and the page locks: it is hidden and
+// inert behind the dialog, the tab's Drive keys are cleared (an open Drive
+// closes: 'secbin:session-ended'), password fields are emptied and the toast is
+// put away. Nothing changes page on its own (3.2.5): "Sign in again" opens the
+// login page in a new tab, so what is typed here stays (2.2.5); coming back to
+// this tab re-checks the session and, for the same user, unlocks the page. For
+// anyone else (another account signed in meanwhile) the page stays locked and
+// says that the session changed (api.js endPageSession), never taking over the
+// other session.
+//
+// All times are the server's: the page measures its clock against the `now`
+// the server sends with the session, so a browser clock that is off does not
+// move the warning.
 
 import { h, spellDuration as spell } from '../../js/common.js';
-import { me, logout, onPrivateActivity, ApiError } from '../../js/api.js';
+import { me, logout, onPrivateActivity, ApiError, isPageSession, endPageSession } from '../../js/api.js';
+import { clearSessionKey } from '../../js/drivekeys.js';
+import { dismissToast } from '../../js/ui.js';
 
 export const WARN_SEC = 120;
 
@@ -27,8 +38,9 @@ const clock = (ms) => {
 
 /**
  * Watch the session described by `session` ({ idleSec, idleEndsAt, endsAt,
- * slideSec }, Unix seconds). Returns { stop, state } (state for tests).
- * `now` and `interval` are injectable for tests.
+ * slideSec, now }, Unix seconds; `now` is the server's time when it answered).
+ * Returns { stop, state } (state for tests). `now` (this browser's clock) and
+ * `every` are injectable for tests.
  */
 export function watchSession(session, { now = () => Date.now(), every = (fn, ms) => setInterval(fn, ms), clear = (t) => clearInterval(t), loginUrl = '/dashboard/login/' } = {}) {
   if (!session || !Number.isFinite(session.idleEndsAt) || !Number.isFinite(session.endsAt)) return { stop() {}, state: null };
@@ -40,36 +52,78 @@ export function watchSession(session, { now = () => Date.now(), every = (fn, ms)
     shown: null, // the open dialog: null | 'idle' | 'absolute' | 'expired'
     dismissedAbsolute: false,
     expired: false,
-    dismissedExpired: false,
+    locked: false, // the page is hidden and inert until the same user signs in again
+    changed: false, // another account is signed in now: nothing more is watched
+    skew: 0, // the server's clock minus this browser's, in ms
   };
   let dlg = null;
   let carried = null; // the opener, kept when one dialog replaces another
+  let lockedEls = [];
+  const measure = (s) => { if (s && Number.isFinite(s.now)) st.skew = s.now * 1000 - now(); };
+  const serverNow = () => now() + st.skew;
+  measure(session);
 
   const adopt = (s) => {
     if (!s || !Number.isFinite(s.idleEndsAt)) return;
+    measure(s);
     if (s.endsAt * 1000 !== st.endsAt) st.dismissedAbsolute = false; // a new session
     st.idleSec = s.idleSec;
     st.idleEndsAt = s.idleEndsAt * 1000;
     st.endsAt = s.endsAt * 1000;
     st.expired = false;
-    st.dismissedExpired = false;
   };
+
+  /** The session is over: keep nothing usable on screen or in the tab (what was typed stays, hidden). */
+  function lockPage() {
+    if (st.locked) return;
+    st.locked = true;
+    clearSessionKey(); // the tab's Drive key slots, stored or held in memory
+    dismissToast();
+    for (const el of document.querySelectorAll('input[type="password"]')) el.value = '';
+    // An open Drive closes itself (its key, names and dialogs): drive-app.js.
+    window.dispatchEvent(new CustomEvent('secbin:session-ended'));
+    lockedEls = [...document.body.children].filter((el) => el.tagName !== 'SCRIPT' && el.id !== 'toast' && !el.classList.contains('session-dialog'));
+    for (const el of lockedEls) {
+      el.dataset.sessionWasInert = el.inert ? '1' : '';
+      el.inert = true;
+      el.classList.add('session-locked');
+    }
+  }
+  function unlockPage() {
+    if (!st.locked) return;
+    st.locked = false;
+    for (const el of lockedEls) {
+      el.classList.remove('session-locked');
+      if (!el.dataset.sessionWasInert) el.inert = false;
+      delete el.dataset.sessionWasInert;
+    }
+    lockedEls = [];
+  }
+  /** Another account is signed in in this browser now: the page stays locked and says so. */
+  function sessionChanged() {
+    st.changed = true;
+    st.expired = true;
+    close({ restore: false });
+    lockPage();
+    endPageSession(); // the "session changed" banner, with Reload (nav.js)
+  }
   // A request at time t slid the window unless the last slide was under
   // slideSec ago: the end is at least t - slideSec + idleSec.
   const off = onPrivateActivity(() => {
     if (st.expired) return;
-    const t = now();
+    const t = serverNow();
     st.idleEndsAt = Math.min(st.endsAt, Math.max(st.idleEndsAt, t + (st.idleSec - st.slideSec) * 1000));
     if (st.shown === 'idle' && st.idleEndsAt - t > WARN_SEC * 1000) close();
   });
 
   function tick() {
-    const t = now();
+    if (st.changed) return;
+    const t = serverNow();
     const left = Math.min(st.idleEndsAt, st.endsAt) - t;
     const absolute = st.endsAt <= st.idleEndsAt;
     if (left <= 0) {
       st.expired = true;
-      if (st.shown !== 'expired' && !st.dismissedExpired) show('expired', absolute);
+      if (st.shown !== 'expired') expire(absolute);
     } else if (left <= WARN_SEC * 1000) {
       if (absolute && !st.dismissedAbsolute && st.shown !== 'absolute') show('absolute');
       else if (!absolute && st.shown !== 'idle') show('idle');
@@ -77,25 +131,36 @@ export function watchSession(session, { now = () => Date.now(), every = (fn, ms)
     if (dlg && dlg.timer) dlg.timer.textContent = clock(left);
   }
 
+  function expire(absolute) {
+    close({ restore: false });
+    lockPage();
+    show('expired', absolute);
+  }
+
   async function stay() {
     if (!dlg) return;
     dlg.primary.disabled = true;
     try {
-      adopt((await me()).session);
+      const p = await me();
+      if (!isPageSession(p)) { sessionChanged(); return; }
+      adopt(p.session);
       close();
     } catch (e) {
       if (dlg) dlg.primary.disabled = false;
-      if (e instanceof ApiError && e.status === 401) { st.expired = true; show('expired', false); }
+      if (e instanceof ApiError && e.status === 401) { st.expired = true; expire(false); }
     }
   }
 
-  // Back in this tab after signing in elsewhere: pick up the new session.
+  // Back in this tab after signing in elsewhere: the same user picks the page up again; anyone
+  // else never does (the page stays locked and says the session changed).
   async function recheck() {
-    if (!st.expired || document.visibilityState === 'hidden') return;
-    try {
-      adopt((await me()).session);
-      close();
-    } catch { /* still signed out */ }
+    if (!st.expired || st.changed || document.visibilityState === 'hidden') return;
+    let p;
+    try { p = await me(); } catch { return; /* still signed out */ }
+    if (!isPageSession(p)) { sessionChanged(); return; }
+    adopt(p.session);
+    unlockPage();
+    close();
   }
   document.addEventListener('visibilitychange', recheck);
   window.addEventListener('focus', recheck);
@@ -123,8 +188,8 @@ export function watchSession(session, { now = () => Date.now(), every = (fn, ms)
     } else {
       title = 'You have been signed out';
       text = [absolute ? 'This session reached its maximum length.' : `There was no activity for ${spell(st.idleSec)}.`,
-        ' What you typed on this page is still here: sign in again in a new tab, then come back to this tab and carry on.'];
-      secondary = h('button.btn.modal-btn', { type: 'button', text: 'Close', on: { click: () => { st.dismissedExpired = true; close(); } } });
+        ' This page is hidden until you sign in again: sign in in a new tab, then come back to this tab and carry on. What you typed is kept, except passwords; an open Drive was closed.'];
+      secondary = h('button.btn.modal-btn', { type: 'button', text: 'Log out', on: { click: async () => { try { await logout(); } catch { /* cleared anyway */ } location.assign(loginUrl); } } });
       primary = h('a.send', { href: loginUrl, target: '_blank', rel: 'noopener' }, h('span.send-txt', { text: 'Sign in again' }), h('span.sr-only', { text: ' (opens in a new tab)' }));
     }
     const box = h('div.modal', { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': `${id}-t`, 'aria-describedby': `${id}-s`, tabindex: '-1', id },
@@ -140,7 +205,8 @@ export function watchSession(session, { now = () => Date.now(), every = (fn, ms)
         e.preventDefault();
         e.stopPropagation();
         if (kind === 'idle') stay();
-        else { if (kind === 'absolute') st.dismissedAbsolute = true; else st.dismissedExpired = true; close(); }
+        else if (kind === 'absolute') { st.dismissedAbsolute = true; close(); }
+        // Signed out: the dialog stays (the page behind it is locked); its buttons are the way on.
         return;
       }
       if (e.key !== 'Tab') return;
@@ -157,7 +223,7 @@ export function watchSession(session, { now = () => Date.now(), every = (fn, ms)
     window.addEventListener('keydown', onKey, true);
     dlg = { scrim, inerted, onKey, opener, timer: kind === 'expired' ? null : timer, primary };
     primary.focus();
-    if (dlg.timer) dlg.timer.textContent = clock(Math.min(st.idleEndsAt, st.endsAt) - now());
+    if (dlg.timer) dlg.timer.textContent = clock(Math.min(st.idleEndsAt, st.endsAt) - serverNow());
   }
 
   function close({ restore = true } = {}) {
@@ -177,6 +243,6 @@ export function watchSession(session, { now = () => Date.now(), every = (fn, ms)
   return {
     state: st,
     tick,
-    stop() { clear(handle); off(); close(); document.removeEventListener('visibilitychange', recheck); window.removeEventListener('focus', recheck); },
+    stop() { clear(handle); off(); close(); unlockPage(); document.removeEventListener('visibilitychange', recheck); window.removeEventListener('focus', recheck); },
   };
 }

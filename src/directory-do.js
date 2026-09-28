@@ -1910,6 +1910,20 @@ export class Directory extends DurableObject {
     await this.#dropDriveRefs([id]);
   }
 
+  /**
+   * A recipient kept a file share's download window open longer (POST
+   * /api/file/:id/extend): the share owner's activity log says which share,
+   * which extension of that window (1–10) and until when (Unix seconds). No
+   * grant, key or address is recorded.
+   */
+  async recordDownloadExtended(id, { n, until }) {
+    const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
+    if (!row) return;
+    const count = Number.isInteger(n) ? n : 0;
+    const end = Number.isInteger(until) ? until : 0;
+    this.#log(null, row.user_id, 'share.download_extended', `id=${id} extension=${count} until=${end}`);
+  }
+
   /** A recipient used "delete now" (the sender allowed it): end the row and tell the sender. */
   async shareDeletedByRecipient(id) {
     const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];

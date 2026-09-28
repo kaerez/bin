@@ -36,7 +36,8 @@ export const MAX_ACTIVE_GRANTS = 2000;
 export const MAX_GRANTS_PER_CLIENT = 20;
 // The person downloading may keep their window open longer, this many times
 // (WCAG 2.2.1 asks for at least ten), each time by the role's window, never
-// past the share's own expiry. It spends no view.
+// past the share's own expiry. It spends no view. When the grant table is full,
+// a grant past its first window gives way to a new open (open()).
 export const MAX_GRANT_EXTENSIONS = 10;
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && timingSafeEqualHex(a, b);
@@ -207,10 +208,17 @@ export class FileShare extends DurableObject {
         const oldest = mine.reduce((a, b) => (b.exp < a.exp ? b : a));
         grants = grants.filter((g) => g !== oldest);
       } else if (grants.length >= MAX_ACTIVE_GRANTS) {
-        return { status: 'busy' };
+        // A full table: a grant living on an extension (past its first window) gives way to a new
+        // open. So keeping a share "busy" still takes a fresh open per slot in every window, as it
+        // did before extensions existed; extensions never make that cheaper.
+        const extended = grants.filter((g) => Number.isInteger(g.f) && g.f <= t);
+        if (!extended.length) return { status: 'busy' };
+        const first = extended.reduce((a, b) => (b.exp < a.exp ? b : a));
+        grants = grants.filter((g) => g !== first);
       }
       const gexp = Math.min(t + grantSec, rec.expires);
-      grants.push({ h: grantHash, exp: gexp, c: client });
+      // `f`: the end of the grant's first window (extensions move `exp`, never `f`).
+      grants.push({ h: grantHash, exp: gexp, f: gexp, c: client });
       // Grants now live under GRANTS_KEY; an empty inline array keeps records
       // readable by the previous release if a deploy is rolled back.
       rec.grants = [];
@@ -276,7 +284,7 @@ export class FileShare extends DurableObject {
         await this.#put(rec);
         await this.ctx.storage.setAlarm(rec.purgeAt * 1000);
       }
-      return { status: 'ok', grantExpires: g.exp, extensionsLeft: MAX_GRANT_EXTENSIONS - g.n };
+      return { status: 'ok', grantExpires: g.exp, extensions: g.n, extensionsLeft: MAX_GRANT_EXTENSIONS - g.n };
     });
   }
 

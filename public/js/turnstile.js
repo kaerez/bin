@@ -47,7 +47,36 @@ export async function turnstileSiteKey() {
   }
 }
 
-const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {} });
+// Focus inside Cloudflare's widget (its frame, behind a closed shadow root) does not make the
+// container match :focus-within in Chromium, and the page gets no focus event for it, only its
+// window's blur, with the widget's host as the active element. So each widget's container is
+// marked (.focus-in) whenever the page's focus changes, and its ring shows where focus is (WCAG
+// 2.4.7). One set of listeners serves every widget on the page; a container that has left the
+// page is dropped, and the listeners go with the last one.
+const focusBoxes = new Set();
+const markFocus = () => {
+  for (const c of [...focusBoxes]) {
+    if (!c.isConnected) { focusBoxes.delete(c); continue; }
+    c.classList.toggle('focus-in', c.contains(document.activeElement));
+  }
+  if (!focusBoxes.size) unwatchFocus();
+};
+const markLater = () => setTimeout(markFocus);
+function unwatchFocus() {
+  window.removeEventListener('blur', markLater);
+  document.removeEventListener('focusin', markFocus);
+  document.removeEventListener('focusout', markLater);
+}
+function watchFocus(container) {
+  if (!focusBoxes.size) {
+    window.addEventListener('blur', markLater);
+    document.addEventListener('focusin', markFocus);
+    document.addEventListener('focusout', markLater);
+  }
+  focusBoxes.add(container);
+}
+
+const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {}, remove: () => {} });
 const WAITING = 'Waiting for the CAPTCHA…';
 // The way on for anyone who cannot complete the widget (a third-party
 // component): the page's own alternative, if any, and the site's contact.
@@ -143,14 +172,7 @@ export function humanCheck(container, action, { gate: buttons = [], alternative 
     state = 'on';
     update();
     container.hidden = false;
-    // Focus inside Cloudflare's widget (its frame, behind a closed shadow root) does not make the
-    // container match :focus-within in Chromium, and the page gets no focus event for it, only its
-    // window's blur, with the widget's host as the active element. So the container is marked
-    // whenever the page's focus changes, and its ring shows where focus is (WCAG 2.4.7).
-    const mark = () => container.classList.toggle('focus-in', container.contains(document.activeElement));
-    window.addEventListener('blur', () => setTimeout(mark));
-    document.addEventListener('focusin', mark);
-    document.addEventListener('focusout', () => setTimeout(mark));
+    watchFocus(container);
     let waiters = [];
     const settle = (fn) => { const w = waiters; waiters = []; for (const x of w) fn(x); };
     let ts;
@@ -182,6 +204,13 @@ export function humanCheck(container, action, { gate: buttons = [], alternative 
     return {
       active: true,
       gate: addGate,
+      /** Tear the widget down: its focus mark and, when it was the last, the page's focus listeners go too. */
+      remove() {
+        focusBoxes.delete(container);
+        container.classList.remove('focus-in');
+        if (!focusBoxes.size) unwatchFocus();
+        try { if (ts && id !== undefined) ts.remove(id); } catch { /* already gone */ }
+      },
       async take() {
         if (broken) throw broken;
         const t = token || await new Promise((resolve, reject) => {

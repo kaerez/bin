@@ -98,19 +98,30 @@ export function tablistKeys(list, { automatic = false } = {}) {
  * click anywhere (after a short grace, so the key that caused it does not
  * dismiss it), or until the next toast. Clicks pass through it. Focus not
  * obscured (2.4.11): when it would cover the focused control it shows at the
- * top instead.
+ * top instead. A toast may name decrypted items ("Moved …"): it is put away,
+ * its text removed too, when the page is left or its history entry changes,
+ * and when the session ends (dismissToast).
  */
 const TOAST_GRACE_MS = 1500;
 let toastShownAt = 0;
 let toastWired = false;
+/** Put the toast away now and remove its text (it may name decrypted items). */
+export function dismissToast() {
+  const t = typeof document === 'undefined' ? null : document.getElementById('toast');
+  if (!t) return;
+  t.classList.remove('show', 'toast-top');
+  t.textContent = '';
+}
 export function toast(message, { error = false } = {}) {
   const t = document.getElementById('toast');
   if (!t) return;
   if (!toastWired) {
     toastWired = true;
-    const dismiss = () => { if (t.classList.contains('show') && Date.now() - toastShownAt >= TOAST_GRACE_MS) t.classList.remove('show'); };
+    const dismiss = () => { if (t.classList.contains('show') && Date.now() - toastShownAt >= TOAST_GRACE_MS) dismissToast(); };
     document.addEventListener('keydown', dismiss, true);
     document.addEventListener('click', dismiss, true);
+    // Leaving the page (also into the back/forward cache) or moving in its history.
+    for (const ev of ['pagehide', 'popstate', 'hashchange']) window.addEventListener(ev, dismissToast);
   }
   t.textContent = message;
   t.classList.toggle('error', !!error);

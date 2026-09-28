@@ -1036,6 +1036,18 @@ export class DriveClient {
     this.archives = [];
   }
 
+  /**
+   * The session ended (session-timeout.js): drop the Drive key and its sub-keys
+   * from this client. The key's bytes are overwritten; every later call that
+   * needs a key fails, so nothing more is opened or sealed with it.
+   */
+  forget() {
+    if (this.dk instanceof Uint8Array) this.dk.fill(0);
+    this.dk = null;
+    this.keys = null;
+    this.forgotten = true;
+  }
+
   static async create(dk, user) {
     return new DriveClient(dk, await deriveSubkeys(dk), user);
   }

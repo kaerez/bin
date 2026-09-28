@@ -211,7 +211,8 @@ async function openFile(env, g, id, { lh, kh }) {
   const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client);
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
-    const out = { paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded, viewer: policy.viewer };
+    // `now`: the server's time, so the viewer's download-window warning does not depend on its clock.
+    const out = { paste: r.paste, grant, grantExpires: r.grantExpires, now: Math.floor(Date.now() / 1000), chunks: r.chunks, padded: r.padded, viewer: policy.viewer };
     if (r.refs) out.refs = r.refs; // a Drive share: its files' chunk counts and sizes
     return json(out);
   }
@@ -257,11 +258,13 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
 
 /**
  * Keep a download window open longer (WCAG 2.2.1): the grant itself is the
- * credential (as for chunks); the window is the sender's role's, now. An id
- * that was never a share counts as invalid (as on the chunk route) and is
- * answered from the Directory's index alone, without creating a FileShare
- * object; a known share that ended is a plain "gone", not counted (goneFor's
- * rule: the viewer's tab arriving late).
+ * credential (as for chunks); the window is the sender's role's, now. Every
+ * refusal counts towards the network's "invalid" limit, so repeated calls end
+ * in 429 (refused up front, before the Directory): a bad grant, an id that
+ * was never a share (answered from the Directory's index alone, without
+ * creating a FileShare object), a grant past its last extension (the viewer
+ * stops asking after the first 409) and a share that has ended (a late tab
+ * asks once). Each extension is recorded in the share owner's activity log.
  */
 async function extendGrant(request, env, g, id) {
   const grant = request.headers.get('x-download-grant') || '';
@@ -269,10 +272,13 @@ async function extendGrant(request, env, g, id) {
   const policy = await directory(env).shareOpenPolicy(id);
   if (!policy.known) return failed(env, g, err(410, 'gone', GONE));
   const r = await fileStub(env, id).extendGrant(await hashToken(grant), policy.grantSec);
-  if (r.status === 'ok') return json({ grantExpires: r.grantExpires, extensionsLeft: r.extensionsLeft });
-  if (r.status === 'limit') return err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires });
+  if (r.status === 'ok') {
+    await directory(env).recordDownloadExtended(id, { n: r.extensions, until: r.grantExpires });
+    return json({ grantExpires: r.grantExpires, extensionsLeft: r.extensionsLeft, now: Math.floor(Date.now() / 1000) });
+  }
+  if (r.status === 'limit') return failed(env, g, err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires }));
   if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'The download window has expired — open the link again.'));
-  return err(410, 'gone', GONE);
+  return failed(env, g, err(410, 'gone', GONE));
 }
 
 /** Chunk i of a file share's stream, or (with `ref`) chunk i of a Drive share's file number `ref`. */
