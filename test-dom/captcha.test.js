@@ -52,7 +52,9 @@ function addPageKey(pk) {
   m.content = `${pk.n}.${pk.key}`;
   document.head.appendChild(m);
 }
-const turnstileScripts = () => [...document.querySelectorAll('script')].filter((s) => /challenges\.cloudflare\.com/.test(s.src));
+// Scripts from any origin but the page's own (the Turnstile script included): compared as parsed
+// origins, never as substrings of the URL.
+const thirdPartyScripts = () => [...document.querySelectorAll('script[src]')].filter((s) => new URL(s.src, location.href).origin !== location.origin);
 function fakeTurnstile() {
   const w = { renders: [] };
   globalThis.turnstile = { render(el, opts) { w.renders.push({ el, opts }); return 'w1'; }, reset() {} };
@@ -258,7 +260,7 @@ describe('the viewer: a share with the CAPTCHA', () => {
     for (const k of DRIVE_SLOTS) expect(sessionStorage.getItem(k)).toBeNull();
     expect(stashedNonce({ kind: 'p', id: ID, storage: sessionStorage })).toBe(pk.n);
     expect($('meta[name="secbin-page-key"]')).toBeNull(); // read once, then gone
-    expect(turnstileScripts()).toHaveLength(0);
+    expect(thirdPartyScripts()).toHaveLength(0);
 
     // 2. The check page (Turnstile's CSP in real life): Continue waits for the CAPTCHA; the key is nowhere here.
     window.happyDOM.setURL(`https://bin.example/p/${ID}?check`);
@@ -293,7 +295,7 @@ describe('the viewer: a share with the CAPTCHA', () => {
     expect(sessionStorage.getItem('secbin_dk_uid')).toBe('u1');
     expect(requests.filter((r) => r.path.startsWith(`/api/paste/${ID}`)).every((r) => r.headers['x-secbin-human'] === GRANT)).toBe(true);
     // The decrypting document never had Turnstile's script (nor asked for its site key).
-    expect(turnstileScripts()).toHaveLength(0);
+    expect(thirdPartyScripts()).toHaveLength(0);
     expect(globalThis.turnstile).toBeUndefined();
     expect(requests.some((r) => r.path === '/api/config')).toBe(false);
   }, T);
@@ -392,7 +394,7 @@ describe('the uploader: a link with the CAPTCHA', () => {
     r = await mountUploader(page(), { location: { pathname: `/r/${S.id}`, hash: '', search: `?n=${pk.n}`, replace }, history: { replaceState }, storage: sessionStorage, pageKey: pk });
     expect(r.state).toBe('ready');
     expect(replaceState).toHaveBeenCalledWith(null, '', `/r/${S.id}#${K}`);
-    expect(turnstileScripts()).toHaveLength(0);
+    expect(thirdPartyScripts()).toHaveLength(0);
     expect($('#reverse-recheck').hidden).toBe(true);
     pick([fileOf('a.txt')]);
     $('#reverse-send').click();

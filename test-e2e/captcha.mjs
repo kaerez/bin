@@ -57,8 +57,21 @@ const navs = (p) => {
   });
   return list;
 };
-const strict = (csp) => !!csp && !csp.includes(TS_ORIGIN) && /frame-src 'none'/.test(csp);
-const tsCsp = (csp) => csp.includes(`script-src 'self' 'wasm-unsafe-eval' ${TS_ORIGIN}`) && csp.includes(`frame-src ${TS_ORIGIN}`);
+/** A CSP header as { directive: [source, …] } (exact tokens, never substrings). */
+const cspOf = (csp) => Object.fromEntries(String(csp || '').split(';').map((d) => d.trim().split(/\s+/)).filter((t) => t[0]).map(([k, ...v]) => [k.toLowerCase(), v]));
+/** The strict CSP: no directive allows any other origin, and nothing may be framed. */
+const strict = (csp) => {
+  const d = cspOf(csp);
+  return Object.keys(d).length > 0 && Object.values(d).every((v) => !v.some((t) => /^https?:/i.test(t))) && d['frame-src']?.join(' ') === "'none'";
+};
+/** The Turnstile CSP: Cloudflare's origin (and no other) added to script-src, and frame-src exactly it. */
+const tsCsp = (csp) => {
+  const d = cspOf(csp);
+  return d['script-src']?.join(' ') === `'self' 'wasm-unsafe-eval' ${TS_ORIGIN}` && d['frame-src']?.join(' ') === TS_ORIGIN;
+};
+/** A URL's query and fragment, parsed. */
+const hasParam = (u, k) => new URL(u).searchParams.has(k);
+const isCheck = (u) => new URL(u).search === '?check';
 async function axeOf(p) {
   await p.evaluate(AXE);
   return p.evaluate(async (tags) => {
@@ -72,7 +85,8 @@ async function audit(p, label) {
   check(`axe: ${label}`, v.length === 0, v.join('; '));
 }
 const storageText = (p) => p.evaluate(() => { const o = {}; for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i); o[k] = sessionStorage.getItem(k); } return JSON.stringify(o); });
-const noTurnstileHere = (p) => p.evaluate((o) => typeof window.turnstile === 'undefined' && ![...document.scripts].some((s) => s.src.startsWith(o)), TS_ORIGIN);
+// No Turnstile object and no script from any origin but the page's own (parsed origins, not substrings).
+const noTurnstileHere = (p) => p.evaluate(() => typeof window.turnstile === 'undefined' && ![...document.scripts].some((s) => s.src && new URL(s.src, location.href).origin !== location.origin));
 async function login(p, user, pw) {
   await p.goto(`${BASE}/dashboard/login/`);
   await p.fill('#login-user', user); await p.fill('#login-pass', pw);
@@ -169,16 +183,16 @@ try {
   let r = await recipient();
   await r.p.goto(plainUrl);
   await r.p.waitForFunction(() => document.querySelector('#paste-content')?.textContent.includes('an open note'), null, { timeout: 60000 });
-  check('unprotected note: opens at once, no check page and no Turnstile script', !r.nav.some((n) => n.url.includes('?check')) && await noTurnstileHere(r.p));
+  check('unprotected note: opens at once, no check page and no Turnstile script', !r.nav.some((n) => hasParam(n.url, 'check')) && await noTurnstileHere(r.p));
   check('unprotected note: its page has the strict CSP (and COEP)', strict(r.nav[0].csp) && r.nav[0].coep === 'require-corp', r.nav[0].csp);
   await r.ctx.close();
 
   r = await recipient();
   const K = keyOf(protUrl);
   await r.p.goto(protUrl);
-  await r.p.waitForURL(/\?check$/, { timeout: 30000 });
+  await r.p.waitForURL((u) => u.search === '?check', { timeout: 30000 });
   check('protected note: the page goes to its check page at once', r.p.url() === `${BASE}/p/${idOf(protUrl)}?check`, r.p.url());
-  const checkNav = r.nav.find((n) => n.url.endsWith('?check'));
+  const checkNav = r.nav.find((n) => isCheck(n.url));
   check('protected note: the check page has the Turnstile CSP (no COEP)', checkNav && tsCsp(checkNav.csp) && checkNav.coep === null, checkNav?.csp);
   await r.p.waitForSelector('#check-continue');
   check('check page: Continue disabled until the CAPTCHA passes', await r.p.isDisabled('#check-continue'));
@@ -194,15 +208,15 @@ try {
   check('protected note: the key is back in the address bar, the sealed copy gone from sessionStorage',
     r.p.url() === `${BASE}/p/${idOf(protUrl)}#${K}` && !/secbin_pk:/.test(await storageText(r.p)), r.p.url());
   const back = r.nav.at(-1);
-  check('protected note: the decrypting document has the strict CSP and no Turnstile script', /\?n=/.test(back.url) && strict(back.csp) && await noTurnstileHere(r.p), back.url);
+  check('protected note: the decrypting document has the strict CSP and no Turnstile script', hasParam(back.url, 'n') && strict(back.csp) && await noTurnstileHere(r.p), back.url);
   const before = r.nav.length;
   await r.p.reload();
   await r.p.waitForFunction(() => document.querySelector('#paste-content')?.textContent.includes('a note behind a CAPTCHA'), null, { timeout: 60000 });
-  check('protected note: a reload in the same tab opens it with the kept grant (no second CAPTCHA)', !r.nav.slice(before).some((n) => n.url.includes('?check')));
+  check('protected note: a reload in the same tab opens it with the kept grant (no second CAPTCHA)', !r.nav.slice(before).some((n) => hasParam(n.url, 'check')));
   await r.ctx.close();
   r = await recipient();
   await r.p.goto(protUrl);
-  await r.p.waitForURL(/\?check$/, { timeout: 30000 });
+  await r.p.waitForURL((u) => u.search === '?check', { timeout: 30000 });
   check('protected note: another browser session (no grant) gets the check page again', true);
   await r.ctx.close();
 
@@ -224,7 +238,7 @@ try {
   check('protected file share: created from the composer with the box ticked', /\/p\/f/.test(fileUrl));
   r = await recipient();
   await r.p.goto(fileUrl);
-  await r.p.waitForURL(/\?check$/, { timeout: 30000 });
+  await r.p.waitForURL((u) => u.search === '?check', { timeout: 30000 });
   await passCheck(r.p);
   await openFiles(r.p);
   check('protected file share: through its check page, then the file downloads intact', (await downloadedText(r.p)) === TEXT_FILE && await noTurnstileHere(r.p));
@@ -246,7 +260,7 @@ try {
   await dialogButton(op, 'Done').click();
   r = await recipient();
   await r.p.goto(driveUrl);
-  await r.p.waitForURL(/\?check$/, { timeout: 30000 });
+  await r.p.waitForURL((u) => u.search === '?check', { timeout: 30000 });
   await passCheck(r.p);
   await openFiles(r.p);
   check('protected Drive share: through its check page, then the file downloads intact', (await downloadedText(r.p)) === DRIVE_FILE);
@@ -276,16 +290,16 @@ try {
   r = await recipient();
   const RK = keyOf(revUrl);
   await r.p.goto(revUrl);
-  await r.p.waitForURL(/\?check$/, { timeout: 30000 });
+  await r.p.waitForURL((u) => u.search === '?check', { timeout: 30000 });
   await r.p.waitForSelector('#check-continue');
   check('protected reverse link: the uploader page goes to its check page; the link key is not there',
     !r.p.url().includes(RK) && !(await r.p.content()).includes(RK) && !(await storageText(r.p)).includes(RK));
-  const rcheck = r.nav.find((n) => n.url.endsWith('?check'));
+  const rcheck = r.nav.find((n) => isCheck(n.url));
   check('protected reverse link: "Complete the CAPTCHA to send files", with the Turnstile CSP', (await r.p.textContent('#check-title')) === 'Complete the CAPTCHA to send files' && tsCsp(rcheck.csp));
   await passCheck(r.p);
   await r.p.waitForSelector('#reverse-page', { timeout: 60000 });
   const rback = r.nav.at(-1);
-  check('protected reverse link: back on the uploader page (strict CSP, no Turnstile script, the key back)', strict(rback.csp) && await noTurnstileHere(r.p) && r.p.url().endsWith(`#${RK}`), rback.url);
+  check('protected reverse link: back on the uploader page (strict CSP, no Turnstile script, the key back)', strict(rback.csp) && await noTurnstileHere(r.p) && new URL(r.p.url()).hash === `#${RK}`, rback.url);
   await audit(r.p, 'the uploader page after the CAPTCHA');
   await r.p.setInputFiles('#reverse-file-input', [{ name: 'upload.txt', mimeType: 'text/plain', buffer: Buffer.from('sent behind a CAPTCHA') }]);
   await r.p.click('#reverse-send');
@@ -299,7 +313,7 @@ try {
   await r.p.setInputFiles('#reverse-file-input', [{ name: 'open.txt', mimeType: 'text/plain', buffer: Buffer.from('no CAPTCHA') }]);
   await r.p.click('#reverse-send');
   await r.p.waitForFunction(() => !document.querySelector('#reverse-done').hidden, null, { timeout: 60000 });
-  check('unprotected reverse link: no check page, no Turnstile; the file is sent', !r.nav.some((n) => n.url.includes('?check')) && await noTurnstileHere(r.p) && /Sent 1 file/.test(await r.p.textContent('#reverse-done')));
+  check('unprotected reverse link: no check page, no Turnstile; the file is sent', !r.nav.some((n) => hasParam(n.url, 'check')) && await noTurnstileHere(r.p) && /Sent 1 file/.test(await r.p.textContent('#reverse-done')));
   await r.ctx.close();
 
   // ── the lists ─────────────────────────────────────────────────────────────

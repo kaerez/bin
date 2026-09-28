@@ -137,7 +137,7 @@ describe('the uploader page', () => {
     expect($('#reverse-total').textContent).toBe('2 files, 11 B');
     // A link without the CAPTCHA: no widget, no Turnstile script, nothing asked for.
     expect($('#reverse-human')).toBeNull();
-    expect(document.querySelector('script[src*="challenges.cloudflare.com"]')).toBeNull();
+    expect([...document.querySelectorAll('script[src]')].filter((s) => new URL(s.src, location.href).origin !== location.origin)).toEqual([]);
     expect(send.disabled).toBe(false);
     send.click();
     await until(() => !$('#reverse-done').hidden);
