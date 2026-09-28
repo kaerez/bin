@@ -1,18 +1,20 @@
-// drivekit.js — a Drive recovery kit's file (docs/DRIVE.md §3, "Recovery
-// kits"), for the owner now and for users later: one module, two kinds.
+// drivekit.js — a Drive kit's file (docs/DRIVE.md §3.1): one module, two
+// kinds, made and read only in the browser (the file never goes to the
+// server; its content does come from the server, which holds the keys):
 //
-//   owner  "secbin-owner-kit/1" { format, ownerId, salt, t, m, iv, ct } — the
-//          owner's DK and a snapshot of every escrow key: it restores the
-//          owner's Drive and the escrow access to every user's Drive;
-//   user   "secbin-user-kit/1"  { format, userId, salt, t, m, iv, ct } — a
-//          user's DK only (the user-kit pages come later).
+//   user  "secbin-user-kit/2" { format, userId, salt, t, m, iv, ct } — a
+//         personal kit (Account page, every user, the owner included): the
+//         user's id, username, user salt and the KEK of each sub-MEK their
+//         Drive uses. It opens that user's files and reverse shares.
+//   key   "secbin-key-kit/1"  { format, ownerId, salt, t, m, iv, ct } — the
+//         key kit (Admin → Security → Keys): the root MEK, every sub-MEK
+//         with its dates, and every user salt. It restores everything.
 //
 //   key  = Argon2id(UTF8(NFC(passphrase)), salt16, m = 64 MiB, t = 3, p = 1) → 32 B
 //   ct   = AES-256-GCM(key, iv12, UTF8(JSON(payload)), AAD)
 //   AAD  = "<format>\nargon2id\nm=65536\nt=3\np=1\nsalt=<b64url>\niv=<b64url>\n"
-//          + "<owner|user>=<account id>\norigin=<origin>\n"
+//          + "<user|key>=<account id>\norigin=<origin>\n"
 //
-// A kit is made and read only in the browser and never sent to the server.
 // The KDF parameters are the export's (public/js/exportcrypt.js) and fixed: a
 // crafted file cannot ask for more work. The format (so the kind), the
 // account id and the server's origin are bound into the AAD: a kit opens only
@@ -25,21 +27,20 @@
 import { argon2idRaw } from './kdf.js';
 import { b64urlFromBytes, bytesFromB64url, randomBytes, utf8, fromUtf8 } from './bytes.js';
 
-export const KIT_FORMATS = Object.freeze({ owner: 'secbin-owner-kit/1', user: 'secbin-user-kit/1' });
-const ID_FIELD = { owner: 'ownerId', user: 'userId' };
+export const KIT_FORMATS = Object.freeze({ user: 'secbin-user-kit/2', key: 'secbin-key-kit/1' });
+const ID_FIELD = { user: 'userId', key: 'ownerId' };
+/** The payload version inside each kind. */
+const PAYLOAD_V = { user: 2, key: 1 };
 const KDF = Object.freeze({ alg: 'argon2id', m: 65536, t: 3, p: 1 });
 const B64_RE = /^[A-Za-z0-9_-]+$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const NO_PASSPHRASE = Uint8Array.of(0xff); // as exportcrypt.js: no UTF-8 text is this byte
 
-/** The kind of kit an account's role takes: the owner's, or a user's. */
-export const kitKindFor = (role) => (role === 'owner' ? 'owner' : 'user');
-
 /**
  * A kit that cannot be used: `check` says which step failed — 'format' (not a
- * kit, or an incompatible one), 'kind' (an owner kit for a user or the other
- * way round), 'owner' (another account's kit), 'auth' (wrong passphrase,
- * another server, or the file was changed) or 'payload'.
+ * kit, or an incompatible one), 'kind' (a key kit where a personal kit is
+ * expected, or the other way round), 'owner' (another account's kit), 'auth'
+ * (wrong passphrase, another server, or the file was changed) or 'payload'.
  */
 export class DriveKitError extends Error {
   constructor(message, check) { super(message); this.name = 'DriveKitError'; this.check = check; }
@@ -53,7 +54,7 @@ async function keyFrom(passphrase, saltBytes) {
   return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
-/** Seal a kit's payload: `kind` 'owner' | 'user', for `accountId` on `origin` → the file's text. */
+/** Seal a kit's payload: `kind` 'user' | 'key', for `accountId` on `origin` → the file's text. */
 export async function sealDriveKit(kind, payload, { accountId, origin, passphrase }) {
   if (!KIT_FORMATS[kind]) throw new DriveKitError('Unknown kind of kit.', 'format');
   if (typeof passphrase !== 'string') throw new DriveKitError('The kit passphrase must be text.', 'format');
@@ -69,7 +70,7 @@ export async function sealDriveKit(kind, payload, { accountId, origin, passphras
 /** A kit file's envelope (untrusted text), checked for form only → { kind, accountId, salt, iv, ct }; DriveKitError('format'). */
 export function parseDriveKit(text) {
   let env;
-  try { env = JSON.parse(text); } catch { throw new DriveKitError('This is not a Drive recovery kit.', 'format'); }
+  try { env = JSON.parse(text); } catch { throw new DriveKitError('This is not a Drive kit.', 'format'); }
   const kind = env && typeof env === 'object' && !Array.isArray(env) ? Object.keys(KIT_FORMATS).find((k) => KIT_FORMATS[k] === env.format) : null;
   const idf = kind ? ID_FIELD[kind] : null;
   const ok = !!kind
@@ -79,7 +80,7 @@ export function parseDriveKit(text) {
     && typeof env.salt === 'string' && env.salt.length === 22 && B64_RE.test(env.salt)
     && typeof env.iv === 'string' && env.iv.length === 16 && B64_RE.test(env.iv)
     && typeof env.ct === 'string' && env.ct.length >= 24 && env.ct.length <= 200000 && B64_RE.test(env.ct);
-  if (!ok) throw new DriveKitError('This is not a Drive recovery kit, or it was made by an incompatible version.', 'format');
+  if (!ok) throw new DriveKitError('This is not a Drive kit, or it was made by an incompatible version.', 'format');
   return { kind, accountId: env[idf], salt: env.salt, iv: env.iv, ct: env.ct };
 }
 
@@ -91,9 +92,9 @@ export function parseDriveKit(text) {
  */
 export async function openDriveKit(env, { kind, accountId, origin, passphrase }) {
   if (env.kind !== kind) {
-    throw new DriveKitError(kind === 'owner' ? 'This is a user’s Drive recovery kit, not an owner recovery kit.' : 'This is the administrator’s recovery kit: it cannot be used for this account.', 'kind');
+    throw new DriveKitError(kind === 'key' ? 'This is a personal kit, not the key kit.' : 'This is the key kit (Admin → Security → Keys), not a personal kit.', 'kind');
   }
-  if (env.accountId !== accountId) throw new DriveKitError(kind === 'owner' ? 'This kit belongs to another owner account.' : 'This kit belongs to another account.', 'owner');
+  if (env.accountId !== accountId) throw new DriveKitError(kind === 'key' ? 'This key kit was made by another owner account.' : 'This kit belongs to another account.', 'owner');
   const key = await keyFrom(typeof passphrase === 'string' ? passphrase : '', bytesFromB64url(env.salt));
   let pt;
   try {
@@ -103,6 +104,6 @@ export async function openDriveKit(env, { kind, accountId, origin, passphrase })
   }
   let payload;
   try { payload = JSON.parse(fromUtf8(new Uint8Array(pt))); } catch { payload = null; }
-  if (!payload || typeof payload !== 'object' || payload.v !== 1) throw new DriveKitError('The kit opened, but its content is not valid.', 'payload');
+  if (!payload || typeof payload !== 'object' || payload.v !== PAYLOAD_V[kind]) throw new DriveKitError('The kit opened, but its content is not valid.', 'payload');
   return payload;
 }

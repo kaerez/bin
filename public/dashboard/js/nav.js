@@ -6,12 +6,12 @@
 import { me, logout, admin, ApiError } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError } from '../../js/common.js';
-import { clearSessionKey, clearImpersonationKey } from '../../js/drivekeys.js';
+import { clearSessionKey, clearImpersonationKeys } from '../../js/drivekeys.js';
 
 const $ = (s) => document.querySelector(s);
 
 function toLogin(reason) {
-  clearSessionKey(); // signed out: forget the tab's Drive key (docs/DRIVE.md §3)
+  clearSessionKey(); // signed out: forget the tab's Drive keys (docs/DRIVE.md §3)
   location.replace(reason === 'account_disabled' ? '/dashboard/login/?disabled=1' : '/dashboard/login/');
 }
 
@@ -31,8 +31,8 @@ export function driveAllowed(profile) {
 
 export const ready = (async () => {
   const profile = await loadMe();
-  // The Drive key of a user the owner acted as lives only while acting as them.
-  if (!profile.impersonatedBy) clearImpersonationKey();
+  // The Drive keys of a user the owner acted as live only while acting as them.
+  if (!profile.impersonatedBy) clearImpersonationKeys();
   const nav = $('#dash-nav');
   if (nav) {
     nav.hidden = false;
@@ -54,7 +54,7 @@ export const ready = (async () => {
     $('#imp-return').onclick = async () => {
       try {
         await admin.unimpersonate();
-        clearImpersonationKey();
+        clearImpersonationKeys();
         location.href = '/dashboard/admin/';
       } catch (e) {
         toast(friendlyError(e), { error: true });

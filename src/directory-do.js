@@ -28,6 +28,10 @@ import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
 import { publicStatement } from '../public/js/a11ystatement.js';
+import {
+  deriveKek, deriveUserKey, deriveFieldKey, keyFingerprint, keyCheckValue, saltCheckValue, sameCheck, sealSubMek, openSubMek,
+  newMekId, newKey, newSalt, KEY_RE, MEK_ID_RE, effectiveAt, mekStatus, checkTimeline,
+} from '../public/js/drivekeys.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -85,6 +89,11 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEX
 CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS meks (id TEXT PRIMARY KEY, sealed TEXT NOT NULL, fp TEXT NOT NULL, from_ts INTEGER NOT NULL, until_ts INTEGER,
+  created INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS user_salts (user_id TEXT PRIMARY KEY, salt TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, v1_items INTEGER, v1_links INTEGER, updated INTEGER NOT NULL);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -211,6 +220,28 @@ const MIGRATIONS = [
     m.sql.exec('CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY)');
     materializeDefaultRole(m.sql);
   },
+  // 15: the Drive key model v2 (docs/DRIVE.md §3): the MEK keyring (the root
+  // MEK in meta "mek.root", the sub-MEKs sealed under it), a random salt per
+  // user (every account gets one now), the owner's key candidates, and the
+  // upgrade of the Drives made before it: every account that may have one
+  // (the owner, and each user with a Drive usage row or an escrow wrap) is
+  // "pending" until its Drive is re-sealed and verified (drive_migration).
+  // The root MEK and the first sub-MEK are generated on first need (or at
+  // set-up), never here.
+  (m) => {
+    m.sql.exec(`CREATE TABLE IF NOT EXISTS meks (id TEXT PRIMARY KEY, sealed TEXT NOT NULL, fp TEXT NOT NULL, from_ts INTEGER NOT NULL, until_ts INTEGER,
+      created INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '')`);
+    m.sql.exec('CREATE TABLE IF NOT EXISTS user_salts (user_id TEXT PRIMARY KEY, salt TEXT NOT NULL, created INTEGER NOT NULL)');
+    m.sql.exec('CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL)');
+    m.sql.exec('CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, v1_items INTEGER, v1_links INTEGER, updated INTEGER NOT NULL)');
+    const ts = Math.floor(Date.now() / 1000);
+    for (const u of m.sql.exec("SELECT id FROM users WHERE role IN ('owner', 'user')").toArray()) {
+      m.sql.exec('INSERT OR IGNORE INTO user_salts (user_id, salt, created) VALUES (?, ?, ?)', u.id, newSalt(), ts);
+    }
+    m.sql.exec(`INSERT OR IGNORE INTO drive_migration (user_id, state, updated)
+      SELECT id, 'pending', ? FROM users WHERE role = 'owner'
+        OR (role = 'user' AND (id IN (SELECT user_id FROM drive_usage) OR ('drive.escrowKid:' || id) IN (SELECT k FROM meta)))`, ts);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -302,14 +333,21 @@ const SQL_BATCH = 90;
  * (docs/DRIVE.md §9): as the user, or — the owner impersonating them — as the
  * user's own in their activity with the real actor in the admin audit.
  */
-/** The owner's own Drive recovery actions (admin audit only). */
-const OWNER_DRIVE_ACTIONS = ['drive.kit_exported', 'drive.kit_used', 'drive.kit_verified', 'drive.kit_keys_restored', 'drive.owner_reset', 'drive.archive_restored', 'drive.archive_deleted'];
+/** The owner's direct actions on a user's Drive keys (admin audit only; driveAdminAction). */
+const ADMIN_DRIVE_ACTIONS = ['drive.escrow_used', 'drive.migrated', 'drive.keys_viewed', 'drive.keys_imported'];
+/** A generated key candidate (Admin → Security → Keys) is kept this long for the owner's session. */
+const MEK_CANDIDATE_SEC = 600;
+/** Key kit checks per owner session and window (seconds). */
+const KIT_VERIFY_MAX = 30;
+const KIT_VERIFY_SEC = 600;
 // Received files (reverse shares, docs/REVERSE.md §7) taken in, marked as not
 // taken in, or put back to try again: one row per link, per actor, per
 // RECEIVED_LOG_SEC that adds up the files. Anonymous uploaders decide how many
 // files arrive, so one row per file could push the user's other entries out.
 const RECEIVED_ACTIONS = ['drive.received_taken_in', 'drive.received_failed', 'drive.received_retried'];
-const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted',
+const DRIVE_ACTIONS = ['drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted',
+  // The personal kit (the user's own), and the user's own browser upgrading their Drive.
+  'drive.kit_exported', 'drive.kit_verified', 'drive.kit_restored', 'drive.migrated',
   ...RECEIVED_ACTIONS];
 const RECEIVED_DETAIL_RE = /^(id=r[A-Za-z0-9_-]{22} )files=([1-9]\d{0,8})$/;
 // A user's own file reads (one row per opened file) are throttled so that they
@@ -587,6 +625,7 @@ export class Directory extends DurableObject {
         const id = newId();
         this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'owner', ?, ?, ?, ?, ?)",
           id, username, salt, t, verifier, ts, ts);
+        this.#ensureSalt(id);
         this.#log(id, id, 'owner.created', `username=${username}`);
       }
       this.#setMeta(`authn_used:${authnHash}`, String(ts));
@@ -1961,7 +2000,7 @@ export class Directory extends DurableObject {
    * What the Worker needs before any Drive call: may this account use its
    * Drive now, its capacity and largest file (null: no limit — the Worker
    * enforces HARD_MAX_DRIVE_BYTES then), the upload deadline for pending
-   * files, and the owner's escrow public key (JWK text, or null).
+   * files, and the current sub-MEK (null before the keyring exists).
    */
   async driveAccess(uid) {
     const u = this.#user(uid);
@@ -1970,6 +2009,7 @@ export class Directory extends DurableObject {
     const L = this.#effective(u).all;
     const s = this.#settings();
     const used = this.sql.exec('SELECT used FROM drive_usage WHERE user_id = ?', uid).toArray()[0]?.used ?? 0;
+    const mig = this.sql.exec('SELECT state FROM drive_migration WHERE user_id = ?', uid).toArray()[0];
     return {
       ok: true,
       enabled: !!L.driveEnabled,
@@ -1978,64 +2018,689 @@ export class Directory extends DurableObject {
       maxFile: L.driveMaxFileBytes === null || L.driveMaxFileBytes === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxFileBytes),
       pendingSec: this.#caps(u, L, s).pendingSec,
       used,
-      escrowPub: this.#meta('drive.escrowPub'),
-      escrowSignPub: this.#meta('drive.escrowSignPub'),
-      escrowSig: this.#meta('drive.escrowSig'),
-      ownerReset: this.#meta('drive.ownerReset'),
+      current: effectiveAt(this.#mekRows(), now())?.id ?? null,
+      // The Drive made before the key model v2 still waits for its upgrade.
+      migration: mig ? mig.state : null,
+    };
+  }
+
+  // ── Drive keys: the MEK keyring (docs/DRIVE.md §3) ───────────────────────
+  // The root MEK lives in meta "mek.root" ({ key, fp, created }); while the
+  // owner changes it, the previous one stays in "mek.rootOld" until every
+  // item sealed under it is re-sealed. The sub-MEKs are rows of `meks`,
+  // sealed under the root MEK. KEKs and field keys are derived here and
+  // handed to the Worker; the root MEK and the sub-MEKs leave this object only
+  // for the owner (Show, the key kit, an export), always logged by
+  // fingerprint. Nothing generated or entered is ever logged.
+
+  #keyRoot(which = 'mek.root') {
+    try {
+      const v = JSON.parse(this.#meta(which) || 'null');
+      return v && typeof v.key === 'string' && KEY_RE.test(v.key) ? { key: bytesFromB64url(v.key), fp: v.fp, created: v.created ?? null } : null;
+    } catch {
+      return null;
+    }
+  }
+  #mekRows() {
+    return this.sql.exec('SELECT id, sealed, fp, from_ts, until_ts, created, note FROM meks ORDER BY from_ts, created, id').toArray()
+      .map((r) => ({ id: r.id, sealed: r.sealed, fp: r.fp, from: r.from_ts, until: r.until_ts, created: r.created, note: r.note }));
+  }
+  /** Every sub-MEK opened under `root` → Map(id → { ...row, key (bytes) | null }). */
+  async #openSubs(root, rows = this.#mekRows()) {
+    const out = new Map();
+    for (const r of rows) {
+      let key = null;
+      if (root) { try { key = await openSubMek(root.key, r.id, r.sealed); } catch { key = null; } }
+      out.set(r.id, { ...r, key });
+    }
+    return out;
+  }
+  #saltOf(uid) {
+    return this.sql.exec('SELECT salt FROM user_salts WHERE user_id = ?', uid).toArray()[0]?.salt ?? null;
+  }
+  /** A user's salt, created (random) when the account is created; never replaced. */
+  #ensureSalt(uid) {
+    this.sql.exec('INSERT OR IGNORE INTO user_salts (user_id, salt, created) VALUES (?, ?, ?)', uid, newSalt(), now());
+    return this.#saltOf(uid);
+  }
+  #keyLog(ownerId, action, detail) {
+    // The keyring is server-wide: an owner's admin action with no subject (never pruned automatically).
+    this.#log(ownerId ? { id: ownerId, adm: true } : null, null, action, detail);
+  }
+  #isOwner(id) {
+    const o = this.#user(id);
+    return !!o && o.role === 'owner';
+  }
+
+  /**
+   * The root MEK and the first sub-MEK, generated securely on first need,
+   * when there are none and never were (`mek.ever`): a keyring that was lost
+   * is never replaced silently (the key kit restores it).
+   */
+  async ensureKeys() {
+    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) return { ok: true, created: false };
+    return this.#createKeys(newKey(), newKey(), 'generated', null);
+  }
+
+  async #createKeys(root, sub, how, actorId) {
+    const id = newMekId();
+    const [sealed, rfp, sfp] = await Promise.all([sealSubMek(root, id, sub), keyFingerprint(root), keyFingerprint(sub)]);
+    // Another call may have made them meanwhile (nothing above wrote).
+    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) return { ok: true, created: false };
+    const ts = now();
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(root), fp: rfp, created: ts }));
+      this.#setMeta('mek.ever', '1');
+      this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, NULL, ?, ?)', id, sealed, sfp, ts, ts, '');
+      this.#keyLog(actorId, 'keys.created', `root MEK ${rfp}, sub-MEK ${id} (${sfp}), ${how}`);
+    });
+    return { ok: true, created: true, root: rfp, sub: { id, fp: sfp } };
+  }
+
+  /**
+   * Set-up (the AUTHN page): the root MEK and the first sub-MEK, generated
+   * here (`generate`) or entered by the owner (`root`, `sub`: 32 bytes each,
+   * base64url, checked by the Worker). Keys that exist are never replaced.
+   */
+  async setupKeys({ generate = true, root = null, sub = null } = {}) {
+    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) return { ok: true, created: false };
+    if (!generate && !(KEY_RE.test(root ?? '') && KEY_RE.test(sub ?? ''))) return fail(400, 'invalid_key', 'Enter the root MEK and the first sub-MEK (32 bytes each), or generate them.');
+    const r = await this.#createKeys(generate ? newKey() : bytesFromB64url(root), generate ? newKey() : bytesFromB64url(sub), generate ? 'generated at set-up' : 'entered at set-up', null);
+    return r;
+  }
+
+  /**
+   * A user's KEKs (docs/DRIVE.md §3) for the sub-MEKs in `meks` (those their
+   * items use; the current one always) or `all` of them → { userId, salt,
+   * current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }],
+   * missing (ids no sub-MEK has), broken (sub-MEKs that do not open under the
+   * root) }. `kekOld`: the KEK under the previous root while the owner is
+   * changing it. `createSalt`: an account with nothing in its Drive gets its
+   * salt now if it has none (a salt that was lost is only restored).
+   */
+  async driveKeys(uid, { meks = [], all = false, createSalt = false } = {}) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    const salt = this.#saltOf(uid) ?? (createSalt ? this.#ensureSalt(uid) : null);
+    if (!salt) return fail(409, 'salt_missing', 'This account has no user salt: restore it from the key kit or a personal kit.');
+    const root = this.#keyRoot();
+    if (!root) return fail(503, 'keys_missing', 'The Drive keys are missing: the administrator restores them from the key kit (Admin → Security → Keys).');
+    const old = this.#keyRoot('mek.rootOld');
+    const rows = this.#mekRows();
+    const cur = effectiveAt(rows, now());
+    const ids = all ? rows.map((r) => r.id) : [...new Set([...(Array.isArray(meks) ? meks : []), cur?.id].filter((x) => typeof x === 'string' && MEK_ID_RE.test(x)))].slice(0, 200);
+    const subs = await this.#openSubs(root, rows);
+    const keys = [];
+    const missing = [];
+    const broken = [];
+    for (const id of ids) {
+      const s = subs.get(id);
+      if (!s) { missing.push(id); continue; }
+      if (!s.key) { broken.push(id); continue; }
+      const kek = await deriveKek(root.key, s.key, salt, uid);
+      const k = { mekId: id, fp: s.fp, from: s.from, until: s.until, kek: b64urlFromBytes(kek) };
+      if (old) k.kekOld = b64urlFromBytes(await deriveKek(old.key, s.key, salt, uid));
+      keys.push(k);
+    }
+    return { ok: true, userId: uid, salt, current: cur?.id ?? null, changing: !!old, keys, missing, broken };
+  }
+
+  /**
+   * A user salt from a personal kit, for an account that has none (a salt is
+   * never replaced). Without `write`: the KEK it gives for sub-MEK
+   * `probe.mek` (the Worker checks it opens one of the Drive's items); with
+   * it: the salt stored.
+   */
+  async saltRestore(uid, salt, probe, { write = false } = {}) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public' || typeof salt !== 'string' || !KEY_RE.test(salt)) return fail(400, 'invalid', 'Invalid salt.');
+    if (this.#saltOf(uid)) return fail(409, 'exists', 'This account has a user salt.');
+    if (write) {
+      const w = this.sql.exec('INSERT OR IGNORE INTO user_salts (user_id, salt, created) VALUES (?, ?, ?)', uid, salt, now()).rowsWritten;
+      if (w) this.#log(uid, uid, 'drive.salt_restored', 'from the personal kit');
+      return { ok: true, written: !!w };
+    }
+    if (!probe) return { ok: true, kek: null };
+    const root = this.#keyRoot();
+    const s = root ? (await this.#openSubs(root)).get(probe.mek) : null;
+    if (!s || !s.key) return fail(409, 'unreadable', 'The sub-MEK of that item is not here.');
+    return { ok: true, kek: b64urlFromBytes(await deriveKek(root.key, s.key, salt, uid)) };
+  }
+
+  /** The field layer's keys for `uid` → { cur: { field: key }, old: { field: key } | null } (base64url). */
+  async fieldKeys(uid, fields) {
+    const salt = this.#saltOf(uid);
+    const root = this.#keyRoot();
+    if (!salt) return fail(409, 'salt_missing', 'This account has no user salt: restore it from the key kit or a personal kit.');
+    if (!root) return fail(503, 'keys_missing', 'The Drive keys are missing: the administrator restores them from the key kit (Admin → Security → Keys).');
+    const one = async (r) => {
+      const uk = await deriveUserKey(r.key, salt, uid);
+      const out = {};
+      for (const f of fields) out[f] = b64urlFromBytes(await deriveFieldKey(uk, f));
+      return out;
+    };
+    const old = this.#keyRoot('mek.rootOld');
+    return { ok: true, cur: await one(root), old: old ? await one(old) : null };
+  }
+
+  /** The keyring as Admin → Security → Keys shows it (fingerprints and dates, never a key). */
+  async mekStatus() {
+    const root = this.#keyRoot();
+    const old = this.#keyRoot('mek.rootOld');
+    const rows = this.#mekRows();
+    const t = now();
+    const subs = await this.#openSubs(root, rows);
+    const cur = effectiveAt(rows, t);
+    const kit = this.#json('mek.kit');
+    return {
+      ok: true,
+      ready: !!root,
+      lost: !root && (rows.length > 0 || !!this.#meta('mek.ever')),
+      root: root ? { fp: root.fp, created: root.created, changing: !!old, oldFp: old ? old.fp : null } : null,
+      subs: rows.map((r) => ({ id: r.id, fp: r.fp, from: r.from, until: r.until, created: r.created, note: r.note, status: mekStatus(rows, r, t), opens: !!subs.get(r.id)?.key })),
+      current: cur ? cur.id : null,
+      job: this.#json('mek.job'),
+      kit, kitFresh: kit ? await this.#kitFresh(kit, root, rows) : false,
+      users: this.sql.exec("SELECT COUNT(*) AS c FROM users WHERE role IN ('owner', 'user')").one().c,
+      now: t,
+    };
+  }
+  #json(k) {
+    try { return JSON.parse(this.#meta(k) || 'null'); } catch { return null; }
+  }
+  /** The users with a salt, as one value (a key kit made before a new user joined is not complete). */
+  async #usersHash() {
+    const ids = this.sql.exec('SELECT user_id FROM user_salts ORDER BY user_id').toArray().map((r) => r.user_id).join('\n');
+    return b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(ids))).subarray(0, 12));
+  }
+  async #kitFresh(kit, root, rows) {
+    if (!kit || !root || kit.root !== root.fp) return false;
+    const have = new Set(Array.isArray(kit.subs) ? kit.subs : []);
+    return rows.every((r) => have.has(r.fp)) && kit.users === await this.#usersHash();
+  }
+
+  /**
+   * A candidate key for the owner (a sub-MEK or a new root): 32 random
+   * bytes, shown to the owner, kept here for at most 10 minutes for this
+   * session and used only when the owner picks "Use this key". Logged by
+   * fingerprint only.
+   */
+  async mekCandidate(ownerId, sid, purpose) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    if (typeof sid !== 'string' || !sid) return fail(400, 'invalid', 'A session is needed.');
+    const key = newKey();
+    const fp = await keyFingerprint(key);
+    const id = newId();
+    const t = now();
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM mek_candidates WHERE exp <= ?', t);
+      // At most a few per session: the oldest go.
+      this.sql.exec('DELETE FROM mek_candidates WHERE sid = ? AND id NOT IN (SELECT id FROM mek_candidates WHERE sid = ? ORDER BY exp DESC LIMIT 4)', sid, sid);
+      this.sql.exec('INSERT INTO mek_candidates (id, sid, key, exp) VALUES (?, ?, ?, ?)', id, sid, b64urlFromBytes(key), t + MEK_CANDIDATE_SEC);
+      this.#keyLog(ownerId, 'keys.candidate', `${purpose === 'root' ? 'root MEK' : 'sub-MEK'} candidate ${fp}`);
+    });
+    return { ok: true, id, key: b64urlFromBytes(key), fp, expires: t + MEK_CANDIDATE_SEC };
+  }
+
+  /** The key a change uses: a candidate of this session (by id), or one the owner entered → { key, how } or a failure. */
+  #pickKey(sid, { candidate, key }) {
+    if (typeof candidate === 'string') {
+      const r = this.sql.exec('SELECT key FROM mek_candidates WHERE id = ? AND sid = ? AND exp > ?', candidate, String(sid ?? ''), now()).toArray()[0];
+      if (!r) return fail(410, 'candidate_expired', 'That generated key is no longer available (it is kept for 10 minutes): generate another.');
+      return { ok: true, key: bytesFromB64url(r.key), how: 'generated', candidate };
+    }
+    if (typeof key === 'string' && KEY_RE.test(key)) {
+      const b = bytesFromB64url(key);
+      if (b.every((x) => x === b[0])) return fail(400, 'weak_key', 'That key has all its bytes the same: generate a random one.');
+      return { ok: true, key: b, how: 'entered' };
+    }
+    return fail(400, 'invalid_key', 'Choose a generated key or enter one (32 bytes).');
+  }
+
+  #writeTimeline(next, prev) {
+    for (const r of next) {
+      const p = prev.find((x) => x.id === r.id);
+      if (p && (p.from !== r.from || p.until !== r.until || p.note !== r.note)) {
+        this.sql.exec('UPDATE meks SET from_ts = ?, until_ts = ?, note = ? WHERE id = ?', r.from, r.until, r.note ?? '', r.id);
+      }
+    }
+  }
+
+  /**
+   * Add a sub-MEK (a generated candidate or one the owner entered). It
+   * becomes the open-ended one from `from` (now by default; later schedules
+   * it): the open-ended one before it ends then. `rotate`: from now on.
+   */
+  async mekAdd(ownerId, { sid, candidate, key, from = null, note = '', rotate = false } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const root = this.#keyRoot();
+    if (!root) return fail(503, 'keys_missing', 'There is no root MEK: restore the keyring from the key kit first.');
+    const k = this.#pickKey(sid, { candidate, key });
+    if (!k.ok) return k;
+    const text = cleanLabel(note);
+    if (text === null) return fail(400, 'invalid', 'A note is up to 100 characters.');
+    const id = newMekId();
+    const [sealed, fp] = await Promise.all([sealSubMek(root.key, id, k.key), keyFingerprint(k.key)]);
+    k.key.fill(0);
+    const t = now();
+    const rows = this.#mekRows();
+    if (this.#keyRoot()?.fp !== root.fp) return fail(409, 'changed', 'The root MEK changed meanwhile: try again.');
+    if (rows.some((r) => r.fp === fp)) return fail(409, 'same_key', 'That key is already a sub-MEK.');
+    const start = rotate || from === null ? t : from;
+    if (!Number.isSafeInteger(start) || start < t - 300 || start > t + 10 * 366 * 86400) return fail(400, 'invalid_date', 'A new sub-MEK starts now or at a later date (within 10 years).');
+    const open = rows.find((r) => r.until === null);
+    if (open && start < open.from) return fail(409, 'invalid_date', `The new sub-MEK must start on or after the current open-ended one (${open.id}); edit the dates instead.`);
+    const next = rows.map((r) => ({ ...r }));
+    const o = next.find((r) => r.until === null);
+    if (o) o.until = start;
+    next.push({ id, from: start, until: null, created: t, note: text });
+    const bad = checkTimeline(next, t);
+    if (bad) return fail(409, 'invalid_dates', bad);
+    if (k.candidate && !this.sql.exec('SELECT 1 FROM mek_candidates WHERE id = ?', k.candidate).toArray().length) return fail(410, 'candidate_expired', 'That generated key was already used.');
+    this.ctx.storage.transactionSync(() => {
+      this.#writeTimeline(next, rows);
+      this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, NULL, ?, ?)', id, sealed, fp, start, t, text);
+      if (k.candidate) this.sql.exec('DELETE FROM mek_candidates WHERE id = ?', k.candidate);
+      this.#keyLog(ownerId, rotate ? 'keys.rotated' : 'keys.added', `sub-MEK ${id} (${fp}), ${k.how}, from ${start}`);
+    });
+    return { ok: true, id, fp, from: start };
+  }
+
+  /** Change a sub-MEK's dates or note (the timeline must stay valid). */
+  async mekEdit(ownerId, id, { from, until, note } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const rows = this.#mekRows();
+    const r = rows.find((x) => x.id === id);
+    if (!r) return fail(404, 'not_found', 'No such sub-MEK.');
+    const next = rows.map((x) => ({ ...x }));
+    const m = next.find((x) => x.id === id);
+    if (from !== undefined) { if (!Number.isSafeInteger(from) || from < 0) return fail(400, 'invalid_date', 'Invalid start date.'); m.from = from; }
+    if (until !== undefined) { if (until !== null && (!Number.isSafeInteger(until) || until < 0)) return fail(400, 'invalid_date', 'Invalid end date.'); m.until = until; }
+    if (note !== undefined) { const text = cleanLabel(note); if (text === null) return fail(400, 'invalid', 'A note is up to 100 characters.'); m.note = text; }
+    const bad = checkTimeline(next, now());
+    if (bad) return fail(409, 'invalid_dates', bad);
+    this.ctx.storage.transactionSync(() => {
+      this.#writeTimeline(next, rows);
+      this.#keyLog(ownerId, 'keys.dates', `sub-MEK ${id} (${r.fp}): from ${m.from} until ${m.until ?? 'open'}`);
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Make sub-MEK `id` the current one from now on: it becomes open-ended
+   * (starting now if it was scheduled), and every other one still running
+   * ends now (a scheduled one is cancelled: its dates close at its start).
+   */
+  async mekSetCurrent(ownerId, id) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const rows = this.#mekRows();
+    const r = rows.find((x) => x.id === id);
+    if (!r) return fail(404, 'not_found', 'No such sub-MEK.');
+    const t = now();
+    const next = rows.map((x) => ({ ...x }));
+    for (const x of next) {
+      if (x.id === id) { x.until = null; if (x.from > t) x.from = t; continue; }
+      if (x.until === null || x.until > t) x.until = Math.max(x.from, t);
+    }
+    const bad = checkTimeline(next, t);
+    if (bad) return fail(409, 'invalid_dates', bad);
+    this.ctx.storage.transactionSync(() => {
+      this.#writeTimeline(next, rows);
+      this.#keyLog(ownerId, 'keys.current', `sub-MEK ${id} (${r.fp}) is current from ${t}`);
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Delete sub-MEK `id` once nothing is sealed under it any more (the Worker
+   * re-seals first and checks every Drive). Never the current one or the
+   * last one.
+   */
+  async mekDelete(ownerId, id) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const rows = this.#mekRows();
+    const r = rows.find((x) => x.id === id);
+    if (!r) return fail(404, 'not_found', 'No such sub-MEK.');
+    const t = now();
+    if (rows.length === 1) return fail(409, 'last_key', 'The only sub-MEK cannot be deleted.');
+    if (effectiveAt(rows, t)?.id === id) return fail(409, 'current_key', 'The current sub-MEK cannot be deleted: make another one current first.');
+    const next = rows.filter((x) => x.id !== id).map((x) => ({ ...x }));
+    if (!next.some((x) => x.until === null)) next.reduce((a, b) => (b.from > a.from ? b : a)).until = null;
+    const bad = checkTimeline(next, t);
+    if (bad) return fail(409, 'invalid_dates', bad);
+    this.ctx.storage.transactionSync(() => {
+      this.#writeTimeline(next, rows);
+      this.sql.exec('DELETE FROM meks WHERE id = ?', id);
+      this.#keyLog(ownerId, 'keys.removed', `sub-MEK ${id} (${r.fp})`);
+    });
+    return { ok: true };
+  }
+
+  /** The owner's "Show" (after the step-up): the root MEK or a sub-MEK's value, logged by fingerprint. */
+  async mekShow(ownerId, { root = false, id = null } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const r = this.#keyRoot();
+    if (!r) return fail(503, 'keys_missing', 'There is no root MEK.');
+    if (root) {
+      this.#keyLog(ownerId, 'keys.viewed', `root MEK ${r.fp}`);
+      return { ok: true, key: b64urlFromBytes(r.key), fp: r.fp };
+    }
+    const s = (await this.#openSubs(r)).get(id);
+    if (!s) return fail(404, 'not_found', 'No such sub-MEK.');
+    if (!s.key) return fail(409, 'broken', 'This sub-MEK does not open under the root MEK: restore it from the key kit.');
+    this.#keyLog(ownerId, 'keys.viewed', `sub-MEK ${id} (${s.fp})`);
+    return { ok: true, key: b64urlFromBytes(s.key), fp: s.fp };
+  }
+
+  /**
+   * Change the root MEK: every sub-MEK is re-sealed under the new one here,
+   * in one transaction; the old root stays ("mek.rootOld") only until the
+   * Worker has re-sealed every item (every KEK changes with the root), then
+   * mekRootDone drops it.
+   */
+  async mekChangeRoot(ownerId, { sid, candidate, key } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    if (this.#keyRoot('mek.rootOld')) return fail(409, 'root_changing', 'A root change is still being finished: let it complete first.');
+    const root = this.#keyRoot();
+    if (!root) return fail(503, 'keys_missing', 'There is no root MEK: restore it from the key kit first.');
+    const k = this.#pickKey(sid, { candidate, key });
+    if (!k.ok) return k;
+    const fp = await keyFingerprint(k.key);
+    if (fp === root.fp) return fail(409, 'same_key', 'That is the current root MEK.');
+    const rows = this.#mekRows();
+    const subs = await this.#openSubs(root, rows);
+    const resealed = [];
+    for (const r of rows) {
+      const s = subs.get(r.id);
+      if (!s.key) return fail(409, 'broken', `Sub-MEK ${r.id} does not open under the current root MEK: restore it from the key kit first.`);
+      resealed.push([r.id, await sealSubMek(k.key, r.id, s.key)]);
+    }
+    const t = now();
+    const same = this.#mekRows();
+    if (this.#keyRoot()?.fp !== root.fp || same.length !== rows.length || same.some((r, i) => r.sealed !== rows[i].sealed)) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
+    if (k.candidate && !this.sql.exec('SELECT 1 FROM mek_candidates WHERE id = ?', k.candidate).toArray().length) return fail(410, 'candidate_expired', 'That generated key was already used.');
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta('mek.rootOld', JSON.stringify({ key: b64urlFromBytes(root.key), fp: root.fp, created: root.created }));
+      this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(k.key), fp, created: t }));
+      for (const [id, sealed] of resealed) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
+      if (k.candidate) this.sql.exec('DELETE FROM mek_candidates WHERE id = ?', k.candidate);
+      this.#keyLog(ownerId, 'keys.root_changed', `root MEK ${root.fp} → ${fp} (${k.how}); sub-MEKs re-sealed: ${rows.length}`);
+    });
+    k.key.fill(0);
+    return { ok: true, fp, old: root.fp };
+  }
+
+  /** Every item sealed under the old root is re-sealed: it goes. */
+  async mekRootDone(ownerId) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const old = this.#keyRoot('mek.rootOld');
+    if (!old) return { ok: true, done: false };
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM meta WHERE k = 'mek.rootOld'");
+      this.#keyLog(ownerId, 'keys.root_change_done', `old root MEK ${old.fp} removed: every item is re-sealed`);
+    });
+    return { ok: true, done: true };
+  }
+
+  /** The re-seal job the owner's browser drives (Admin → Security → Keys): { kind, from, ... } or null. */
+  async mekJob() { return this.#json('mek.job'); }
+  async mekJobSet(ownerId, job) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    if (job === null) this.sql.exec("DELETE FROM meta WHERE k = 'mek.job'");
+    else this.#setMeta('mek.job', JSON.stringify(job));
+    return { ok: true };
+  }
+  /** The accounts whose Drive may hold items (a Drive usage row), in id order. */
+  async driveUsers() {
+    return this.sql.exec("SELECT d.user_id AS id FROM drive_usage d JOIN users u ON u.id = d.user_id WHERE u.role IN ('owner', 'user') ORDER BY d.user_id").toArray().map((r) => r.id);
+  }
+  async userName(uid) {
+    return this.#user(uid)?.username ?? null;
+  }
+
+  /**
+   * The key kit (docs/DRIVE.md §3.1): the root MEK, every sub-MEK with its
+   * dates and every user salt, for the owner's browser to seal under a
+   * passphrase. The download is recorded ({ at, root, subs, users }: what
+   * it covers) for the fresh-kit notice. Not during a root change.
+   */
+  async keyKit(ownerId) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    if (this.#keyRoot('mek.rootOld')) return fail(409, 'root_changing', 'Finish the root change first: then the kit covers every item.');
+    const root = this.#keyRoot();
+    if (!root) return fail(503, 'keys_missing', 'There is no root MEK: restore it from the key kit first.');
+    const rows = this.#mekRows();
+    const subs = await this.#openSubs(root, rows);
+    const broken = rows.filter((r) => !subs.get(r.id).key).map((r) => r.id);
+    if (broken.length) return fail(409, 'broken', `Sub-MEK ${broken.join(', ')} does not open under the root MEK: restore it first.`);
+    const salts = {};
+    for (const r of this.sql.exec("SELECT s.user_id AS id, s.salt AS salt, u.username AS name FROM user_salts s JOIN users u ON u.id = s.user_id WHERE u.role IN ('owner', 'user') ORDER BY s.user_id").toArray()) {
+      salts[r.id] = { salt: r.salt, username: r.name };
+    }
+    const t = now();
+    const rec = { at: t, root: root.fp, subs: rows.map((r) => r.fp), users: await this.#usersHash() };
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta('mek.kit', JSON.stringify(rec));
+      this.#keyLog(ownerId, 'keys.kit_exported', `root MEK ${root.fp}; sub-MEKs: ${rows.length}; user salts: ${Object.keys(salts).length}`);
+    });
+    return {
+      ok: true, kit: rec,
+      material: {
+        made: t, current: effectiveAt(rows, t)?.id ?? null,
+        root: { key: b64urlFromBytes(root.key), fp: root.fp, created: root.created },
+        subs: rows.map((r) => ({ id: r.id, key: b64urlFromBytes(subs.get(r.id).key), fp: r.fp, from: r.from, until: r.until, created: r.created, note: r.note })),
+        salts,
+      },
     };
   }
 
   /**
-   * The owner started over without a recovery kit (docs/DRIVE.md §3): a
-   * public record — the reset's epoch (one more than the last), the new
-   * escrow key's kid, the new signing public key and the time — that lets a
-   * user's browser move its Drive to the new escrow key by itself, once per
-   * reset (the maintainer's accepted exception to the signed-key pin).
-   *
-   * The new escrow public key, signing key and signature (`escrowPub`,
-   * `signPub`, `sig`: JSON text / base64url) are set in the same transaction,
-   * and only when the latest reset is still `expectEpoch` (the one the Worker
-   * read before the owner's Drive started over): a compare-and-set, so one
-   * start over is one epoch (R5-L2; `409 reset_conflict` otherwise).
+   * Verify a key kit, read-only (the owner's selected file): the browser
+   * sends check values (drivekeys.js keyCheckValue / saltCheckValue), never
+   * a key, and each is compared here in constant time → match | mismatch |
+   * absent per part. At most KIT_VERIFY_MAX per session per KIT_VERIFY_SEC.
    */
-  async recordOwnerReset(ownerId, { kid, signPub, escrowPub, sig, expectEpoch }) {
-    const o = this.#user(ownerId);
-    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner starts over.');
-    let prev;
-    try { prev = JSON.parse(this.#meta('drive.ownerReset') || 'null')?.epoch ?? 0; } catch { prev = 0; }
-    if (prev !== expectEpoch) return fail(409, 'reset_conflict', 'Another start over was recorded at the same time.');
-    const rec = { epoch: prev + 1, kid, signPub: JSON.parse(signPub), at: now() };
-    const had = !!this.#meta('drive.escrowPub');
-    this.ctx.storage.transactionSync(() => {
-      this.#setMeta('drive.escrowPub', escrowPub);
-      this.#setMeta('drive.escrowSignPub', signPub);
-      this.#setMeta('drive.escrowSig', sig);
-      this.#setMeta('drive.ownerReset', JSON.stringify(rec));
-      this.#log(ownerId, ownerId, 'drive.escrow_key_set', had ? 'replaced' : 'created');
-    });
-    return { ok: true, reset: rec };
+  async keyKitVerify(ownerId, sid, { root = null, subs = {}, salts = {} } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const rl = this.#hit(`mek.verify:${sid}`, KIT_VERIFY_MAX, KIT_VERIFY_SEC);
+    if (!rl.ok) return fail(429, 'rate_limited', 'Too many kit checks: try again in a few minutes.', { retryAfter: rl.retryAfter });
+    const r = this.#keyRoot();
+    const rows = this.#mekRows();
+    const opened = await this.#openSubs(r, rows);
+    const t = now();
+    const out = { root: 'absent', subs: [], salts: { total: 0, match: 0, mismatch: 0, absent: 0, extra: 0 }, extraSubs: [] };
+    if (typeof root === 'string') out.root = r && sameCheck(root, await keyCheckValue(r.key, 'mek')) ? 'match' : 'mismatch';
+    for (const m of rows) {
+      const s = opened.get(m.id);
+      const given = subs && typeof subs[m.id] === 'string' ? subs[m.id] : null;
+      const result = given === null ? 'absent' : s.key && sameCheck(given, await keyCheckValue(s.key, 'mek')) ? 'match' : 'mismatch';
+      out.subs.push({ id: m.id, fp: m.fp, from: m.from, until: m.until, status: mekStatus(rows, m, t), result });
+    }
+    out.extraSubs = Object.keys(subs || {}).filter((id) => !rows.some((m) => m.id === id)).slice(0, 200);
+    const users = this.sql.exec("SELECT s.user_id AS id, s.salt AS salt FROM user_salts s JOIN users u ON u.id = s.user_id WHERE u.role IN ('owner', 'user')").toArray();
+    out.salts.total = users.length;
+    for (const u of users) {
+      const given = salts && typeof salts[u.id] === 'string' ? salts[u.id] : null;
+      if (given === null) out.salts.absent++;
+      else if (sameCheck(given, await saltCheckValue(u.salt, u.id))) out.salts.match++;
+      else out.salts.mismatch++;
+    }
+    out.salts.extra = Object.keys(salts || {}).filter((id) => !users.some((u) => u.id === id)).length;
+    const complete = out.root === 'match' && out.subs.every((s) => s.result === 'match') && out.salts.match === out.salts.total;
+    this.#keyLog(ownerId, 'keys.kit_verified', `${complete ? 'complete' : 'incomplete'}: root ${out.root}; sub-MEKs ${out.subs.filter((s) => s.result === 'match').length}/${out.subs.length}; salts ${out.salts.match}/${out.salts.total}`);
+    return { ok: true, complete, now: t, ...out };
+  }
+
+  /** A fixed-window counter kept in meta (key kit checks): → { ok, retryAfter }. */
+  #hit(key, max, windowSec) {
+    const t = now();
+    let v = this.#json(`rl:${key}`);
+    if (!v || !Number.isSafeInteger(v.start) || t - v.start >= windowSec) v = { start: t, n: 0 };
+    v.n += 1;
+    this.#setMeta(`rl:${key}`, JSON.stringify(v));
+    return { ok: v.n <= max, retryAfter: v.start + windowSec - t };
   }
 
   /**
-   * A user's browser moved their Drive to the escrow key of owner reset
-   * `epoch` by itself: a system event in the user's activity, and the same,
-   * naming the user, in the owner-only admin audit — once per user and epoch
-   * (R5-I1: a repeated `escrowReset` for an epoch already applied, or an
-   * earlier one, writes nothing; → { ok, logged }).
+   * Put back what a key kit (or a keys export) holds and this server lost,
+   * never a working key (docs/DRIVE.md §3.1):
+   * - the root MEK only when there is none, when none of the sub-MEKs opens
+   *   under the one here (it was lost and replaced), or with `useRoot` (the
+   *   Worker checked that no item is sealed under the keys here: an empty
+   *   instance); the sub-MEKs here are re-sealed under it;
+   * - a sub-MEK when its id is not here, or its copy here does not open and
+   *   the kit's key has the recorded fingerprint;
+   * - a user salt only when the account has none.
+   * `dryRun`: the plan only. → { root, subs: [{ id, result }], salts: { … } }.
    */
-  async driveEscrowRewrapped(userId, fingerprint, epoch) {
-    const u = this.#user(userId);
-    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
-    if (!Number.isSafeInteger(epoch) || epoch < 1) return fail(400, 'invalid', 'An owner reset epoch.');
-    const k = `drive.resetApplied:${userId}`;
-    if ((Number(this.#meta(k)) || 0) >= epoch) return { ok: true, logged: false };
-    const fp = String(fingerprint || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 16);
+  async keyRestore(ownerId, { root = null, subs = [], salts = {}, useRoot = false, dryRun = true } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    if (this.#keyRoot('mek.rootOld')) return fail(409, 'root_changing', 'Finish the root change first.');
+    const cur = this.#keyRoot();
+    const rows = this.#mekRows();
+    const out = { root: root ? 'kept' : 'absent', subs: [], salts: { restored: 0, same: 0, kept: 0, unknown: 0 } };
+    const t = now();
+    // The root MEK first: every sub-MEK is sealed under the one that stays.
+    let rootKey = cur ? cur.key : null;
+    let rootFp = cur ? cur.fp : null;
+    let newRoot = null;
+    const opened = await this.#openSubs(cur, rows);
+    if (root) {
+      const given = bytesFromB64url(root.key);
+      const fp = await keyFingerprint(given);
+      const givenOpens = [];
+      for (const r of rows) { try { givenOpens.push([r.id, await openSubMek(given, r.id, r.sealed)]); } catch { /* not under it */ } }
+      if (cur && fp === cur.fp) out.root = 'same';
+      else if (!cur || (rows.length && ![...opened.values()].some((s) => s.key) && givenOpens.length) || useRoot) {
+        out.root = 'restored';
+        newRoot = { key: given, fp };
+        rootKey = given;
+        rootFp = fp;
+        for (const [id, key] of givenOpens) opened.set(id, { ...opened.get(id), key });
+      }
+    }
+    // The sub-MEKs: missing ones added, broken ones replaced (fingerprint recorded here), working ones kept.
+    const reseal = [];
+    const next = rows.map((r) => ({ ...r }));
+    for (const s of Array.isArray(subs) ? subs : []) {
+      if (!s || !MEK_ID_RE.test(s.id ?? '') || !KEY_RE.test(s.key ?? '')) { out.subs.push({ id: String(s?.id ?? '').slice(0, 20), result: 'invalid' }); continue; }
+      const key = bytesFromB64url(s.key);
+      const fp = await keyFingerprint(key);
+      const here = opened.get(s.id);
+      if (here && here.key) { out.subs.push({ id: s.id, result: here.fp === fp ? 'same' : 'kept' }); continue; }
+      if (here && here.fp !== fp) { out.subs.push({ id: s.id, result: 'conflict' }); continue; }
+      if (!rootKey) { out.subs.push({ id: s.id, result: 'no_root' }); continue; }
+      if (!here && rows.some((r) => r.fp === fp)) { out.subs.push({ id: s.id, result: 'kept' }); continue; }
+      const sealed = await sealSubMek(rootKey, s.id, key);
+      if (here) { reseal.push([s.id, sealed]); out.subs.push({ id: s.id, result: 'restored' }); continue; }
+      // A sub-MEK this server never had (or lost): with its dates when they fit, else closed (it only opens items).
+      const from = Number.isSafeInteger(s.from) ? s.from : t;
+      let row = { id: s.id, sealed, fp, from, until: s.until === null || Number.isSafeInteger(s.until) ? s.until : from, created: Number.isSafeInteger(s.created) ? s.created : t, note: cleanLabel(s.note) ?? '' };
+      let adjusted = false;
+      if (next.length && checkTimeline([...next, row], t)) { row = { ...row, until: Math.min(Math.max(row.from, row.until ?? t), t) }; adjusted = true; }
+      if (next.length && checkTimeline([...next, row], t)) { row = { ...row, from: Math.min(row.from, t), until: Math.min(row.from, t) }; adjusted = true; }
+      if (!next.length && row.until !== null) { row = { ...row, until: null }; adjusted = true; }
+      next.push(row);
+      out.subs.push({ id: s.id, result: adjusted ? 'added (dates adjusted)' : 'added' });
+    }
+    // The sub-MEKs that stay here, under a restored root.
+    if (newRoot) {
+      for (const r of rows) {
+        const s = opened.get(r.id);
+        if (s && s.key && !reseal.some(([id]) => id === r.id)) reseal.push([r.id, await sealSubMek(newRoot.key, r.id, s.key)]);
+      }
+    }
+    if (next.length && checkTimeline(next, t)) return fail(409, 'invalid_dates', `After the restore, ${checkTimeline(next, t)}`);
+    // User salts: only for an account that has none.
+    const addSalts = [];
+    for (const [uid, v] of Object.entries(salts && typeof salts === 'object' ? salts : {}).slice(0, 10000)) {
+      const salt = typeof v === 'string' ? v : v && v.salt;
+      const u = this.#user(uid);
+      if (!u || u.role === 'public' || typeof salt !== 'string' || !KEY_RE.test(salt)) { out.salts.unknown++; continue; }
+      const have = this.#saltOf(uid);
+      if (!have) { addSalts.push([uid, salt]); out.salts.restored++; } else if (have === salt) out.salts.same++; else out.salts.kept++;
+    }
+    const changed = !!newRoot || reseal.length || next.length !== rows.length || addSalts.length;
+    if (dryRun || !changed) return { ok: true, dryRun, changed: !!changed, ...out };
+    if (this.#keyRoot()?.fp !== cur?.fp || this.#mekRows().length !== rows.length) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
     this.ctx.storage.transactionSync(() => {
-      this.#setMeta(k, String(epoch));
-      this.#log(null, userId, 'drive.escrow_rewrapped', `new escrow key ${fp}`);
-      this.#log({ id: null, adm: true }, userId, 'drive.escrow_rewrapped', `user=${u.username} new escrow key ${fp} (after the owner started over)`);
+      if (newRoot) this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(newRoot.key), fp: newRoot.fp, created: root.created ?? t }));
+      this.#setMeta('mek.ever', '1');
+      for (const [id, sealed] of reseal) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
+      for (const r of next) {
+        if (rows.some((x) => x.id === r.id)) continue;
+        this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, ?, ?, ?)', r.id, r.sealed, r.fp, r.from, r.until, r.created, r.note);
+      }
+      for (const [uid, salt] of addSalts) this.sql.exec('INSERT OR IGNORE INTO user_salts (user_id, salt, created) VALUES (?, ?, ?)', uid, salt, t);
+      this.#keyLog(ownerId, 'keys.restored', `root MEK ${out.root}${newRoot ? ` (${rootFp})` : ''}; sub-MEKs ${out.subs.filter((s) => /restored|added/.test(s.result)).length} put back; user salts ${addSalts.length} put back`);
     });
-    return { ok: true, logged: true };
+    return { ok: true, dryRun: false, changed: true, ...out };
+  }
+
+  /**
+   * An export's key parts (docs/DRIVE.md §3.1, Admin → Import / export): the
+   * root MEK, the chosen sub-MEKs (with their dates) and the chosen users'
+   * salts, for the owner's browser to seal. Logged with counts only.
+   */
+  async keysExport(ownerId, { root = false, subs = [], salts = [] } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const r = this.#keyRoot();
+    if (!r) return fail(503, 'keys_missing', 'There is no root MEK.');
+    const rows = this.#mekRows();
+    const opened = await this.#openSubs(r, rows);
+    const want = subs === 'all' ? rows.map((x) => x.id) : (Array.isArray(subs) ? subs : []);
+    const out = {};
+    if (root) out.root = { key: b64urlFromBytes(r.key), fp: r.fp, created: r.created };
+    if (want.length) {
+      out.subs = [];
+      for (const id of want) {
+        const s = opened.get(id);
+        if (!s) return fail(404, 'not_found', `No sub-MEK ${String(id).slice(0, 20)}.`);
+        if (!s.key) return fail(409, 'broken', `Sub-MEK ${id} does not open under the root MEK.`);
+        out.subs.push({ id, key: b64urlFromBytes(s.key), fp: s.fp, from: s.from, until: s.until, created: s.created, note: s.note });
+      }
+    }
+    if (Array.isArray(salts) && salts.length) {
+      out.salts = {};
+      for (const uid of salts) {
+        const salt = this.#saltOf(uid);
+        if (salt) out.salts[uid] = salt;
+      }
+    }
+    return { ok: true, parts: out };
+  }
+
+  // ── the upgrade of Drives made before the key model v2 ───────────────────
+  /** Every account whose Drive was (or may be) made before it, with its state. */
+  async migrationList() {
+    return this.sql.exec(`SELECT m.user_id AS id, m.state, m.v1_items AS v1Items, m.v1_links AS v1Links, m.updated, u.username, u.role
+      FROM drive_migration m JOIN users u ON u.id = m.user_id ORDER BY u.role DESC, u.username`).toArray();
+  }
+  async migrationSet(uid, { state, v1Items = null, v1Links = null }) {
+    if (!['pending', 'done'].includes(state)) return fail(400, 'invalid', 'Unknown state.');
+    this.sql.exec('UPDATE drive_migration SET state = ?, v1_items = ?, v1_links = ?, updated = ? WHERE user_id = ?', state, v1Items, v1Links, now(), uid);
+    return { ok: true, left: this.sql.exec("SELECT COUNT(*) AS c FROM drive_migration WHERE state != 'done'").one().c };
+  }
+  /** The owner's escrow public key of the release before (for the upgrade's escrow path), or null. */
+  async legacyEscrow() {
+    const o = this.#owner();
+    return { ownerId: o ? o.id : null, escrowPub: this.#meta('drive.escrowPub') };
+  }
+  /**
+   * Every Drive is upgraded: the escrow records of the release before go
+   * (the escrow public key and signature, each user's escrow kid, the owner
+   * reset). The Worker drops the owner's own sealed escrow keys and wraps.
+   */
+  async migrationCleanup(ownerId) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const left = this.sql.exec("SELECT COUNT(*) AS c FROM drive_migration WHERE state != 'done'").one().c;
+    if (left) return { ok: true, done: false, left };
+    const had = this.sql.exec("SELECT COUNT(*) AS c FROM meta WHERE k LIKE 'drive.%'").one().c;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM meta WHERE k IN ('drive.escrowPub', 'drive.escrowSignPub', 'drive.escrowSig', 'drive.ownerReset') OR k LIKE 'drive.escrowKid:%' OR k LIKE 'drive.resetApplied:%'");
+      if (had) this.#keyLog(ownerId, 'drive.migration_done', 'every Drive is upgraded: the escrow records of the release before were removed');
+    });
+    return { ok: true, done: true, left: 0 };
   }
 
   /**
@@ -2058,40 +2723,6 @@ export class Directory extends DurableObject {
     if (!this.#user(uid)) return;
     this.sql.exec('INSERT INTO drive_usage (user_id, used, updated) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET used = excluded.used, updated = excluded.updated',
       uid, used, now());
-  }
-
-  /**
-   * The owner sets (or replaces) the escrow public key every Drive wraps its
-   * key to, with the owner's signing key and its signature over the escrow key
-   * (users' browsers check it against the signing key they pinned).
-   * `onlyIfNone` (the very first escrow key, which needs no step-up): refused
-   * once an escrow or signing public key exists (`409 escrow_exists`).
-   */
-  async setEscrowPub(ownerId, jwkText, { signPub, sig, onlyIfNone = false } = {}) {
-    const o = this.#user(ownerId);
-    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner can set the escrow key.');
-    const had = !!this.#meta('drive.escrowPub');
-    if (onlyIfNone && (had || this.#meta('drive.escrowSignPub'))) return fail(409, 'escrow_exists', 'An escrow key exists already: replacing it needs your confirmation.');
-    if (jwkText !== undefined) this.#setMeta('drive.escrowPub', jwkText);
-    if (signPub !== undefined) this.#setMeta('drive.escrowSignPub', signPub);
-    if (sig !== undefined) this.#setMeta('drive.escrowSig', sig);
-    this.#log(ownerId, ownerId, 'drive.escrow_key_set', jwkText === undefined ? 'signature' : had ? 'replaced' : 'created');
-    return { ok: true };
-  }
-
-  /** The kid a user's escrow wrap is made for (so the owner keeps an earlier escrow key while one needs it). */
-  async setEscrowKid(uid, kid) {
-    const u = this.#user(uid);
-    if (!u || u.role === 'owner' || typeof kid !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kid)) return;
-    this.#setMeta(`drive.escrowKid:${uid}`, kid);
-  }
-
-  /**
-   * The kids users' escrow wraps are made for (existing accounts only; never
-   * the owner's own Drive, which has no escrow wrap: R5-I6).
-   */
-  async escrowKidsInUse() {
-    return [...new Set(this.sql.exec("SELECT m.v AS v FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id WHERE u.role != 'owner'").toArray().map((r) => r.v))];
   }
 
   /**
@@ -2131,51 +2762,34 @@ export class Directory extends DurableObject {
   }
 
   /**
-   * The owner opening a user's Drive with the escrow while impersonating
-   * them: the owner's own escrow key is used, not anything of the user's, so
-   * it is recorded in the admin audit only (like the admin escrow route).
+   * The owner, acting as a user, fetched that user's KEKs (their Drive opens
+   * in the owner's browser): the owner's own action, in the admin audit only
+   * (`imp` and `adm`), as every use of another user's Drive keys.
    */
-  async driveEscrowUsed(ownerId, userId, detail = '') {
+  async driveKeysUsed(ownerId, userId, detail = '') {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
-    this.#log({ id: ownerId, imp: true, adm: true }, userId, 'drive.escrow_used', detail);
+    this.#log({ id: ownerId, imp: true, adm: true }, userId, 'drive.keys_used', detail);
     return { ok: true };
-  }
-
-  /** One user per kid users' escrow wraps are made for (the recovery kit's live check opens one wrap per kid). */
-  async escrowKidUsers() {
-    const seen = new Map();
-    for (const r of this.sql.exec("SELECT u.id AS id, m.v AS kid FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id WHERE u.role != 'owner' ORDER BY u.created, u.id").toArray()) {
-      if (!seen.has(r.kid)) seen.set(r.kid, r.id);
-    }
-    return [...seen].map(([kid, userId]) => ({ kid, userId }));
   }
 
   /**
-   * The owner's own Drive recovery (docs/DRIVE.md §3), in the owner-only admin
-   * audit: a recovery kit downloaded (`drive.kit_exported`), used to restore
-   * the owner's Drive (`drive.kit_used`), checked (`drive.kit_verified`, with
-   * the verdict), or used to put back sealed escrow keys
-   * (`drive.kit_keys_restored`), and the owner's Drive started over without
-   * a kit (`drive.owner_reset`). Nothing of a kit reaches the server.
+   * The owner's direct actions on a user's Drive keys, in the admin audit
+   * only: opening the user's Drive key of the release before through the
+   * escrow for its upgrade (`drive.escrow_used`), the upgrade itself
+   * (`drive.migrated`, also a system event in the user's activity), viewing
+   * or importing the user's keys (`drive.keys_viewed`, `drive.keys_imported`;
+   * ids and counts only).
    */
-  async driveOwnerLog(ownerId, action, detail = '') {
-    const o = this.#user(ownerId);
-    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the administrator has this recovery kit.');
-    if (!OWNER_DRIVE_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
-    this.#log({ id: ownerId, adm: true }, ownerId, action, detail);
-    return { ok: true };
-  }
-
   async driveAdminAction(ownerId, userId, action, detail = '') {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
     const u = this.#user(userId);
     if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
-    if (!['drive.escrow_used', 'drive.pw_rewrapped', 'drive.created_by_owner'].includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    if (!ADMIN_DRIVE_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
     this.#log({ id: ownerId, adm: true }, userId, action, detail);
-    // The user's own activity: a Drive the owner set up for them is a system event, with no admin detail.
-    if (action === 'drive.created_by_owner') this.#log(null, userId, 'drive.created_by_owner', '');
+    // The user's own activity: their Drive upgraded is a system event, with no admin detail.
+    if (action === 'drive.migrated' && userId !== ownerId) this.#log(null, userId, 'drive.migrated', '');
     return { ok: true };
   }
 
@@ -2328,30 +2942,6 @@ export class Directory extends DurableObject {
     return { ok: false };
   }
 
-  /**
-   * The owner's reverse links after starting over (docs/DRIVE.md §3.2):
-   * `paused` (the owner started over: their keys are in the archive),
-   * `resumed` (the archive was restored with a kit) or `revoked` (the archive
-   * was deleted: the index rows end too). One entry per link, the owner as
-   * the actor: in the owner's activity and the admin audit. Only the owner's
-   * own links, only for the owner.
-   */
-  async reverseArchiveEvent(ownerId, event, ids) {
-    const o = this.#user(ownerId);
-    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner starts over.');
-    if (!['paused', 'resumed', 'revoked'].includes(event)) return fail(400, 'invalid', 'Unknown reverse-link event.');
-    const list = [...new Set((Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string' && /^r[A-Za-z0-9_-]{22}$/.test(x)))].slice(0, 10000);
-    let n = 0;
-    for (const id of list) {
-      const row = this.sql.exec("SELECT status FROM shares WHERE id = ? AND user_id = ? AND kind = 'reverse'", id, ownerId).toArray()[0];
-      if (!row) continue;
-      if (event === 'revoked') this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, ownerId);
-      this.#log(ownerId, ownerId, `reverse.${event}`, event === 'revoked' ? `id=${id} reason=archive_deleted` : `id=${id}`);
-      n++;
-    }
-    return { ok: true, logged: n };
-  }
-
   async createUser({ username, salt, t, verifier }, actorId) {
     if (typeof username !== 'string' || !USERNAME_RE.test(username)) return fail(400, 'invalid_username', 'Username must be 3–64 characters: letters, digits, . _ @ -');
     if (this.#userByName(username)) return fail(409, 'username_taken', 'That username is taken.');
@@ -2359,9 +2949,12 @@ export class Directory extends DurableObject {
     if (bad) return fail(400, 'invalid_credential', bad);
     const id = newId();
     const ts = now();
-    this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
-      id, username, salt, t, verifier, ts, ts);
-    this.#log(actorId, id, 'user.created', `username=${username}`);
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
+        id, username, salt, t, verifier, ts, ts);
+      this.#ensureSalt(id); // the user salt of the Drive keys (docs/DRIVE.md §3), made with the account
+      this.#log(actorId, id, 'user.created', `username=${username}`);
+    });
     // With whether their role has a Drive: the owner's browser sets one up only then.
     const u = this.#user(id);
     return { ok: true, user: { ...this.#publicUser(u), drive: this.#driveOf(u, 0) } };
@@ -2404,7 +2997,7 @@ export class Directory extends DurableObject {
     const shares = this.sql.exec("SELECT id FROM shares WHERE user_id = ? AND status = 'active'", id).toArray().map((r) => r.id);
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM meta WHERE k IN (SELECT ? || id FROM passkeys WHERE user_id = ?)', handleAlias(''), id);
-      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges', 'drive_usage']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
+      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges', 'drive_usage', 'user_salts', 'drive_migration']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
       this.sql.exec('DELETE FROM users WHERE id = ?', id);
       this.sql.exec('DELETE FROM meta WHERE k = ?', `drive.escrowKid:${id}`);
       this.#log(actorId, id, 'user.deleted', `username=${u.username}`);
@@ -3229,6 +3822,7 @@ export class Directory extends DurableObject {
           const c = u.credentials;
           this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, disabled, created, updated) VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?)",
             id, entry.as, c.salt, c.t, c.verifier, c.disabled ? 1 : 0, ts, ts);
+          this.#ensureSalt(id);
         }
         const did = [];
         if (job.role !== null) {

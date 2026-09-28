@@ -9,14 +9,15 @@
 // keys. An import never changes an existing account's password, recovery
 // codes, API keys or passkeys: it only sets its role and adds passkeys, so the
 // parts that cannot apply to an existing account are shown but disabled.
-// The owner recovery kit (drivekit-ui.js) is its own card here, never part of
-// an export file.
+// The Drive keys (admin-keysport.js) are a card of their own here, in a file
+// of their own, never part of the account export.
 
 import { admin, ApiError } from '../../js/api.js';
 import { loginProof } from '../../js/pwauth.js';
 import { sealExport, openExport, ExportCryptError } from '../../js/exportcrypt.js';
 import { h, clear, showMsg, formatDate, friendlyError } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
+import { keysPortCard } from './admin-keysport.js';
 
 const field = (label, control, hint) => h('label.field', {}, h('span.field-label', { text: label }), control, hint ? h('span.mono.muted', { text: hint }) : null);
 const check = (label, checked = false, note = '') => {
@@ -72,16 +73,9 @@ export async function renderPortable(panel, profile) {
   try { users = (await admin.users()).users.filter((u) => u.role === 'user'); } catch (e) { showMsg(p.appendChild(h('p.msg')), friendlyError(e)); }
   p.appendChild(exportCard(users, profile));
   p.appendChild(importCard(users, profile));
-  // The owner recovery kit (docs/DRIVE.md §3): the Drive key and the escrow
-  // keys, never in the export file above.
-  const slot = p.appendChild(h('div', { id: 'owner-kit-slot' }));
-  try {
-    const [{ kitCard, KIT_ANCHOR }, drive] = await Promise.all([import('./drivekit-ui.js'), import('../../js/driveclient.js')]);
-    slot.replaceWith(kitCard({ profile, drive, place: 'export' }));
-    if (location.hash === `#${KIT_ANCHOR}`) document.getElementById(KIT_ANCHOR)?.focus();
-  } catch (e) {
-    showMsg(slot.appendChild(h('p.msg')), `The owner recovery kit is unavailable: ${friendlyError(e)}`);
-  }
+  // The Drive keys (docs/DRIVE.md §3.1): a file of their own, never in the export above.
+  const slot = p.appendChild(h('div', { id: 'drive-keys-slot' }));
+  slot.replaceWith(await keysPortCard(profile));
 }
 
 // ── export ───────────────────────────────────────────────────────────────────
@@ -148,7 +142,7 @@ function exportCard(users, profile) {
 
   return h('div.card.stack', {},
     h('h2.section-title', { text: 'Export' }),
-    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. Sessions and shares are never exported, nor your own password, role or API keys, nor Drive content (files, folders, keys): Drive options travel with the roles. Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
+    h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. Sessions and shares are never exported, nor your own password, role or API keys, nor Drive content (files, folders): Drive options travel with the roles, and the Drive keys have their own file (below). Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
     h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
     h('fieldset.range', {}, h('legend', { text: 'Users (you included) and what to export for each' }), bulks, table, partNotes()),
     h('div.toolbar', {}, field('Export passphrase (optional)', pass1), field('Repeat', pass2)), noPass,

@@ -11,6 +11,8 @@ import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../publ
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { requestOptions } from '../lib/webauthn.js';
 import { syncCredentialWraps, driveOwnerRecovered } from './drive.js';
+import { parseManualKey } from '../../public/js/drivekeys.js';
+import { b64urlFromBytes } from '../../public/js/bytes.js';
 
 const AUTH_LABEL = utf8('secbin-auth/v2');
 
@@ -89,16 +91,30 @@ export async function handleAuth(request, env, url) {
     }
     const verifier = await verifierFrom(body.proof);
     if (!verifier) return err(400, 'invalid_credential', 'Invalid password proof.');
+    // The Drive keys (docs/DRIVE.md §3): the root MEK and the first sub-MEK,
+    // generated here (the default) or entered by the owner — only when the
+    // server has none yet (they are never replaced here).
+    let keys = { generate: true };
+    if (body.keys && typeof body.keys === 'object' && body.keys.mode === 'manual') {
+      try {
+        keys = { generate: false, root: b64urlFromBytes(parseManualKey(body.keys.root)), sub: b64urlFromBytes(parseManualKey(body.keys.sub)) };
+      } catch (e) {
+        return err(400, 'invalid_key', `Drive keys: ${e.message}`);
+      }
+      if (keys.root === keys.sub) return err(400, 'invalid_key', 'Drive keys: the root MEK and the sub-MEK must differ.');
+    }
     const res = await directory(env).setup({ authnHash, username: body.username, salt: body.salt, t: body.t, verifier });
     if (!res.ok) return err(res.status, res.error, res.message);
     if (res.recovered && res.ownerId) {
-      // The owner's passkeys and recovery codes are gone, so are their Drive
-      // wraps, and the password wrap is stale: the owner's recovery kit opens
-      // the Drive and the browser writes the new wrap (docs/DRIVE.md §3). No
-      // key is created or changed. The recovery itself never fails on this.
-      try { await driveOwnerRecovered(env, res.ownerId); } catch (e) { console.warn('secbin: owner Drive not marked after recovery', e && e.message ? e.message : e); }
+      // The owner's passkeys and recovery codes are gone: so are the Drive key
+      // wraps of the release before that belonged to them (a Drive still
+      // waiting for its upgrade). No Drive key changes. The recovery itself
+      // never fails on this.
+      try { await driveOwnerRecovered(env, res.ownerId); } catch (e) { console.warn('secbin: owner Drive not synced after recovery', e && e.message ? e.message : e); }
     }
-    return json({ ok: true, recovered: res.recovered });
+    let made = null;
+    try { made = await directory(env).setupKeys(keys); } catch (e) { console.warn('secbin: Drive keys not created at set-up', e && e.message ? e.message : e); }
+    return json({ ok: true, recovered: res.recovered, keys: made && made.ok ? (made.created ? 'created' : 'kept') : 'later' });
   }
 
   if (p === '/api/auth/prelogin') {

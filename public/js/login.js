@@ -9,8 +9,9 @@ import { loginProof } from './pwauth.js';
 import { showMsg, markInvalid, wirePeek, friendlyError } from './common.js';
 import { humanCheck } from './turnstile.js';
 import { passkeysSupported, usePasskeyPrf } from './passkeys.js';
-import { DRIVE_PRF_SALT, clearSessionKey, releaseSessionKeys } from './drivekeys.js';
-import { unlockAtSignIn } from './driveclient.js';
+import { clearSessionKey, releaseSessionKeys } from './drivekeys.js';
+import { DRIVE_PRF_SALT } from './drivev1.js';
+import { legacyUnlockAtSignIn } from './driveupgrade.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -27,20 +28,22 @@ if (new URLSearchParams(location.search).get('disabled') === '1') {
 })();
 
 wirePeek(['#login-pass', '#login-pass-peek']);
-// A Drive key left in this tab goes before the human check's (third-party)
-// script can load; the sign-in unlocks the Drive again (SECURITY.md).
+// Drive keys left in this tab go before the human check's (third-party)
+// script can load (SECURITY.md).
 clearSessionKey();
 // Sign-in buttons stay disabled until the human check (when on) has passed.
 const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'), $('#passkey-btn')] });
 
 /**
- * Signed in: unlock the Drive for this tab with what was used (the password,
- * a passkey's PRF output, a recovery code — docs/DRIVE.md §3; never blocks the
- * sign-in: the Drive page asks when this fails), then to the dashboard, or to
- * Account when a recovery code was spent.
+ * Signed in: the Drive needs nothing from the sign-in (its keys come from
+ * the server), except a Drive made before the key model v2 that still waits
+ * for its upgrade: its old key is opened here with what was used (the
+ * password, a passkey's PRF output, a recovery code — docs/DRIVE.md §3.3;
+ * never blocks the sign-in), for the Drive page to upgrade it. Then to the
+ * dashboard, or to Account when a recovery code was spent.
  */
 async function done(r, creds = {}) {
-  if (r && r.user && typeof r.user.id === 'string') await unlockAtSignIn({ user: r.user, ...creds, spentWraps: r.driveSpent });
+  if (r && r.user && typeof r.user.id === 'string') await legacyUnlockAtSignIn({ user: r.user, ...creds, spentWraps: r.driveSpent });
   // The next page needs the key: with the human check's script loaded here, it
   // was kept in memory (turnstile.js); it goes to sessionStorage now, as the
   // page is left (the script on this page saw the password anyway).

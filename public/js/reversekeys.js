@@ -3,8 +3,8 @@
 //
 // Each reverse share has its own ECDH P-256 key pair, made in the user's
 // browser. The raw public key is the link's #fragment; the private key is
-// stored on the server sealed with the user's Drive key (DK's "files"
-// sub-key), so only the user's unlocked Drive opens it. The uploader encrypts
+// stored on the server sealed under HKDF(the user's KEK, "reverse-link")
+// (drivekeys.js sealLinkKey, docs/DRIVE.md §3). The uploader encrypts
 // each file exactly like a Drive file (a random file key fk), its relative
 // path and metadata with a random metadata key mk, and wraps fk ‖ mk to the
 // public key (ECDH with an ephemeral key → HKDF → AES-GCM). The server stores
@@ -14,7 +14,6 @@
 
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes, bytesFromB64url } from './bytes.js';
 import { hkdf32, proofHash, DecryptError } from './crypto.js';
-import { sealField, openField, deriveSubkeys } from './drivekeys.js';
 import { ARGON2 } from './format.js';
 
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
@@ -94,20 +93,12 @@ export function pubFromFragment(fragment) {
   return b.length === 65 && b[0] === 4 ? b : null;
 }
 
-/** The private key sealed with DK's "files" key, bound to the reverse share id → { iv, ct }. */
-export async function sealReversePriv(dk, id, privateKey) {
-  const { files } = await deriveSubkeys(dk);
-  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
-  return sealField(files, 'reversePriv', id, pkcs8);
-}
-
 /**
- * The private key back → { privateKey (for ECDH), pub (raw, to show the link
- * again) }; DecryptError with another Drive's key or another share's value.
+ * A link's private key (PKCS#8 bytes, opened by the Drive client) → {
+ * privateKey (for ECDH), pub (raw, to show the link again) }; DecryptError
+ * when the bytes are not such a key. The bytes are overwritten.
  */
-export async function openReversePriv(dk, id, value) {
-  const { files } = await deriveSubkeys(dk);
-  const pkcs8 = await openField(files, 'reversePriv', id, value);
+export async function pubOfPrivate(pkcs8) {
   let jwk;
   try {
     // Imported once as extractable only to read its public point, then again for use.
@@ -122,6 +113,7 @@ export async function openReversePriv(dk, id, value) {
   pub.set(x, 1);
   pub.set(y, 33);
   const privateKey = await crypto.subtle.importKey('pkcs8', pkcs8, ECDH, false, ['deriveBits']);
+  pkcs8.fill(0);
   return { privateKey, pub };
 }
 

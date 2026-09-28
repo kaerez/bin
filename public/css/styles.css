@@ -693,11 +693,9 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 }
 /* ── drive (dashboard/drive: public/dashboard/js/drive-app.js) ────────────── */
 .drive { display: flex; flex-direction: column; gap: .9rem; }
-.drive-notice, .drive-unlock { max-width: 560px; display: flex; flex-direction: column; gap: .9rem; }
+.drive-notice { max-width: 560px; display: flex; flex-direction: column; gap: .9rem; }
 .drive-unlock-form { display: flex; flex-direction: column; gap: .6rem; }
-/* the owner recovery kit (dashboard/js/ownerkit-ui.js): its status, notice and check results */
-.kit-status { display: flex; flex-direction: column; gap: .45rem; }
-.kit-status p { margin: 0; }
+/* the Drive kits (dashboard/js/kit-ui.js, userkit.js, admin-keys.js): their notice and check results */
 .kit-notice { display: flex; flex-direction: column; gap: .45rem; align-items: flex-start; }
 .kit-notice .msg, .kit-results .msg, .drive-notice .msg.warn { padding: 0; text-align: left; }
 .msg.warn { color: var(--warn); }
@@ -707,6 +705,14 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 .kit-warn { color: var(--warn); }
 .kit-fail { color: var(--seal); }
 .kit-skip { color: var(--ink-2); }
+/* Drive keys (dashboard/js/admin-keys.js, admin-keysport.js): a revealed key, the key chooser, the user picker */
+.key-value { display: block; padding: .35rem .5rem; background: var(--sheet-2); border: 1px solid var(--rule-2); border-radius: 3px;
+  font-size: .8rem; overflow-wrap: anywhere; word-break: break-all; user-select: all; }
+.key-reveal { display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; }
+.key-chooser summary { cursor: pointer; }
+.plain-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .25rem; }
+.user-pick { max-height: 16rem; overflow-y: auto; padding: .4rem .6rem; border: 1px solid var(--rule); border-radius: 3px; }
+.pill.muted { color: var(--ink-2); font-size: inherit; }
 .dfield { display: flex; flex-direction: column; gap: .35rem; }
 .dfield .input { width: 100%; }
 .drive-cap { display: grid; grid-template-columns: auto minmax(8rem, 1fr); align-items: center; gap: .3rem .9rem; }
