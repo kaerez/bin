@@ -26,6 +26,7 @@ import { buildRefsManifest, refChunks } from './refsmanifest.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
 import { createReverseKey, linkHash, passwordGate, sealNote, fragmentOf, openUpload, newReverseId, pubOfPrivate } from './reversekeys.js';
 import { deriveSubkeysV1, openFieldV1, openReversePrivV1, clearLegacyKey } from './drivev1.js';
+import { itemOf, itemName, itemExt, withExt, KIND_LABELS, ITEM_MAX_BYTES, isKind } from './receivekinds.js';
 import { provenLegacyKey } from './driveupgrade.js';
 
 /** The account's role has no Drive. */
@@ -108,6 +109,21 @@ function uniqueName(taken, name) {
   for (let k = 2; taken.has(n); k++) n = `${stem} (${k})${ext}`;
   taken.add(n);
   return n;
+}
+
+/**
+ * The Drive name of a received note, link or credential (receivekinds.js
+ * itemName): a note's title made a usable name ("/" and "\" become "-",
+ * control characters go, at most MAX_NAME_BYTES), else — or when nothing is
+ * left of it — "Note from <date>" and so on.
+ */
+function itemLeaf(item, createdSec) {
+  const fallback = itemName({ kind: item.kind }, createdSec);
+  if (!(item.kind === 'note' && item.title)) return fallback;
+  // eslint-disable-next-line no-control-regex
+  let t = cleanName(item.title).replace(/[/\\]/g, '-').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  while (t && utf8(t).length > MAX_NAME_BYTES) t = t.slice(0, -1);
+  try { return t && t !== '.' && t !== '..' ? checkName(t) : fallback; } catch { return fallback; }
 }
 
 /**
@@ -390,6 +406,7 @@ export class DriveClient {
     const badName = name === null;
     let type = null;
     let mtime = 0;
+    let item = null;
     if (base.kind === 'file') {
       let ok = false;
       try {
@@ -398,13 +415,15 @@ export class DriveClient {
         mtime = Number.isSafeInteger(m.mtime) && m.mtime >= 0 ? m.mtime : 0;
         ok = Number.isSafeInteger(m.size) && m.size === base.size && base.chunks === refChunks(base.size);
         if (m.renamed === true) renamed = true; // a received file whose name was cleaned when it was taken in
+        // A note, link or credential received through a Receive link: its kind is in the sealed metadata.
+        item = itemOf(m);
       } catch { /* missing or unreadable metadata */ }
       if (!ok) name = null;
     }
     return {
       ...base, name, type: base.kind === 'file' ? (type || OCTET) : null, mtime,
       ...(name === null ? { unreadable: true } : {}), ...(badName ? { badName: true } : {}), ...(waiting ? { upgrading: true } : {}),
-      ...(renamed && name !== null ? { renamed: true } : {}),
+      ...(renamed && name !== null ? { renamed: true } : {}), ...(item && name !== null ? { item } : {}),
     };
   }
 
@@ -637,7 +656,7 @@ export class DriveClient {
   async #fileEntry(raw, path) {
     const d = await this.decode(raw);
     if (d.kind !== 'file' || d.unreadable) throw new Error(d.upgrading ? 'This file waits for the Drive upgrade.' : 'This file cannot be read.');
-    return { path: path ?? d.name, size: d.size, type: d.type, mtime: d.mtime, fk: await this.#fileKey(raw), node: d.id, chunks: d.chunks, ch: typeof raw.ch === 'string' ? raw.ch : null };
+    return { path: path ?? d.name, size: d.size, type: d.type, mtime: d.mtime, fk: await this.#fileKey(raw), node: d.id, chunks: d.chunks, ch: typeof raw.ch === 'string' ? raw.ch : null, ...(d.item ? { item: d.item } : {}) };
   }
 
   /**
@@ -690,6 +709,20 @@ export class DriveClient {
   }
 
   /**
+   * A note, link or credential of the Drive → { item, name, bytes, text }
+   * (its content, decrypted here; the regular viewers show it: typedview.js).
+   * Throws when the node is not one.
+   */
+  async readItem(id, { onProgress, signal } = {}) {
+    const d = await this.download(id, { onProgress, signal });
+    if (!d.entry.item) throw new Error('This is not a note, link or credential.');
+    // Never more than its kind can be (a larger one is only downloaded, never rendered).
+    if (d.entry.size > ITEM_MAX_BYTES[d.entry.item.kind]) throw new Error(`This ${KIND_LABELS[d.entry.item.kind].toLowerCase()} is larger than one can be (${ITEM_MAX_BYTES[d.entry.item.kind]} bytes), so it is not shown. Download it instead.`);
+    const bytes = await d.reader.bytes(d.entry, byteCounter(d.entry.size, onProgress, signal));
+    return { item: d.entry.item, name: d.entry.path, bytes, text: fromUtf8(bytes) };
+  }
+
+  /**
    * Flatten nodes into { files: [{ path, id, ...entry }], dirs: [path] }:
    * each top-level node by its own name, folders recursively; duplicate
    * names get " (2)", " (3)"… so every path is unique.
@@ -703,7 +736,8 @@ export class DriveClient {
       if (!r || !r.node) throw malformed();
       const d = await this.decode(r.node);
       if (d.unreadable) throw new Error('A file or folder name cannot be read.');
-      const name = uniqueName(top, checkName(d.name)); // paths for ZIPs and manifests: never ".." or "/" from a name
+      // Paths for ZIPs and manifests: never ".." or "/" from a name; a note, link or credential with its extension.
+      const name = uniqueName(top, checkName(d.item ? withExt(d.name, itemExt(d.item, { stored: true })) : d.name));
       if (++out.count > MAX_ENTRIES) throw new Error(`At most ${MAX_ENTRIES} files and folders at once.`);
       if (d.kind === 'file') {
         out.files.push({ ...(await this.#fileEntry(r.node, name)), id });
@@ -725,7 +759,8 @@ export class DriveClient {
       if (++out.count > MAX_ENTRIES) throw new Error(`At most ${MAX_ENTRIES} files and folders at once.`);
       const d = await this.decode(c);
       if (d.unreadable) throw new Error('A file or folder name cannot be read.');
-      const leaf = uniqueName(taken, checkName(d.name)); // paths for ZIPs and manifests: never ".." or "/" from a name
+      // Paths for ZIPs and manifests: never ".." or "/" from a name; a note, link or credential with its extension.
+      const leaf = uniqueName(taken, checkName(d.item ? withExt(d.name, itemExt(d.item, { stored: true })) : d.name));
       const p = path ? `${path}/${leaf}` : leaf;
       if (d.kind === 'file') {
         out.files.push({ ...(await this.#fileEntry(c, p)), id: c.id });
@@ -738,7 +773,9 @@ export class DriveClient {
 
   /**
    * Save a folder as a ZIP of its content (downloads.js saveZip) → resolves
-   * when saved. opts: onProgress(bytesDone, total), signal, zipName.
+   * to { left: n } when saved. opts: onProgress(bytesDone, total), signal,
+   * zipName. Credentials are left out (`left`: how many): a credential leaves
+   * the Drive in plain text only on its own, after its confirmation.
    */
   async downloadFolder(id, { onProgress, signal, zipName } = {}) {
     const r = await api.node(id);
@@ -746,10 +783,14 @@ export class DriveClient {
     const d = await this.decode(r.node);
     const out = { files: [], dirs: [], count: 0 };
     await this.#walk(id, '', out, 1);
+    const all = out.files.length;
+    out.files = out.files.filter((f) => !(f.item && f.item.kind === 'secret'));
+    const left = all - out.files.length;
     const entries = [...out.files.map((f, ref) => ({ ...f, ref })), ...out.dirs.map((path) => ({ path, dir: true }))];
     const total = out.files.reduce((s, f) => s + f.size, 0);
     const reader = this.#reader(entries, total);
     await saveZip(reader, '', zipName || `${d.name || 'drive'}.zip`, byteCounter(total, onProgress, signal));
+    return { left };
   }
 
   /**
@@ -769,6 +810,15 @@ export class DriveClient {
     if (!Array.isArray(nodeIds) || !nodeIds.length) throw new Error('Choose what to share.');
     const { files, dirs } = await this.#collect(nodeIds);
     if (!files.length) throw new Error('There are no files to share.');
+    // A link or a credential received through a Receive link is shared as what it is: only where the
+    // account may share links or credentials (as the composer; the server cannot see what an item is).
+    // Always (no limits given: none allowed); the recipient's page also shows them only as the
+    // sender's role allowed when the share was made (the server records it: `kinds`).
+    const lim = limits || {};
+    for (const [kind, key] of [['url', 'url'], ['secret', 'secret']]) {
+      if (lim[key] !== true && files.some((f) => f.item && f.item.kind === kind)) throw new Error(`Your account is not allowed to share ${KIND_LABELS[kind].toLowerCase()}s: leave out the ${KIND_LABELS[kind].toLowerCase()} you received, or ask the administrator.`);
+    }
+    if (lim.text !== true && files.some((f) => f.item)) throw new Error('Your account is not allowed to share notes, links or credentials: leave out the ones you received, or ask the administrator.');
     const body = { nodes: files.map((f) => f.id), views, expire };
     const typePolicy = limits && ['allow', 'block'].includes(limits.fileTypeMode);
     const depthPolicy = limits && Number.isInteger(limits.maxFolderDepth);
@@ -784,7 +834,7 @@ export class DriveClient {
       }
       if (depthPolicy) body.depth = d.depth;
     }
-    const manifest = buildRefsManifest({ files: files.map((f) => ({ path: f.path, size: f.size, type: f.type, mtime: f.mtime, fk: f.fk })), dirs, view });
+    const manifest = buildRefsManifest({ files: files.map((f) => ({ path: f.path, size: f.size, type: f.type, mtime: f.mtime, fk: f.fk, ...(f.item ? { item: f.item } : {}) })), dirs, view });
     const { body: paste, fragment } = await encryptPaste({
       text: JSON.stringify(manifest), fmt: 'files', password, bar: views !== null, views: views ?? undefined, expire, deletable,
     });
@@ -830,13 +880,14 @@ export class DriveClient {
    * `captcha`: uploaders pass the CAPTCHA first (true / false where the role
    * allows a choice; undefined: its default). `expire` "never": no expiry
    * (where the role allows it); `views`: upload sessions allowed (null:
-   * unlimited, where the role allows it).
+   * unlimited, where the role allows it); `accept`: what it takes (files,
+   * note, url, secret: receivekinds.js; files only when not given).
    */
-  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', views = null, maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {}, captcha } = {}) {
+  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', views = null, maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {}, captcha, accept } = {}) {
     const id = newReverseId();
     const { pub, privateKey } = await createReverseKey();
     const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
-    const extra = { lh: await linkHash(pub), expire, views, maxFiles, maxBytes, maxFileBytes, types };
+    const extra = { lh: await linkHash(pub), expire, views, maxFiles, maxBytes, maxFileBytes, types, ...(Array.isArray(accept) ? { accept } : {}) };
     if (note) extra.note = await sealNote(pub, id, note);
     if (password) extra.password = await passwordGate(password, pub);
     if (label) extra.label = label;
@@ -847,7 +898,7 @@ export class DriveClient {
         return api.createReverse({ id, folder: folderId, mek, priv: await sealLinkKey(kek, { userId: this.user.id, mekId: mek, linkId: id }, pkcs8), ...extra, ...step });
       });
       if (r.id !== id) throw malformed();
-      return { url: reverseUrl(id, pub), id, expires: r.expires ?? null, views: r.views ?? null, captcha: r.captcha === true };
+      return { url: reverseUrl(id, pub), id, expires: r.expires ?? null, views: r.views ?? null, captcha: r.captcha === true, accept: Array.isArray(r.accept) ? r.accept : ['files'] };
     } finally {
       pkcs8.fill(0);
     }
@@ -904,9 +955,20 @@ export class DriveClient {
    * - Names are cleaned (files.js cleanName: direction overrides and
    *   invisible separators removed, NFC); a file whose name changed is marked
    *   `renamed` in its metadata, which the Drive shows.
+   * - A note, link or credential (its kind in the uploader's sealed
+   *   metadata) goes into the link's folder itself, named "Note from <date>"
+   *   and so on (a note with a title: the title), and keeps its kind marker
+   *   in the Drive's sealed metadata; `kinds` counts what was added by kind.
    * - At most RECEIVED_MAX_DEPTH folder levels (and MAX_DEPTH in all) are
    *   created for a path, and RECEIVED_MAX_NEW_FOLDERS folders per take-in:
    *   past either, the file lands in the deepest folder allowed (`flattened`).
+   * - What each item really is is held to its link's rules — its kind to the
+   *   kind its session declared (`declared`, sealed with it) and to what the
+   *   link accepts as the user's role allows it now (the server filters
+   *   `accept`), a note, link or credential's size to its kind's cap, a file's
+   *   type to the link's file types and its size to its largest file (the
+   *   uploader's browser only declared them to the server): a mismatch is
+   *   recorded as failed (`kind`, `type`, `size`).
    * - An item that cannot be taken in (it does not open, its name is not
    *   usable, the Drive refuses its place) is recorded as failed on the
    *   server: it leaves the queue (the Drive lists it to delete or try again),
@@ -916,6 +978,7 @@ export class DriveClient {
    */
   async receivePending({ onItem } = {}) {
     const keys = new Map(); // share id → private key, or null (does not open) / 'later' (waits for the upgrade)
+    const rules = new Map(); // share id → { accept, types, maxFileBytes }: what the link takes, held to what each item really is
     const folders = new Map(); // `${parent}\n${path}` → id
     const inside = new Map(); // folder id → { dirs: Map(name → id), names: Set }
     const depthOf = new Map(); // a link's folder → its depth in the tree
@@ -958,14 +1021,17 @@ export class DriveClient {
     // A refusal by the Drive (full, folder full, too deep, the role's file policy) fails the item;
     // being signed out or losing the Drive stops the take-in.
     const refused = (e) => e instanceof ApiError && ((e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403 && e.code !== 'mek_not_current') || POLICY_CODES.has(e.code));
-    const reasonOf = (e) => (e instanceof ApiError && e.code === 'file_type_not_allowed' ? 'type' : 'place');
-    const out = { added: 0, failed: 0, renamed: 0, flattened: 0, deferred: 0, more: false };
+    const reasonOf = (e) => (e instanceof ApiError && e.code === 'file_type_not_allowed' ? 'type' : e instanceof ApiError && e.code === 'kind_not_accepted' ? 'kind' : 'place');
+    // `kinds`: what was added, by kind (files, and notes, links and credentials received).
+    const out = { added: 0, failed: 0, renamed: 0, flattened: 0, deferred: 0, more: false, kinds: { files: 0, note: 0, url: 0, secret: 0 } };
     let after = null;
     for (let page = 0; page < RECEIVED_MAX_PAGES; page++) {
       const r = await api.received(after);
       const items = Array.isArray(r.items) ? r.items : [];
       for (const k of Array.isArray(r.keys) ? r.keys : []) {
         if (keys.has(k.id)) continue;
+        rules.set(k.id, { accept: Array.isArray(k.accept) ? k.accept : [], types: k.types && ['allow', 'block'].includes(k.types.mode) && Array.isArray(k.types.rules) ? k.types : null,
+          maxFileBytes: Number.isSafeInteger(k.maxFileBytes) ? k.maxFileBytes : null });
         if (!k.mek && !this.legacy) { keys.set(k.id, 'later'); continue; }
         const got = await this.#linkKey(k.id, k.mek, k.priv);
         keys.set(k.id, got ? got.privateKey : null);
@@ -974,29 +1040,59 @@ export class DriveClient {
         try {
           const priv = keys.get(it.rs);
           if (priv === 'later') { out.deferred++; continue; }
+          // A field the server found in plain text at rest, or no declared kind: never taken in.
+          if (it.unsealed === true) throw failure('kind');
           if (!priv) throw failure('unreadable');
           let got;
           try { got = await openUpload(priv, it.rs, it); } catch { throw failure('unreadable'); }
           // The uploader's sealed size must be the server's (the chunks follow from it): else it fails closed.
           if (got.size !== it.size) throw failure('unreadable');
+          // A note, link or credential: in the link's folder itself, named from its kind (a note: its
+          // title) and the time the server received it; its kind marker stays in the sealed metadata.
+          const item = got.item;
           let path;
-          try {
-            path = checkPath(cleanName(got.path));
-            path.split('/').forEach(checkName);
-          } catch { throw failure('name'); }
-          const renamed = path !== got.path;
+          let renamed = false;
+          if (item) {
+            path = itemLeaf(item, it.created);
+          } else {
+            try {
+              path = checkPath(cleanName(got.path));
+              path.split('/').forEach(checkName);
+            } catch { throw failure('name'); }
+            renamed = path !== got.path;
+          }
+          // What it really is, against the link's rules (the uploader's browser only declared it to the
+          // server, and a modified one can lie): its kind, and for a file its type and size. A mismatch
+          // fails (listed, to delete): it never enters the Drive.
+          const rule = rules.get(it.rs) || { accept: [], types: null, maxFileBytes: null };
+          const kind = item ? item.kind : 'files';
+          // What its session declared to the server (limits, quotas, role) must be what it is; the link
+          // (as the user's role allows it now) must accept it; a note, link or credential fits its cap.
+          if (!isKind(it.declared) || kind !== it.declared) throw failure('kind');
+          if (!rule.accept.includes(kind)) throw failure('kind');
+          if (item && it.size > ITEM_MAX_BYTES[item.kind]) throw failure('size');
+          if (!item) {
+            if (rule.maxFileBytes !== null && it.size > rule.maxFileBytes) throw failure('size');
+            if (rule.types) {
+              if (uncheckableExt(path)) throw failure('type');
+              const d = declare([{ path, type: normalizeMime(got.type) || OCTET }]);
+              if (refusedTypes(rule.types.mode, rule.types.rules, d.types).length) throw failure('type');
+            }
+          }
           const segs = path.split('/');
           const leafName = segs.pop();
           const type = normalizeMime(got.type) || OCTET;
           // The role's file-type rules apply on top of the link's (the uploader's page checked those),
-          // so a Receive link is no way around the Drive's policy; the type is declared as for an upload.
+          // so a Receive link is no way around the Drive's policy; the type is declared as for an upload
+          // (a note, link or credential too: the server holds every take-in to it, by its stored name
+          // and type).
           let types;
           try { types = this.#declareType(leafName, type); } catch (e) {
             got.fk.fill(0);
             if (e instanceof DrivePolicyError) throw failure('type');
             throw e;
           }
-          const allowed = await levelsUnder(it.parent);
+          const allowed = item ? 0 : await levelsUnder(it.parent);
           const want = segs.slice(0, allowed).join('/');
           // The link's folder itself deeper than the role now allows: nothing can go in it.
           if (this.#deep && depthOf.get(it.parent) > maxLevel) { got.fk.fill(0); throw failure('place'); }
@@ -1010,7 +1106,8 @@ export class DriveClient {
           const flattened = segs.length > allowed || (want !== '' && folders.get(`${it.parent}\n${want}`) !== parent);
           const { names: taken } = await contentOf(parent);
           const leaf = uniqueName(taken, leafName);
-          const meta = { type, mtime: got.mtime, size: it.size, ...(renamed ? { renamed: true } : {}) };
+          const marker = item ? (item.kind === 'note' ? { kind: 'note', fmt: item.fmt } : { kind: item.kind }) : null;
+          const meta = { type, mtime: got.mtime, size: it.size, ...(renamed ? { renamed: true } : {}), ...(marker || {}) };
           try {
             // The server's size is the one the chunks have: the metadata says the same.
             await this.#fresh(async () => api.acceptReceived(it.id, { parent, ...(types ? { types } : {}), ...(await this.#sealNew({ name: leaf, meta: JSON.stringify(meta), dek: got.fk })) }));
@@ -1021,9 +1118,10 @@ export class DriveClient {
             got.fk.fill(0);
           }
           out.added++;
+          out.kinds[item ? item.kind : 'files']++;
           if (renamed) out.renamed++;
           if (flattened) out.flattened++;
-          if (onItem) onItem({ id: it.id, path, name: leaf, parent, renamed, flattened });
+          if (onItem) onItem({ id: it.id, path, name: leaf, parent, renamed, flattened, ...(item ? { item } : {}) });
         } catch (e) {
           if (!e || !e.receivedReason) {
             if (e instanceof ApiError && (e.status === 401 || e.status === 403)) throw e; // signed out, or no Drive: stop

@@ -15,6 +15,30 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Take-in holds received items to their link's rules** (audit A-3): the uploader's browser only
+  declares a file's type and a send's kind to the server, so the user's browser now checks the
+  real, decrypted name and type against the link's file types, a file's size against its largest
+  file, and each item's kind against what the link accepts. A mismatch is never added to the
+  Drive: it is recorded as failed (new reasons `type`, `size`, `kind`) and listed, to delete.
+  Each item is also held to the kind its session declared (the server seals that kind with the
+  item until it is taken in), a note, link or credential to its kind's size, and the link's
+  kinds to what the user's role allows at take-in, so a modified uploader cannot pass a file off
+  as a note to escape the file limits and quotas, or send a kind the role has since dropped.
+- **Drive shares of notes, links and credentials are held to the sender's role on the
+  recipient's side:** the server records what the sender's role allowed when the share was made
+  (`kinds`, returned by `open`), and the recipient's page shows an entry as a note, link or
+  credential only where that allows it (otherwise a plain file, Download only). Item viewers never
+  read or render an item larger than its kind can be. A credential's Download on a Drive share's
+  page asks first, as in the Drive, and ZIPs (Drive folders, a Drive share's "Download all" and
+  folders) leave credentials out and say how many.
+- **A Receive link cannot be made on a folder deeper than the role's folder depth limit**
+  (`maxFolderDepth`, by the Drive's own depth rule; `403 folder_too_deep` with `max`): nothing it
+  received could be placed there. A link's folder moved deeper later takes nothing in.
+- **The server holds a take-in to the declared kind too:** `409 kind_not_accepted` unless the
+  kind the item's session declared is one its link accepts and the user's role allows at
+  take-in; a link the role now allows no kind for takes nothing in (the browser no longer reads
+  an empty list as "files"). A received item's fields stored in plain text at rest are refused
+  (no fallback), failed as `kind`.
 - **Per-network limits and the invalid-fetch rule, from the security audit of `main`:**
   - **The share CAPTCHA page** (`/p|r/<id>?check`) is served and counted only for this site's
     own document navigations (`Sec-Fetch-Dest: document`, `Sec-Fetch-Site: same-origin` or
@@ -64,7 +88,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   role); in a role (the public account's too, and its API restrictions), loosening passkeys,
   the password policy, session timeouts or log retention, the CAPTCHA and uploader-password
   options and their defaults, longer or unlimited expiry and views, links with no expiry, and
-  allowing link or credential shares, API keys, more file types or more links; and adding an
+  allowing file, link or credential shares (`files`, `url`, `secret`), Receive links that take
+  files, links or credentials (`reverseFiles`, `reverseUrl`, `reverseSecret`), API keys, more
+  file types or more links; and adding an
   allow IP rule. Missing, the server answers `400 reauth_required` with what the change weakens, and
   the admin panel then shows the confirmation field; tightening asks for nothing (SECURITY.md
   "admin changes that weaken a control").
@@ -563,6 +589,45 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - a warning is logged when only one Turnstile key is set.
 
 ### Added
+
+- **"Receive" links take what regular shares carry** (docs/REVERSE.md §3.1): besides files, a
+  link may accept a **note** (plain text, Markdown or code, with an optional title), a **link**
+  and a **credential** (the regular credential's fields), as the user chooses when making it
+  ("What senders can send") or later (Edit). Links made before accept files only.
+  - Role options `reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret` (Default: files and
+    notes on, links and credentials off, as for regular shares; the Owner: all; not for the public
+    account; restrictable for API keys; in import / export like every role option). Directory
+    migration 18 gives the Default role their values. The server checks them on create, on each
+    kind an Edit adds, and at every upload — `open`, `begin` and each reservation — with the role
+    as it is then.
+  - The uploader page offers the accepted kinds as tabs, with the composer's note formats, the link
+    field (destination spelled out) and the credential form, under the warning that the
+    recipient's server can decrypt it. Each send is one upload session of one kind, declared at
+    `begin` (`{ type }`; `403 kind_not_accepted`): one view, counted under `receive`,
+    `receive-upload` and a new quota kind per kind of send — `receive-file`, `receive-note`,
+    `receive-url`, `receive-secret` — given back as before when it sends nothing. A note, link or
+    credential session carries one item (`409 one_item`) of bounded size (`413 item_too_large`);
+    the file types and the largest file apply to files only; the password and the CAPTCHA gate
+    every kind.
+  - Taken in, each becomes a Drive item of its own kind (its kind in the sealed metadata; the
+    server sees the kind of a send, never its content), in the link's folder, named after a note's
+    title or "Note / Link / Credential from <date>". The Drive lists it with an icon and a label
+    and opens it with the regular shares' viewers (`public/js/typedview.js`, shared with the share
+    page): a note rendered, a link under the user's URL rules, a credential masked. Download saves
+    text (`.md` / `.txt`; a link as `.txt`, never a `.url` shortcut; a credential as a plain-text
+    export after a confirmation); Share… carries them as what they are (the manifest's `item`),
+    where the account may share links and credentials.
+  - The server keeps each item's declared kind sealed with it until it is taken in; the user's
+    browser fails an item whose sealed kind differs from what its session declared, that exceeds
+    its kind's cap, or that the link no longer accepts under the user's role as it is then
+    (reason `kind` / `size`). Viewers never render an item past its kind's cap. A Drive share
+    records what the sender's role allowed (`kinds`) and its recipient's page shows items as what
+    they are only where that allows (otherwise as plain files). A credential leaves in plain text only on its own, after a confirmation
+    (in the Drive and on a Drive share's page); ZIPs leave credentials out.
+  - Adding files, links or credentials to what a link accepts weakens it: it needs the account
+    password or a passkey, and an API key cannot do it (`403 step_up_required`, `weakens:
+    ["accept"]`). Adding a note does not.
+  - The CLI does not send to Receive links; it is unchanged.
 
 - **Drive quota: bytes uploaded** (`drive-bytes`, Admin → Roles → Quotas → Drive → "Bytes
   uploaded"; README "Quotas", docs/DRIVE.md §5, docs/API.md). The bytes uploaded to the Drive

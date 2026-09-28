@@ -6,7 +6,9 @@ Status: the contract reverse shares are built against (task #24). It builds on t
 ## 1. What it is
 
 - A **user** whose role allows it creates a **reverse share** on one of their Drive folders: a
-  link (`/r/<id>#<key>`) that lets anyone, with no account, upload files and folders to them.
+  link (`/r/<id>#<key>`) that lets anyone, with no account, send them files and folders — and,
+  as the user chooses per link, a **note**, a **link** or a **credential**, the types regular
+  shares carry (§3.1).
 - Uploads land in the chosen Drive folder. The user sees them there like any other file, the next
   time their Drive page opens (it takes them in).
 - An optional **password** gates the anonymous uploader only. It never protects the data (always
@@ -27,9 +29,24 @@ Status: the contract reverse shares are built against (task #24). It builds on t
 ## 2. What the server sees
 
 - Visible: the reverse share's id, folder id, label, limits, times, status, counters (files and
-  bytes received), each received file's ciphertext size and chunk count, the uploader's network
-  address (as for every request, for the Guard), and whether a password is set.
-- Never sent in plain text: file contents, names, types, folder structure of an upload, the note
+  bytes received), what it accepts (files, notes, links, credentials: §3.1), each received file's
+  ciphertext size and chunk count, the uploader's network address (as for every request, for the
+  Guard), and whether a password is set.
+- The **kind of each send** (files, a note, a link or a credential), as the uploader's browser
+  declares it when the session starts: the server checks it against the link and the user's role
+  and counts it in the quotas, and keeps it with the session (`rsessions.kind`) until the session
+  ends. Each item it reserves keeps that declared kind too, sealed at rest with the item's wrap
+  (the field layer; never in plain text), until the user's browser takes it in (§3). Where the
+  owner set a quota of a kind per kind of send (`receive-note`, `receive-url`, `receive-secret`,
+  `receive-file`), the Directory keeps **counts only** — how many sessions of that kind the user
+  received in each quota window, no content, no link or sender — each count row until 400 days
+  after its window's first count (the same pruning as every quota; a window longer than that
+  starts again from zero). A received item itself carries no plaintext kind: a note, link or
+  credential is stored like a received file, and what it is stays inside the metadata the
+  uploader seals to the link's key. The size of an item's ciphertext is visible, as for every
+  file.
+- Never sent in plain text: file contents, names, types, folder structure of an upload, a received
+  note's text, format and title, a received link, a received credential, the note
   to the uploader, the link key (the public key, only in the URL fragment), the password, the
   reverse share's private key, any file key. The server can still open them (all but the
   password itself, which it can only test guesses against): the link's private key is sealed
@@ -82,7 +99,8 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     chosen by the uploader;
   - `name` = AES-GCM(`mk`, the file's **relative path** — `a.txt` or `folder/sub/a.txt`, ≤ 2048
     bytes, `checkPath` rules), AAD `secbin-reverse/v1\nname\n<nodeId>\n`;
-  - `meta` = AES-GCM(`mk`, JSON `{ type, mtime, size }`), AAD `secbin-reverse/v1\nmeta\n<nodeId>\n`;
+  - `meta` = AES-GCM(`mk`, JSON `{ type, mtime, size }` — for a note, link or credential also
+    its kind marker, §3.1), AAD `secbin-reverse/v1\nmeta\n<nodeId>\n`;
   - the **wrap** of `fk ‖ mk` to the link public key: an ephemeral ECDH P-256 key pair,
     `shared = ECDH(ephemeral, pub)`, `kek = HKDF(shared, salt = epk, info = "secbin-reverse/v1
     kek")`, AES-GCM over the 64 bytes with AAD `secbin-reverse/v1\nwrap\n<id>\n<nodeId>\n`;
@@ -110,17 +128,69 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     would interrupt every opening, put names an anonymous uploader chose in front of the user, and
     hold the items behind it; flattening never drops a file, only folder levels, and bounds the
     folders an uploader can make the user's browser create.
+  - **The link's rules, on what really arrived:** the uploader's browser declares a file's type
+    and a send's kind to the server, and a modified one could lie. The user's browser, which
+    opens the item, holds it to the link's rules as they are at take-in (the server lists them with
+    each link's key, `accept` already narrowed to what the user's role allows **now**): its kind
+    (a file, or the sealed marker of a note, link or credential) to the kind its session declared
+    (`declared`, which the server sealed with the item) and to what the link accepts (reason
+    `kind`), a note, link or credential's size to its kind's cap (`size`), a file's real name and
+    type to the link's file types (`type`, `filepolicy.js`), its size to the link's largest file
+    (`size`). A mismatch is never
+    added to the Drive: it fails as below. (A link narrowed while items wait fails those of the
+    kinds it no longer accepts, and a link the role now allows no kind for accepts nothing;
+    widened again, **Try again** takes them in.) The server holds the take-in to the declared kind
+    too: it opens the item's wrap (sealed at rest; one stored in plain text is refused and listed
+    as `unsealed`, failed as `kind`) and answers `409 kind_not_accepted` unless the declared kind
+    is one the link accepts and the user's role allows now.
   - **The role's Drive rules** apply on top of the link's own type rules: the take-in declares
-    the file's type (as a Drive upload does) and a type the role refuses in the Drive is not
-    taken in (reason `type`); a path makes folders only down to the role's `maxFolderDepth`
+    the file's type (as a Drive upload does; a note, link or credential by its stored name and
+    type too) and a type the role refuses in the Drive is not taken in (reason `type`); a path makes folders only down to the role's `maxFolderDepth`
     (flattened past it), and a link folder already deeper than that takes nothing in (reason
     `place`). docs/DRIVE.md §5.
   - **Failures:** an item that cannot be taken in (it does not open with the link's key, its name
-    or path cannot be used, the Drive refuses its place, or the role's file types refuse it) is recorded on the server
-    (`POST …/received/<id>/failed`, with a reason). It leaves the queue, so it never holds up the
-    items behind it, and the Drive lists it ("Review them": the link's label, size, time and why)
-    with **Delete** and **Try again**. A network or server error leaves the item for the next
-    time the Drive opens.
+    or path cannot be used, the Drive refuses its place, it breaks the link's rules, or the role's
+    file types refuse it) is recorded on the server (`POST …/received/<id>/failed`, with a reason).
+    It leaves the queue, so it never holds up the items behind it, and the Drive lists it ("Review
+    them": the link's label, size, time and why) with **Delete** and **Try again**. A network or
+    server error leaves the item for the next time the Drive opens.
+
+### 3.1 Notes, links and credentials
+
+`public/js/receivekinds.js` implements this section.
+
+- **What a link accepts** (`accept`, in its limits): a non-empty set of `files`, `note`, `url`
+  and `secret` (the types of regular shares: a note in plain text, Markdown or code; one link; a
+  credential). Links made before this option have none stored and accept `files` only.
+- **A send is one upload session of one kind.** The uploader's page offers the accepted kinds as
+  tabs; `begin` declares the kind (`{ type }`; none: files, as every client before). The server
+  holds a note, link or credential session to exactly **one** item of its kind's size (below);
+  what the item really is the server cannot see, so the user's browser holds it to the declared
+  kind and the size at take-in (§3) — a modified uploader that declares one kind and sends
+  another, or a larger item, gets it refused there, never added. Its content is its plaintext:
+  - a note: its text (UTF-8), at most 2 MiB (about what a regular note's ciphertext cap holds
+    uncompressed, and what the text viewer shows);
+  - a link: the normalized URL (`sharetypes.js` `parseShareUrl`, as a recipient reads one: any
+    scheme but the forbidden ones, no user name or password in it), at most 2048 characters;
+  - a credential: the regular credential's JSON `{ v: 1, title?, username?, password?, url?,
+    notes?, totp? }`, at most the regular fields' limits.
+  It is encrypted exactly like a file (one chunk under a fresh `fk`); its sealed path is its
+  kind's name ("Note"); its sealed metadata adds the **kind marker** `{ kind: 'note' | 'url' |
+  'secret', fmt? ('plaintext' | 'markdown' | 'code', a note), title? (a note, ≤ 200 characters) }`.
+  The link's file types and largest file apply to files only; every item counts towards the
+  link's most files and total bytes, like a file.
+- **Taken in** (§3), a note, link or credential goes into the link's folder itself (never a
+  sub-folder), named after a note's title or "Note from <date>", "Link from <date>",
+  "Credential from <date>" (the time the server received it, in the user's time zone; "/" and "\"
+  in a title become "-"), and keeps its marker (`kind`, and a note's `fmt`) in the Drive's sealed
+  metadata. The Drive lists it with its kind's icon and label and opens it in the viewer of
+  regular shares (`public/js/typedview.js`): a note rendered (Markdown through the safe subset,
+  code highlighted, Raw), a link spelled out with its warnings and — only when the user's own URL
+  rules (`urlRules`) allow it and the scheme is one a page may open — **Open** behind a
+  confirmation, a credential masked with Reveal and Copy. A marker or content that does not parse
+  is never rendered as a link or credential.
+- Like all Drive content they are **not end-to-end**: the server holds the keys (§1). The uploader
+  page says so on the credential form ("The recipient's server can decrypt this").
 
 ## 4. Storage (server)
 
@@ -143,6 +213,9 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   - `reverse.sealed`: the sealed paths, metadata and wraps received (they count towards the
     link's byte limit); `reverse.pwfails`, `pwsince`, `pwlock`: wrong passwords in the current
     window and the lock after too many.
+  - `reverse.opts.accept`: what the link accepts (§3.1; none: files only, every link before);
+    `rsessions.kind`: what the session sends, as declared at `begin` (a Drive-DO column; a
+    session from before sends files).
   - `rsessions.net`: 24 bits of SHA-256 over the link id and the uploader's network (the Guard's
     key, an IPv4 address or an IPv6 prefix), for the per-network session cap; no key is involved
     and the address is not stored (about 256 IPv4 addresses share each value);
@@ -185,7 +258,9 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   at most `reverseMaxViews`, or unlimited where `reverseAllowUnlimitedViews` allows it); maximum number of files (`maxFiles`, 1–10 000 or none); maximum total bytes
   (`maxBytes`: each file's content plus its sealed path, metadata and wrap, about 2.5 KB, so empty
   files count too); maximum file size (`maxFileBytes`); allowed file types (`types: { mode: 'allow' |
-  'block', rules }`, the file-policy rules of `public/js/filepolicy.js`); a label (plain text, for
+  'block', rules }`, the file-policy rules of `public/js/filepolicy.js`, for files only); what it
+  accepts (`accept`, §3.1: files, notes, links, credentials, each as the role allows; files by
+  default); a label (plain text, for
   the user's own lists); an optional note to the uploader (encrypted, §3); an optional password
   (as the role's `reversePassword` says).
 - **A view** of a reverse share is one upload session granted: the link proof, the CAPTCHA (when
@@ -215,11 +290,19 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   under `allow`), and `reverseEdit` (default true: the user may change a link after making it —
   its expiry, views, limits, CAPTCHA, password and note; the label and revoking are always
   allowed. Regular shares have no separate "extend" option, so changing expiry or views is part
-  of `reverseEdit`). The expiry, views and `reverseEdit` options can be restricted further for
+  of `reverseEdit`), and what links may accept, mirroring the regular shares' `files`, `text`,
+  `url` and `secret`: `reverseFiles` (files and folders, default **true**), `reverseText` (notes,
+  default **true**), `reverseUrl` (links, default **false**) and `reverseSecret` (credentials,
+  default **false**) — migration 18 gave the Default role these values. The server checks them
+  when a link is made (every kind it accepts), when one is changed (the kinds a change adds; a
+  kind the link has may stay) and at every upload — `open`, `begin` and each reservation — with
+  the role as it is then: a link accepts what it was made to accept **and** its user's role still
+  allows; one left with nothing takes no uploads (`410`). The expiry, views, `reverseEdit` and
+  kind options can be restricted further for
   API keys (Admin → Roles, API limits), which reach reverse shares through
   `/api/private/shares`. The owner: allowed, no limits (CAPTCHA `allow`, box on; password
-  `allow`, box off; no expiry and unlimited views allowed; editing allowed). The public account:
-  none.
+  `allow`, box off; no expiry and unlimited views allowed; editing allowed; every kind). The
+  public account: none.
 - **The CAPTCHA** (Cloudflare Turnstile; SECURITY.md, *CAPTCHA on shares*): per link, when the
   role allows a choice (`captcha: true|false` on create; `require` forces it on, `off` refuses
   `true` with `403 captcha_disabled`). Changed later (where `reverseEdit` allows) within the same
@@ -236,17 +319,17 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, views?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; `views` absent or null: unlimited; the role's options of §5 apply: `403 no_expiry_disabled`, `expiry_too_long`, `too_many_views`, `unlimited_views_disabled`, `password_required_by_role`, `password_disabled`). The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, views?, maxFiles?, maxBytes?, maxFileBytes?, types?, accept?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha, accept }` (`expire: "never"`: no expiry, `expires: null`; `views` absent or null: unlimited; `accept` absent or null: files only; the role's options of §5 apply: `403 no_expiry_disabled`, `expiry_too_long`, `too_many_views`, `unlimited_views_disabled`, `password_required_by_role`, `password_disabled`, `receive_kind_disabled` with `kinds`; `403 folder_too_deep` with `max` when the folder is deeper than the role's `maxFolderDepth`, by the Drive's own depth rule (docs/DRIVE.md §5: a file at its folder's level), so nothing it received could be placed). The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
-| `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv, mek }], more, next }` (an item whose field layer does not open comes with `unreadable: true` and no fields: the browser records it as failed); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
-| `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek, types? }` (sealed under the current KEK, checked; `parent` a folder; `types` and the depth as for a Drive upload, docs/DRIVE.md §5) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
-| `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
+| `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created, declared }], keys: [{ id, priv, mek, types, maxFileBytes, accept }], more, next }` (`declared`: the kind the item's session declared, `files` for items from before; each link's rules come with its key, `accept` narrowed to what the user's role allows now: the browser holds what it opens to them, §3) (an item whose field layer does not open comes with `unreadable: true` and no fields — `unsealed: true` too when a field is stored in plain text: the browser records it as failed, `kind` for an unsealed one); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
+| `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek, types? }` (sealed under the current KEK, checked; `parent` a folder; `types` and the depth as for a Drive upload, docs/DRIVE.md §5; `409 kind_not_accepted` when the kind its session declared is not one the link accepts and the role allows now, or its wrap is not sealed at rest) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
+| `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' \| 'type' \| 'size' \| 'kind' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
 | `DELETE /api/private/drive/nodes/<nodeId>` | discard a received file (as any Drive item) |
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares) |
-| `PATCH /api/private/shares/<id>` | change it (My shares' Edit; a session, or an API key with `manage`): `{ label?, expires? (a time, or null: none), views? (null: unlimited), maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, password? ({ salt, t, ph } or null), note? ({ iv, ct } or null) }` → `{ ok, expires, views, left, used }`. Everything but the label needs `reverseEdit` (`403 reverse_edit_disabled`) and an active link (`409 not_active`), and each value its own option (§5). **Expiry** follows the rule of regular shares — it can only be extended (`400`) — except that any link may be made indefinite (`reverseNoExpiry`) and one with no expiry may be given one. **Views** may be raised or lowered, never below the views already used (`400`, with `used`). The password and the note are made in the user's browser from the link's key (§3), which the session's KEK opens: neither is sent in plain text, but the server, which holds the keys that open the link's key, can read the note and test guesses at the password (not end-to-end, like the uploads). A change that **weakens** the link — its password removed or changed (not added where it had none), its CAPTCHA turned off, no expiry, unlimited views — needs the password proof (`current`) or a passkey (`reauth`), as creating a link does (`400 reauth_required`, `403 wrong_password` / `reauth_failed`), and is refused for API keys (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing. Tightening needs no confirmation. The lock is checked before anything is written; the Drive is changed first and put back if the index then refuses (a lock in between), so the two never differ. The index and the Drive change together; the index holds the CAPTCHA the uploader's `begin` checks. The owner changing a user's link directly (Admin → Shares) may change its label, expiry and views only (`403 user_only`), and a link with no expiry only where the user's role allows it. The target folder of a link does not change |
+| `PATCH /api/private/shares/<id>` | change it (My shares' Edit; a session, or an API key with `manage`): `{ label?, expires? (a time, or null: none), views? (null: unlimited), maxFiles?, maxBytes?, maxFileBytes?, types?, accept?, captcha?, password? ({ salt, t, ph } or null), note? ({ iv, ct } or null) }` → `{ ok, expires, views, left, used, accept }`. Everything but the label needs `reverseEdit` (`403 reverse_edit_disabled`) and an active link (`409 not_active`), and each value its own option (§5). **Expiry** follows the rule of regular shares — it can only be extended (`400`) — except that any link may be made indefinite (`reverseNoExpiry`) and one with no expiry may be given one. **Views** may be raised or lowered, never below the views already used (`400`, with `used`). The password and the note are made in the user's browser from the link's key (§3), which the session's KEK opens: neither is sent in plain text, but the server, which holds the keys that open the link's key, can read the note and test guesses at the password (not end-to-end, like the uploads). A change that **weakens** the link — its password removed or changed (not added where it had none), its CAPTCHA turned off, no expiry, unlimited views, or `accept` gaining files, links or credentials (each a new way for an anonymous sender to reach the user: a file of any type, a link to follow, a secret entrusted to a channel that is not end-to-end; a **note** is plain text shown inertly, less than a file carries, so adding one is not weakening, nor is removing any kind) — needs the password proof (`current`) or a passkey (`reauth`), as creating a link does (`400 reauth_required`, `403 wrong_password` / `reauth_failed`), and is refused for API keys (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing. Tightening needs no confirmation. The lock is checked before anything is written; the Drive is changed first and put back if the index then refuses (a lock in between), so the two never differ. The index and the Drive change together; the index holds the CAPTCHA the uploader's `begin` checks. The owner changing a user's link directly (Admin → Shares) may change its label, expiry and views only (`403 user_only`), and a link with no expiry only where the user's role allows it. The target folder of a link does not change |
 
 A row: `{ id, folder, label, created, expires (null: none), status, locked, priv, password: bool, note: bool,
-captcha: bool, views (null: unlimited), used, left, maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
+captcha: bool, views (null: unlimited), used, left, maxFiles, maxBytes, maxFileBytes, types, accept, files, bytes, pending }` (`status` as the share index
 has it: `active`, `revoked`, `expired`, `ended`; `pending` = received files waiting to be
 taken in, `failed` = those the browser could not take in). `GET /api/private/drive` adds
 `received` (waiting) and `receivedFailed`.
@@ -264,10 +347,10 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 
 | Method and path | Headers | Purpose |
 |---|---|---|
-| `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires (null: none), captcha, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` (`captcha`: the link has the CAPTCHA and the server has Turnstile keys). Not a view; `410` once the views are used up. The views are not shown to the uploader |
+| `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires (null: none), captcha, accept, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` (`captcha`: the link has the CAPTCHA and the server has Turnstile keys; `accept`: what it takes now — what it accepts that its user's role allows). Not a view; `410` once the views are used up, or when the role allows nothing it accepts. The views are not shown to the uploader |
 | `POST …/human` | `X-Secbin-Turnstile` (action `reverse-upload`) | a CAPTCHA grant for this link: `{ grant, expires }` (10 minutes, bound to the uploader's network; `{ grant: null }` when the link needs none). Needs no link proof. A link whose views are used up (or that ended) answers `410` before any CAPTCHA check, and gets no grant |
-| `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Human` (a grant) or `X-Secbin-Turnstile` (a token), when the link has the CAPTCHA | a session: `{ grant, expires }` — one view (§5): with its views used up, `410` before the CAPTCHA and the password are looked at. The CAPTCHA comes before the password: without it no guess is answered (`403 captcha_required`). A grant starts one session, whatever the answer (a wrong password spends it too). The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
-| `POST …/files` | `X-Reverse-Grant`; JSON `{ id, name, meta, size, wrap, types? }` | reserve one file → `201 { id, uploadToken, chunks }` (limits, capacity) |
+| `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Human` (a grant) or `X-Secbin-Turnstile` (a token), when the link has the CAPTCHA; an optional JSON body `{ type: 'files' \| 'note' \| 'url' \| 'secret' }` (none: files) | a session of that kind: `{ grant, expires }` — one view (§5); a kind the link (or its user's role, now) does not take: `403 kind_not_accepted` (`kind`), before the views, the CAPTCHA and the password: with its views used up, `410` before the CAPTCHA and the password are looked at. The CAPTCHA comes before the password: without it no guess is answered (`403 captcha_required`). A grant starts one session, whatever the answer (a wrong password spends it too). The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
+| `POST …/files` | `X-Reverse-Grant`; JSON `{ id, name, meta, size, wrap, types? }` | reserve one file → `201 { id, uploadToken, chunks }` (limits, capacity; `types` for a files session only). The session's kind must still be one the link and its user's role take (`403 kind_not_accepted`); a note, link or credential session reserves one item (`409 one_item`) of at most its kind's size (`413 item_too_large`) |
 | `PUT …/files/<nodeId>/chunk/<i>` | `X-Upload-Token`; `application/octet-stream` | chunk `i`, exact size |
 | `POST …/files/<nodeId>/finalize` | `X-Reverse-Grant`, `X-Upload-Token` | `{ ok }` (only the session that reserved the file: else `403 bad_grant`) |
 | `DELETE …/files/<nodeId>` | `X-Reverse-Grant`, `X-Upload-Token` | cancel an unfinished upload (its reservation is given back; only the session that reserved it) |
@@ -289,7 +372,9 @@ checks from this network within 10 minutes, on `human` or a `begin` with a token
 counts as an invalid request), `429 blocked`.
 
 **Quotas.** The user's role quotas of kind `receive-upload` and `receive` count each upload
-session through the user's links, for the user (never the uploader): at `begin`, before the
+session through the user's links, whatever it sends, and one kind per kind of send counts it too:
+`receive-file` (a session that sends files), `receive-note`, `receive-url`, `receive-secret` —
+for the user (never the uploader): at `begin`, before the
 password is checked. A session that does not start (wrong password, busy, paused) or that ends
 having sent no file — `done`, or lapsing — is given back; one that sent a file stays counted. A
 new link counts under `receive-link` and `receive` (given back when its creation does not
@@ -328,7 +413,8 @@ many files arrive.
 ## 8. UI
 
 - **Drive → Receive…** (toolbar; the selected folder, else the open one): a dialog with the
-  options of §5 — "Accept files for", "No expiry" (shown where the role allows it), "Views" with
+  options of §5 — "What senders can send" (a box per kind the role allows, files ticked; each with
+  what it means), "Accept files for", "No expiry" (shown where the role allows it), "Views" with
   ∞ (unlimited, pre-set where the role allows it), the password box (as `reversePassword` says:
   a choice pre-set from its default, ticked and disabled, or hidden) —, "Require CAPTCHA to send files" (as the role says: a choice, ticked and disabled,
   or hidden) and the account password (or, left empty, a passkey when the account has one;
@@ -338,8 +424,13 @@ many files arrive.
   renamed, placed higher up, and the ones that could not be
   added with **Review them**, a dialog to delete them or try again; then the folder shows them).
 - **Uploader page** `/r/<id>#<key>` (`public/r/index.html`, `public/js/reverse.js`): the note,
-  the limits, a password field when needed, a file picker, a folder picker, drag and drop of
-  files and folders, and progress. DOM only through `h()`; always the strict CSP (no third-party
+  the limits, a password field when needed, and one tab per kind the link accepts (an ARIA
+  tablist; none when it takes files only): **Files** — a file picker, a folder picker, drag and
+  drop of files and folders; **Note** — an optional title, the format (Plain text, Markdown, Code)
+  and the text; **Link** — the address, with its destination spelled out as the composer does;
+  **Credential** — the regular credential fields (the password and the seed masked, with Show),
+  under the warning that the recipient's server can decrypt it; and progress. The heading and the
+  page title name what can be sent ("Send a note or files"). DOM only through `h()`; always the strict CSP (no third-party
   script, whatever the server's Turnstile keys), never cached by the service worker.
 - **A link with the CAPTCHA:** the uploader page takes the key out of the address bar, removes
   the tab's Drive keys, seals the link's key alone for this tab under a random page key held in
@@ -364,6 +455,29 @@ many files arrive.
   dialog shows the form; saving closes it). Admin → Shares changes a Receive link's views and
   expiry (or none) only.
 - Empty folders in an upload are not sent (only files are received; their paths make the folders).
+- My shares' and the Drive's **Edit** shows "What senders can send" too; a kind the role no longer
+  allows can only be turned off. Adding files, links or credentials shows the account password
+  field (the step-up), adding a note does not.
+- **The Drive** lists a received note, link or credential with its icon and label ("Note",
+  "Link", "Credential"); its name opens it in its viewer (§3.1). Rename, move, delete and Share…
+  work as for files. **Download** saves text: a note as `.md` (Markdown) or `.txt`, a link as
+  `.txt` holding the URL (never a `.url` Internet Shortcut: the shell follows a shortcut's target,
+  and a link may name any scheme), a credential as a plain-text export that says at its top what
+  it holds — after a confirmation. A folder's ZIP holds notes and links as stored (`.md` /
+  `.txt`) and leaves credentials out (the page says how many). An item larger than its kind's
+  cap is never shown in a viewer (Download only).
+  **Share…** carries them as what they are: the Drive share's manifest marks each entry with its
+  kind (`item: { kind, fmt? }`, docs/DRIVE.md §7) and the recipient's page opens it in the same
+  viewers (the sender's URL rules unknown there, as for a regular link share); the user's browser
+  shares a link or a credential only where the account may share links or credentials (`url`,
+  `secret`, `text`: the server cannot see what an item is). The server records on the Drive share
+  what the sender's role allowed when it was made (`kinds: { note, url, secret }`, returned by
+  `open`), and the recipient's page opens an entry as a note, link or credential only where that
+  allows it (otherwise the entry is a plain file there: Download only, no Open, no card), and
+  never past its kind's size. A credential's Download there asks first, as in the Drive; **ZIPs
+  never include credentials** (a Drive folder's, a Drive share's "Download all" or folder): each
+  leaves in plain text only on its own, after its confirmation, and the page says how many were
+  left out.
 
 ## 9. Links of the previous release
 

@@ -1,7 +1,8 @@
 // quota-kinds.test.js — what each role quota kind counts (public/js/
 // quotakinds.js) in workerd: every action is counted by exactly the kinds that
 // cover it (all outgoing shares, and each type; the Drive's uploads; Receive's
-// new links and upload sessions, counted for the link's user), the API-only
+// new links and upload sessions of every kind — files, notes, links and
+// credentials, with a kind each —, counted for the link's user), the API-only
 // channel, the public account's anonymous subjects and restricted kinds, the
 // refunds (refused after counting, a Drive upload that never completes, a
 // Receive session that sends nothing), the uploader's neutral 429, the
@@ -11,7 +12,7 @@ import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { owner, makeUser, fetchJson, createNote, freshIp, proofFor, USER_PW } from './helpers.js';
 import { enableDrive, createFile, uploadFile, del, putChunk, drive } from './drive-helpers.js';
-import { receiver, newReverse, begin, grantOf, send, rv, reserve, driveOf, dirStub, takeInAny, received } from './reverse-helpers.js';
+import { receiver, newReverse, begin, grantOf, send, rv, reserve, driveOf, dirStub, takeInAny, received, itemSession } from './reverse-helpers.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { buildSecret } from '../public/js/sharetypes.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
@@ -24,7 +25,8 @@ beforeAll(async () => { oc = await owner(); });
 afterEach(() => { vi.useRealTimers(); invalidateGuardCaches(); });
 
 // Every kind, and which kinds each action must count (and no other).
-const KINDS = ['all', 'text', 'note', 'url', 'secret', 'files', 'file', 'drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload'];
+const KINDS = ['all', 'text', 'note', 'url', 'secret', 'files', 'file', 'drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload',
+  'receive-file', 'receive-note', 'receive-url', 'receive-secret'];
 const COUNTED_BY = {
   note: ['all', 'text', 'note'],
   url: ['all', 'text', 'url'],
@@ -33,7 +35,11 @@ const COUNTED_BY = {
   drive: ['all', 'files', 'drive'],
   'drive-upload': ['drive-upload'], // and its bytes: BYTES_OF
   'receive-link': ['receive', 'receive-link'],
-  'receive-upload': ['receive', 'receive-upload'],
+  // An upload session through a Receive link: "receive", "receive-upload" (any kind) and its own kind.
+  'receive-file': ['receive', 'receive-upload', 'receive-file'],
+  'receive-note': ['receive', 'receive-upload', 'receive-note'],
+  'receive-url': ['receive', 'receive-upload', 'receive-url'],
+  'receive-secret': ['receive', 'receive-upload', 'receive-secret'],
 };
 // What an action adds to the quotas counted in bytes (the matrix's Drive upload is 10 bytes).
 const BYTES_OF = { 'drive-upload': 10 };
@@ -64,10 +70,10 @@ const done = (r, grant, ip) => rv(r.id, '/done', { headers: { 'x-reverse-grant':
 describe('every kind is counted by its actions, and only by them', () => {
   it('outgoing shares, Drive uploads and Receive each count under the kinds that cover them', async () => {
     const u = await receiver('qk-matrix');
-    await setLimits(u.id, { url: true, secret: true });
+    await setLimits(u.id, { url: true, secret: true, reverseUrl: true, reverseSecret: true });
     // Fixtures first: saving the quotas starts every count from zero.
     const f = await uploadFile(u.cookie, 'root', 10);
-    const link = await newReverse(u.cookie);
+    const link = await newReverse(u.cookie, { accept: ['files', 'note', 'url', 'secret'] });
     expect(link.res.status).toBe(201);
     expect((await setQuotas(u.id, KINDS.map((k) => q(k)))).status).toBe(200);
     expect(Object.values(await used(u.cookie)).every((n) => n === 0)).toBe(true);
@@ -80,7 +86,10 @@ describe('every kind is counted by its actions, and only by them', () => {
       drive: async () => expect((await driveShare(u.cookie, [f.id])).status).toBe(201),
       'drive-upload': async () => expect((await createFile(u.cookie, 'root', 10)).res.status).toBe(201),
       'receive-link': async () => expect((await newReverse(u.cookie)).res.status).toBe(201),
-      'receive-upload': () => uploadSession(link),
+      'receive-file': () => uploadSession(link),
+      'receive-note': () => itemSession(link, 'note', { text: '# hello', fmt: 'markdown' }, { ip: freshIp() }),
+      'receive-url': () => itemSession(link, 'url', { url: 'https://example.com/doc' }, { ip: freshIp() }),
+      'receive-secret': () => itemSession(link, 'secret', { username: 'synthetic', password: 'not-a-real-one' }, { ip: freshIp() }),
     };
     const expected = Object.fromEntries(KINDS.map((k) => [`${k}:all`, 0]));
     for (const [action, run] of Object.entries(actions)) {
@@ -89,8 +98,9 @@ describe('every kind is counted by its actions, and only by them', () => {
       expected['drive-bytes:all'] += BYTES_OF[action] ?? 0;
       expect(await used(u.cookie), action).toEqual(expected);
     }
-    // In sum: "all" counted the five outgoing shares (not the Drive upload or Receive); "receive" both Receive actions.
-    expect(expected).toMatchObject({ 'all:all': 5, 'text:all': 3, 'files:all': 2, 'drive-upload:all': 1, 'drive-bytes:all': 10, 'receive:all': 2 });
+    // In sum: "all" counted the five outgoing shares (not the Drive upload or Receive); "receive" every Receive action;
+    // "receive-upload" the four upload sessions, whatever they sent.
+    expect(expected).toMatchObject({ 'all:all': 5, 'text:all': 3, 'files:all': 2, 'drive-upload:all': 1, 'drive-bytes:all': 10, 'receive:all': 5, 'receive-upload:all': 4 });
     // Markdown and code notes are notes.
     await createNote(u.cookie, { text: '# md', fmt: 'markdown' });
     await createNote(u.cookie, { text: 'x = 1', fmt: 'code' });
@@ -163,7 +173,7 @@ describe('the API-only channel', () => {
     expect((await fileInit(null, bearer)).status).toBe(429);
     expect((await fileInit(u.cookie)).status).toBe(201);
     expect(await used(u.cookie)).toEqual({ 'note:api': 1, 'file:api': 1 });
-    for (const kind of ['drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload']) {
+    for (const kind of ['drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload', 'receive-file', 'receive-note', 'receive-url', 'receive-secret']) {
       const r = await setQuotas(u.id, [q(kind, 1, 'api')]);
       expect(await errorBody(r)).toEqual({ status: 400, error: 'invalid_quota', message: `quota kind ${kind} is only ever counted in the web app: its channel must be all` });
     }
@@ -189,7 +199,7 @@ describe('the public account', () => {
     expect((await publicNote(ip, { text: 'https://example.com/', fmt: 'url' })).status).toBe(429);
     expect((await publicNote(freshIp())).status).toBe(201); // another network has its own count
     // No Drive, no Receive: the public list refuses those kinds (and Drive shares), in the API and in an import.
-    for (const kind of ['drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload']) {
+    for (const kind of ['drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload', 'receive-file', 'receive-note', 'receive-url', 'receive-secret']) {
       const r = await setQuotas(PUBLIC_ID, [q(kind)]);
       expect(r.status).toBe(400);
       expect((await r.json()).message).toMatch(/^the public account has no Drive or Receive/);

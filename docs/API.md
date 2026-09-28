@@ -173,13 +173,15 @@ reached: 10 notes per 1d via the API.", quota: { channel, kind, n, unit, max } }
 credentials), `note` (plain text, Markdown or code), `url`, `secret`, `files` (file and Drive
 shares), `file`, `drive`; the Drive: `drive-upload` (each file uploaded), `drive-bytes` (the
 bytes uploaded: `max` and the count are bytes, and the message names a size, e.g. "Quota
-reached: 1.0 GB uploaded to the Drive per 1d."); Receive: `receive`
-(both below), `receive-link` (a new reverse share), `receive-upload` (an upload session that
-sends files through one of your links). A key only ever meets the outgoing kinds (the Drive and
-Receive are for browser sessions). The message's words for each kind: outgoing shares; notes,
-links and credentials; notes; links; credentials; file and Drive shares; file shares; Drive
-shares; files uploaded to the Drive; uploaded to the Drive (after the size); Receive links and
-uploads received; new Receive links; uploads received.
+reached: 1.0 GB uploaded to the Drive per 1d."); Receive: `receive` (all below),
+`receive-link` (a new reverse share), `receive-upload` (an upload session through one of your
+links, whatever it sends), and by what a session sends: `receive-file` (files),
+`receive-note`, `receive-url`, `receive-secret`. A key only ever meets the outgoing kinds (the
+Drive and Receive are for browser sessions). The message's words for each kind: outgoing
+shares; notes, links and credentials; notes; links; credentials; file and Drive shares; file
+shares; Drive shares; files uploaded to the Drive; uploaded to the Drive (after the size);
+Receive links and uploads received; new Receive links; uploads received; uploads with files
+received; notes received; links received; credentials received.
 
 The role's file rules (file types, folder depth) on the Drive's routes, for browser sessions:
 
@@ -544,7 +546,7 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok, ch }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth?, captcha? }` → `201 { id, deletetoken, expires, captcha }` (`captcha` as above) |
-| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, views?, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; below) — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above); counted by the quotas of kind `receive-link` and `receive` (`429 quota_exceeded`; given back when the creation does not complete) |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, views?, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, accept?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha, accept }` (`expire: "never"`: no expiry, `expires: null`; below) — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above); counted by the quotas of kind `receive-link` and `receive` (`429 quota_exceeded`; given back when the creation does not complete) |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
 | `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
 | `POST /api/private/drive/received/:id` | `{ parent, name, meta, dek, ks, mek, types? }` → `{ ok }` — a received file re-sealed into the Drive under the user's current KEK; held to the role's Drive rules as an upload (`types` with a type policy; `403 file_type_not_allowed`, `403 folder_too_deep`) |
@@ -555,7 +557,9 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 `name`, `meta` and `dek` are sealed in the browser under the user's KEK (docs/DRIVE.md §3). The
 Drive is not end-to-end encrypted: the server derives every KEK, so it can open them. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
-then also returns `refs: [{ chunks, size }]`), and its chunks are read with
+then also returns `refs: [{ chunks, size }]` and `kinds: { note, url, secret }`, what the
+sender's role allowed it to share as notes, links and credentials when it was made: the
+recipient's page shows an entry as one only where that is `true`), and its chunks are read with
 `GET /api/file/:id/chunk/:ref/:i` and the download grant.
 
 Reverse shares ("Receive" links) are listed, changed and revoked with the share routes above
@@ -564,7 +568,10 @@ Reverse shares ("Receive" links) are listed, changed and revoked with the share 
 and `views` (1–100 000, or `null` / absent: unlimited, where `reverseAllowUnlimitedViews`
 allows it; at most `reverseMaxViews`) limits the upload sessions; `expire` is held to
 `reverseMaxExpireSec` (not the regular `maxExpireSec`), and a password is required or refused as
-`reversePassword` says (`403 password_required_by_role` / `password_disabled`). The response's
+`reversePassword` says (`403 password_required_by_role` / `password_disabled`). `accept` says
+what the link takes — a non-empty list of `files`, `note`, `url`, `secret` (absent: `["files"]`),
+each allowed by the role's `reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret`
+(`403 receive_kind_disabled`, with `kinds`). The response's
 `expires` is `null` for a link with no expiry.
 
 `PATCH /api/private/shares/:id` of a Receive link takes, besides `label`, and only where the
@@ -576,13 +583,14 @@ Admin → Roles apply on top):
 | `expires` | a time (unix seconds, within 365 days and `reverseMaxExpireSec`), or `null`: no expiry (`reverseNoExpiry`, else `403 no_expiry_disabled`). As for other shares an expiry can only be extended (`400`); a link with none can be given one |
 | `views` | the new total of views (a view: one upload session granted), or `null`: unlimited. It may be raised or lowered, never below the views already used (`400`, with `used`) |
 | `maxFiles`, `maxBytes`, `maxFileBytes`, `types` | the limits, as on create (`maxBytes` at most `reverseMaxBytes`; `null` is that limit, or none) |
+| `accept` | what it takes: a non-empty list of `files`, `note`, `url`, `secret`. Each kind it adds must be allowed by the role (for an API key, by the API limits too: `403 receive_kind_disabled`); a kind it already has may stay. Adding `files`, `url` or `secret` weakens it (below); adding `note`, or removing any, does not |
 | `captcha` | `true` / `false`, within `reverseCaptcha` (`403 captcha_required_by_role` / `captcha_disabled`) |
 | `password` | `{ salt, t, ph }` made in the browser from the link's key (docs/REVERSE.md §3), or `null`: none — within `reversePassword`. The password is not sent; the server, which holds the keys that open the link's key, can test guesses at it |
 | `note` | `{ iv, ct }` sealed in the browser with the link's key, or `null`: none. Not end-to-end: the server can open it, as it can the link's uploads |
 | `current` / `reauth` | the confirmation a weakening change needs (below) |
 
 A change that **weakens** a link — its password removed or changed, its CAPTCHA turned off, no
-expiry, unlimited views — needs what creating one needs: the password proof (`current`) or a
+expiry, unlimited views, files, links or credentials it did not accept — needs what creating one needs: the password proof (`current`) or a
 passkey (`reauth`) in the same body (`400 reauth_required`, `403 wrong_password` /
 `reauth_failed`, counted as failed confirmations), and is refused for an API key even with
 `manage` (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing.
@@ -590,7 +598,7 @@ Tightening needs no confirmation and works with an API key: adding a password to
 none, turning the CAPTCHA on, an expiry (extended within the role, or given to a link with none),
 fewer views or more within the role's limit, tighter file limits, the label.
 
-→ `{ ok, expires, views, left, used }` (`expires` `null`: none). A revoked or ended link can only
+→ `{ ok, expires, views, left, used, accept }` (`expires` `null`: none). A revoked or ended link can only
 be relabelled (`409 not_active`); a locked one not at all (`423`). The owner changing another
 user's link directly (Admin → Shares) may change its label, expiry and views only (`403
 user_only` otherwise), and a link with no expiry only where that user's role allows it. The

@@ -4,6 +4,10 @@
 // exactly like a Drive file, and end the session. Everything that describes a
 // file — its path, type, time and key — leaves this browser only sealed to the
 // share's public key, which is in the link's #fragment and never sent.
+// A note, a link or a credential (public/js/receivekinds.js) is sent the same
+// way, as one item of its own session: its content encrypted as the file's
+// chunks, its kind inside the sealed metadata. The session declares its kind
+// to the server (for the link's accepted kinds, the role and the quotas).
 //
 // Every request goes through api.js (`reverseApi`, /api/reverse/<id>/…). The
 // uploader is anonymous: those routes read no session, so api.js sends no CSRF
@@ -17,6 +21,7 @@ import { randomBytes, utf8, b64urlFromBytes } from './bytes.js';
 import { CHUNK, encryptChunk, importFileKey, checkPath } from './files.js';
 import { detectMime } from './mime.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
+import { encodeItem, DEFAULT_ACCEPT, KIND_LABELS } from './receivekinds.js';
 
 const ID_RE = /^r[A-Za-z0-9_-]{22}$/;
 const MAX_SEGMENT_BYTES = 255;
@@ -81,6 +86,28 @@ export function checkFiles(entries, limits = {}) {
 }
 
 /**
+ * About how much the sealed name, metadata and wrap of one received item add
+ * to the link's bytes (docs/REVERSE.md §5: "about 2.5 KB"), for the checks
+ * before sending (the server counts exactly).
+ */
+export const ITEM_OVERHEAD = 2600;
+
+/**
+ * Check a note, link or credential (`kind`, the form's values) against the
+ * link's limits → { ok: true, bytes, meta, type } (encoded, ready to send) or
+ * { ok: false, error }. The server checks again.
+ */
+export function checkItem(kind, values, limits = {}) {
+  let enc;
+  try { enc = encodeItem(kind, values); } catch (e) { return { ok: false, error: e.message }; }
+  if (limits.filesLeft !== null && limits.filesLeft !== undefined && limits.filesLeft < 1) return { ok: false, error: 'This link does not accept anything more.' };
+  if (limits.bytesLeft !== null && limits.bytesLeft !== undefined && enc.bytes.length + ITEM_OVERHEAD > limits.bytesLeft) {
+    return { ok: false, error: `This ${KIND_LABELS[kind].toLowerCase()} is too large for what this link has left (${limits.bytesLeft} bytes).` };
+  }
+  return { ok: true, ...enc };
+}
+
+/**
  * Open the link → a ReverseUpload. Throws LinkError (bad link), or ApiError
  * (410 gone, 423 locked, 429 blocked…).
  */
@@ -108,27 +135,34 @@ export class ReverseUpload {
 
   get limits() { return this.head.limits || {}; }
   get needsPassword() { return !!this.head.password; }
+  /** What the link takes now (files, note, url, secret); files only from a server before these kinds. */
+  get accept() { return Array.isArray(this.head.accept) && this.head.accept.length ? this.head.accept : [...DEFAULT_ACCEPT]; }
 
   /**
    * Start the session: the password proof (when the link has a password) and
    * the CAPTCHA grant from the check page (`humanGrant`, when the link has the
    * CAPTCHA; each grant starts one session) or a Turnstile token. A wrong
-   * password rejects with ApiError code 'bad_password'.
+   * password rejects with ApiError code 'bad_password'. `type`: what the
+   * session sends (files, note, url, secret), declared to the server.
    */
-  async begin({ password = '', turnstile = null, humanGrant = null } = {}) {
+  async begin({ password = '', turnstile = null, humanGrant = null, type = 'files' } = {}) {
     let keyProof = null;
     if (this.head.password) {
       if (!password) throw new ApiError('Enter the password for this link.', 401, 'password_required');
       keyProof = await passwordProof(password, this.head.password.salt, this.head.password.t, this.pub);
     }
-    const r = await this.api.begin(this.id, { linkProof: this.linkProof, keyProof, turnstile, humanGrant });
+    const r = await this.api.begin(this.id, { linkProof: this.linkProof, keyProof, turnstile, humanGrant, type });
     if (typeof r.grant !== 'string') throw new ApiError('Malformed response from the server.', 502, 'malformed');
     this.grant = r.grant;
     return r;
   }
 
-  /** Encrypt and upload one file (`path` relative, `file` a File/Blob) → its node id. */
-  async uploadOne({ path, file, type }, { onProgress, signal } = {}) {
+  /**
+   * Encrypt and upload one file (`path` relative, `file` a File/Blob) → its
+   * node id. `item`: the kind marker of a note, link or credential (sent as
+   * one item of its own session; no file-type declaration).
+   */
+  async uploadOne({ path, file, type, item = null }, { onProgress, signal } = {}) {
     if (!this.grant) throw new Error('Start the upload first.');
     const clean = cleanPath(path);
     const size = file.size;
@@ -136,10 +170,10 @@ export class ReverseUpload {
     const mime = type || detectMime({ name: clean, platformType: file.type, head });
     const node = newNodeId();
     const fk = randomBytes(32);
-    const sealedParts = await sealUpload(this.pub, this.id, node, fk, { path: clean, type: mime, mtime: file.lastModified || 0, size });
+    const sealedParts = await sealUpload(this.pub, this.id, node, fk, { path: clean, type: mime, mtime: file.lastModified || 0, size, item });
     const body = { id: node, ...sealedParts, size };
     const t = this.limits.types;
-    if (t && (t.mode === 'allow' || t.mode === 'block')) body.types = declare([{ path: clean, type: mime }]).types;
+    if (!item && t && (t.mode === 'allow' || t.mode === 'block')) body.types = declare([{ path: clean, type: mime }]).types;
     const init = await this.api.createFile(this.id, this.grant, body, signal);
     const n = Math.ceil(size / CHUNK);
     if (init.id !== node || init.chunks !== n || typeof init.uploadToken !== 'string') throw new ApiError('Malformed response from the server.', 502, 'malformed');
@@ -196,6 +230,19 @@ export class ReverseUpload {
     }
     if (onProgress) onProgress(total, total);
     return { files: files.length, bytes: total };
+  }
+
+  /**
+   * Encrypt and send a note, link or credential (`checked`: checkItem's
+   * result) as the one item of this session (begin({ type: kind }) first) →
+   * { files: 1, bytes }. Its sealed path is its kind ("Note"); the user's
+   * Drive names it from its sealed metadata: a note's title, else "Note from
+   * <date>" and so on (receivekinds.js itemName).
+   */
+  async sendItem(kind, checked, { onProgress, signal } = {}) {
+    const file = new Blob([checked.bytes], { type: checked.type });
+    await this.uploadOne({ path: KIND_LABELS[kind], file, type: checked.type, item: checked.meta }, { onProgress, signal });
+    return { files: 1, bytes: checked.bytes.length };
   }
 
   /** End the session (the user's log records how many files and bytes arrived). */

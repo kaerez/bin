@@ -16,7 +16,12 @@ anything in this file is a coordinated change: update it first.
 - Deleting a drive item ends every share that references it (recipients get "gone").
 - **Reverse shares** ("Receive…", [`REVERSE.md`](./REVERSE.md)): anonymous uploads land in
   a Drive folder the user chooses, encrypted to the link's key until the user's browser takes
-  them in.
+  them in. Besides files, a link may accept a **note**, a **link** or a **credential**
+  (REVERSE.md §3.1): each becomes a Drive item of its own kind — a file whose content is the
+  note's text, the URL or the credential's JSON, with its kind (`kind`, and a note's `fmt`) in its
+  sealed metadata — counted in the capacity like a file, listed with its kind's icon and label,
+  and opened with the regular shares' viewers (§8). Like every Drive item it is not end-to-end
+  (§2).
 - Terminology: the person who owns a drive is the **user**; "owner" means the admin.
 
 ## 2. What the server sees, and what it can open
@@ -466,7 +471,8 @@ row or an escrow wrap) as `pending` (`drive_migration`).
 - Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
   `reverseMaxExpireSec`, `reverseNoExpiry`, `reverseMaxViews`, `reverseAllowUnlimitedViews`,
   `reversePassword`, `reversePasswordDefault`, `reverseEdit`, `reverseCaptcha`,
-  `reverseCaptchaDefault`): [`REVERSE.md`](./REVERSE.md) §5. The reverse-share
+  `reverseCaptchaDefault`, and what links may accept — `reverseFiles`, `reverseText`,
+  `reverseUrl`, `reverseSecret`): [`REVERSE.md`](./REVERSE.md) §5. The reverse-share
   CAPTCHA is shown in the role editor only while the role has the Drive and reverse shares.
 - New keys join the Default role (a Directory migration materialises them) and appear in the
   role editors under a **Drive** section.
@@ -521,8 +527,18 @@ drive data stays) and appear in My shares and Admin → Shares with `kind = 'dri
   touches `d/` objects. The Directory `shares` row has `kind = 'drive'`.
 - The share's encrypted paste (the manifest, sealed with the share's own link key and optional
   password, exactly as for file shares) is **manifest v3**:
-  `{ v: 3, kind: 'refs', entries: [{ path, size, type, mtime, ref, fk }], dirs: [...], view }` where
-  `ref` indexes `refs` and `fk` is that file's key (base64url). Folders are flattened to paths
+  `{ v: 3, kind: 'refs', entries: [{ path, size, type, mtime, ref, fk, item? }], dirs: [...], view }` where
+  `ref` indexes `refs` and `fk` is that file's key (base64url). `item` marks a note, link or
+  credential received through a Receive link (`{ kind: 'note', fmt }`, `{ kind: 'url' }`,
+  `{ kind: 'secret' }`; checked strictly, anything else refuses the manifest): the recipient's
+  page shows it with Open (the regular viewers: `public/js/typedview.js`) and Download (as text, a
+  credential as a plain-text export, after a confirmation; ZIPs leave credentials out). The
+  sender's browser shares a link or a credential only where the account may share links or
+  credentials (the role's `url` / `secret` / `text`; the server cannot see what an item is), and
+  the server records on the share what the sender's role allowed when it was made (`kinds`,
+  returned by `open`): the recipient's page shows an entry as a note, link or credential only
+  where that allows it (otherwise a plain file: Download only, no Open, no card), and never past
+  its kind's size. Folders are flattened to paths
   (`dirs` lists every folder, so empty ones survive; duplicate names get " (2)"…). `view` is the
   sender's viewer-policy snapshot as in v2 (`{ rules, maxBytes }` or null; optional on read).
   `public/js/refsmanifest.js` builds and validates it. Each `fk` is the file's DEK, opened in the
@@ -546,7 +562,11 @@ drive data stays) and appear in My shares and Admin → Shares with `kind = 'dri
     a folder's sub-folders; selecting a folder shows its content in the right pane;
   - right pane: the folder's files and folders (name, size, modified), with upload (files and
     folders, drag and drop), new folder, rename, move, delete, download, and **Share…** (the
-    composer's share options), and each item's shares (with revoke);
+    composer's share options), and each item's shares (with revoke); a received note, link or
+    credential has its kind's icon and label ("Note", "Link", "Credential"), its name opens it in
+    a dialog with the regular viewer (a note rendered with Raw and Copy; a link spelled out,
+    opening only through a confirmed click and only when the user's URL rules allow it; a
+    credential masked, with Reveal and Copy), and Download saves it as text (REVERSE.md §8);
   - capacity bar (used of total);
   - a notice when the user's personal kit is out of date (§3.1, `#drive-kit-notice`, with a link
     to Account; not while the owner acts as the user);

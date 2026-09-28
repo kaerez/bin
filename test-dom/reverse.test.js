@@ -670,7 +670,7 @@ describe('taking received files in: the role\'s Drive rules apply too', () => {
     // The review says why.
     $('#drive-received-review').click();
     await until(() => $('#drive-failed-table'));
-    expect(document.querySelector('#drive-failed-table tbody tr').children[3].textContent).toBe('your account does not allow this file type in the Drive');
+    expect(document.querySelector('#drive-failed-table tbody tr').children[3].textContent).toBe('its file type is one this link does not accept, or your account does not allow in the Drive');
   }, 60000);
 
   it('the server refusing the type (a policy the page did not know of) fails the item as "type", and the take-in goes on', async () => {

@@ -81,7 +81,7 @@ const NO_EXPIRY = 'Receive: links with no expiry allowed (they take files until 
 const MAX_VIEWS = 'Receive: most views per link (a view: one visit that starts sending files)';
 const UNLIMITED = 'Receive: unlimited views allowed';
 const MAX_EXPIRE = 'Receive: longest expiry of a link';
-const EDIT = 'Receive: users may change a link after making it (expiry, views, limits, CAPTCHA, password, note)';
+const EDIT = 'Receive: users may change a link after making it (expiry, views, limits, what it accepts, CAPTCHA, password, note)';
 
 beforeAll(async () => {
   globalThis.fetch = vi.fn(adminFetch);
