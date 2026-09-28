@@ -870,6 +870,9 @@ async function createShare(request, env, dir, a) {
     types: body.types, depth: body.depth, deletable, captcha: body.captcha,
   });
   if (!auth.ok) return fromDir(auth);
+  // What the sender's role lets it share as a note, a link or a credential (the server cannot see
+  // what an item is: the recipient's page shows an entry as one only where this allows it).
+  const kinds = await dir.shareKindsOf(uid, a.channel);
   const deleteToken = genDeleteToken();
   let id;
   let r;
@@ -878,7 +881,7 @@ async function createShare(request, env, dir, a) {
       id = genId('f');
       r = await fileStub(env, id).initRefs({
         id, dth: await hashToken(deleteToken), refs: refsR.refs, views, expire, ttl, deletable, paste: clean, acc: clean.acc,
-        hc: auth.captcha === true,
+        hc: auth.captcha === true, kinds,
       });
       if (r.status !== 'exists') break;
       if (attempt >= 4) throw new Error('id allocation failed');

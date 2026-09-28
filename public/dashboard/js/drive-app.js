@@ -964,8 +964,12 @@ function mountApp(mount, client, deps) {
   function downloadSel() {
     const [it] = selectedItems();
     if (!it) return;
-    if (it.kind === 'dir') transfer(`Preparing ${it.name}.zip`, (progress, signal) => client.downloadFolder(it.id, { onProgress: progress, signal }));
-    else if (it.item) downloadItem(it);
+    if (it.kind === 'dir') {
+      // Credentials never go into a ZIP (each leaves in plain text only on its own, after a confirmation).
+      let left = 0;
+      transfer(`Preparing ${it.name}.zip`, async (progress, signal) => { left = (await client.downloadFolder(it.id, { onProgress: progress, signal }))?.left ?? 0; })
+        .then((ok) => { if (ok && left) showMsg(msg, `${left} credential${left === 1 ? ' was' : 's were'} left out of the ZIP: download ${left === 1 ? 'it' : 'each'} on ${left === 1 ? 'its' : 'their'} own (it asks first, as it leaves in plain text).`, false); });
+    } else if (it.item) downloadItem(it);
     else transfer(`Downloading ${it.name}`, async (progress, signal) => (await client.download(it.id, { onProgress: progress, signal })).save());
   }
 
@@ -1446,7 +1450,7 @@ function mountApp(mount, client, deps) {
     // What it really is breaks the link's rules (the sender's browser declared something else).
     type: 'its real file type is one this link does not accept',
     size: 'it is larger than this link’s largest file',
-    kind: 'it is a kind this link does not accept (a file, note, link or credential)',
+    kind: 'it is not what its sender declared, or a kind this link (or your role, now) does not accept (a file, note, link or credential)',
   };
 
   /** The received files that could not be added: link, size, time, why; delete or try again. */

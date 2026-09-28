@@ -24,7 +24,7 @@ import { $, showView, toast, copyText, pill, countdownSwitch } from './ui.js';
 import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError, nameEl } from './common.js';
 import { ShareTypeError } from './sharetypes.js';
 import { linkCard, secretCard, stopTotp, noteKind, drawNote } from './typedview.js';
-import { itemExport, KIND_LABELS } from './receivekinds.js';
+import { itemExport, KIND_LABELS, KIND_PLURALS, ITEM_MAX_BYTES, SECRET_EXPORT_WARNING } from './receivekinds.js';
 import { saveText } from './downloads.js';
 import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
 import { validateRefsManifest } from './refsmanifest.js';
@@ -231,7 +231,7 @@ async function doOpen({ id, kind, head, fragment, password }) {
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
   if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
-  renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires, { id, grant: res.grant, serverNow: res.now });
+  renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires, { id, grant: res.grant, serverNow: res.now, kinds: res.kinds });
   $('#files-delete-row').hidden = !canDeleteNow(paste.meta);
   wireDeleteNow($('#files-delete'), paste.meta, del, $('#files-msg'));
 }
@@ -385,7 +385,7 @@ function cleanManifest(manifest) {
 
 const renamedNote = (e) => (e.renamed ? h('span.tree-sub.mono.renamed-note', { text: 'renamed: hidden characters removed' }) : null);
 
-function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, grant, serverNow } = {}) {
+function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, grant, serverNow, kinds = null } = {}) {
 
   showView('files');
   const pills = clear($('#files-pills'));
@@ -493,7 +493,10 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
   $('#preview-close').onclick = closePreview;
 
   // A note, link or credential a Drive share carries (received through a "Receive" link): its
-  // viewer, and a download as text (a credential as a plain-text export that says so).
+  // viewer, and a download as text (a credential as a plain-text export that says so, after a
+  // confirmation). Only where the server says the sender's role allowed sharing that kind when the
+  // share was made (`kinds`; the `item` marker is the sender's own), and never past its kind's size.
+  const itemAllowed = (entry) => !!(kinds && kinds[entry.item.kind] === true);
   const saveItem = (entry) => run(`Downloading ${basename(entry.path)}`, entry.size, async (q) => {
     const bytes = await reader.bytes(entry, q);
     let out;
@@ -501,8 +504,23 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
     // One that does not parse is saved as it is (never rendered).
     if (out) saveText(out.filename, out.text); else await saveFile(reader, entry, () => {});
   });
+  /** A credential leaves in plain text only after a second, confirmed click. */
+  const downloadBtn = (entry, save = saveItem) => {
+    const b = h('button.btn', { type: 'button', text: 'Download' });
+    if (entry.item.kind === 'secret') {
+      b.setAttribute('aria-describedby', 'files-secret-warning');
+      armConfirm(b, 'Download in plain text?', () => save(entry));
+    } else b.addEventListener('click', () => save(entry));
+    return b;
+  };
+  const saveRaw = (entry) => run(`Downloading ${basename(entry.path)}`, entry.size, (q) => saveFile(reader, entry, q));
   const itemButtons = (entry) => {
     const what = KIND_LABELS[entry.item.kind].toLowerCase();
+    if (!itemAllowed(entry)) {
+      // Not shown as what it says it is (no Open, no card): a plain file, Download only.
+      return [h('span.tree-sub.mono', { text: `not available as a ${what}: this share may not show ${KIND_PLURALS[entry.item.kind]}` }), downloadBtn(entry, saveRaw)];
+    }
+    const tooBig = entry.size > ITEM_MAX_BYTES[entry.item.kind];
     const openBtn = h('button.btn', {
       type: 'button', text: 'Open', 'aria-label': `Open the ${what} ${basename(entry.path)}`,
       on: {
@@ -514,6 +532,13 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
           clear(previewBody);
           preview.hidden = false;
           preview.scrollIntoView({ block: 'nearest' });
+          if (tooBig) {
+            // Larger than one can be: never read or rendered here.
+            previewBody.appendChild(h('p.msg.error', { text: `This ${what} is larger than one can be, so it is not shown.` }));
+            $('#preview-download').hidden = entry.item.kind === 'secret'; // its own Download asks first
+            $('#preview-download').onclick = entry.item.kind === 'secret' ? null : () => saveItem(entry);
+            return undefined;
+          }
           return run(`Loading ${basename(entry.path)}`, entry.size, async (p) => {
             const text = new TextDecoder('utf-8', { fatal: false }).decode(await reader.bytes(entry, p));
             try {
@@ -523,13 +548,19 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
               clear(previewBody).appendChild(h('p.msg.error', { text: e instanceof ShareTypeError ? `${e.message} Download it to see what it holds.` : 'This item cannot be shown.' }));
             }
             previewCleanup = () => { stopTotp(); clear(previewBody); };
-            $('#preview-download').onclick = () => saveItem(entry);
+            $('#preview-download').onclick = null;
+            $('#preview-download').hidden = entry.item.kind === 'secret'; // its own Download asks first
+            if (entry.item.kind !== 'secret') $('#preview-download').onclick = () => saveItem(entry);
           }, previewBar);
         },
       },
     });
-    return [openBtn, h('button.btn', { type: 'button', text: 'Download', on: { click: () => saveItem(entry) } })];
+    return [openBtn, downloadBtn(entry)];
   };
+  // Credentials never go into a ZIP: each leaves in plain text only on its own, after its confirmation.
+  const inZip = (e) => !(e.item && e.item.kind === 'secret');
+  const secrets = manifest.entries.filter((e) => !e.dir && e.item && e.item.kind === 'secret').length;
+  const zipNote = secrets ? h('p.mono.muted', { id: 'files-secret-warning', text: `${SECRET_EXPORT_WARNING} Credentials are left out of ZIP downloads: download each on its own.` }) : null;
   const fileButtons = (entry) => {
     if (entry.item) return itemButtons(entry);
     const out = [h('button.btn', { type: 'button', text: 'Download', on: { click: () => run(`Downloading ${basename(entry.path)}`, entry.size, (p) => saveFile(reader, entry, p)) } })];
@@ -558,6 +589,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
                 clear(previewBody).appendChild(h('p.msg.error', { text: e.message || 'This file cannot be previewed.' }));
               }
               previewBar.hide();
+              $('#preview-download').hidden = false;
               $('#preview-download').onclick = () => run(`Downloading ${basename(entry.path)}`, entry.size, (q) => saveFile(reader, entry, q));
             }, previewBar);
           },
@@ -570,6 +602,8 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
 
   const tree = clear($('#files-tree'));
   const all = $('#download-all');
+  document.getElementById('files-secret-warning')?.remove();
+  if (zipNote) tree.before(zipNote);
   if (!hasDirs && files.length === 1) {
     all.hidden = true;
     const f = files[0];
@@ -579,7 +613,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
     return;
   }
   all.hidden = false;
-  all.onclick = () => run('Preparing ZIP', manifest.total, (p) => saveZip(reader, '', 'secbin-files.zip', p));
+  all.onclick = () => run('Preparing ZIP', manifest.total, (p) => saveZip(reader, '', 'secbin-files.zip', p, { keep: inZip }));
 
   const size = (node) => node.files.reduce((n, f) => n + f.size, 0) + [...node.dirs.values()].reduce((n, d) => n + size(d), 0);
   const count = (node) => node.files.length + [...node.dirs.values()].reduce((n, d) => n + count(d), 0);
@@ -593,7 +627,7 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
         h('div.tree-row', {},
           h('button.tree-name.tree-open', { type: 'button', title: `Open ${d.name}`, on: { click: () => open(d.path) } }, nameEl(d.name, { suffix: '/' })),
           h('span.tree-sub.mono', { text: `${count(d)} · ${formatBytes(size(d))}` }),
-          h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p)) } }))));
+          h('button.btn.tree-btn', { type: 'button', text: 'Download (.zip)', on: { click: () => run(`Preparing ${d.name}.zip`, size(d), (p) => saveZip(reader, d.path, `${d.name}.zip`, p, { keep: inZip })) } }))));
     }
     for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) {
       ul.appendChild(h('li.tree-file', {},

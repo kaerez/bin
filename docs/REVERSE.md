@@ -35,9 +35,16 @@ Status: the contract reverse shares are built against (task #24). It builds on t
 - The **kind of each send** (files, a note, a link or a credential), as the uploader's browser
   declares it when the session starts: the server checks it against the link and the user's role
   and counts it in the quotas, and keeps it with the session (`rsessions.kind`) until the session
-  ends. A received item itself carries no plaintext kind: a note, link or credential is stored like
-  a received file, and what it is stays inside the metadata the uploader seals to the link's key.
-  The size of an item's ciphertext is visible, as for every file.
+  ends. Each item it reserves keeps that declared kind too, sealed at rest with the item's wrap
+  (the field layer; never in plain text), until the user's browser takes it in (§3). Where the
+  owner set a quota of a kind per kind of send (`receive-note`, `receive-url`, `receive-secret`,
+  `receive-file`), the Directory keeps **counts only** — how many sessions of that kind the user
+  received in each quota window, no content, no link or sender — each count row until 400 days
+  after its window's first count (the same pruning as every quota; a window longer than that
+  starts again from zero). A received item itself carries no plaintext kind: a note, link or
+  credential is stored like a received file, and what it is stays inside the metadata the
+  uploader seals to the link's key. The size of an item's ciphertext is visible, as for every
+  file.
 - Never sent in plain text: file contents, names, types, folder structure of an upload, a received
   note's text, format and title, a received link, a received credential, the note
   to the uploader, the link key (the public key, only in the URL fragment), the password, the
@@ -124,9 +131,12 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   - **The link's rules, on what really arrived:** the uploader's browser declares a file's type
     and a send's kind to the server, and a modified one could lie. The user's browser, which
     opens the item, holds it to the link's rules as they are at take-in (the server lists them with
-    each link's key): its kind to what the link accepts (a file, or the sealed marker of a note,
-    link or credential: reason `kind`), a file's real name and type to the link's file types
-    (`type`, `filepolicy.js`), its size to the link's largest file (`size`). A mismatch is never
+    each link's key, `accept` already narrowed to what the user's role allows **now**): its kind
+    (a file, or the sealed marker of a note, link or credential) to the kind its session declared
+    (`declared`, which the server sealed with the item) and to what the link accepts (reason
+    `kind`), a note, link or credential's size to its kind's cap (`size`), a file's real name and
+    type to the link's file types (`type`, `filepolicy.js`), its size to the link's largest file
+    (`size`). A mismatch is never
     added to the Drive: it fails as below. (A link narrowed while items wait fails those of the
     kinds it no longer accepts; widened again, **Try again** takes them in.)
   - **Failures:** an item that cannot be taken in (it does not open with the link's key, its name
@@ -144,8 +154,11 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   and `secret` (the types of regular shares: a note in plain text, Markdown or code; one link; a
   credential). Links made before this option have none stored and accept `files` only.
 - **A send is one upload session of one kind.** The uploader's page offers the accepted kinds as
-  tabs; `begin` declares the kind (`{ type }`; none: files, as every client before). A note, link
-  or credential session reserves exactly **one** item, whose content is its plaintext:
+  tabs; `begin` declares the kind (`{ type }`; none: files, as every client before). The server
+  holds a note, link or credential session to exactly **one** item of its kind's size (below);
+  what the item really is the server cannot see, so the user's browser holds it to the declared
+  kind and the size at take-in (§3) — a modified uploader that declares one kind and sends
+  another, or a larger item, gets it refused there, never added. Its content is its plaintext:
   - a note: its text (UTF-8), at most 2 MiB (about what a regular note's ciphertext cap holds
     uncompressed, and what the text viewer shows);
   - a link: the normalized URL (`sharetypes.js` `parseShareUrl`, as a recipient reads one: any
@@ -441,12 +454,21 @@ many files arrive.
   work as for files. **Download** saves text: a note as `.md` (Markdown) or `.txt`, a link as
   `.txt` holding the URL (never a `.url` Internet Shortcut: the shell follows a shortcut's target,
   and a link may name any scheme), a credential as a plain-text export that says at its top what
-  it holds — after a confirmation. A folder's ZIP holds each as stored (`.md` / `.txt` / `.json`).
+  it holds — after a confirmation. A folder's ZIP holds notes and links as stored (`.md` /
+  `.txt`) and leaves credentials out (the page says how many). An item larger than its kind's
+  cap is never shown in a viewer (Download only).
   **Share…** carries them as what they are: the Drive share's manifest marks each entry with its
   kind (`item: { kind, fmt? }`, docs/DRIVE.md §7) and the recipient's page opens it in the same
   viewers (the sender's URL rules unknown there, as for a regular link share); the user's browser
   shares a link or a credential only where the account may share links or credentials (`url`,
-  `secret`, `text`: the server cannot see what an item is).
+  `secret`, `text`: the server cannot see what an item is). The server records on the Drive share
+  what the sender's role allowed when it was made (`kinds: { note, url, secret }`, returned by
+  `open`), and the recipient's page opens an entry as a note, link or credential only where that
+  allows it (otherwise the entry is a plain file there: Download only, no Open, no card), and
+  never past its kind's size. A credential's Download there asks first, as in the Drive; **ZIPs
+  never include credentials** (a Drive folder's, a Drive share's "Download all" or folder): each
+  leaves in plain text only on its own, after its confirmation, and the page says how many were
+  left out.
 
 ## 9. Links of the previous release
 

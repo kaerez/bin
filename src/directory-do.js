@@ -1673,6 +1673,34 @@ export class Directory extends DurableObject {
     return q.ok ? { ok: true, refund: q.hits } : q;
   }
 
+  /**
+   * What `uid`'s role lets it share as a note, a link or a credential now
+   * (`text`, and `url` / `secret` with it, as the composer), for `channel`:
+   * a Drive share records it, and its recipient's page shows a note, link or
+   * credential entry only where it allows (the server cannot see what an
+   * item is) → { note, url, secret }.
+   */
+  async shareKindsOf(uid, channel = 'all') {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return { note: false, url: false, secret: false };
+    const eff = this.#effective(u);
+    const L = channel === 'api' ? eff.api : eff.all;
+    return { note: L.text === true, url: L.text === true && L.url === true, secret: L.text === true && L.secret === true };
+  }
+
+  /**
+   * The kinds `uid`'s role lets Receive links accept now (reverseFiles,
+   * reverseText, reverseUrl, reverseSecret) — what the user's browser holds
+   * received items to at take-in (a role that turned reverse shares off
+   * ends its links; what they received before is still taken in by kind).
+   */
+  async receiveKindsOf(uid) {
+    const u = this.#user(uid);
+    if (!u || u.disabled || u.role === 'public') return [];
+    const L = this.#effective(u).all;
+    return RECEIVE_KINDS.filter((k) => L[KIND_OPTIONS[k]] === true);
+  }
+
   // ── public access: profile, trackers, subjects ────────────────────────────
   /** What the public composer needs (no secrets). */
   async publicProfile() {

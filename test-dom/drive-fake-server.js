@@ -256,9 +256,12 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (failed) {
         return ok({ items: page.map((n) => ({ id: n.id, rs: n.rs, label: S.reverse.find((r) => r.id === n.rs)?.label || '', size: n.size, created: n.created, failed: n.rfail, reason: n.rwhy })), more, next });
       }
-      const items = page.map((n) => ({ id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created }));
+      // `declared`: the kind the item's session declared (sealed with its wrap on the server); each
+      // link's `accept` as the user's role allows it now (S.roleKinds, as the server filters it).
+      const items = page.map((n) => ({ id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created, declared: n.declared ?? 'files' }));
+      const roleKinds = S.roleKinds || ['files', 'note', 'url', 'secret'];
       const keys = [...new Set(items.map((i) => i.rs))].map((id) => S.reverse.find((r) => r.id === id)).filter(Boolean)
-        .map((r) => ({ id: r.id, priv: r.priv, mek: r.mek ?? null, types: r.types ?? null, maxFileBytes: r.maxFileBytes ?? null, accept: r.accept ?? ['files'] }));
+        .map((r) => ({ id: r.id, priv: r.priv, mek: r.mek ?? null, types: r.types ?? null, maxFileBytes: r.maxFileBytes ?? null, accept: (r.accept ?? ['files']).filter((k) => roleKinds.includes(k)) }));
       return ok({ items, keys, more, next });
     }
     if ((m = p.match(/^\/api\/private\/drive\/received\/([^/]+)\/failed$/))) {
@@ -615,9 +618,10 @@ export async function seedTree(S, tree, parent = 'root', prefix = '', ids = new 
  * the uploader's browser would have sent it: content under a fresh file key,
  * path and metadata sealed with a metadata key, both wrapped to `pub`.
  * `bad: true` stores a wrap that does not open; `item`: a note, link or
- * credential's kind marker (sealed in its metadata). → the node id.
+ * credential's kind marker (sealed in its metadata); `declared`: the kind its
+ * session declared to the server (default: what it is). → the node id.
  */
-export async function seedReceived(S, { rid, pub, folder = 'root', path, bytes, type = 'text/plain', bad = false, item = null, created = 1700000000 }) {
+export async function seedReceived(S, { rid, pub, folder = 'root', path, bytes, type = 'text/plain', bad = false, item = null, created = 1700000000, declared = item ? item.kind : 'files' }) {
   const id = newNodeId();
   const fk = randomBytes(32);
   const n = Math.ceil(bytes.length / CHUNK);
@@ -626,7 +630,7 @@ export async function seedReceived(S, { rid, pub, folder = 'root', path, bytes, 
   const sealed = await sealUpload(pub, bad ? `r${'A'.repeat(22)}` : rid, id, fk, { path, type, mtime: 1700000000000, size: bytes.length, item });
   S.nodes.set(id, {
     id, parent: folder, kind: 'file', name: sealed.name, meta: sealed.meta, fk: { kind: 'rs', data: sealed.wrap },
-    size: bytes.length, chunks: n, state: 'ready', created, updated: created, rs: rid,
+    size: bytes.length, chunks: n, state: 'ready', created, updated: created, rs: rid, declared,
   });
   return id;
 }

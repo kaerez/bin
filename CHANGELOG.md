@@ -20,6 +20,17 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   real, decrypted name and type against the link's file types, a file's size against its largest
   file, and each item's kind against what the link accepts. A mismatch is never added to the
   Drive: it is recorded as failed (new reasons `type`, `size`, `kind`) and listed, to delete.
+  Each item is also held to the kind its session declared (the server seals that kind with the
+  item until it is taken in), a note, link or credential to its kind's size, and the link's
+  kinds to what the user's role allows at take-in, so a modified uploader cannot pass a file off
+  as a note to escape the file limits and quotas, or send a kind the role has since dropped.
+- **Drive shares of notes, links and credentials are held to the sender's role on the
+  recipient's side:** the server records what the sender's role allowed when the share was made
+  (`kinds`, returned by `open`), and the recipient's page shows an entry as a note, link or
+  credential only where that allows it (otherwise a plain file, Download only). Item viewers never
+  read or render an item larger than its kind can be. A credential's Download on a Drive share's
+  page asks first, as in the Drive, and ZIPs (Drive folders, a Drive share's "Download all" and
+  folders) leave credentials out and say how many.
 
 - **Received names are cleaned first, then checked again (ZIP slip).** The viewer checked a
   file or Drive share's paths before removing their hidden characters and never after, so a
@@ -506,6 +517,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     text (`.md` / `.txt`; a link as `.txt`, never a `.url` shortcut; a credential as a plain-text
     export after a confirmation); Share… carries them as what they are (the manifest's `item`),
     where the account may share links and credentials.
+  - The server keeps each item's declared kind sealed with it until it is taken in; the user's
+    browser fails an item whose sealed kind differs from what its session declared, that exceeds
+    its kind's cap, or that the link no longer accepts under the user's role as it is then
+    (reason `kind` / `size`). Viewers never render an item past its kind's cap. A Drive share
+    records what the sender's role allowed (`kinds`) and its recipient's page shows items as what
+    they are only where that allows (otherwise as plain files). A credential leaves in plain text only on its own, after a confirmation
+    (in the Drive and on a Drive share's page); ZIPs leave credentials out.
   - Adding files, links or credentials to what a link accepts weakens it: it needs the account
     password or a passkey, and an API key cannot do it (`403 step_up_required`, `weakens:
     ["accept"]`). Adding a note does not.

@@ -543,7 +543,9 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 `name`, `meta` and `dek` are sealed in the browser under the user's KEK (docs/DRIVE.md §3). The
 Drive is not end-to-end encrypted: the server derives every KEK, so it can open them. A Drive share is opened like a file share (`POST /api/file/:id/open`, which
-then also returns `refs: [{ chunks, size }]`), and its chunks are read with
+then also returns `refs: [{ chunks, size }]` and `kinds: { note, url, secret }`, what the
+sender's role allowed it to share as notes, links and credentials when it was made: the
+recipient's page shows an entry as one only where that is `true`), and its chunks are read with
 `GET /api/file/:id/chunk/:ref/:i` and the download grant.
 
 Reverse shares ("Receive" links) are listed, changed and revoked with the share routes above

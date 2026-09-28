@@ -170,7 +170,7 @@ try {
   await u.click('#reverse-tab-url');
   await audit(u, 'uploader: the Link tab');
   await u.fill('#reverse-link-in', LINK);
-  check('uploader: the link\'s destination is spelled out', /Destination: example\.com/.test(await u.textContent('#reverse-link-host')));
+  check('uploader: the link\'s destination is spelled out', (await u.textContent('#reverse-link-host')) === 'Destination: example.com');
   await u.click('#reverse-send');
   await sent(u);
   check('uploader: the link is sent', /^Sent the link, encrypted/.test(await u.textContent('#reverse-done')), await u.textContent('#reverse-done'));
@@ -211,6 +211,10 @@ try {
   });
   check('server: a credential is refused at send time once the role drops it', refused2 === '403 kind_not_accepted', refused2);
   await dc.close();
+  // Back on before the take-in: a kind the role no longer allows fails there too (audit RT-1; the DOM and
+  // workerd suites cover that), and the credential sent above is taken in below.
+  const back = await csrfFetch(op, '/api/private/admin/limits', 'PATCH', { scope: `role:${roleId}`, channel: 'all', patch: { reverseSecret: true } });
+  check('admin: credentials turned back on for the role', back.status === 200, JSON.stringify(back));
 
   // ── alice: the Drive takes them in; each opens in its viewer ──
   await ap.goto(`${BASE}/dashboard/drive/`);
@@ -230,7 +234,7 @@ try {
   await ap.click('.drive-dialog button:has-text("Close")');
   await openRow('url');
   await ap.waitForSelector('.drive-dialog .link-card');
-  check('viewer: the link spelled out, with Open (https, allowed by the rules)', /example\.com/.test(await ap.textContent('.drive-dialog .link-host'))
+  check('viewer: the link spelled out, with Open (https, allowed by the rules)', (await ap.textContent('.drive-dialog .link-host')) === 'example.com'
     && (await ap.locator('.drive-dialog .link-card button:has-text("Open link")').count()) === 1);
   await audit(ap, 'drive viewer: a link');
   await ap.click('.drive-dialog button:has-text("Close")');

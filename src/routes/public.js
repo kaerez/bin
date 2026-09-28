@@ -286,7 +286,10 @@ async function openFile(env, g, id, { lh, kh }, human) {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
     // `now`: the server's time, so the viewer's download-window warning does not depend on its clock.
     const out = { paste: r.paste, grant, grantExpires: r.grantExpires, now: Math.floor(Date.now() / 1000), chunks: r.chunks, padded: r.padded, viewer: policy.viewer };
-    if (r.refs) out.refs = r.refs; // a Drive share: its files' chunk counts and sizes
+    if (r.refs) {
+      out.refs = r.refs; // a Drive share: its files' chunk counts and sizes
+      out.kinds = r.kinds; // …and what its sender's role allowed it to share as notes, links, credentials
+    }
     return json(out);
   }
   if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));

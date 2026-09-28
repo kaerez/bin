@@ -15,12 +15,13 @@ import { startDrive, reverseOptions, acceptWords } from '../public/dashboard/js/
 import { reverseEditForm, reverseEditPatch, weakensLink, acceptChoice } from '../public/dashboard/js/reverse-edit.js';
 import * as drive from '../public/js/driveclient.js';
 import { setReverseStretcher, createReverseKey, linkProof, passwordGate, openUpload, fragmentOf, newReverseId } from '../public/js/reversekeys.js';
-import { clearSessionKey, clearImpersonationKeys, sealLinkKey, openName as openSealedName } from '../public/js/drivekeys.js';
+import { clearSessionKey, clearImpersonationKeys, sealLinkKey, openName as openSealedName, sealName, sealDek, newSalt } from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
-import { utf8, fromUtf8, bytesFromB64url } from '../public/js/bytes.js';
+import { utf8, fromUtf8, bytesFromB64url, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, decryptChunk, importFileKey } from '../public/js/files.js';
 import { buildSecret } from '../public/js/sharetypes.js';
-import { nameDate, SECRET_EXPORT_WARNING, encodeItem } from '../public/js/receivekinds.js';
+import { nameDate, SECRET_EXPORT_WARNING, encodeItem, ITEM_MAX_BYTES } from '../public/js/receivekinds.js';
+import { refChunks } from '../public/js/refsmanifest.js';
 import { revokeShare } from '../public/js/api.js';
 import { fakeServer, seedTree, seedReceived } from './drive-fake-server.js';
 
@@ -411,7 +412,8 @@ describe('the Drive: received notes, links and credentials', () => {
     rowOf(sshName).querySelector('button.drive-open').click();
     await until(() => dialog()?.querySelector('.link-card'));
     const card = dialog().querySelector('.link-card');
-    expect(card.querySelector('.link-full, .link-host').textContent).toMatch(/ssh:\/\/example\.com\/repo|example\.com/);
+    expect(card.querySelector('.link-host').textContent).toBe('example.com');
+    expect(card.querySelector('.link-full').textContent).toBe('ssh://example.com/repo');
     expect(button(card, 'Open link')).toBeUndefined();
     expect(button(card, 'Copy link')).toBeDefined();
     expect(card.textContent).toMatch(/Your account’s URL rules allow https:\/\/ links; this link is not one of them/);
@@ -494,6 +496,9 @@ describe('the Drive: received notes, links and credentials', () => {
     await expect(c.share([seeded.secret], { views: 1, expire: '1h', limits: { ...PROFILE.limits, secret: false } })).rejects.toThrow(/not allowed to share credentials/);
     await expect(c.share([seeded.web], { views: 1, expire: '1h', limits: { ...PROFILE.limits, url: false } })).rejects.toThrow(/not allowed to share links/);
     await expect(c.share([seeded.note], { views: 1, expire: '1h', limits: { ...PROFILE.limits, text: false } })).rejects.toThrow(/not allowed to share notes/);
+    // No limits given (a caller that skips them): none of them is shared (RT-3; the server records the role too).
+    await expect(c.share([seeded.web], { views: 1, expire: '1h' })).rejects.toThrow(/not allowed to share links/);
+    await expect(c.share([seeded.note], { views: 1, expire: '1h' })).rejects.toThrow(/not allowed to share notes/);
   });
 });
 
@@ -528,8 +533,113 @@ describe('take-in holds what arrives to the link\'s rules (audit A-3: the upload
     await until(() => dialog()?.querySelector('#drive-failed-table'));
     const reasons = [...dialog().querySelectorAll('#drive-failed-table td[data-label="Why"]')].map((td) => td.textContent);
     expect(reasons).toEqual(expect.arrayContaining(['its real file type is one this link does not accept', 'it is larger than this link’s largest file',
-      'it is a kind this link does not accept (a file, note, link or credential)']));
+      'it is not what its sender declared, or a kind this link (or your role, now) does not accept (a file, note, link or credential)']));
     expect(strayText()).toEqual([]);
+  });
+});
+
+describe('take-in holds each item to the kind its session declared, its kind\'s cap and the role now (audit RT-1)', () => {
+  it('A1: declared a file, sealed as a note (past a note\'s cap): fails; a note past its cap fails even when declared', async () => {
+    await server();
+    const r = await existingReverse(ids.get('Inbox'), ['files', 'note']);
+    const big = encodeItem('note', { text: 'x' });
+    const bytes = new Uint8Array(ITEM_MAX_BYTES.note + 1).fill(0x61); // a "note" of 2 MiB + 1
+    const seeded = {
+      a1: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Note', bytes, item: big.meta, declared: 'files' }),
+      over: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Note', bytes, item: big.meta, declared: 'note' }),
+      ok: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Note', bytes: big.bytes, item: big.meta, declared: 'note' }),
+    };
+    const app = await startDrive(mountPoint(), deps());
+    await app.app.received;
+    expect(Object.fromEntries(Object.keys(seeded).map((k) => [k, S.nodes.get(seeded[k]).rwhy ?? null]))).toEqual({ a1: 'kind', over: 'size', ok: null });
+    expect((S.accepted || []).map((x) => x.id)).toEqual([seeded.ok]);
+  });
+
+  it('A3: declared a note (no file limits), sealed as a plain file: fails; a link or credential declared as a file fails too', async () => {
+    await server();
+    const r = await existingReverse(ids.get('Inbox'), ['files', 'note', 'url', 'secret']);
+    Object.assign(S.reverse.at(-1), { types: { mode: 'allow', rules: ['ext:pdf'] }, maxFileBytes: 4 });
+    const link = encodeItem('url', { url: 'https://example.com/' });
+    const secret = encodeItem('secret', { password: 'not-real-pw' });
+    const seeded = {
+      a3: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'payload.exe', bytes: utf8('MZ-long-payload'), type: 'application/pdf', declared: 'note' }),
+      linkAsFile: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Link', bytes: link.bytes, item: link.meta, declared: 'files' }),
+      secretAsNote: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Credential', bytes: secret.bytes, item: secret.meta, declared: 'note' }),
+      linkOk: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Link', bytes: link.bytes, item: link.meta }),
+    };
+    const app = await startDrive(mountPoint(), deps());
+    await app.app.received;
+    expect(Object.fromEntries(Object.keys(seeded).map((k) => [k, S.nodes.get(seeded[k]).rwhy ?? null]))).toEqual({ a3: 'kind', linkAsFile: 'kind', secretAsNote: 'kind', linkOk: null });
+    expect((S.accepted || []).map((x) => x.id)).toEqual([seeded.linkOk]);
+  });
+
+  it('B2: a kind the user\'s role no longer allows (the server filters the link\'s accept) fails at take-in', async () => {
+    await server();
+    S.roleKinds = ['files', 'note', 'url']; // the role dropped credentials after the link was made
+    const r = await existingReverse(ids.get('Inbox'), ['files', 'note', 'url', 'secret']);
+    const secret = encodeItem('secret', { password: 'not-real-pw' });
+    const note = encodeItem('note', { text: 'hello' });
+    const seeded = {
+      secret: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Credential', bytes: secret.bytes, item: secret.meta }),
+      note: await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'Note', bytes: note.bytes, item: note.meta }),
+    };
+    const app = await startDrive(mountPoint(), deps());
+    await app.app.received;
+    expect(S.nodes.get(seeded.secret).rwhy).toBe('kind');
+    expect(S.nodes.get(seeded.note).rwhy ?? null).toBeNull();
+    expect((S.accepted || []).map((x) => x.id)).toEqual([seeded.note]);
+  });
+});
+
+/** A Drive item (sealed as the take-in writes it) of `size` bytes whose content is never served. */
+async function oversizeItem(parent, name, item, size) {
+  await S.ready;
+  const cur = S.current();
+  const kek = await S.kekOf(cur.id);
+  const id = b64urlFromBytes(crypto.getRandomValues(new Uint8Array(16)));
+  const ks = newSalt();
+  const at = { userId: S.user.id, mekId: cur.id, salt: ks };
+  S.nodes.set(id, {
+    id, parent, kind: 'file', size, chunks: refChunks(size), state: 'ready', created: 1700000000, updated: 1700000000, ks, mek: cur.id,
+    name: JSON.stringify(await sealName(kek, at, 'name', utf8(name))),
+    meta: JSON.stringify(await sealName(kek, at, 'meta', utf8(JSON.stringify({ type: 'text/plain', mtime: 0, size, ...item })))),
+    dek: JSON.stringify(await sealDek(kek, at, crypto.getRandomValues(new Uint8Array(32)))),
+  });
+  return id;
+}
+
+describe('the Drive\'s viewers and ZIPs (audit RT-2, RT-4)', () => {
+  it('an item larger than its kind can be is not read or shown: Download only', async () => {
+    await server();
+    const id = await oversizeItem(ids.get('Inbox'), 'Huge note', { kind: 'note', fmt: 'markdown' }, ITEM_MAX_BYTES.note + 1);
+    const app = await startDrive(mountPoint(), deps());
+    await app.app.received;
+    await app.app.open(ids.get('Inbox'), { focus: true });
+    const before = S.requests.filter((q) => q.path.includes(`/${id}/`) && /chunk/.test(q.path)).length;
+    await expect(app.app.client.readItem(id)).rejects.toThrow(/larger than one can be .* so it is not shown\. Download it instead\./);
+    rowOf('Huge note').querySelector('button.drive-open').click();
+    await until(() => dialog()?.textContent.includes('larger than one can be'));
+    expect(dialog().querySelector('#drive-item-note .md, #drive-item-note pre')).toBeNull();
+    expect(S.requests.filter((q) => q.path.includes(`/${id}/`) && /chunk/.test(q.path)).length).toBe(before);
+  });
+
+  it('a folder ZIP leaves credentials out and says how many', async () => {
+    await server();
+    const r = await existingReverse(ids.get('Inbox'));
+    await seedKinds(r, ids.get('Inbox'));
+    const app = await startDrive(mountPoint(), deps());
+    await app.app.received;
+    const blobs = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => { blobs.push(b); return 'blob:x'; });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const out = await app.app.client.downloadFolder(ids.get('Inbox'));
+    expect(out).toEqual({ left: 1 });
+    expect(blobs).toHaveLength(1);
+    const zip = new TextDecoder('utf-8', { fatal: false }).decode(await blobs[0].arrayBuffer());
+    expect(zip).toContain('Weekly: plan - notes.md');
+    expect(zip).not.toContain('Credential from');
+    expect(zip).not.toContain('not-real-pw');
   });
 });
 

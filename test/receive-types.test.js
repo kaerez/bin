@@ -12,8 +12,10 @@
 // only.
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW } from './helpers.js';
-import { driveLimits } from './drive-helpers.js';
+import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW, proofHeaders } from './helpers.js';
+import { driveLimits, uploadFile } from './drive-helpers.js';
+import { encryptPaste } from '../public/js/crypto.js';
+import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { PUBLIC_ID, SCHEMA_VERSION } from '../src/directory-do.js';
 import { LIMITS, UNLIMITED, API_LIMIT_KEYS, REVERSE_KEYS } from '../src/lib/settings.js';
 import { weakening } from '../src/routes/reverse.js';
@@ -354,6 +356,63 @@ describe('take-in failures: the reasons for what breaks the link\'s rules', () =
     await itemSession(r2, 'note', { text: 'x' }, { ip });
     const k = (await received(u.cookie)).keys.find((x) => x.id === r2.id);
     expect(k).toMatchObject({ accept: ['files', 'note'], maxFileBytes: 10, types: { mode: 'allow', rules: ['ext:pdf'] } });
+  });
+});
+
+describe('audit RT-1: each item carries its session\'s declared kind; take-in gets the link\'s kinds as the role allows now', () => {
+  it('a modified uploader declaring one kind and sending another: the item carries the declared kind (sealed at rest), for the browser to refuse', async () => {
+    const u = await everything('rt1-declared');
+    const r = await newReverse(u.cookie, { accept: ALL });
+    const ip = freshIp();
+    // PoC A1: declares files, sends an item marked "note" (a note bigger than a note may be is only refused at take-in).
+    const g1 = await grantAs(r, 'files', ip);
+    const a1 = await send(r, g1, { ip, path: 'Note', bytes: utf8('x'.repeat(4096)), item: { kind: 'note', fmt: 'plaintext' } });
+    // PoC A3: declares a note, sends a plain file.
+    const g3 = await grantAs(r, 'note', ip);
+    const a3 = await send(r, g3, { ip, path: 'smuggled.bin', bytes: utf8('MZ binary'), type: 'application/octet-stream' });
+    const got = await received(u.cookie);
+    const byId = new Map(got.items.map((x) => [x.id, x]));
+    expect(byId.get(a1.node).declared).toBe('files');
+    expect(byId.get(a3.node).declared).toBe('note');
+    // At rest: sealed with the wrap under the user's field layer (no plaintext kind).
+    const stored = await runInDurableObject(driveOf(u.id), (i, st) => st.storage.sql.exec('SELECT fk FROM nodes WHERE id = ?', a3.node).one().fk);
+    expect(stored).not.toMatch(/declared|note/);
+  });
+
+  it('PoC B2: once the role drops credentials, the link\'s kinds as take-in gets them no longer include them', async () => {
+    const u = await everything('rt1-role');
+    const r = await newReverse(u.cookie, { accept: ['note', 'secret'] });
+    const ip = freshIp();
+    await itemSession(r, 'note', { text: 'kept' }, { ip });
+    expect((await received(u.cookie)).keys.find((k) => k.id === r.id).accept).toEqual(['note', 'secret']);
+    await driveLimits(u.id, { reverseSecret: false });
+    // A "note" session carrying a credential: the server cannot tell; the browser refuses it (kind), as the role now says.
+    const g = await grantAs(r, 'note', ip);
+    await sendItem(r, g, 'secret', { username: 'synthetic' }, { ip });
+    expect((await received(u.cookie)).keys.find((k) => k.id === r.id).accept).toEqual(['note']);
+  });
+});
+
+describe('audit RT-3: a Drive share records what its sender\'s role allowed', () => {
+  async function driveShare(cookie, node) {
+    const manifest = { v: 3, kind: 'refs', entries: [{ path: 'n.md', size: 10, type: 'text/markdown', mtime: 0, ref: 0, fk: b64urlFromBytes(randomBytes(32)), item: { kind: 'note', fmt: 'markdown' } }], dirs: [] };
+    const { body, fragment } = await encryptPaste({ text: JSON.stringify(manifest), fmt: 'files', expire: '1h' });
+    const res = await fetchJson('/api/private/drive/shares', { method: 'POST', cookie, body: { nodes: [node], views: null, expire: '1h', paste: body } });
+    expect(res.status, await res.clone().text()).toBe(201);
+    const { id } = await res.json();
+    const ip = freshIp();
+    const head = await (await fetchJson(`/api/file/${id}`, { ip })).json();
+    const { headers } = await proofHeaders(head.adata, fragment, '');
+    return (await (await fetchJson(`/api/file/${id}/open`, { method: 'POST', headers, ip })).json()).kinds;
+  }
+  it('open returns { note, url, secret } as the role was when the share was made (the markers are the sender\'s own)', async () => {
+    const u = await receiver('rt3-kinds');
+    const f = await uploadFile(u.cookie, 'root', 10);
+    expect(await driveShare(u.cookie, f.id)).toEqual({ note: true, url: false, secret: false }); // Default: links and credentials off
+    await driveLimits(u.id, { url: true, secret: true });
+    expect(await driveShare(u.cookie, f.id)).toEqual({ note: true, url: true, secret: true });
+    await driveLimits(u.id, { text: false });
+    expect(await driveShare(u.cookie, f.id)).toEqual({ note: false, url: false, secret: false });
   });
 });
 

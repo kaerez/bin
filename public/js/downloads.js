@@ -169,11 +169,12 @@ export async function saveFile(reader, entry, onBytes) {
 
 /**
  * Save a ZIP of folder `dirPath` ('' = the whole share), preserving the tree
- * below it (and its empty folders).
+ * below it (and its empty folders). `keep(entry)`: which files go in (all by
+ * default; a Drive share leaves its credentials out).
  */
-export async function saveZip(reader, dirPath, zipName, onBytes) {
+export async function saveZip(reader, dirPath, zipName, onBytes, { keep = () => true } = {}) {
   const entries = reader.manifest.entries;
-  const files = filesUnder(entries, dirPath);
+  const files = filesUnder(entries, dirPath).filter(keep);
   const prefix = dirPath ? dirPath + '/' : '';
   const dirs = entries.filter((e) => e.dir && (e.path + '/').startsWith(prefix) && e.path !== dirPath);
   const total = files.reduce((n, f) => n + f.size, 0);

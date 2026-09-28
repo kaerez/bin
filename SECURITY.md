@@ -1331,8 +1331,17 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   link's key. The uploader's browser **declares the kind of each session** at `begin`: the server
   sees that kind (it checks it against the link and the user's role as it is at that moment, and
   again at every reservation; it counts it in the quotas; it keeps it with the session until the
-  session ends) and each item's ciphertext size, never its text, URL, fields, title or format, and
-  a stored item carries no plaintext kind. Like every Drive item a received credential is **not
+  session ends, and with each item it reserves — sealed at rest, never in plain text — until the
+  item is taken in) and each item's ciphertext size, never its text, URL, fields, title or
+  format, and a stored item carries no plaintext kind. Per-kind quotas (`receive-file`,
+  `receive-note`, `receive-url`, `receive-secret`, where the owner sets them) keep counts only —
+  sessions per kind per quota window, no content — each count row until 400 days after its
+  window's first count. The server holds a declared note, link or credential session to one
+  item of its kind's size, but cannot see what the item is: **the user's browser fails at take-in
+  an item whose sealed kind is not the one its session declared, that exceeds its kind's cap, or
+  that the link no longer accepts under the user's role as it is then** (so a modified uploader
+  cannot pass a file off as a note to escape the file limits or quotas, or send a credential
+  once the role stopped allowing them). Like every Drive item a received credential is **not
   end-to-end encrypted**: the recipient's server can decrypt it, and the uploader page says so on
   the credential form ("The recipient's server can decrypt this"). In the Drive each opens only
   in the inert viewers of regular shares (`public/js/typedview.js`): a note as text or through
@@ -1341,8 +1350,11 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   allow it (else Copy only, with the reason), a credential masked. A download is a text file: a
   link as a plain `.txt` with its URL, never an Internet Shortcut (`.url`), whose target the
   shell would follow; a credential as a plain-text export that says what it holds, after a
-  confirmation. A marker or content that does not parse is never rendered as a link or a
-  credential.
+  confirmation; ZIPs never include credentials. A viewer never renders an item past its kind's
+  size. A Drive share records what the sender's role allowed it to share as notes, links and
+  credentials when it was made, and the recipient's page shows an entry as one only where that
+  allows it (the manifest's markers are the sender's own). A marker or content that does not parse
+  is never rendered as a link or a credential.
 - **Declared file types.** When the user limits a link to some file types, the uploader's
   browser declares each file's `{ extension, MIME type }`; the server checks it against the
   link's rules and does not store it (as for file shares: a modified client could lie). Unlike a
@@ -1404,8 +1416,9 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   `reversePassword`, `reverseEdit`, `reverseCaptcha`, and the kinds a link may accept
   (`reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret`, checked on create, on each kind a
   change adds, and at every upload with the role as it is then); always the Drive's capacity and
-  largest file. A note, link or credential session reserves one item of bounded size (a note
-  2 MiB, a link 2048 characters, a credential the regular credential's fields). The server checks every one on create and on every change (for an API key, with the
+  largest file. The server holds a note, link or credential session to one item of bounded size
+  (a note 2 MiB, a link 2048 characters, a credential the regular credential's fields), and the
+  user's browser holds what really arrives to the declared kind and that size at take-in. The server checks every one on create and on every change (for an API key, with the
   role's API limits on top); the pages only reflect them. The role's current
   `reverseMaxBytes` applies to existing links too: a link is held to the smaller of its own
   byte limit and the role's (lowering the role's cap takes effect at once; raising it does not

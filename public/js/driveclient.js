@@ -26,7 +26,7 @@ import { buildRefsManifest, refChunks } from './refsmanifest.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
 import { createReverseKey, linkHash, passwordGate, sealNote, fragmentOf, openUpload, newReverseId, pubOfPrivate } from './reversekeys.js';
 import { deriveSubkeysV1, openFieldV1, openReversePrivV1, clearLegacyKey } from './drivev1.js';
-import { itemOf, itemName, itemExt, withExt, KIND_LABELS } from './receivekinds.js';
+import { itemOf, itemName, itemExt, withExt, KIND_LABELS, ITEM_MAX_BYTES, isKind } from './receivekinds.js';
 import { provenLegacyKey } from './driveupgrade.js';
 
 /** The account's role has no Drive. */
@@ -602,6 +602,8 @@ export class DriveClient {
   async readItem(id, { onProgress, signal } = {}) {
     const d = await this.download(id, { onProgress, signal });
     if (!d.entry.item) throw new Error('This is not a note, link or credential.');
+    // Never more than its kind can be (a larger one is only downloaded, never rendered).
+    if (d.entry.size > ITEM_MAX_BYTES[d.entry.item.kind]) throw new Error(`This ${KIND_LABELS[d.entry.item.kind].toLowerCase()} is larger than one can be (${ITEM_MAX_BYTES[d.entry.item.kind]} bytes), so it is not shown. Download it instead.`);
     const bytes = await d.reader.bytes(d.entry, byteCounter(d.entry.size, onProgress, signal));
     return { item: d.entry.item, name: d.entry.path, bytes, text: fromUtf8(bytes) };
   }
@@ -657,7 +659,9 @@ export class DriveClient {
 
   /**
    * Save a folder as a ZIP of its content (downloads.js saveZip) → resolves
-   * when saved. opts: onProgress(bytesDone, total), signal, zipName.
+   * to { left: n } when saved. opts: onProgress(bytesDone, total), signal,
+   * zipName. Credentials are left out (`left`: how many): a credential leaves
+   * the Drive in plain text only on its own, after its confirmation.
    */
   async downloadFolder(id, { onProgress, signal, zipName } = {}) {
     const r = await api.node(id);
@@ -665,10 +669,14 @@ export class DriveClient {
     const d = await this.decode(r.node);
     const out = { files: [], dirs: [], count: 0 };
     await this.#walk(id, '', out, 1);
+    const all = out.files.length;
+    out.files = out.files.filter((f) => !(f.item && f.item.kind === 'secret'));
+    const left = all - out.files.length;
     const entries = [...out.files.map((f, ref) => ({ ...f, ref })), ...out.dirs.map((path) => ({ path, dir: true }))];
     const total = out.files.reduce((s, f) => s + f.size, 0);
     const reader = this.#reader(entries, total);
     await saveZip(reader, '', zipName || `${d.name || 'drive'}.zip`, byteCounter(total, onProgress, signal));
+    return { left };
   }
 
   /**
@@ -690,12 +698,13 @@ export class DriveClient {
     if (!files.length) throw new Error('There are no files to share.');
     // A link or a credential received through a Receive link is shared as what it is: only where the
     // account may share links or credentials (as the composer; the server cannot see what an item is).
-    if (limits) {
-      for (const [kind, key] of [['url', 'url'], ['secret', 'secret']]) {
-        if (limits[key] !== true && files.some((f) => f.item && f.item.kind === kind)) throw new Error(`Your account is not allowed to share ${KIND_LABELS[kind].toLowerCase()}s: leave out the ${KIND_LABELS[kind].toLowerCase()} you received, or ask the administrator.`);
-      }
-      if (limits.text === false && files.some((f) => f.item)) throw new Error('Your account is not allowed to share notes, links or credentials: leave out the ones you received, or ask the administrator.');
+    // Always (no limits given: none allowed); the recipient's page also shows them only as the
+    // sender's role allowed when the share was made (the server records it: `kinds`).
+    const lim = limits || {};
+    for (const [kind, key] of [['url', 'url'], ['secret', 'secret']]) {
+      if (lim[key] !== true && files.some((f) => f.item && f.item.kind === kind)) throw new Error(`Your account is not allowed to share ${KIND_LABELS[kind].toLowerCase()}s: leave out the ${KIND_LABELS[kind].toLowerCase()} you received, or ask the administrator.`);
     }
+    if (lim.text !== true && files.some((f) => f.item)) throw new Error('Your account is not allowed to share notes, links or credentials: leave out the ones you received, or ask the administrator.');
     const body = { nodes: files.map((f) => f.id), views, expire };
     const typePolicy = limits && ['allow', 'block'].includes(limits.fileTypeMode);
     const depthPolicy = limits && Number.isInteger(limits.maxFolderDepth);
@@ -839,10 +848,13 @@ export class DriveClient {
    * - At most RECEIVED_MAX_DEPTH folder levels (and MAX_DEPTH in all) are
    *   created for a path, and RECEIVED_MAX_NEW_FOLDERS folders per take-in:
    *   past either, the file lands in the deepest folder allowed (`flattened`).
-   * - What each item really is is held to its link's rules — its kind to what
-   *   the link accepts, a file's type to the link's file types and its size to
-   *   its largest file (the uploader's browser only declared them to the
-   *   server): a mismatch is recorded as failed (`kind`, `type`, `size`).
+   * - What each item really is is held to its link's rules — its kind to the
+   *   kind its session declared (`declared`, sealed with it) and to what the
+   *   link accepts as the user's role allows it now (the server filters
+   *   `accept`), a note, link or credential's size to its kind's cap, a file's
+   *   type to the link's file types and its size to its largest file (the
+   *   uploader's browser only declared them to the server): a mismatch is
+   *   recorded as failed (`kind`, `type`, `size`).
    * - An item that cannot be taken in (it does not open, its name is not
    *   usable, the Drive refuses its place) is recorded as failed on the
    *   server: it leaves the queue (the Drive lists it to delete or try again),
@@ -933,7 +945,12 @@ export class DriveClient {
           // server, and a modified one can lie): its kind, and for a file its type and size. A mismatch
           // fails (listed, to delete): it never enters the Drive.
           const rule = rules.get(it.rs) || { accept: ['files'], types: null, maxFileBytes: null };
-          if (!rule.accept.includes(item ? item.kind : 'files')) throw failure('kind');
+          const kind = item ? item.kind : 'files';
+          // What its session declared to the server (limits, quotas, role) must be what it is; the link
+          // (as the user's role allows it now) must accept it; a note, link or credential fits its cap.
+          if (kind !== (isKind(it.declared) ? it.declared : 'files')) throw failure('kind');
+          if (!rule.accept.includes(kind)) throw failure('kind');
+          if (item && it.size > ITEM_MAX_BYTES[item.kind]) throw failure('size');
           if (!item) {
             if (rule.maxFileBytes !== null && it.size > rule.maxFileBytes) throw failure('size');
             if (rule.types) {

@@ -142,5 +142,23 @@ describe('the security statements about the Drive and reverse shares (audit B M3
     expect(g).toMatch(/<dt>Receive \(link\)<\/dt>\s*<dd>[^<]*not end-to-end encrypted/);
     expect(g).toMatch(/<dt>Receive \(link\)<\/dt>\s*<dd>[^<]*a note, a link or a credential\. [^<]*not end-to-end encrypted/);
     expect(g).toMatch(/<dt>Drive<\/dt>\s*<dd>[^<]*not end-to-end encrypted/);
+    // Audit RT-6: the glossary no longer says only files come through a Receive link.
+    expect(g).toMatch(/anything sent to you through a “Receive” link are not/);
+    expect(g).not.toMatch(/files sent to you through a “Receive” link are not/);
+    expect(g).toMatch(/how many visits may start sending something — files, a note, a link or a credential/);
+    expect(g).not.toMatch(/how many visits may start sending files \(/);
+  });
+
+  it('the per-kind receive quotas, the take-in checks and credential downloads are described as they are (audit RT-1, RT-4, RT-5)', () => {
+    const sec = read('SECURITY.md');
+    const rev = read('docs/REVERSE.md');
+    // RT-5: counts only, no content, and for how long.
+    expect(sec).toMatch(/keep counts only —\s+sessions per kind per quota window, no content — each count row until 400 days after its\s+window's first count/);
+    expect(rev).toMatch(/the Directory keeps \*\*counts only\*\* — how many sessions of that kind the user\s+received in each quota window, no content, no link or sender — each count row until 400 days/);
+    // RT-6 / RT-1: the server holds a session to one item of its size; what arrives is held at take-in by the user's browser.
+    expect(sec).not.toMatch(/session reserves one item of bounded size/);
+    expect(sec).toMatch(/the user's browser fails at take-in\s+an item whose sealed kind is not the one its session declared/);
+    // RT-4: ZIPs never hold credentials.
+    expect(rev).toMatch(/\*\*ZIPs\s+never include credentials\*\*/);
   });
 });

@@ -460,9 +460,13 @@ drive data stays) and appear in My shares and Admin → Shares with `kind = 'dri
   credential received through a Receive link (`{ kind: 'note', fmt }`, `{ kind: 'url' }`,
   `{ kind: 'secret' }`; checked strictly, anything else refuses the manifest): the recipient's
   page shows it with Open (the regular viewers: `public/js/typedview.js`) and Download (as text, a
-  credential as a plain-text export). The sender's browser shares a link or a credential only
-  where the account may share links or credentials (the role's `url` / `secret` / `text`; the
-  server cannot see what an item is). Folders are flattened to paths
+  credential as a plain-text export, after a confirmation; ZIPs leave credentials out). The
+  sender's browser shares a link or a credential only where the account may share links or
+  credentials (the role's `url` / `secret` / `text`; the server cannot see what an item is), and
+  the server records on the share what the sender's role allowed when it was made (`kinds`,
+  returned by `open`): the recipient's page shows an entry as a note, link or credential only
+  where that allows it (otherwise a plain file: Download only, no Open, no card), and never past
+  its kind's size. Folders are flattened to paths
   (`dirs` lists every folder, so empty ones survive; duplicate names get " (2)"…). `view` is the
   sender's viewer-policy snapshot as in v2 (`{ rules, maxBytes }` or null; optional on read).
   `public/js/refsmanifest.js` builds and validates it. Each `fk` is the file's DEK, opened in the

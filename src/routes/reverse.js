@@ -137,6 +137,12 @@ export async function handleReverseOwner(request, env, url, a) {
     }
     const failed = url.searchParams.get('failed') === '1';
     const r = await drive().received(uid, { after, failed });
+    if (!failed && r.keys.length) {
+      // What each link takes now: what it accepts that the user's role still allows (as the
+      // uploader's routes check it); an item of a kind the role dropped fails at take-in.
+      const kinds = await dir.receiveKindsOf(uid);
+      for (const k of r.keys) k.accept = (Array.isArray(k.accept) ? k.accept : DEFAULT_ACCEPT).filter((x) => kinds.includes(x));
+    }
     if (!failed && (r.items.length || r.keys.length)) {
       // The field layer comes off here: the browser gets the uploader's sealed fields and the link keys.
       const fk = await fieldKeys(env, uid);
@@ -145,6 +151,8 @@ export async function handleReverseOwner(request, env, url, a) {
           it.name = parsed(await fromRest(fk, uid, 'received', `name:${it.id}`, it.name));
           it.meta = it.meta ? parsed(await fromRest(fk, uid, 'received', `meta:${it.id}`, it.meta)) : null;
           it.fk = parsed(await fromRest(fk, uid, 'received', `wrap:${it.id}`, it.fk));
+          // The kind its session declared (items from before these kinds: files).
+          it.declared = it.fk && isKind(it.fk.declared) ? it.fk.declared : 'files';
         } catch {
           // One item that does not open never holds up the rest: the browser records it as failed.
           Object.assign(it, { name: null, meta: null, fk: null, unreadable: true });
@@ -739,7 +747,9 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
   const fk = await fieldKeys(env, uid);
   const r = await drive.reverseCreateFile(uid, id, await hashToken(grant), {
     node, name: await toRest(fk, uid, 'received', `name:${node}`, name), meta: await toRest(fk, uid, 'received', `meta:${node}`, meta),
-    wrap: await toRest(fk, uid, 'received', `wrap:${node}`, JSON.stringify({ kind: 'rs', data: wrap })), size: body.size, uploadHash: await hashToken(uploadToken),
+    // The session's declared kind goes with the item, sealed at rest with its wrap (never in plain
+    // text): the user's browser fails an item whose sealed marker is another kind (docs/REVERSE.md §3).
+    wrap: await toRest(fk, uid, 'received', `wrap:${node}`, JSON.stringify({ kind: 'rs', data: wrap, declared: o.session.kind })), size: body.size, uploadHash: await hashToken(uploadToken),
     capacity: tg.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: tg.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: tg.pendingSec,
     roleMaxBytes: tg.roleMaxBytes, // the role's current cap applies to existing links too
   });
