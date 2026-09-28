@@ -15,6 +15,46 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **CAPTCHA on shares and reverse shares** (role options; SECURITY.md "CAPTCHA on shares",
+  docs/API.md, docs/REVERSE.md §5–§8, docs/DRIVE.md §5, §7): Admin → Roles has, for every
+  non-public role, "CAPTCHA on shares" (notes, file shares, Drive shares) and — while the role
+  has the Drive and reverse shares — "CAPTCHA on reverse shares": radio buttons "Allow CAPTCHA
+  (user chooses per share)", "Require CAPTCHA for all shares" ("…for all reverse shares") and
+  "Disable CAPTCHA", and under "Allow" a "Default for new shares: CAPTCHA on / off". Options
+  `shareCaptcha` / `shareCaptchaDefault` and `reverseCaptcha` / `reverseCaptchaDefault`
+  (Directory migration 15): the Owner role is locked at "allow" (the box starts off for shares,
+  on for reverse shares); the Default role holds allow / off for shares and require / on for
+  reverse shares (every reverse link had the human check before); custom roles inherit; the
+  Public role has none. They travel in an export's roles part.
+  - **Per share:** "Require CAPTCHA to open" in the composer and the Drive's Share dialog,
+    "Require CAPTCHA to send files" in Receive files, `captcha: true|false` on every create
+    route, `--captcha` / `--no-captcha` in the CLI's `create` and `send` — pre-set from the
+    role's default under "allow", ticked and disabled under "require", hidden under "off". The
+    server applies the role: "require" is on whatever is asked; "off" refuses `captcha: true`
+    (`403 captcha_disabled`). The flag is stored in the share's record and index row; My shares
+    and Admin → Shares show a CAPTCHA badge, and `share.created` logs it.
+  - **Recipients:** a protected share's head, open, "delete now" and every chunk answer
+    `403 captcha_required` ("This share requires a CAPTCHA; open it in a browser") until a
+    CAPTCHA grant is presented: `POST /api/(paste|file)/<id>/human` with a Turnstile token for
+    the new action `share-open` issues one (HMAC-signed, bound to the share and the caller's
+    network, 10 minutes, sliding while used, at most 12 hours). Nothing is spent and nothing is
+    counted as an invalid fetch without it; views are spent only by the open that follows. The
+    CLI's `get` prints that message.
+  - **Reverse shares:** starting an upload session needs a grant (`POST /api/reverse/<id>/human`,
+    action `reverse-upload`) or a token only when the link has the flag, still before the
+    password; each grant starts one session (a wrong password spends it). Links without it have
+    no check (before, every link had it while Turnstile was on).
+  - **The key never meets Cloudflare's script:** `/p/<id>` and `/r/<id>` now always have the
+    strict CSP (the uploader page had the Turnstile CSP whenever Turnstile was on) and are
+    served by the Worker with a per-navigation page key; a protected share's page takes the key
+    out of the address bar, seals it (with the tab's Drive keys) in `sessionStorage` and goes to
+    its check page (`/p/<id>?check`, `/r/<id>?check`, the Turnstile CSP), which never holds a key
+    that opens it; back on the strict page the key is opened, put back and the share opened.
+    Without `sessionStorage` or a page key a protected share is not opened.
+  - **Inactive without Turnstile keys:** the flag is saved but not asked for; the role editor,
+    the composer and the dialogs say so.
+  - **Wording:** the UI calls the Turnstile check "CAPTCHA" everywhere (Admin → Security →
+    CAPTCHA, the waiting and load-failure notes on login, Account and the home page).
 - **Reverse shares when the owner starts over** (docs/REVERSE.md §9, docs/DRIVE.md §3.2): the
   owner's reverse links are **paused**, not revoked — no new session or upload (`409 paused`,
   once the link proof matches; the uploader page says "This link is not accepting files right

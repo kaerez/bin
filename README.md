@@ -61,7 +61,7 @@ flowchart TD
 | Optional password | Argon2id (64 MiB, t=3). Checked by the server via a proof before any view is spent. |
 | Recipient downloads | Folder tree on the left (collapsed by default; **+** opens a folder's sub-folders), the selected folder's files and folders on the right: download any file raw, any folder/sub-folder as a ZIP, or everything at once. The composer's file list uses the same tree. |
 | Drive | If the role allows it: **Dashboard → Drive**, a private, end-to-end encrypted folder tree (collapsed by default, content in a right pane) within a role capacity — upload files and folders (pickers or drag and drop), new folder, rename, move, delete, download (files raw, folders as ZIP), and **Share…** any files or folders with the usual share options; each item lists its shares with revoke. Unlocked in the browser with the password, a passkey (WebAuthn PRF) or a recovery code. See [`docs/DRIVE.md`](./docs/DRIVE.md). |
-| Receive files (reverse shares) | If the role allows it: **Drive → Receive files…** on a folder makes an upload link (`/r/<id>#<key>`, with copy and QR) that lets anyone, without an account, send files and folders into that folder — drag and drop, progress, the human check when configured. Options: expiry, maximum files, total size and file size, allowed file types, a label, an encrypted note to the uploader, and an optional password that only gates the uploader; creating a link is confirmed with the account password or a passkey. Files are encrypted in the uploader's browser to the user's key; the user's browser takes them into the Drive when it is unlocked. Listed in My shares (type "receive") and Admin → Shares; revoking stops uploads, received files stay. See [`docs/REVERSE.md`](./docs/REVERSE.md). |
+| Receive files (reverse shares) | If the role allows it: **Drive → Receive files…** on a folder makes an upload link (`/r/<id>#<key>`, with copy and QR) that lets anyone, without an account, send files and folders into that folder — drag and drop, progress, and a CAPTCHA when the link has one (the role requires it by default, or lets the user choose). Options: expiry, maximum files, total size and file size, allowed file types, a label, an encrypted note to the uploader, and an optional password that only gates the uploader; creating a link is confirmed with the account password or a passkey. Files are encrypted in the uploader's browser to the user's key; the user's browser takes them into the Drive when it is unlocked. Listed in My shares (type "receive") and Admin → Shares; revoking stops uploads, received files stay. See [`docs/REVERSE.md`](./docs/REVERSE.md). |
 | Safe in-browser viewer | Optional, admin-governed: text, Markdown, code, images, PDF (hardened pdf.js, no PDF scripting), audio/video. Nothing executes. |
 | Accounts | Built-in login; one owner/admin; users with one role each (capabilities, limits, quotas, password policy, passkeys, sessions) and API keys. |
 | Drive | If the user's role allows it: a private, end-to-end encrypted folder tree within a role capacity (Dashboard → Drive). Any file or folder can be shared any number of times, with the usual share options; when a share ends only the share goes. See [docs/DRIVE.md](./docs/DRIVE.md). |
@@ -243,6 +243,16 @@ working.
   (password, username, passkeys, recovery codes, sign-in steps, API keys) and anonymous share
   creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
   disabled until the check has passed, and again after each use until the next one passes.
+- **CAPTCHA on shares (optional, per role):** the same check for the recipients of a share and
+  the uploaders of a reverse-share link. Admin → Roles has, for shares and for reverse shares,
+  "Allow CAPTCHA (user chooses per share)" (with a default for new shares), "Require CAPTCHA
+  for all shares" and "Disable CAPTCHA". Where it is a choice, the composer, the Drive's Share
+  and Receive files dialogs, the API (`captcha`) and the CLI (`--captcha` / `--no-captcha`) set
+  it per share. A protected share serves nothing — not even its metadata — until the recipient
+  passes the CAPTCHA on the share's check page, so API and CLI recipients cannot open it; the
+  link's key never reaches the page that runs Cloudflare's script. My shares and Admin → Shares
+  show a CAPTCHA badge. Not active until Turnstile keys are set. See SECURITY.md, *CAPTCHA on
+  shares*.
 - **Kill switches** — plain env vars, case-insensitive `true`:
   `DISABLE_BFP` (all brute-force protection and IP rules off) and `DISABLE_BFP_SETUP` (setup
   only). Default off.

@@ -75,7 +75,7 @@ describe('gated buttons', () => {
     expect(b.disabled).toBe(true);
     // The reason is shown under the button and linked to it.
     const note = b.nextElementSibling;
-    expect(note.textContent).toMatch(/Waiting for the human check/);
+    expect(note.textContent).toMatch(/Waiting for the CAPTCHA/);
     expect(note.hidden).toBe(false);
     expect(b.getAttribute('aria-describedby')).toBe(note.id);
     w.solve('tok-1');

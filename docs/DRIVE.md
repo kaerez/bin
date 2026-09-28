@@ -451,7 +451,11 @@ no server-held key, no Drive created for a user by anyone but the user's own bro
   null = no limit up to a hard 100 GiB); `driveMaxFileBytes` (bytes, nullable, default null).
 - Drive shares obey the same share options as file shares: `files`, `maxViews`,
   `allowUnlimitedViews`, `maxExpireSec`, `maxFilesPerShare`, `openerDelete`, file-type rules,
-  quotas (kind `files`), receipts. The owner has no limits. The public account has no Drive.
+  quotas (kind `files`), receipts, and the CAPTCHA (`shareCaptcha` / `shareCaptchaDefault`:
+  SECURITY.md, *CAPTCHA on shares*). The owner has no limits. The public account has no Drive.
+- Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
+  `reverseCaptcha`, `reverseCaptchaDefault`): [`REVERSE.md`](./REVERSE.md) §5. The reverse-share
+  CAPTCHA is shown in the role editor only while the role has the Drive and reverse shares.
 - New keys join the Default role (a Directory migration materialises them) and appear in the
   role editors under a **Drive** section.
 
@@ -514,6 +518,10 @@ shares and Admin → Shares with `kind = 'drive'`.
   grant. `public/js/downloads.js` and the viewer read v3 manifests (per-file keys and chunk
   sequences), including preview, single-file download and zip.
 - Deleting a drive node revokes every share whose `refs` include it (or a descendant).
+- **The CAPTCHA:** a Drive share can require its recipients to pass a CAPTCHA first, as any
+  share (`captcha` on `POST /api/private/drive/shares`, as the role allows; the FileShare
+  record's `hc` and the index row's `captcha`): without a grant its head, open, "delete now"
+  and every `/chunk/<ref>/<i>` answer `403 captcha_required` (SECURITY.md, *CAPTCHA on shares*).
 
 ## 8. UI
 
@@ -601,8 +609,9 @@ stand-in. What each side relies on:
   handle whose `save()` streams the file to disk or a download, and
   `downloadFolder(id, { onProgress, signal })` (a ZIP).
 - `mkdir(parent, name)` → the new id; `rename(id, name)`, `move(id, parent)`, `remove(id)`.
-- `share(ids, { views, expire, password, deletable, label, limits, view })` → `{ url, id,
-  deletetoken }`: `ids` may be files and folders (the client flattens them to files for the
+- `share(ids, { views, expire, password, deletable, label, limits, view, captcha })` → `{ url, id,
+  deletetoken, captcha }` (`captcha`: the Share dialog's "Require CAPTCHA to open", shown as the
+  role says — a choice pre-set from its default, ticked and disabled, or hidden): `ids` may be files and folders (the client flattens them to files for the
   server); `views` is a number or `null` (unlimited), `expire` the composer's string form
   (`"24h"`, `"30m"`, `"7d"`); `limits` is the profile's `limits` (the client applies the
   file-type and folder-depth policy and declares `types` / `depth`, as the composer does);

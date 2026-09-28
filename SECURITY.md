@@ -208,7 +208,7 @@ compromise. Defenses:
 
 Off unless a site key and a secret key are both configured. They are set either as the
 deployment's `TURNSTILE_SITEKEY` and `TURNSTILE_SECRET`, or by the owner in Admin → Security
-("Human check"). The deployment's keys always win.
+("CAPTCHA"). The deployment's keys always win.
 
 - **Keys set in the admin panel** need the owner's password or a passkey, and are logged
   (`turnstile.updated` with the site key; never the secret).
@@ -245,9 +245,10 @@ Asking for a challenge changes nothing and needs no token: the passkey registrat
 (`POST /api/private/me/reauth`). The step each of them leads to is protected, and a challenge is
 not used up by a request that the human check refuses, so the check cannot be skipped by
 calling the steps in another order. Setup, admin password resets, the owner's changes in the
-admin panel (to other accounts or their own), recipients opening links, file chunks and API
-keys are never challenged; API keys cannot reach the account routes at all (`403
-api_key_not_allowed`).
+admin panel (to other accounts or their own), file chunks and API keys are never challenged;
+API keys cannot reach the account routes at all (`403 api_key_not_allowed`). Recipients opening
+a link, and uploaders using a reverse-share link, are challenged only when that share has the
+CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
 
 - **Client side** (`public/js/turnstile.js`). The protected buttons (log in, sign in with a
   passkey, create an anonymous share, and every button in the table above) stay disabled until
@@ -262,8 +263,8 @@ api_key_not_allowed`).
   when the token:
   - succeeded;
   - was issued for the request's own hostname;
-  - was issued for that form's action (`login`, `password`, `account`, `public-share`), so a
-    token from one form cannot be replayed on another;
+  - was issued for that form's action (`login`, `password`, `account`, `public-share`,
+    `share-open`, `reverse-upload`), so a token from one form cannot be replayed on another;
   - has not been used before (siteverify refuses a reused token).
 
   The token is checked before the password (at login, and before the "confirm it's you" step of
@@ -271,12 +272,14 @@ api_key_not_allowed`).
   If siteverify cannot be reached the request is refused (`503`, fail closed). Cloudflare's
   published testing keys return no hostname or action, so their results are accepted as they
   come; never deploy with testing keys.
-- **The only third-party code, confined to those pages.** Login, Account and the home page
-  (the last only while anonymous sharing is on) get a CSP that adds
+- **The only third-party code, confined to those pages.** Login, Account, the home page
+  (only while anonymous sharing is on) and the CAPTCHA page of a share that has one
+  (`/p/<id>?check`, `/r/<id>?check`, only while Turnstile is on) get a CSP that adds
   `https://challenges.cloudflare.com` to `script-src` and `frame-src` and drops
   `Cross-Origin-Embedder-Policy` (the widget's cross-origin iframe cannot load in a
   cross-origin-isolated page). Every other page keeps the strict policy above. That includes
-  every `/p/*` link, which is static and never loads the widget.
+  every recipient's page `/p/<id>` and every uploader's page `/r/<id>`: the pages where a link's
+  key is in the address bar never load the widget.
   - Trusted Types stay enforced: the `secbin` policy (`public/js/tt.js`) mints exactly one
     third-party URL, `https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit`.
   - The Permissions-Policy is unchanged; the widget's requests for extra features are denied,
@@ -290,16 +293,91 @@ api_key_not_allowed`).
     uses it there;
   - on the home page, what an anonymous sender types and the link, with its key, that it
     produces;
-  - on a reverse share's uploader page (`/r/<id>`), the link key in `location.hash` (it reads the
-    note and uploads to the link; it opens nothing received) and the files being sent, before
-    they are encrypted.
+  - on a share's CAPTCHA page, the share's id, the link key sealed under a key that page cannot
+    get (*CAPTCHA on shares*), and the grant the page itself obtains: never the link key, the
+    content or the files being sent.
 
-  Recipients' pages (`/p/*`) and signed-in composers never load it. secbin already runs on
+  Recipients' pages (`/p/<id>`), uploaders' pages (`/r/<id>`) and signed-in composers never load
+  it. secbin already runs on
   Cloudflare, so this adds no new trusted party, but it is a second code origin. Leave Turnstile
   off if that is unacceptable.
 - **Privacy.** Turnstile runs Cloudflare's client-side challenge and sends browser signals to
   Cloudflare. For GDPR, treat Cloudflare as a processor for this purpose and describe it in
   your privacy notice.
+
+### CAPTCHA on shares
+
+A share can require its recipients (and a reverse-share link its uploaders) to pass a CAPTCHA —
+the Turnstile check above — before anything of it is served. It is a role option, not a setting:
+
+- **Role options** (Admin → Roles; `src/lib/settings.js`): `shareCaptcha` for notes, file shares
+  and Drive shares, `reverseCaptcha` for reverse shares, each `allow` (the user ticks "Require
+  CAPTCHA to open" / "Require CAPTCHA to send files" per share, pre-set from
+  `shareCaptchaDefault` / `reverseCaptchaDefault`, `on` or `off`), `require` (every new share has
+  it) or `off` (none). The Owner role is locked at `allow` (the box starts off for shares and on
+  for reverse shares); the Default role holds `allow` / `off` for shares and `require` for
+  reverse shares, because every reverse link had the check before these options existed; custom
+  roles inherit; the public account has none (`off`, not settable).
+- **The server decides.** Every create path (the composer and the API: `captcha: true|false`
+  on `POST /api/private/paste`, `/api/private/file`, `/api/private/drive/shares`,
+  `/api/private/drive/reverse`; the CLI's `--captcha` / `--no-captcha`) resolves the flag from
+  the creator's role: `require` is on whatever is asked; `off` refuses `captcha: true` (`403
+  captcha_disabled`), so a sender is never led to believe a share is protected when it is not;
+  anything but a boolean is `400 invalid_captcha`. The flag is stored in the share's own record
+  (the KV note, the BurnPaste or FileShare object, the reverse link's Drive row) and in the share
+  index (My shares and Admin → Shares show it; `share.created` logs it). It is fixed when the
+  share is created: changing the role later does not change existing shares.
+- **Inactive without Turnstile.** When the server has no Turnstile keys, a flagged share is
+  served without a check (never locked for good); the role editor, the composer and the Drive's
+  dialogs say that the CAPTCHA is not active until Turnstile is configured. It is enforced as
+  soon as keys are set.
+- **Recipients** (`src/routes/public.js`): the head, open, "delete now" and every chunk of a
+  protected share answer `403 captcha_required` ("This share requires a CAPTCHA; open it in a
+  browser") without a grant, before anything else is said about the share (its format, views,
+  lock, whether it may be deleted); no view is spent, and the refusal is not counted as an
+  invalid fetch (the Guard's blocks and rate limits still apply). A grant comes from
+  `POST /api/(paste|file)/<id>/human` with a Turnstile token for the action `share-open`; that
+  call looks nothing up and spends nothing. Views are spent only by the open that follows.
+  API and CLI recipients cannot pass it.
+- **Grants** (`src/lib/human.js`): `h1.<claims>.<HMAC-SHA-256>` under a key derived from `SIG`;
+  claims: the kind (share or reverse), the share id, a keyed hash of the caller's network (the
+  Guard's key: an IPv4 address or an IPv6 prefix), when the check passed and when the grant
+  lapses. A share grant lasts 10 minutes and slides while it is used (each call that passes
+  renews it in `X-Secbin-Human`; the recipient's page renews it every 4 minutes while it is open),
+  never more than 12 hours after the check. It opens only its share, from its network (a
+  mobile network that changes address needs the check again). Stateless: it cannot be revoked
+  before it lapses, but it gives nothing without the link's key.
+- **Reverse shares:** when the link has the flag, starting an upload session (`…/begin`) needs a
+  grant from `POST /api/reverse/<id>/human` (a token for `reverse-upload`) or, as before, a
+  Turnstile token itself, checked before the password. A reverse grant has a random id that the
+  session start spends in the user's Drive whatever the answer (a wrong password included), so
+  each session start — each password guess — costs one CAPTCHA, as each needed one token
+  before. Links without the flag have no check.
+- **The key never meets the third-party script.** The link's key is in the address bar
+  (`#fragment`), and Turnstile's script would run in the page that loads it. So:
+  - `/p/<id>` and `/r/<id>` always get the strict CSP, where no third-party script can load.
+  - On a real navigation to them (`Sec-Fetch-Dest: document` and `Sec-Fetch-Mode: navigate`,
+    which a script cannot send with `fetch()`), the Worker writes a page key into the page: a
+    nonce `n` and `HMAC(key derived from SIG, kind ‖ id ‖ n)`.
+  - When the share answers `captcha_required`, the page takes the key out of the address bar
+    (`history.replaceState`), seals it with the page key (AES-256-GCM, bound to the share and
+    `n`) together with this tab's Drive keys (which leave `sessionStorage` too), keeps only the
+    sealed record in `sessionStorage` (this tab only), and replaces itself with the check page.
+  - The check page (`/p/<id>?check`, `public/js/check.js`; the Turnstile CSP only while the
+    share has the flag and the server has keys, else a redirect back) holds the widget and the
+    sealed record, never the page key: it cannot get one (a `fetch()` of the page carries none,
+    it cannot frame the page, and a window it opens is in another browsing context group).
+    Continue stays disabled until the CAPTCHA passes, redeems the token for the grant, keeps
+    the grant for the tab and returns to `/p/<id>?n=<n>`.
+  - That navigation gets the page key for `n` again; the strict page opens the sealed record,
+    removes it, puts the Drive keys and the link's key back (the key into the address bar) and
+    opens the share with the grant.
+  - Without `sessionStorage` (a restricted window, storage off) or without a page key (a
+    browser that sends no Fetch Metadata) a protected share is not opened, and the page says
+    why. `/check/` itself is not served.
+- **What a compromised Turnstile script could still do** on the check page: obtain a grant
+  (it runs the check), see the share's id and the sealed record, and navigate the tab. It
+  cannot open the record, and a grant opens nothing without the key.
 
 ### Accessibility widget and statement
 
@@ -673,7 +751,10 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
     before anything can load the script, uses them from there for its changes, and puts them
     back only when the server has no human check; otherwise they are gone when the page is left
     (the Drive page asks to unlock again);
-  - the sign-in page and the home page's public composer clear them before the script loads.
+  - the sign-in page and the home page's public composer clear them before the script loads;
+  - a share's CAPTCHA page never has them: the share's page seals them with the link's key
+    (*CAPTCHA on shares*) and removes them from `sessionStorage` before it goes there, and puts
+    them back when the tab returns.
 
   What remains: the sign-in unlocks the Drive on the login page and stores DK when it
   succeeds, and a change on Account that re-wraps DK (a password change, a passkey, new
@@ -1138,17 +1219,19 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   bad upload tokens count in the Guard's `invalid` scope and block the network like invalid share
   fetches; a late visitor to an ended link with the right link proof is not counted. Cross-site
   requests are refused before any accounting. Wrong passwords are logged for the user
-  (`reverse.bad_password`, at most one entry per link per minute). When Turnstile is configured,
-  starting an upload session needs a token for the `reverse-upload` action, checked before the
-  password, so no password guess is answered without one (the uploader page shows the widget and
-  keeps Send disabled until it passes; it gets the Turnstile CSP, and the strict one otherwise).
+  (`reverse.bad_password`, at most one entry per link per minute). When the link has the
+  CAPTCHA (its user's role and choice; *CAPTCHA on shares*) and Turnstile is configured,
+  starting an upload session needs a CAPTCHA grant (or a token) for the `reverse-upload`
+  action, checked before the password, so no password guess is answered without one; each grant
+  starts one session, whatever the answer. The uploader page always keeps the strict CSP: the
+  widget is on the link's check page, and Continue there stays disabled until it passes.
   Besides the per-network Guard, each link has its own lockout: 10 wrong passwords within 15
   minutes, from any networks, lock its password for 15 minutes (the right one too). The lockout
   is per link on purpose, so that guesses spread over many networks are stopped too; the
   consequence is that one network holding the link can keep its password locked for everyone:
   10 wrong guesses every 15 minutes are well under the Guard's per-network limit (60 invalid
-  requests per 10 minutes), so that network is not blocked, and with Turnstile on each guess costs
-  one solved challenge. An upload session's deadline slides: while it has a file reserved and
+  requests per 10 minutes), so that network is not blocked, and with the CAPTCHA on the link each
+  guess costs one solved challenge. An upload session's deadline slides: while it has a file reserved and
   not finished it stays open for the role's `filePendingSec` after its last progress; as soon as
   nothing is unfinished (the file finished or was cancelled) it is idle again and lapses 10
   minutes later, and it never lasts more than 24 hours after it began. A network may hold at most

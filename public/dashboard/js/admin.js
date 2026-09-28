@@ -331,11 +331,11 @@ function captchaInput({ key, label, opt, rows, inherited, explicit, active }) {
   const modes = group(`captcha-${key}-${seq}`, modeChoices, initial(key));
   const defs = group(`captcha-${opt.defKey}-${seq}`, defChoices, initial(opt.defKey));
   const defId = `captcha-${opt.defKey}-${seq}-legend`;
-  const defBox = h('fieldset.captcha-default', {}, h('legend', { id: defId, text: `Default for new ${opt.which === 'reverse' ? 'reverse shares' : 'shares'}` }), ...defs.map((x) => x.el));
+  const defBox = h('fieldset.captcha-default', {}, h('legend', { id: defId, text: 'Default for new shares:' }), ...defs.map((x) => x.el));
   const noteId = `captcha-${key}-${seq}-note`;
   const note = h(`p.mono${active ? '.muted' : '.warn'}`, { id: noteId, text: active
     ? (opt.which === 'reverse' ? 'Uploaders complete the CAPTCHA before they can send files. Stored per link when it is created.' : 'Recipients complete the CAPTCHA before anything of a share is sent to them; the API and the CLI cannot open such a share. Stored per share when it is created.')
-    : 'The CAPTCHA is not active until Turnstile is configured (Security → Human check): until then it is saved but not asked for.' });
+    : 'The CAPTCHA is not active until Turnstile is configured (Security → CAPTCHA): until then it is saved but not asked for.' });
   const el = h('fieldset.captcha-role', { 'aria-describedby': noteId }, h('legend', { text: label }), ...modes.map((x) => x.el), defBox, note);
   const checked = (list) => list.find((x) => x.r.checked)?.r.value ?? 'inherit';
   const read = (list) => ({ get value() { const v = checked(list); return v === 'inherit' ? 'inherit' : `enum:${v}`; } });
@@ -849,7 +849,7 @@ async function ownerRole(box) {
   const save = h('button.cta', { type: 'button', text: 'Save' });
   box.append(h('h2.section-title', { text: 'Owner role' }),
     h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
-    h('p.mono.muted', { id: 'owner-captcha', text: `CAPTCHA: allowed on shares and on reverse shares — you choose for each one (the box starts off for shares and on for reverse shares).${overview.turnstile ? '' : ' Not active until Turnstile is configured (Security → Human check).'}` }),
+    h('p.mono.muted', { id: 'owner-captcha', text: `CAPTCHA: allowed on shares and on reverse shares — you choose for each one (the box starts off for shares and on for reverse shares).${overview.turnstile ? '' : ' Not active until Turnstile is configured (Security → CAPTCHA).'}` }),
     h('div.card.stack', {},
       h('h3.field-label', { text: 'Your sessions' }), dur('session.idleSec', 'Sign out after being idle for'), dur('session.absSec', 'Sign out in any case after'),
       h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
@@ -1178,12 +1178,12 @@ async function renderPublic() {
  */
 async function turnstileCard() {
   const st = await guard(() => admin.turnstile());
-  const card = h('div.card.stack', {}, h('h2.section-title', { text: 'Human check (Cloudflare Turnstile)' }));
+  const card = h('div.card.stack', {}, h('h2.section-title', { text: 'CAPTCHA (Cloudflare Turnstile)' }));
   if (!st) return card;
   const state = st.active === 'env' ? 'On, with the deployment\'s keys (TURNSTILE_SITEKEY and TURNSTILE_SECRET).'
     : st.active === 'admin' ? 'On, with the keys set here.' : 'Off: no keys are set.';
   card.appendChild(h('p', { text: state }));
-  card.appendChild(h('p.mono.muted', { text: 'When on, login, every change on the Account page (password, username, passkeys, recovery codes, API keys) and anonymous sharing ask for a Turnstile check. Create a widget in the Cloudflare dashboard (Turnstile → Add widget) for this hostname, then paste its site key and secret key. The deployment\'s keys (Worker variables or secrets) always win over the ones set here; a Worker secret is the safer place for the secret key.' }));
+  card.appendChild(h('p.mono.muted', { text: 'When on, login, every change on the Account page (password, username, passkeys, recovery codes, API keys) and anonymous sharing ask for a Turnstile check, and so do shares and reverse-share links that have the CAPTCHA (a role option, Roles). Create a widget in the Cloudflare dashboard (Turnstile → Add widget) for this hostname, then paste its site key and secret key. The deployment\'s keys (Worker variables or secrets) always win over the ones set here; a Worker secret is the safer place for the secret key.' }));
   if (st.deployment) {
     card.appendChild(h('p.mono.muted', { text: 'Set by the deployment: change or remove the keys there (wrangler secret put TURNSTILE_SECRET, TURNSTILE_SITEKEY in wrangler.toml or the dashboard).' }));
     return card;
@@ -1197,13 +1197,13 @@ async function turnstileCard() {
   save.onclick = async () => {
     let step;
     try { step = await confirmStep(mine, profile.user.username, passkey); } catch (e) { return msg(friendlyError(e), true); }
-    if (await guard(() => admin.setTurnstile({ sitekey: sitekey.value.trim(), secret: secret.value.trim(), ...step }), 'Turnstile keys saved. The human check is on (other servers pick it up within 30 seconds).')) renderSecurity();
+    if (await guard(() => admin.setTurnstile({ sitekey: sitekey.value.trim(), secret: secret.value.trim(), ...step }), 'Turnstile keys saved. The CAPTCHA is on (other servers pick it up within 30 seconds).')) renderSecurity();
   };
   const remove = h('button.btn.danger', { type: 'button', text: 'Remove keys', disabled: !st.sitekey && !st.secretSet });
   armConfirm(remove, 'Remove keys: turn the check off?', async () => {
     let step;
     try { step = await confirmStep(mine, profile.user.username, passkey); } catch (e) { return msg(friendlyError(e), true); }
-    if (await guard(() => admin.setTurnstile({ clear: true, ...step }), 'Turnstile keys removed. The human check is off.')) renderSecurity();
+    if (await guard(() => admin.setTurnstile({ clear: true, ...step }), 'Turnstile keys removed. The CAPTCHA is off.')) renderSecurity();
   });
   card.append(
     h('label.field', {}, h('span.field-label', { text: 'Site key (public)' }), sitekey),

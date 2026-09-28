@@ -13,9 +13,9 @@ import { fetchConfig } from './api.js';
 import { holdSessionKeys } from './drivekeys.js';
 
 const WAIT_MS = 120000;
-// `noun`: what the page calls the check ("human check"; the CAPTCHA pages of shares say "CAPTCHA").
+// `noun`: what the page calls the check ("CAPTCHA" everywhere in the UI).
 const loadFailed = (noun) => `The ${noun} (Cloudflare Turnstile) could not load. Check your connection or content blocker, then reload the page.`;
-const LOAD_FAILED = loadFailed('human check');
+const LOAD_FAILED = loadFailed('CAPTCHA');
 const notDone = (noun) => `Complete the ${noun}, then try again.`;
 
 let loader = null;
@@ -91,7 +91,7 @@ function gate(btn, waiting) {
  * widget can serve several buttons: each take() uses up the token and starts
  * a fresh check.
  */
-export function humanCheck(container, action, { gate: buttons = [], noun = 'human check' } = {}) {
+export function humanCheck(container, action, { gate: buttons = [], noun = 'CAPTCHA' } = {}) {
   let token = null;
   let state = 'pending'; // pending (site key unknown) | on | off
   let broken = null;

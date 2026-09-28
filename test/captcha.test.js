@@ -346,6 +346,28 @@ describe('a protected share serves nothing without a grant', () => {
     expect((await head(s, ip, g)).status).toBe(410);
   });
 
+  it('the extend route keeps the CAPTCHA: after a label, more views or a later expiry, every kind still refuses without a grant', async () => {
+    for (const kind of ['kv', 'burn', 'file', 'drive']) {
+      const s = await make(kind);
+      expect(s.res.status, kind).toBe(201);
+      const expires = Math.floor(Date.now() / 1000) + 2 * 3600;
+      const patch = { label: `extended ${kind}`, expires, ...(kind === 'kv' ? {} : { views: 10 }) };
+      const ext = await fetchJson(`/api/private/shares/${s.id}`, { method: 'PATCH', cookie: u.cookie, body: patch });
+      expect(ext.status, kind).toBe(200);
+      const row = (await (await fetchJson(`/api/private/shares/${s.id}`, { cookie: u.cookie })).json()).share;
+      expect(row, kind).toMatchObject({ captcha: true, label: `extended ${kind}`, expires });
+      const ip = freshIp();
+      for (const res of [await head(s, ip), await openIt(s, ip), await expireIt(s, ip)]) {
+        expect([res.status, await errorOf(res)], kind).toEqual([403, 'captcha_required']);
+      }
+      const grant = await grantFor(s.id, ip);
+      const h = await (await head(s, ip, grant)).json();
+      expect(h.meta.expires, kind).toBe(expires);
+      if (kind !== 'kv') expect(h.meta.left, kind).toBe(10);
+      expect((await openIt(s, ip, grant)).status, kind).toBe(200);
+    }
+  });
+
   it('an unprotected share needs nothing; with no Turnstile keys a protected one opens without a grant (inactive, never locked)', async () => {
     for (const kind of ['kv', 'burn', 'file', 'drive']) {
       const plain = await make(kind, false);
@@ -514,6 +536,18 @@ describe('reverse shares: the uploader\'s session start', () => {
     const n = await note({ cookie: oc }, { captcha: true });
     expect(await errorOf(await beginWith(link, ip, { grant: await grantFor(n.id, ip), password: 'open sesame' }))).toBe('captcha_required');
     expect((await beginWith(link, ip, { turnstile: token('reverse-upload'), password: 'open sesame' })).status).toBe(200);
+  });
+
+  it('the extend route keeps a link\'s CAPTCHA: after a later expiry, a session start still needs a grant', async () => {
+    const link = await newReverse(r.cookie, { captcha: true, expire: '1h' });
+    const expires = Math.floor(Date.now() / 1000) + 3 * 3600;
+    expect((await fetchJson(`/api/private/shares/${link.id}`, { method: 'PATCH', cookie: r.cookie, body: { expires, label: 'extended link' } })).status).toBe(200);
+    expect((await (await fetchJson(`/api/private/shares/${link.id}`, { cookie: r.cookie })).json()).share).toMatchObject({ captcha: true, expires });
+    const ip = freshIp();
+    const head = await (await ts(`/api/reverse/${link.id}/open`, { method: 'POST', ip, headers: { ...intent, 'x-link-proof': await linkProof(link.pub) } })).json();
+    expect(head).toMatchObject({ captcha: true, expires });
+    expect(await errorOf(await beginWith(link, ip))).toBe('captcha_required');
+    expect((await beginWith(link, ip, { grant: await rgrant(link, ip) })).status).toBe(200);
   });
 
   it('without the flag: no check at all; with no Turnstile keys the flag is inactive', async () => {

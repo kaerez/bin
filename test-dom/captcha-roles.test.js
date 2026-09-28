@@ -92,7 +92,7 @@ describe('Admin → Roles: the CAPTCHA options', () => {
     expect(checkedLabel(r)).toBe('Allow CAPTCHA (user chooses per share)');
     const def = defaultGroup(shares);
     expect(def.hidden).toBe(false);
-    expect(def.querySelector('legend').textContent).toBe('Default for new shares');
+    expect(def.querySelector('legend').textContent).toBe('Default for new shares:');
     expect(checkedLabel([...def.querySelectorAll('input')])).toBe('CAPTCHA off');
     pick(r, 'Require CAPTCHA for all shares');
     expect(def.hidden).toBe(true);
@@ -118,7 +118,7 @@ describe('Admin → Roles: the CAPTCHA options', () => {
     expect(rr.map(labelOf)).toEqual(['Allow CAPTCHA (user chooses per share)', 'Require CAPTCHA for all reverse shares', 'Disable CAPTCHA']);
     expect(checkedLabel(rr)).toBe('Require CAPTCHA for all reverse shares');
     expect(defaultGroup(rev).hidden).toBe(true);
-    expect(defaultGroup(rev).querySelector('legend').textContent).toBe('Default for new reverse shares');
+    expect(defaultGroup(rev).querySelector('legend').textContent).toBe('Default for new shares:');
     pick(rr, 'Allow CAPTCHA (user chooses per share)');
     expect(defaultGroup(rev).hidden).toBe(false);
     expect(checkedLabel([...defaultGroup(rev).querySelectorAll('input')])).toBe('CAPTCHA on');

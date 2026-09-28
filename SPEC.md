@@ -251,6 +251,14 @@ Common errors on any route:
   none. Errors: `403 turnstile_required` (no token), `403 turnstile_failed` (rejected,
   expired, reused, or for another action or hostname), `503 turnstile_unavailable` (siteverify
   unreachable; fails closed). Setup, admin resets, file chunks/finalize and API keys are exempt.
+- **CAPTCHA on shares** (the creator's role: `shareCaptcha` / `reverseCaptcha`; SECURITY.md
+  "CAPTCHA on shares"): the create routes take `captcha: true|false` (`400 invalid_captcha`,
+  `403 captcha_disabled` when the role has it off) and answer the resolved `captcha`. A share
+  with it, while Turnstile is configured: every public route below except `DELETE` needs
+  `X-Secbin-Human: <grant>`, else `403 captcha_required` (never counted as an invalid failure,
+  nothing spent); the grant comes from `POST /api/{paste,file}/:id/human` with a token for the
+  action `share-open`. A reverse link with it: `POST /api/reverse/:id/begin` needs a grant from
+  `POST /api/reverse/:id/human` (action `reverse-upload`, one session per grant) or a token.
 - `403 scope_denied`: an API key without the scope the route needs (`notes` for
   `POST /api/private/paste`, `files` for the file routes, `policy` for `GET /api/private/policy`,
   `read` for `GET /api/private/shares[/:id[/opens]]`, `manage` for `PATCH /api/private/shares/:id`
@@ -269,6 +277,7 @@ Common errors on any route:
 | `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
 | `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
 | `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable` and the sender's account still has `openerDelete`; not after a file share's last view; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 |
+| `POST /api/{paste,file}/:id/human` | `X-Secbin-Intent: 1`; a Turnstile token (`share-open`) → a new CAPTCHA grant, or `X-Secbin-Human` → that grant renewed (10 min from now, at most 12 h after the check); looks nothing up, spends nothing | 200 `{grant, expires}` (`grant: null` without Turnstile keys) | 400 `missing_intent`, 403 `turnstile_*` / `captcha_required`, 429 |
 | `POST /api/paste` | v1 anonymous create — removed | — | 410 |
 
 Every `404`/`410` for an id that was never a share, `bad_link`, `bad_password`, `bad_grant` and
