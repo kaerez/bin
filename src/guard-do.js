@@ -18,6 +18,9 @@
 // release has none and is done from the start), the Worker also asks this
 // shard for them (legacyCheck, legacyTake): a block made before still applies
 // and failures counted before still count, so the upgrade opens no window.
+// A row keyed by an address written after that (an isolate of the release
+// before, still serving during a rollout) clears the flag again and asks the
+// Directory to run its pass soon, so such rows are looked up and re-keyed too.
 //
 // Rule semantics (admin-configurable, see settings.js): X failures within a
 // fixed window that opens at the first failure → block that key for N seconds.
@@ -72,6 +75,15 @@ export class Guard extends DurableObject {
   #setDone() {
     this.sql.exec("INSERT INTO meta (k, v) VALUES ('legacy.done', ?) ON CONFLICT(k) DO NOTHING", String(now()));
   }
+  /** A write keyed by an address (the release before): not done any more, and the Directory's pass runs soon. */
+  async #legacyWrite(key) {
+    if (typeof key !== 'string' || key.startsWith('h:') || !this.#isDone()) return;
+    this.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'");
+    try {
+      const ns = this.env?.DIRECTORY;
+      if (ns) await ns.get(ns.idFromName('directory')).recordsPassSoon();
+    } catch { /* the hourly pass still comes */ }
+  }
 
   async #schedule(atSec) {
     const cur = await this.ctx.storage.getAlarm();
@@ -93,6 +105,7 @@ export class Guard extends DurableObject {
    * from its legacy row by legacyTake), added to this window's.
    */
   async fail(scope, key, rule, sealed = null, carry = null) {
+    await this.#legacyWrite(key);
     const ts = now();
     const blocked = await this.check(scope, key);
     if (blocked.blocked) return blocked;
@@ -142,9 +155,14 @@ export class Guard extends DurableObject {
     return { ok: true };
   }
 
-  /** The owner blocks a key (from the tracking list): the block keeps the row's address. */
-  async block(scope, key, until) {
-    const r = await this.row(scope, key);
+  /**
+   * The owner blocks a key: the block keeps the row's address, else
+   * `fallback` ({ addr, rk }: the address the owner typed, sealed by the
+   * Worker) when this shard has no row for the key.
+   */
+  async block(scope, key, until, fallback = null) {
+    await this.#legacyWrite(key);
+    const r = (await this.row(scope, key)) ?? (typeof fallback?.addr === 'string' ? { addr: fallback.addr, rk: str(fallback.rk) } : null);
     this.sql.exec('INSERT OR REPLACE INTO blocks (scope, key, until, since, addr, rk) VALUES (?, ?, ?, ?, ?, ?)', scope, key, until, now(), r?.addr ?? null, r?.rk ?? null);
     await this.#schedule(until);
     return { ok: true };
@@ -174,6 +192,24 @@ export class Guard extends DurableObject {
     if (b.done || b.blocked) return { ...b, carry: null };
     const r = this.sql.exec(`DELETE FROM tracking WHERE scope = ? AND key = ? AND ${LEGACY} AND expires > ? RETURNING count, start`, scope, String(legacyKey), now()).toArray()[0];
     return { ...b, carry: r ? { count: r.count, start: r.start } : null };
+  }
+
+  /**
+   * The pass's move of legacy failure counters, their first half: `list`
+   * [{ scope, key }] read and deleted in one transaction → the rows taken
+   * ({ scope, key, count, start, expires }), for apply's `adopt` to add to
+   * their tags' counters. A failure counted in between (legacyTake finds
+   * nothing to carry) is never counted twice.
+   */
+  async takeLegacy(list = []) {
+    const out = [];
+    this.ctx.storage.transactionSync(() => {
+      for (const r of Array.isArray(list) ? list : []) {
+        const row = this.sql.exec(`DELETE FROM tracking WHERE scope = ? AND key = ? AND ${LEGACY} AND expires > ? RETURNING scope, key, count, start, expires`, String(r.scope), String(r.key), now()).toArray()[0];
+        if (row) out.push(row);
+      }
+    });
+    return out;
   }
 
   /**
@@ -213,8 +249,8 @@ export class Guard extends DurableObject {
    * The pass's results for rows of this shard: `reseal` [{ t, scope, key,
    * addr, rk, was: { addr, rk } }] (only if the row still holds `was`);
    * `adopt` [row with its new key] (a re-keyed row that lands here: a block
-   * keeps the later end, a tracking row already here is kept); `drop` [{ t,
-   * scope, key }] (the re-keyed rows' old keys).
+   * keeps the later end, a counter adds to the one here); `drop` [{ t, scope,
+   * key }] (the re-keyed blocks' old keys, once their new rows are written).
    */
   async apply({ reseal = [], adopt = [], drop = [] } = {}) {
     let next = null;
@@ -230,8 +266,12 @@ export class Guard extends DurableObject {
             ON CONFLICT(scope, key) DO UPDATE SET until = MAX(until, excluded.until)`, r.scope, r.key, r.until, r.since, str(r.addr), str(r.rk));
           next = Math.min(next ?? r.until, r.until);
         } else if (r.t === 'tracking') {
-          this.sql.exec('INSERT OR IGNORE INTO tracking (scope, key, count, start, expires, addr, rk) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            r.scope, r.key, r.count, r.start, r.expires, str(r.addr), str(r.rk));
+          // A counter taken from its old key (takeLegacy): added to the tag's, which may hold failures counted since.
+          this.sql.exec(`INSERT INTO tracking (scope, key, count, start, expires, addr, rk) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, key) DO UPDATE SET count = count + excluded.count,
+              start = MIN(start, excluded.start), expires = CASE WHEN excluded.start < start THEN excluded.expires ELSE expires END,
+              addr = COALESCE(addr, excluded.addr), rk = CASE WHEN addr IS NULL THEN excluded.rk ELSE rk END`,
+          r.scope, r.key, r.count, r.start, r.expires, str(r.addr), str(r.rk));
           next = Math.min(next ?? r.expires, r.expires);
         }
       }

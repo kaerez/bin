@@ -36,8 +36,8 @@ import {
   newMekId, newKey, newSalt, KEY_RE, MEK_ID_RE, effectiveAt, mekStatus, checkTimeline,
 } from '../public/js/drivekeys.js';
 import {
-  deriveRecordKey, deriveTableKeyBytes, tableKey, sealRecord, openRecord, wrapRecordKey, unwrapRecordKey, KID_RE,
-  guardTag, guardRowId, importTagKey, isGuardTag,
+  deriveRecordKey, tableKey, sealRecord, openRecord, wrapRecordKey, unwrapRecordKey, KID_RE,
+  guardTag, guardWhere, isGuardTag, recordNonce,
 } from './lib/records.js';
 import { GUARD_SHARDS, guardShardIndex } from './guard-do.js';
 
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS failures (user_id TEXT PRIMARY KEY, count INTEGER NOT
 CREATE TABLE IF NOT EXISTS pwchange_failures (user_id TEXT PRIMARY KEY, count INTEGER NOT NULL, start INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor_id TEXT,
   subject_id TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', imp INTEGER NOT NULL DEFAULT 0,
-  adm INTEGER NOT NULL DEFAULT 0, rk TEXT);
+  adm INTEGER NOT NULL DEFAULT 0, rk TEXT, rn TEXT);
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
   created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL,
@@ -83,7 +83,7 @@ CREATE INDEX IF NOT EXISTS trackers_seen ON trackers(last_seen);
 CREATE TABLE IF NOT EXISTS opens (id INTEGER PRIMARY KEY AUTOINCREMENT, share_id TEXT NOT NULL, user_id TEXT NOT NULL, ts INTEGER NOT NULL,
   ip TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', region TEXT NOT NULL DEFAULT '', city TEXT NOT NULL DEFAULT '',
   browser TEXT NOT NULL DEFAULT '', browser_ver TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', langs TEXT NOT NULL DEFAULT '',
-  ip_h TEXT, rk TEXT);
+  ip_h TEXT, rk TEXT, rn TEXT);
 CREATE INDEX IF NOT EXISTS opens_share ON opens(share_id, id);
 CREATE INDEX IF NOT EXISTS opens_user ON opens(user_id, ts);
 CREATE INDEX IF NOT EXISTS opens_ts ON opens(ts);
@@ -293,18 +293,25 @@ const MIGRATIONS = [
   (m) => materializeDefaultRole(m.sql),
   // 19: sign-in and viewer records sealed at rest (SECURITY.md, "Records at rest"): each
   // record row's key id (activity.rk, opens.rk: NULL in the clear, else the
-  // fingerprint of the root MEK its record key comes from), the opener
-  // address's keyed hash for the per-address throttle (opens.ip_h), and the
-  // record keys of earlier roots (record_keys). Nothing is sealed here (the
-  // crypto is asynchronous): the rows already stored are sealed by the
-  // background pass (the alarm, run soon after this step, "records.pass").
+  // fingerprint of the root MEK its record key comes from) and random nonce
+  // (rn, bound in the AAD), the opener address's keyed hash for the
+  // per-address throttle (opens.ip_h), the record keys of earlier roots
+  // (record_keys), and the indexes the pass reads through: the unsealed rows
+  // (partial, UNSEALED_ACTIVITY / UNSEALED_OPENS) and the sealed rows by key
+  // id. The rows already stored are sealed by the background pass (the alarm,
+  // run soon after this step, "records.pass"), not here: the migration runs
+  // before the object has its keys in hand.
   (m) => {
     m.addColumn('activity', 'rk', 'TEXT');
+    m.addColumn('activity', 'rn', 'TEXT');
     m.addColumn('opens', 'ip_h', 'TEXT');
     m.addColumn('opens', 'rk', 'TEXT');
+    m.addColumn('opens', 'rn', 'TEXT');
     m.sql.exec('CREATE TABLE IF NOT EXISTS record_keys (kid TEXT PRIMARY KEY, sealed TEXT NOT NULL, under TEXT NOT NULL, created INTEGER NOT NULL)');
-    m.sql.exec('CREATE INDEX IF NOT EXISTS activity_rk ON activity(rk)');
-    m.sql.exec('CREATE INDEX IF NOT EXISTS opens_rk ON opens(rk)');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS activity_rk ON activity(rk) WHERE rk IS NOT NULL');
+    m.sql.exec('CREATE INDEX IF NOT EXISTS opens_rk ON opens(rk) WHERE rk IS NOT NULL');
+    m.sql.exec(`CREATE INDEX IF NOT EXISTS activity_unsealed ON activity(id) WHERE ${UNSEALED_ACTIVITY}`);
+    m.sql.exec(`CREATE INDEX IF NOT EXISTS opens_unsealed ON opens(id) WHERE ${UNSEALED_OPENS}`);
     m.sql.exec("INSERT INTO meta (k, v) VALUES ('records.pass', '1') ON CONFLICT(k) DO UPDATE SET v = excluded.v");
   },
 ];
@@ -396,17 +403,24 @@ const KEY_INFO = Object.freeze({
  */
 const RECORD_ACTIONS = new Set(['login', 'login.password_ok', 'logout', 'account.locked', 'account.unlocked', 'sessions.revoked',
   'passkey.added', 'passkey.removed', 'guard.blocked', 'guard.unblocked']);
+/**
+ * The unsealed rows the records pass reads, as the partial indexes of
+ * migration 19 define them (the query repeats the index's condition, word for
+ * word, so that SQLite uses it: the pass reads only unsealed sign-in rows,
+ * never the rest of the log). Changing RECORD_ACTIONS needs a migration that
+ * rebuilds activity_unsealed.
+ */
+const RECORD_ACTIONS_SQL = `action IN (${[...RECORD_ACTIONS].map((a) => `'${a}'`).join(', ')})`;
+export const UNSEALED_ACTIVITY = `rk IS NULL AND ${RECORD_ACTIONS_SQL}`;
+export const UNSEALED_OPENS = 'rk IS NULL';
 /** A read receipt's sealed columns (all of what the request revealed about the opener). */
 const OPEN_COLS = ['ip', 'country', 'region', 'city', 'browser', 'browser_ver', 'os', 'langs'];
 /** Rows per table the records pass seals per run; with more left, it runs again after RECORD_PASS_AGAIN_MS. */
 const RECORD_PASS_ROWS = 500;
 const RECORD_PASS_AGAIN_MS = 10 * 1000;
-/** A record row still marked "being sealed" after this long never will be (the object restarted): it is released, empty. */
-const RECORD_PENDING_SEC = 3600;
 /** What a sealed record shows when its key is gone (never why in more detail). */
 const UNREADABLE = '(unreadable: its key is not available)';
-/** A record row's key-id column: NULL (in the clear), a key id, "~…" (being sealed) or "!…" (does not open). */
-const pendingMark = () => `~${b64urlFromBytes(randomBytes(6))}`;
+/** A record row's key-id column: NULL (in the clear), a key id, or "!…" (it did not open under that key). */
 const isKid = (rk) => typeof rk === 'string' && KID_RE.test(rk);
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -674,14 +688,16 @@ export class Directory extends DurableObject {
     const imp = !!(obj && actor.imp);
     const adm = !!(obj && actor.adm);
     const actorIdValue = obj ? actor.id : actor;
-    // A sign-in record (RECORD_ACTIONS) with a keyring: the row is written empty, marked "being
-    // sealed", and its detail sealed right after (#queueSeal) — the detail is never stored in the
-    // clear. Without a keyring it is stored as before (rk NULL) and sealed by the pass later.
-    const text = cleanDetail(detail);
-    const mark = RECORD_ACTIONS.has(action) && this.#recordKid() ? pendingMark() : null;
-    const { id } = this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp, adm, rk) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
-      now(), actorIdValue ?? null, subject ?? null, action, mark ? '' : text, imp ? 1 : 0, adm ? 1 : 0, mark).one();
-    if (mark) this.#queueSeal('activity', id, mark, { detail: text });
+    // A sign-in record (RECORD_ACTIONS) with a keyring: its detail is sealed here and the row
+    // written sealed, in one statement (the seal is synchronous: nothing is ever stored empty or
+    // in the clear meanwhile). Without a keyring it is stored as before (rk NULL) and sealed by
+    // the pass later.
+    let text = cleanDetail(detail);
+    const k = RECORD_ACTIONS.has(action) ? this.#sealKey('activity') : null;
+    const rn = k ? recordNonce() : null;
+    if (k) text = sealRecord(k.key, Directory.#activityWhere({ rn, actor_id: actorIdValue ?? null, subject_id: subject ?? null, action }), text);
+    this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp, adm, rk, rn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      now(), actorIdValue ?? null, subject ?? null, action, text, imp ? 1 : 0, adm ? 1 : 0, k ? k.kid : null, rn);
   }
   #settings() {
     const rows = {};
@@ -1169,11 +1185,12 @@ export class Directory extends DurableObject {
     // the user did, what was done as them, and system events (no actor).
     const where = "subject_id = ? AND adm = 0 AND (actor_id = subject_id OR actor_id IS NULL OR imp = 1)"
       + " AND action NOT IN ('impersonate.start', 'impersonate.end')";
-    await this.#settleRecords();
+    const cols = 'id, ts, action, detail, rk, rn, actor_id, subject_id';
     const rows = before
-      ? this.sql.exec(`SELECT id, ts, action, detail, rk FROM activity WHERE ${where} AND id < ? ORDER BY id DESC LIMIT ?`, uid, before, lim).toArray()
-      : this.sql.exec(`SELECT id, ts, action, detail, rk FROM activity WHERE ${where} ORDER BY id DESC LIMIT ?`, uid, lim).toArray();
-    return this.#openDetails(rows);
+      ? this.sql.exec(`SELECT ${cols} FROM activity WHERE ${where} AND id < ? ORDER BY id DESC LIMIT ?`, uid, before, lim).toArray()
+      : this.sql.exec(`SELECT ${cols} FROM activity WHERE ${where} ORDER BY id DESC LIMIT ?`, uid, lim).toArray();
+    // The user's own view never names the actor (impersonation stays invisible).
+    return this.#openDetails(rows, ['id', 'ts', 'action', 'detail']);
   }
 
   // ── API keys ─────────────────────────────────────────────────────────────
@@ -2137,15 +2154,18 @@ export class Directory extends DurableObject {
   // The read receipts' opener details (opens), the sign-in entries of the
   // activity log (RECORD_ACTIONS: their detail) and the Guard's addresses are
   // sealed under the record key of the current root MEK (src/lib/records.js),
-  // with its fingerprint as the row's key id (rk). What stays in the clear is
-  // what the indexes, throttles and retention need: ids, times, the share and
-  // account a row belongs to, the action, and keyed hashes of addresses.
-  // Without a keyring (an instance from before the Drive, or one whose keyring
-  // is lost) rows are written in the clear with rk NULL; the background pass
-  // (#recordPass, from the alarm) seals them once there is a keyring, and
-  // re-seals rows under an earlier root's key under the current one. Opened
-  // only for the viewers who may see them (activity, audit, shareOpens,
-  // openGuardAddrs); never logged, never in an error.
+  // with its fingerprint as the row's key id (rk) and a random row nonce (rn).
+  // The seal is synchronous: a record is sealed in the statement that writes
+  // it, so no row is ever stored empty, pending or in the clear while there is
+  // a keyring. What stays in the clear is what the indexes, throttles and
+  // retention need: ids, times, the share and account a row belongs to, the
+  // action, and keyed hashes of addresses (the owner columns are bound in the
+  // AAD). Without a keyring (an instance from before the Drive, or one whose
+  // keyring is lost) rows are written in the clear with rk NULL; the
+  // background pass (#recordPass, from the alarm) seals them once there is a
+  // keyring, and re-seals rows under an earlier root's key under the current
+  // one. Opened only for the viewers who may see them (activity, audit,
+  // shareOpens, openGuardAddrs); never logged, never in an error.
 
   /** The current record key's id (the root MEK's fingerprint), or null: no keyring, records are written in the clear. */
   #recordKid() {
@@ -2170,89 +2190,69 @@ export class Directory extends DurableObject {
    * sealed under the root (record_keys). A key id names one root's key for
    * good, so what is found is cached.
    */
-  async #recordKeyBytes(kid) {
+  #recordKeyBytes(kid) {
     this.recordKeys ??= new Map();
     if (this.recordKeys.has(kid)) return this.recordKeys.get(kid);
     const roots = [this.#keyRoot(), this.#keyRoot('mek.rootOld')].filter(Boolean);
     let key = null;
     const own = roots.find((r) => r.fp === kid);
-    if (own) key = await deriveRecordKey(own.key);
+    if (own) key = deriveRecordKey(own.key);
     else {
       const w = this.sql.exec('SELECT sealed, under FROM record_keys WHERE kid = ?', kid).toArray()[0];
       const by = w && roots.find((r) => r.fp === w.under);
-      if (by) { try { key = await unwrapRecordKey(by.key, kid, w.sealed); } catch { key = null; } }
+      if (by) { try { key = unwrapRecordKey(by.key, kid, w.sealed); } catch { key = null; } }
     }
     if (key) this.recordKeys.set(kid, key);
     return key;
   }
 
-  /** One table's key under record key `kid` (an AES-GCM CryptoKey), or null when that record key is not available. */
-  async #tableKey(kid, table) {
+  /** One table's key under record key `kid` (32 bytes), or null when that record key is not available. */
+  #tableKey(kid, table) {
     this.tableKeys ??= new Map();
     const id = `${kid}\n${table}`;
     if (!this.tableKeys.has(id)) {
-      const rk = await this.#recordKeyBytes(kid);
+      const rk = this.#recordKeyBytes(kid);
       if (!rk) return null;
-      this.tableKeys.set(id, await tableKey(rk, table));
+      this.tableKeys.set(id, tableKey(rk, table));
     }
     return this.tableKeys.get(id);
   }
 
-  /** One stored record value as it reads: in the clear, opened, '' (still being sealed) or null (it does not open). */
-  async #recordValue(rk, where, value) {
+  /** The current table key → { kid, key } or null (no keyring: records are written in the clear). */
+  #sealKey(table) {
+    const kid = this.#recordKid();
+    const key = kid ? this.#tableKey(kid, table) : null;
+    return key ? { kid, key } : null;
+  }
+
+  /** One stored record value as it reads: in the clear (rk NULL), opened, or null (it does not open, or "!…": it did not before). */
+  #recordValue(rk, where, value) {
     if (rk === null || rk === undefined) return value;
-    if (rk.startsWith('~')) return '';
-    if (!isKid(rk)) return null;
-    const key = await this.#tableKey(rk, where.table);
+    if (!isKid(rk) || !where.rn) return null;
+    const key = this.#tableKey(rk, where.table);
     if (!key) return null;
-    try { return await openRecord(key, where, value); } catch { return null; }
+    try { return openRecord(key, where, value); } catch { return null; }
   }
 
-  /** Activity rows with their sealed details opened (UNREADABLE when a key is gone); `rk` is not returned. */
-  async #openDetails(rows) {
-    const out = [];
-    for (const { rk, ...r } of rows) {
-      if (rk !== null && rk !== undefined) r.detail = (await this.#recordValue(rk, { table: 'activity', col: 'detail', id: r.id }, r.detail)) ?? UNREADABLE;
-      out.push(r);
-    }
-    return out;
+  /** Where an activity row's detail is sealed: its nonce and owner columns. */
+  static #activityWhere(r) {
+    return { table: 'activity', col: 'detail', rn: r.rn, bind: [r.actor_id ?? null, r.subject_id ?? null, r.action] };
+  }
+  /** Where a read receipt's column is sealed. */
+  static #opensWhere(r, col) {
+    return { table: 'opens', col, rn: r.rn, bind: [r.share_id, r.user_id] };
   }
 
   /**
-   * Seal `values` ({ column: text }) of row `id` of `table`, written with the
-   * pending mark `mark` and none of those values (the row id is part of every
-   * value's AAD, so the row is written first). Sealed before the call that
-   * wrote the row returns (every RPC method settles, see the end of this
-   * file); a mark is random, so a row id that a rolled-back transaction gave
-   * out again is never written over.
+   * Activity rows (with rn, rk, actor_id, subject_id) with their sealed
+   * details opened (UNREADABLE when a key is gone); `keep`: the columns
+   * returned (rn and rk never are).
    */
-  #queueSeal(table, id, mark, values) {
-    (this.sealQueue ??= []).push({ table, id, mark, values });
-  }
-  /**
-   * Seal what is queued, in the calling request (a promise is never shared
-   * between requests). Rows whose sealing fails stay pending, holding no
-   * value; the pass releases them.
-   */
-  async #settleRecords() {
-    while (this.sealQueue?.length) {
-      const batch = this.sealQueue.splice(0);
-      const kid = this.#recordKid();
-      for (const it of batch) {
-        try {
-          const key = kid ? await this.#tableKey(kid, it.table) : null;
-          const cols = Object.keys(it.values);
-          const vals = [];
-          // No record key any more (the keyring was lost meanwhile): in the clear, flagged (rk NULL) for the pass.
-          for (const c of cols) vals.push(key ? await sealRecord(key, { table: it.table, col: c, id: it.id }, it.values[c]) : it.values[c]);
-          this.sql.exec(`UPDATE ${it.table} SET ${cols.map((c) => `${c} = ?`).join(', ')}, rk = ? WHERE id = ? AND rk = ?`, ...vals, key ? kid : null, it.id, it.mark);
-        } catch { /* stays pending (empty) */ }
-      }
-    }
-  }
-  /** For the RPC wrapper at the end of this file. */
-  async settleRecords() {
-    await this.#settleRecords();
+  #openDetails(rows, keep) {
+    return rows.map((r) => {
+      const detail = r.rk === null || r.rk === undefined ? r.detail : (this.#recordValue(r.rk, Directory.#activityWhere(r), r.detail) ?? UNREADABLE);
+      return Object.fromEntries(keep.map((k) => [k, k === 'detail' ? detail : r[k]]));
+    });
   }
 
   /**
@@ -2261,19 +2261,19 @@ export class Directory extends DurableObject {
    * previous one) that stops being derivable once it goes. A key that opens
    * under none of the roots here stays as it is. → [{ kid, sealed, under, created }].
    */
-  async #rewrapRecordKeys(target, add = []) {
+  #rewrapRecordKeys(target, add = []) {
     const roots = [this.#keyRoot(), this.#keyRoot('mek.rootOld'), target].filter(Boolean);
     const out = [];
     for (const r of this.sql.exec('SELECT kid, sealed, under, created FROM record_keys ORDER BY kid').toArray()) {
       if (r.kid === target.fp) continue; // derived from the root itself
       const by = roots.find((x) => x.fp === r.under);
       let key = null;
-      if (by) { try { key = await unwrapRecordKey(by.key, r.kid, r.sealed); } catch { key = null; } }
-      out.push(key ? { kid: r.kid, sealed: await wrapRecordKey(target.key, r.kid, key), under: target.fp, created: r.created } : r);
+      if (by) { try { key = unwrapRecordKey(by.key, r.kid, r.sealed); } catch { key = null; } }
+      out.push(key ? { kid: r.kid, sealed: wrapRecordKey(target.key, r.kid, key), under: target.fp, created: r.created } : r);
     }
     for (const a of add) {
       if (!a || a.fp === target.fp || out.some((x) => x.kid === a.fp)) continue;
-      out.push({ kid: a.fp, sealed: await wrapRecordKey(target.key, a.fp, await deriveRecordKey(a.key)), under: target.fp, created: now() });
+      out.push({ kid: a.fp, sealed: wrapRecordKey(target.key, a.fp, deriveRecordKey(a.key)), under: target.fp, created: now() });
     }
     return out;
   }
@@ -2283,7 +2283,7 @@ export class Directory extends DurableObject {
    * already; a previous root put back from a kit may not have. → the list to
    * write, or null when there is nothing to add.
    */
-  async #keepOldRecordKey(old) {
+  #keepOldRecordKey(old) {
     const root = this.#keyRoot();
     if (!root || !old || this.sql.exec('SELECT 1 FROM record_keys WHERE kid = ?', old.fp).toArray().length) return null;
     return this.#rewrapRecordKeys(root, [old]);
@@ -2300,6 +2300,11 @@ export class Directory extends DurableObject {
     const cur = await this.ctx.storage.getAlarm();
     if (cur === null || cur > at) await this.ctx.storage.setAlarm(at);
   }
+  /** A Guard shard found a row from before the tags written after it was done (an isolate of the release before, during a rollout): the pass runs soon. */
+  async recordsPassSoon() {
+    await this.#passSoon();
+    return { ok: true };
+  }
 
   /**
    * The Guard's keys, for the Worker (src/lib/guard.js caches them): the tag
@@ -2310,9 +2315,8 @@ export class Directory extends DurableObject {
    */
   async guardKeys() {
     const tag = b64urlFromBytes(await this.#purposeBits(KEY_INFO.guardTag));
-    const kid = this.#recordKid();
-    const rk = kid ? await this.#recordKeyBytes(kid) : null;
-    return { tag, kid: rk ? kid : null, key: rk ? b64urlFromBytes(await deriveTableKeyBytes(rk, 'guard')) : null };
+    const k = this.#sealKey('guard');
+    return { tag, kid: k ? k.kid : null, key: k ? b64urlFromBytes(k.key) : null };
   }
 
   /**
@@ -2327,17 +2331,21 @@ export class Directory extends DurableObject {
       if (!r || typeof r.key !== 'string') { out.push(''); continue; }
       if (!isGuardTag(r.key)) { out.push(r.key); continue; }
       if (typeof r.addr !== 'string') { out.push(''); continue; }
-      out.push((await this.#recordValue(r.rk ?? null, { table: 'guard', col: 'addr', id: guardRowId(r.scope, r.key) }, r.addr)) ?? UNREADABLE);
+      out.push(this.#recordValue(r.rk ?? null, guardWhere(r.scope, r.key), r.addr) ?? UNREADABLE);
     }
     return out;
   }
 
-  /** The owner's block or unblock of a Guard key, in the admin audit with its address (sealed there too). */
-  async guardLog({ action, scope, key, row = null, seconds = null } = {}, actorId) {
+  /**
+   * The owner's block or unblock of a Guard key, in the admin audit with its
+   * address (sealed there too): the row's (`row`, as stored), else the one the
+   * owner typed (`typed`).
+   */
+  async guardLog({ action, scope, key, row = null, typed = null, seconds = null } = {}, actorId) {
     if (action !== 'guard.blocked' && action !== 'guard.unblocked') return fail(400, 'invalid', 'Unknown action.');
-    const [addr] = await this.openGuardAddrs([{ scope, key, addr: row?.addr ?? null, rk: row?.rk ?? null }]);
+    const [stored] = row?.addr ? await this.openGuardAddrs([{ scope, key, addr: row.addr, rk: row.rk ?? null }]) : [''];
+    const addr = (stored && stored !== UNREADABLE ? stored : null) ?? (typeof typed === 'string' && typed ? typed : null) ?? stored ?? key;
     this.#log(actorId, null, action, `${scope} ${addr || key}${seconds ? ` ${seconds}s` : ''}`);
-    await this.#settleRecords();
     return { ok: true };
   }
 
@@ -2350,52 +2358,60 @@ export class Directory extends DurableObject {
    * (#guardPass). → true when work is left.
    */
   async #recordPass() {
-    const ts = now();
-    // Rows whose sealing never finished (the object restarted in between): they hold no value; released.
-    for (const t of ['opens', 'activity']) this.sql.exec(`UPDATE ${t} SET rk = NULL WHERE rk LIKE '~%' AND ts < ?`, ts - RECORD_PENDING_SEC);
-    const kid = this.#recordKid();
+    const cur = this.#sealKey('opens') && this.#recordKid();
     let more = false;
-    if (kid && await this.#recordKeyBytes(kid)) {
+    if (cur) {
       // The earlier keys that still open (only their rows can be sealed again).
       const others = [];
       for (const k of new Set([this.#keyRoot('mek.rootOld')?.fp, ...this.sql.exec('SELECT kid FROM record_keys').toArray().map((r) => r.kid)])) {
-        if (k && k !== kid && await this.#recordKeyBytes(k)) others.push(k);
+        if (k && k !== cur && this.#recordKeyBytes(k)) others.push(k);
       }
-      const sel = '(rk IS NULL OR rk IN (SELECT value FROM json_each(?)))';
-      const tables = [
-        { table: 'opens', cols: OPEN_COLS, rows: this.sql.exec(`SELECT id, rk, ip_h, ${OPEN_COLS.join(', ')} FROM opens WHERE ${sel} ORDER BY id LIMIT ?`, JSON.stringify(others), RECORD_PASS_ROWS).toArray() },
-        { table: 'activity', cols: ['detail'], rows: this.sql.exec(`SELECT id, rk, detail FROM activity WHERE ${sel} AND action IN (SELECT value FROM json_each(?)) ORDER BY id LIMIT ?`,
-          JSON.stringify(others), JSON.stringify([...RECORD_ACTIONS]), RECORD_PASS_ROWS).toArray() },
+      const earlier = JSON.stringify(others);
+      const OPEN_SEL = `id, rn, rk, share_id, user_id, ip_h, ${OPEN_COLS.join(', ')}`;
+      const ACT_SEL = 'id, rn, rk, actor_id, subject_id, action, detail';
+      // Unsealed rows through their partial indexes (migration 19), earlier keys' rows through the key-id index.
+      const batches = [
+        { table: 'opens', cols: OPEN_COLS, rows: [
+          ...this.sql.exec(`SELECT ${OPEN_SEL} FROM opens WHERE ${UNSEALED_OPENS} ORDER BY id LIMIT ?`, RECORD_PASS_ROWS).toArray(),
+          ...(others.length ? this.sql.exec(`SELECT ${OPEN_SEL} FROM opens WHERE rk IN (SELECT value FROM json_each(?)) LIMIT ?`, earlier, RECORD_PASS_ROWS).toArray() : [])] },
+        { table: 'activity', cols: ['detail'], rows: [
+          ...this.sql.exec(`SELECT ${ACT_SEL} FROM activity WHERE ${UNSEALED_ACTIVITY} ORDER BY id LIMIT ?`, RECORD_PASS_ROWS).toArray(),
+          ...(others.length ? this.sql.exec(`SELECT ${ACT_SEL} FROM activity WHERE rk IN (SELECT value FROM json_each(?)) LIMIT ?`, earlier, RECORD_PASS_ROWS).toArray() : [])] },
       ];
-      for (const { table, cols, rows } of tables) {
+      for (const { table, cols, rows } of batches) {
         if (rows.length >= RECORD_PASS_ROWS) more = true;
-        const key = await this.#tableKey(kid, table);
+        const key = this.#tableKey(cur, table);
+        const whereOf = (r, rn, c) => (table === 'opens' ? Directory.#opensWhere({ ...r, rn }, c) : Directory.#activityWhere({ ...r, rn }));
         for (const r of rows) {
           const plain = {};
-          for (const c of cols) plain[c] = await this.#recordValue(r.rk, { table, col: c, id: r.id }, r[c]);
+          for (const c of cols) plain[c] = r.rk === null ? r[c] : this.#recordValue(r.rk, whereOf(r, r.rn, c), r[c]);
           if (cols.some((c) => plain[c] === null)) {
             this.sql.exec(`UPDATE ${table} SET rk = ? WHERE id = ? AND rk = ?`, `!${r.rk}`, r.id, r.rk);
             continue;
           }
-          const vals = [];
-          for (const c of cols) vals.push(await sealRecord(key, { table, col: c, id: r.id }, plain[c]));
+          // A row from before migration 19, or never sealed, gets its nonce now.
+          const rn = r.rn ?? recordNonce();
+          const vals = cols.map((c) => sealRecord(key, whereOf(r, rn, c), plain[c]));
           const extra = table === 'opens' ? { ip_h: r.ip_h ?? await this.#recordHash(plain.ip) } : {};
           const set = [...cols, ...Object.keys(extra)].map((c) => `${c} = ?`).join(', ');
-          this.sql.exec(`UPDATE ${table} SET ${set}, rk = ? WHERE id = ? AND rk IS ?`, ...vals, ...Object.values(extra), kid, r.id, r.rk);
+          this.sql.exec(`UPDATE ${table} SET ${set}, rn = ?, rk = ? WHERE id = ? AND rk IS ? AND rn IS ?`, ...vals, ...Object.values(extra), rn, cur, r.id, r.rk, r.rn);
         }
       }
     }
-    return (await this.#guardPass(kid)) || more;
+    return (await this.#guardPass(cur || null)) || more;
   }
 
   /**
    * The Guard's part of the pass: in every shard, rows from before the tags
-   * are re-keyed (they move to the shard of their tag; a block keeps the later
-   * end), and addresses in the clear or under an earlier key are sealed under
-   * the current one; an address that no longer opens is dropped (the row
-   * stays). A shard with no row from before the tags left is then marked done
-   * (Guard.legacyDone), and the Worker stops looking for such rows there.
-   * → true when a shard had more than one run takes.
+   * are re-keyed, and addresses in the clear or under an earlier key are
+   * sealed under the current one; an address that no longer opens is dropped
+   * (the row stays). A re-keyed block is written in its new shard before its
+   * old key goes (no window without it); a re-keyed failure counter is taken
+   * out of its old shard first (one Guard transaction: read and delete) and
+   * then added to its new one, so a failure counted in between is never
+   * counted twice. A shard with no row from before the tags left is then
+   * marked done (Guard.legacyDone), and the Worker stops looking for such
+   * rows there. → true when a shard had more than one run takes.
    */
   async #guardPass(kid) {
     const ns = this.env?.GUARD;
@@ -2408,26 +2424,35 @@ export class Directory extends DurableObject {
       await markDone();
       return false;
     }
-    const tagKey = await importTagKey(await this.#purposeBits(KEY_INFO.guardTag));
-    const gkey = kid ? await this.#tableKey(kid, 'guard') : null;
-    const seal = (scope, tag, addr) => (gkey ? sealRecord(gkey, { table: 'guard', col: 'addr', id: guardRowId(scope, tag) }, addr) : addr);
-    const plan = shards.map(() => ({ reseal: [], adopt: [], drop: [] }));
+    const tagKey = await this.#purposeBits(KEY_INFO.guardTag);
+    const gkey = kid ? this.#tableKey(kid, 'guard') : null;
+    const seal = (scope, tag, addr) => (gkey ? sealRecord(gkey, guardWhere(scope, tag), addr) : addr);
+    const plan = shards.map(() => ({ reseal: [], adopt: [], drop: [], take: [] }));
     let more = false;
     for (let i = 0; i < shards.length; i++) {
       if (found[i].length >= RECORD_PASS_ROWS) more = true;
       for (const r of found[i]) {
         if (!isGuardTag(r.key)) {
-          const tag = await guardTag(tagKey, r.key);
-          plan[guardShardIndex(tag)].adopt.push({ ...r, key: tag, addr: await seal(r.scope, tag, r.key), rk: gkey ? kid : null });
-          plan[i].drop.push({ t: r.t, scope: r.scope, key: r.key });
+          if (r.t === 'tracking') plan[i].take.push({ scope: r.scope, key: r.key });
+          else {
+            const tag = guardTag(tagKey, r.key);
+            plan[guardShardIndex(tag)].adopt.push({ ...r, key: tag, addr: seal(r.scope, tag, r.key), rk: gkey ? kid : null });
+            plan[i].drop.push({ t: r.t, scope: r.scope, key: r.key });
+          }
           continue;
         }
         if (!gkey) continue;
-        const addr = await this.#recordValue(r.rk, { table: 'guard', col: 'addr', id: guardRowId(r.scope, r.key) }, r.addr);
-        plan[i].reseal.push({ t: r.t, scope: r.scope, key: r.key, addr: addr === null ? null : await seal(r.scope, r.key, addr), rk: addr === null ? null : kid, was: { addr: r.addr, rk: r.rk } });
+        const addr = this.#recordValue(r.rk, guardWhere(r.scope, r.key), r.addr);
+        plan[i].reseal.push({ t: r.t, scope: r.scope, key: r.key, addr: addr === null ? null : seal(r.scope, r.key, addr), rk: addr === null ? null : kid, was: { addr: r.addr, rk: r.rk } });
       }
     }
-    // Every re-keyed row lands in its new shard before its old key goes.
+    // Failure counters: taken out of their old shards, then added to their tags' (never both at once).
+    const taken = await Promise.all(shards.map((s, i) => (plan[i].take.length ? s.takeLegacy(plan[i].take) : [])));
+    for (const r of taken.flat()) {
+      const tag = guardTag(tagKey, r.key);
+      plan[guardShardIndex(tag)].adopt.push({ ...r, t: 'tracking', key: tag, addr: seal(r.scope, tag, r.key), rk: gkey ? kid : null });
+    }
+    // Every re-keyed block lands in its new shard before its old key goes.
     await Promise.all(shards.map((s, i) => (plan[i].reseal.length || plan[i].adopt.length ? s.apply({ reseal: plan[i].reseal, adopt: plan[i].adopt }) : null)));
     await Promise.all(shards.map((s, i) => (plan[i].drop.length ? s.apply({ drop: plan[i].drop }) : null)));
     await markDone();
@@ -2456,21 +2481,18 @@ export class Directory extends DurableObject {
     // burst beyond the per-minute cap, is counted but not stored again.
     if (this.sql.exec('SELECT 1 FROM opens WHERE share_id = ? AND ip_h = ? AND ts > ? LIMIT 1', shareId, ipH, ts - OPENS_DEDUPE_SEC).toArray().length) return;
     if (this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ? AND ts > ?', shareId, ts - 60).one().c >= OPENS_PER_MINUTE) return;
-    // With a keyring the details are sealed (#queueSeal) and the row holds none of them meanwhile;
+    // With a keyring the details are sealed here and the row written sealed, in one statement;
     // without one they are stored in the clear (rk NULL) until the pass seals them.
-    const mark = this.#recordKid() ? pendingMark() : null;
-    const { id } = this.sql.exec(`INSERT INTO opens (share_id, user_id, ts, ip_h, rk, ${OPEN_COLS.join(', ')})
-      VALUES (?, ?, ?, ?, ?, ${OPEN_COLS.map(() => '?').join(', ')}) RETURNING id`, shareId, r.user_id, ts, ipH, mark,
-    ...OPEN_COLS.map((c) => (mark ? '' : values[c]))).one();
+    const k = this.#sealKey('opens');
+    const rn = k ? recordNonce() : null;
+    const cells = OPEN_COLS.map((c) => (k ? sealRecord(k.key, Directory.#opensWhere({ rn, share_id: shareId, user_id: r.user_id }, c), values[c]) : values[c]));
+    this.sql.exec(`INSERT INTO opens (share_id, user_id, ts, ip_h, rk, rn, ${OPEN_COLS.join(', ')})
+      VALUES (?, ?, ?, ?, ?, ?, ${OPEN_COLS.map(() => '?').join(', ')})`, shareId, r.user_id, ts, ipH, k ? k.kid : null, rn, ...cells);
     const c = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
     if (c > MAX_OPENS_PER_SHARE) {
       // Keep the first receipts (who opened it first) and the most recent ones.
       this.sql.exec(`DELETE FROM opens WHERE id IN (SELECT id FROM opens WHERE share_id = ? ORDER BY id ASC LIMIT ? OFFSET ?)`,
         shareId, c - MAX_OPENS_PER_SHARE, OPENS_KEEP_FIRST);
-    }
-    if (mark) {
-      this.#queueSeal('opens', id, mark, values);
-      await this.#settleRecords();
     }
   }
 
@@ -2483,8 +2505,7 @@ export class Directory extends DurableObject {
     const s = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0];
     if (!s || (!admin && s.user_id !== uid)) return fail(404, 'not_found', 'Share not found.');
     const lim = Math.max(1, Math.min(MAX_OPENS_PER_SHARE, limit | 0));
-    await this.#settleRecords();
-    const rows = this.sql.exec(`SELECT id, rk, ts, ${OPEN_COLS.join(', ')} FROM opens WHERE share_id = ? ORDER BY id DESC LIMIT ?`, shareId, lim).toArray();
+    const rows = this.sql.exec(`SELECT id, rk, rn, share_id, user_id, ts, ${OPEN_COLS.join(', ')} FROM opens WHERE share_id = ? ORDER BY id DESC LIMIT ?`, shareId, lim).toArray();
     // Every open counts, including those not stored individually (throttled, or before receipts existed).
     const stored = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
     const counted = this.sql.exec('SELECT opens_total FROM shares WHERE id = ?', shareId).toArray()[0]?.opens_total ?? 0;
@@ -2503,7 +2524,7 @@ export class Directory extends DurableObject {
       let unreadable = false;
       for (const c of OPEN_COLS) {
         if (!keys.has(c)) continue;
-        const v = await this.#recordValue(r.rk, { table: 'opens', col: c, id: r.id }, r[c]);
+        const v = this.#recordValue(r.rk, Directory.#opensWhere(r, c), r[c]);
         if (v === null) unreadable = true;
         row[c] = v ?? '';
       }
@@ -5248,7 +5269,6 @@ export class Directory extends DurableObject {
 
   async adminLog(entry, actorId) {
     this.#log(actorId, entry.subject ?? null, entry.action, entry.detail ?? '');
-    await this.#settleRecords();
   }
 
   async audit({ before = null, limit = 100, subject = null } = {}) {
@@ -5257,11 +5277,11 @@ export class Directory extends DurableObject {
     const args = [];
     if (before) { where.push('a.id < ?'); args.push(before); }
     if (subject) { where.push('a.subject_id = ?'); args.push(subject); }
-    await this.#settleRecords();
     return this.#openDetails(this.sql.exec(
-      `SELECT a.id, a.ts, a.action, a.detail, a.rk, a.actor_id, a.subject_id, a.imp, a.adm, ua.username AS actor, us.username AS subject
+      `SELECT a.id, a.ts, a.action, a.detail, a.rk, a.rn, a.actor_id, a.subject_id, a.imp, a.adm, ua.username AS actor, us.username AS subject
        FROM activity a LEFT JOIN users ua ON ua.id = a.actor_id LEFT JOIN users us ON us.id = a.subject_id
-       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ?`, ...args, lim).toArray());
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ?`, ...args, lim).toArray(),
+    ['id', 'ts', 'action', 'detail', 'actor_id', 'subject_id', 'imp', 'adm', 'actor', 'subject']);
   }
 
   // ── housekeeping ─────────────────────────────────────────────────────────
@@ -5295,21 +5315,6 @@ export class Directory extends DurableObject {
     try { more = await this.#recordPass(); } catch (e) { console.warn('secbin: records pass not finished', e && e.name ? e.name : 'error'); }
     await this.ctx.storage.setAlarm(Date.now() + (more ? RECORD_PASS_AGAIN_MS : 3600 * 1000));
   }
-}
-
-// Every RPC method (every async method of the class) seals the records it
-// queued before it returns (#queueSeal): #log is synchronous and called from
-// inside transactions, while the sealing is asynchronous, so it is done here,
-// in the same request, once the method's own work is done.
-for (const name of Object.getOwnPropertyNames(Directory.prototype)) {
-  const fn = Directory.prototype[name];
-  if (name === 'constructor' || name === 'settleRecords' || typeof fn !== 'function' || fn.constructor.name !== 'AsyncFunction') continue;
-  Object.defineProperty(Directory.prototype, name, {
-    configurable: true, writable: true,
-    value: { async [name](...args) {
-      try { return await fn.apply(this, args); } finally { await this.settleRecords(); }
-    } }[name],
-  });
 }
 
 export const SETTING_KEYS = Object.keys(SETTINGS);

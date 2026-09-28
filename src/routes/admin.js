@@ -4,7 +4,7 @@
 
 import { json, err, readJsonBody, assertIntent, methodNotAllowed } from '../lib/http.js';
 import { authenticate, issueSession } from '../lib/auth.js';
-import { directory, guardShards, guardShardFor, guardKeyFor, invalidateGuardCaches, cachedSettings, ipContext, RATE_LIMIT_SCOPES } from '../lib/guard.js';
+import { directory, guardShards, guardShardFor, guardKeyFor, guardKeyTyped, sealedTyped, invalidateGuardCaches, cachedSettings, ipContext, RATE_LIMIT_SCOPES } from '../lib/guard.js';
 import { isGuardTag } from '../lib/records.js';
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
 import { GUARD_SCOPES, apiExpiry } from '../lib/settings.js';
@@ -442,21 +442,25 @@ export async function handleAdmin(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const body = await readJsonBody(request);
     if (![...GUARD_SCOPES, ...RATE_LIMIT_SCOPES].includes(body.scope) || typeof body.key !== 'string' || body.key.length > 64) return err(400, 'invalid', 'scope and key are required');
-    // A row's key (a tag), or an address / prefix as the owner knows it: its tag (SECURITY.md, "Records at rest").
-    const key = isGuardTag(body.key) ? body.key : await guardKeyFor(env, body.key);
+    // A row's key (a tag), or an address / prefix as the owner knows it (a row from before the
+    // tags is keyed by it, and the owner may type one): normalised as the Guard keys a network
+    // ("1.2.3.4" → "1.2.3.4/32"), then its tag (SECURITY.md, "Records at rest").
+    const typed = isGuardTag(body.key) ? null : await guardKeyTyped(env, body.key);
+    const key = typed === null ? body.key : await guardKeyFor(env, typed);
     const stub = guardShardFor(env, key);
-    // The row's address, for the audit entry (sealed there like every sign-in record).
+    // The row's address, for the view and the audit entry (sealed there like every sign-in record).
     const row = await stub.row(body.scope, key);
     if (gm[1] === 'unblock') {
       await stub.unblock(body.scope, key);
       // A row from before the tags (not re-keyed yet) is keyed by the address itself.
-      if (key !== body.key) await guardShardFor(env, body.key).unblock(body.scope, body.key);
-      await dir.guardLog({ action: 'guard.unblocked', scope: body.scope, key, row: row ?? (key !== body.key ? { addr: body.key, rk: null } : null) }, me);
+      if (typed !== null) await guardShardFor(env, typed).unblock(body.scope, typed);
+      await dir.guardLog({ action: 'guard.unblocked', scope: body.scope, key, row, typed }, me);
     } else {
       const sec = Number(body.seconds);
       if (!Number.isSafeInteger(sec) || sec < 1 || sec > 365 * 86400) return err(400, 'invalid', 'seconds must be 1–31536000');
-      await stub.block(body.scope, key, now() + sec);
-      await dir.guardLog({ action: 'guard.blocked', scope: body.scope, key, row, seconds: sec }, me);
+      // No row for the tag here yet (a typed address, or a row not re-keyed yet): the block keeps the typed address.
+      await stub.block(body.scope, key, now() + sec, typed !== null ? await sealedTyped(env, body.scope, key, typed) : null);
+      await dir.guardLog({ action: 'guard.blocked', scope: body.scope, key, row, typed, seconds: sec }, me);
     }
     return json({ ok: true });
   }

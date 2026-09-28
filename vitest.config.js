@@ -24,7 +24,7 @@ export default defineConfig({
         // attaches (workerd#4042); DecompressionStream errors both stream sides
         // and trips this, which vitest 4 then reports as an unhandled error.
         // This flag defers the event until the microtask checkpoint completes.
-        compatibilityFlags: ['unhandled_rejection_after_microtask_checkpoint'],
+        compatibilityFlags: ['nodejs_compat', 'unhandled_rejection_after_microtask_checkpoint'],
       },
     }),
   ],

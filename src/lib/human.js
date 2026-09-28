@@ -60,6 +60,16 @@ async function derived(env, label) {
 
 const mac = async (env, label, text) => new Uint8Array(await crypto.subtle.sign('HMAC', await derived(env, label), utf8(text)));
 
+/**
+ * The network as a Drive upload session keeps it (rsessions.net, the
+ * per-network session cap): an HMAC of the Guard's tracking key under a key of
+ * its own, never the address or an unkeyed hash of it (SECURITY.md, "Records
+ * at rest"). The Drive hashes it again per link and keeps 24 bits.
+ */
+export async function reverseNet(env, guardKey) {
+  return b64urlFromBytes(await mac(env, 'reverse-net', String(guardKey ?? ''))).slice(0, 22);
+}
+
 /** The network tag a grant is bound to (from the Guard's tracking key). */
 export async function netTag(env, guardKey) {
   return b64urlFromBytes(await mac(env, 'human-net', String(guardKey ?? ''))).slice(0, 22);

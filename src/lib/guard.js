@@ -9,10 +9,10 @@
 // (src/lib/records.js, SECURITY.md, "Records at rest").
 
 import { bfpDisabled, binding } from './config.js';
-import { parseIp, parseRule, ruleContains, trackingKey } from './ip.js';
+import { parseIp, parseCidr, formatCidr, parseRule, ruleContains, trackingKey } from './ip.js';
 import { clientIp } from './http.js';
 import { GUARD_SHARDS, guardShardIndex } from '../guard-do.js';
-import { guardTag, guardRowId, importTagKey, importTableKey, sealRecord } from './records.js';
+import { guardTag, guardWhere, isGuardTag, sealRecord } from './records.js';
 import { bytesFromB64url } from '../../public/js/bytes.js';
 
 const CACHE_MS = 30 * 1000;
@@ -20,8 +20,13 @@ let rulesCache = { at: 0, rules: [] };
 let settingsCache = { at: 0, settings: null };
 let publicConfigCache = { at: 0, config: null };
 let guardKeysCache = { at: 0, keys: null };
-/** The Guard shards whose legacy rows the Directory's pass has re-keyed (legacyDone): never asked again by this isolate. */
-let legacyDoneShards = new Set();
+/**
+ * The Guard shards whose legacy rows the Directory's pass has re-keyed
+ * (legacyDone) → when this isolate learnt it. Asked again after CACHE_MS: a
+ * shard clears its flag when a row keyed by an address arrives after it (an
+ * isolate of the release before, during a rollout).
+ */
+let legacyDoneShards = new Map();
 
 export const directory = (env) => {
   const ns = binding(env, 'DIRECTORY');
@@ -34,13 +39,13 @@ export function invalidateGuardCaches() {
   settingsCache = { at: 0, settings: null };
   publicConfigCache = { at: 0, config: null };
   guardKeysCache = { at: 0, keys: null };
-  legacyDoneShards = new Set();
+  legacyDoneShards = new Map();
 }
 
 /**
  * The Guard's keys (Directory.guardKeys): the tag key (HMAC) and, once there
- * is a keyring, the Guard's record key with its id → { tag, kid, seal | null }
- * (CryptoKeys, never extractable here). Cached per isolate like the settings:
+ * is a keyring, the Guard's table key with its id → { tag, kid, seal | null }
+ * (32-byte keys, in this isolate's memory only). Cached per isolate like the settings:
  * after a root change, addresses may be sealed under the previous root's key
  * for up to CACHE_MS (they stay readable; the Directory's pass re-seals them).
  */
@@ -49,7 +54,7 @@ async function guardKeys(env) {
     const r = await directory(env).guardKeys();
     guardKeysCache = {
       at: Date.now(),
-      keys: { tag: await importTagKey(bytesFromB64url(r.tag)), kid: r.kid ?? null, seal: r.key ? await importTableKey(bytesFromB64url(r.key)) : null },
+      keys: { tag: bytesFromB64url(r.tag), kid: r.kid ?? null, seal: r.key ? bytesFromB64url(r.key) : null },
     };
   }
   return guardKeysCache.keys;
@@ -58,6 +63,30 @@ async function guardKeys(env) {
 /** The Guard key of a tracking key the owner typed (an address or a prefix, as the Guard's rows showed it before the tags). */
 export async function guardKeyFor(env, trackingKeyText) {
   return guardTag((await guardKeys(env)).tag, trackingKeyText);
+}
+
+/**
+ * A key the owner typed in the block / unblock routes, as the Guard keys a
+ * network: a bare IPv4 address → "/32", a bare IPv6 address → the Guard's
+ * IPv6 prefix (`guard.v6Prefix`, a /64 by default), a CIDR block in its
+ * canonical form; a row key (a tag), or anything with a suffix ("…#<name
+ * hash>"), keeps that suffix. Anything else is left as it is.
+ */
+export async function guardKeyTyped(env, text) {
+  if (typeof text !== 'string' || isGuardTag(text)) return text;
+  const hash = text.indexOf('#');
+  const head = hash < 0 ? text : text.slice(0, hash);
+  const tail = hash < 0 ? '' : text.slice(hash);
+  let key = head;
+  if (parseIp(head)) key = trackingKey(head, (await cachedSettings(env))['guard.v6Prefix']);
+  else if (head.includes('/')) { const c = parseCidr(head); if (c) key = formatCidr(c); }
+  return `${key}${tail}`;
+}
+
+/** An address the owner typed, sealed as the `scope` row of `tag` keeps it ({ addr, rk }). */
+export async function sealedTyped(env, scope, tag, text) {
+  const k = await guardKeys(env);
+  return k.seal ? { addr: sealRecord(k.seal, guardWhere(scope, tag), text), rk: k.kid } : { addr: text, rk: null };
 }
 
 /**
@@ -77,7 +106,7 @@ async function tagOf(env, g) {
 async function sealedAddr(env, g, scope, tag) {
   const k = await guardKeys(env);
   if (!k.seal) return { addr: g.key, rk: null };
-  return { addr: await sealRecord(k.seal, { table: 'guard', col: 'addr', id: guardRowId(scope, tag) }, g.key), rk: k.kid };
+  return { addr: sealRecord(k.seal, guardWhere(scope, tag), g.key), rk: k.kid };
 }
 
 /**
@@ -158,10 +187,10 @@ export async function isBlocked(env, g, scope) {
  */
 async function legacy(env, g, ask) {
   const i = guardShardIndex(g.key);
-  if (legacyDoneShards.has(i)) return null;
+  if (Date.now() - (legacyDoneShards.get(i) ?? -Infinity) <= CACHE_MS) return null;
   const ns = binding(env, 'GUARD');
   const r = await ask(ns.get(ns.idFromName(`shard-${i}`)));
-  if (r.done) { legacyDoneShards.add(i); return null; }
+  if (r.done) { legacyDoneShards.set(i, Date.now()); return null; }
   return r;
 }
 

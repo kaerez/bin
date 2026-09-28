@@ -10,7 +10,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { owner, makeUser, fetchJson, createNote, openNote, freshIp, proofFor, OWNER_STEP } from './helpers.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
 import { GUARD_SHARDS, guardShardIndex as at } from '../src/guard-do.js';
-import { deriveRecordKey, tableKey, sealRecord, openRecord, wrapRecordKey, unwrapRecordKey, isSealedRecord, guardTag, importTagKey } from '../src/lib/records.js';
+import { deriveRecordKey, tableKey, sealRecord, openRecord, wrapRecordKey, unwrapRecordKey, isSealedRecord, guardTag, recordNonce } from '../src/lib/records.js';
 import { randomBytes, b64urlFromBytes, bytesFromB64url } from '../public/js/bytes.js';
 import { keyFingerprint } from '../public/js/drivekeys.js';
 
@@ -47,30 +47,44 @@ async function lab(name, { keys = true } = {}) {
 const rows = (stub, q, ...args) => runInDurableObject(stub, (d) => d.sql.exec(q, ...args).toArray());
 
 describe('records.js', () => {
-  it('seals and opens a value; the AAD binds the table, the column and the row', async () => {
-    const rk = await deriveRecordKey(randomBytes(32));
-    const k = await tableKey(rk, 'opens');
-    const where = { table: 'opens', col: 'ip', id: 7 };
-    const v = await sealRecord(k, where, '203.0.113.9');
+  it('seals and opens a value; the AAD binds the table, the column, the row nonce and the owner columns', () => {
+    const rk = deriveRecordKey(randomBytes(32));
+    const k = tableKey(rk, 'opens');
+    const where = { table: 'opens', col: 'ip', rn: recordNonce(), bind: ['share-1', 'user-1'] };
+    const v = sealRecord(k, where, '203.0.113.9');
     expect(isSealedRecord(v)).toBe(true);
     expect(v).not.toContain('203.0.113.9');
-    expect(await openRecord(k, where, v)).toBe('203.0.113.9');
-    // Two seals of one value differ (a random IV each).
-    expect(await sealRecord(k, where, '203.0.113.9')).not.toBe(v);
-    for (const other of [{ ...where, id: 8 }, { ...where, col: 'city' }]) await expect(openRecord(k, other, v)).rejects.toThrow();
-    // Another table's key (the same record key) does not open it either.
-    await expect(openRecord(await tableKey(rk, 'activity'), { ...where, table: 'activity' }, v)).rejects.toThrow();
-    // Nor another root's record key.
-    await expect(openRecord(await tableKey(await deriveRecordKey(randomBytes(32)), 'opens'), where, v)).rejects.toThrow();
+    expect(openRecord(k, where, v)).toBe('203.0.113.9');
+    // Two seals of one value differ (a random IV each), and so do two rows' nonces.
+    expect(sealRecord(k, where, '203.0.113.9')).not.toBe(v);
+    expect(recordNonce()).not.toBe(where.rn);
+    for (const other of [{ ...where, rn: recordNonce() }, { ...where, col: 'city' }, { ...where, bind: ['share-2', 'user-1'] }, { ...where, bind: ['share-1', 'user-2'] }, { ...where, bind: ['share-1'] }]) {
+      expect(() => openRecord(k, other, v)).toThrow();
+    }
+    // Another table's key (the same record key) does not open it either, nor another root's record key.
+    expect(() => openRecord(tableKey(rk, 'activity'), { ...where, table: 'activity' }, v)).toThrow();
+    expect(() => openRecord(tableKey(deriveRecordKey(randomBytes(32)), 'opens'), where, v)).toThrow();
+    // A cut ciphertext or a changed byte is refused.
+    expect(() => openRecord(k, where, v.slice(0, -2))).toThrow();
+    expect(() => openRecord(k, where, `${v.slice(0, -1)}${v.endsWith('A') ? 'B' : 'A'}`)).toThrow();
+    // An empty value round-trips too (most sign-in entries have no detail).
+    const e = sealRecord(k, where, '');
+    expect(isSealedRecord(e)).toBe(true);
+    expect(openRecord(k, where, e)).toBe('');
+    expect(() => openRecord(k, { ...where, col: 'city' }, e)).toThrow();
+    // null and '' are different owner values.
+    const w2 = { table: 'activity', col: 'detail', rn: recordNonce(), bind: [null, 'u', 'login'] };
+    const v2 = sealRecord(tableKey(rk, 'activity'), w2, 'x');
+    expect(() => openRecord(tableKey(rk, 'activity'), { ...w2, bind: ['', 'u', 'login'] }, v2)).toThrow();
   });
 
-  it('an earlier root\'s record key is wrapped under the root, bound to its id', async () => {
+  it('an earlier root\'s record key is wrapped under the root, bound to its id', () => {
     const root = randomBytes(32);
-    const rk = await deriveRecordKey(randomBytes(32));
-    const w = await wrapRecordKey(root, 'kidA', rk);
-    expect([...await unwrapRecordKey(root, 'kidA', w)]).toEqual([...rk]);
-    await expect(unwrapRecordKey(root, 'kidB', w)).rejects.toThrow();
-    await expect(unwrapRecordKey(randomBytes(32), 'kidA', w)).rejects.toThrow();
+    const rk = deriveRecordKey(randomBytes(32));
+    const w = wrapRecordKey(root, 'kidA', rk);
+    expect([...unwrapRecordKey(root, 'kidA', w)]).toEqual([...rk]);
+    expect(() => unwrapRecordKey(root, 'kidB', w)).toThrow();
+    expect(() => unwrapRecordKey(randomBytes(32), 'kidA', w)).toThrow();
   });
 });
 
@@ -120,12 +134,80 @@ describe('sign-in and viewer records at rest', () => {
       d.sql.exec('UPDATE opens SET ip = ?, city = ? WHERE id = ?', a.ip, a.ip, b.id); // row a's address into row b, and into its city
       const [x, y] = d.sql.exec("SELECT id, detail FROM activity WHERE action = 'login' ORDER BY id").toArray();
       d.sql.exec('UPDATE activity SET detail = ? WHERE id = ?', x.detail, y.id);
+      // Every sealed row has its own nonce.
+      expect(new Set(d.sql.exec('SELECT rn FROM opens WHERE share_id = ?', shareId).toArray().map((r) => r.rn)).size).toBe(2);
       const r = await d.shareOpens(null, shareId, { admin: true });
       const moved = r.rows.find((o) => o.unreadable);
       expect(moved).toMatchObject({ ip: '', city: '', unreadable: true });
       expect(r.rows.find((o) => !o.unreadable)).toMatchObject({ ip: '192.0.2.1', city: 'Haifa' });
       const log = await d.audit({ subject: ownerId });
       expect(log.filter((e) => e.action === 'login').map((e) => e.detail)).toEqual(['(unreadable: its key is not available)', 'passkey=Laptop']);
+    });
+  });
+
+  it('a sealed row moved to another share, account or action does not open (the owner columns are bound)', async () => {
+    const { stub, shareId, ownerId } = await lab('rec-owner');
+    const other = 'shotherotherotherother'.slice(0, 21);
+    await runInDurableObject(stub, async (d) => {
+      const t = now();
+      d.sql.exec("INSERT OR IGNORE INTO shares (id, user_id, kind, created, expires, status) VALUES (?, ?, 'paste', ?, ?, 'active')", other, ownerId, t, t + 86400);
+      d.sql.exec("INSERT OR IGNORE INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES ('usrotherotherxx1', 'rec-owner-2', 'user', 's', 3, 'v', ?, ?)", t, t);
+      await d.recordOpen(shareId, { ip: '192.0.2.77', city: 'Haifa' });
+      await d.adminLog({ subject: ownerId, action: 'passkey.added', detail: 'name=Secret' }, ownerId);
+      // The receipt moved to another share (and another sender); the entry to another subject, actor or action.
+      d.sql.exec('UPDATE opens SET share_id = ? WHERE share_id = ?', other, shareId);
+      const moved = await d.shareOpens(null, other, { admin: true });
+      expect(moved.rows[0]).toMatchObject({ ip: '', city: '', unreadable: true });
+      d.sql.exec('UPDATE opens SET share_id = ?, user_id = ? WHERE share_id = ?', shareId, 'usrotherotherxx1', other);
+      expect((await d.shareOpens(null, shareId, { admin: true })).rows[0].unreadable).toBe(true);
+      d.sql.exec('UPDATE opens SET user_id = ? WHERE share_id = ?', ownerId, shareId);
+      expect((await d.shareOpens(null, shareId, { admin: true })).rows[0]).toMatchObject({ ip: '192.0.2.77', city: 'Haifa' }); // back where it was: it opens
+      const entry = () => d.sql.exec("SELECT id FROM activity WHERE detail LIKE 'r1.%' ORDER BY id DESC LIMIT 1").one().id;
+      const id = entry();
+      const detailOf = async () => (await d.audit({})).find((e) => e.id === id).detail;
+      expect(await detailOf()).toBe('name=Secret');
+      for (const [col, v] of [['subject_id', 'usrotherotherxx1'], ['actor_id', 'usrotherotherxx1'], ['action', 'passkey.removed']]) {
+        const was = d.sql.exec(`SELECT ${col} AS v FROM activity WHERE id = ?`, id).one().v;
+        d.sql.exec(`UPDATE activity SET ${col} = ? WHERE id = ?`, v, id);
+        expect(await detailOf()).toBe('(unreadable: its key is not available)');
+        d.sql.exec(`UPDATE activity SET ${col} = ? WHERE id = ?`, was, id);
+      }
+      expect(await detailOf()).toBe('name=Secret');
+    });
+  });
+
+  it('a record is written sealed in one statement: nothing pending, and an object restarted right after the write loses nothing', async () => {
+    const { stub, shareId, ownerId } = await lab('rec-restart');
+    await runInDurableObject(stub, async (d) => {
+      await d.adminLog({ subject: ownerId, action: 'login', detail: 'passkey=Right before the restart' }, ownerId);
+      await d.recordOpen(shareId, { ip: '192.0.2.88', browser: 'Firefox' });
+      // Already sealed as written: a nonce, the key id and a sealed value, no pending mark.
+      const a = d.sql.exec("SELECT detail, rk, rn FROM activity WHERE action = 'login' ORDER BY id DESC LIMIT 1").one();
+      expect(isSealedRecord(a.detail) && /^[A-Za-z0-9_-]{22}$/.test(a.rn) && !!a.rk).toBe(true);
+      const o = d.sql.exec('SELECT ip, rk, rn FROM opens WHERE share_id = ?', shareId).one();
+      expect(isSealedRecord(o.ip) && !!o.rn && !!o.rk).toBe(true);
+    });
+    await runInDurableObject(stub, (i, s) => { try { s.abort('restart'); } catch { /* the instance ends here */ } }).catch(() => {});
+    await runInDurableObject(dirOf('rec-restart'), async (d) => {
+      expect((await d.audit({ subject: ownerId })).find((e) => e.action === 'login').detail).toBe('passkey=Right before the restart');
+      expect((await d.shareOpens(null, shareId, { admin: true })).rows[0]).toMatchObject({ ip: '192.0.2.88', browser: 'Firefox' });
+    });
+  });
+
+  it('the pass reads only unsealed sign-in rows (partial indexes), never the rest of the log', async () => {
+    const { UNSEALED_ACTIVITY, UNSEALED_OPENS } = await import('../src/directory-do.js');
+    const { stub, ownerId } = await lab('rec-index', { keys: false });
+    await runInDurableObject(stub, async (d) => {
+      const t = now();
+      for (let i = 0; i < 2000; i++) d.sql.exec("INSERT INTO activity (ts, actor_id, subject_id, action, detail) VALUES (?, ?, ?, 'share.created', 'id=x')", t, ownerId, ownerId);
+      await d.adminLog({ subject: ownerId, action: 'login', detail: 'passkey=Old' }, ownerId);
+      const plan = (q) => d.sql.exec(`EXPLAIN QUERY PLAN ${q}`).toArray().map((r) => r.detail).join(' | ');
+      expect(plan(`SELECT id FROM activity WHERE ${UNSEALED_ACTIVITY} ORDER BY id LIMIT 500`)).toMatch(/USING (COVERING )?INDEX activity_unsealed/);
+      expect(plan(`SELECT id FROM activity WHERE ${UNSEALED_ACTIVITY} ORDER BY id LIMIT 500`)).not.toMatch(/TEMP B-TREE/);
+      expect(plan(`SELECT id FROM opens WHERE ${UNSEALED_OPENS} ORDER BY id LIMIT 500`)).toMatch(/USING (COVERING )?INDEX opens_unsealed/);
+      const c = d.sql.exec(`SELECT id, rk, detail FROM activity WHERE ${UNSEALED_ACTIVITY} ORDER BY id LIMIT 500`);
+      expect(c.toArray()).toHaveLength(1);
+      expect(c.rowsRead).toBeLessThan(10); // not the 2000 other entries
     });
   });
 
@@ -292,7 +374,7 @@ describe('Guard rows from before the tags', () => {
     seed[i]?.(g.sql);
   })));
   const doneFlags = () => Promise.all(shards().map((s) => runInDurableObject(s, (g) => g.sql.exec("SELECT COUNT(*) AS c FROM meta WHERE k = 'legacy.done'").one().c)));
-  const tagOf = (legacy) => runInDurableObject(dirOf(), async (d) => guardTag(await importTagKey(bytesFromB64url((await d.guardKeys()).tag)), legacy));
+  const tagOf = (legacy) => runInDurableObject(dirOf(), async (d) => guardTag(bytesFromB64url((await d.guardKeys()).tag), legacy));
 
   it('a block made before applies at once after the upgrade (legacy lookup), and after the pass as its tagged row', async () => {
     const ip = '203.0.113.201';
@@ -346,5 +428,126 @@ describe('Guard rows from before the tags', () => {
     expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: tag } })).status).toBe(200);
     await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': 60, 'guard.invalid.windowSec': 600, 'guard.invalid.blockSec': 1800, ...OWNER_STEP } });
     invalidateGuardCaches();
+  });
+});
+
+describe('the Guard routes and the pass (review of #86)', () => {
+  const setInvalid = (max) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': max, 'guard.invalid.windowSec': 600, 'guard.invalid.blockSec': 600, ...OWNER_STEP } });
+  const guardView = async () => (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
+  const lastAudit = async (action) => (await (await fetchJson('/api/private/admin/audit', { cookie: oc })).json()).rows.find((r) => r.action === action)?.detail;
+  const block = (key, seconds = 600) => fetchJson('/api/private/admin/guard/block', { method: 'POST', cookie: oc, body: { scope: 'invalid', key, seconds } });
+  const unblock = (key) => fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'invalid', key } });
+
+  it('F1 / F7: a typed address is normalised as the Guard keys it; a block with no row yet keeps it for the view and the audit', async () => {
+    invalidateGuardCaches();
+    const n = await createNote(oc, { text: 'x', bar: true });
+    const ip = '198.51.100.241';
+    // A bare IPv4 address, no row for it anywhere: the block holds it as "/32".
+    expect((await block(ip)).status).toBe(200);
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(429);
+    const b = (await guardView()).blocks.find((x) => x.scope === 'invalid' && x.addr === `${ip}/32`);
+    expect(b.key).toMatch(/^h:/);
+    expect(await lastAudit('guard.blocked')).toBe(`invalid ${ip}/32 600s`);
+    // Unblocking the bare address works too, and the audit names it.
+    expect((await unblock(ip)).status).toBe(200);
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(200);
+    expect(await lastAudit('guard.unblocked')).toBe(`invalid ${ip}/32`);
+    // A bare IPv6 address: the Guard's prefix (a /64 by default) — another address in it is blocked too.
+    expect((await block('2001:DB8:77::5')).status).toBe(200);
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip: '2001:db8:77::9' })).status).toBe(429);
+    expect((await guardView()).blocks.some((x) => x.addr === '2001:db8:77:0:0:0:0:0/64')).toBe(true);
+    expect((await unblock('2001:db8:77:0::1')).status).toBe(200);
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip: '2001:db8:77::9' })).status).toBe(200);
+  });
+
+  it('F1: "Block 24h" on a row not re-keyed yet (its key is the address) keeps the address', async () => {
+    const ip = '198.51.100.242';
+    const legacy = `${ip}/32`;
+    const t = now();
+    await runInDurableObject(shards()[at(legacy)], (g) => {
+      g.sql.exec("INSERT OR REPLACE INTO tracking (scope, key, count, start, expires) VALUES ('invalid', ?, 1, ?, ?)", legacy, t, t + 600);
+      g.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'");
+    });
+    invalidateGuardCaches();
+    const row = (await guardView()).tracking.find((x) => x.key === legacy);
+    expect(row.addr).toBe(legacy);
+    expect((await block(row.key, 86400)).status).toBe(200);
+    const b = (await guardView()).blocks.find((x) => x.scope === 'invalid' && x.addr === legacy);
+    expect(b.key).toMatch(/^h:/);
+    expect(await lastAudit('guard.blocked')).toBe(`invalid ${legacy} 86400s`);
+    expect((await unblock(b.key)).status).toBe(200);
+    await runInDurableObject(dirOf(), (d) => d.alarm());
+  });
+
+  it('F2: a failure between the pass taking a legacy counter and adding it to the tag is counted once', async () => {
+    expect((await setInvalid(6)).status).toBe(200);
+    await runInDurableObject(dirOf(), (d) => d.ctx.storage.deleteAlarm());
+    const ip = '198.51.100.243';
+    const legacy = `${ip}/32`;
+    const t = now();
+    const tag = guardTag(bytesFromB64url(await runInDurableObject(dirOf(), async (d) => (await d.guardKeys()).tag)), legacy);
+    await runInDurableObject(shards()[at(legacy)], (g) => {
+      g.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'");
+      g.sql.exec("INSERT OR REPLACE INTO tracking (scope, key, count, start, expires) VALUES ('invalid', ?, 2, ?, ?)", legacy, t - 10, t + 590);
+    });
+    invalidateGuardCaches();
+    // The pass's first half: the legacy counter is read and deleted in one Guard transaction.
+    const taken = await shards()[at(legacy)].takeLegacy([{ scope: 'invalid', key: legacy }]);
+    expect(taken).toMatchObject([{ scope: 'invalid', key: legacy, count: 2 }]);
+    // A failure in between: nothing to carry any more, one on the tag.
+    const n = await createNote(oc, { text: 'x', bar: true, password: 'pw-123456789' });
+    expect((await openNote(n.id, n.fragment, 'wrong', { ip })).res.status).toBe(403);
+    // The second half: added to the tag's counter.
+    await shards()[at(tag)].apply({ adopt: taken.map((r) => ({ ...r, t: 'tracking', key: tag, addr: null, rk: null })) });
+    const count = await runInDurableObject(shards()[at(tag)], (g) => g.sql.exec("SELECT count FROM tracking WHERE scope = 'invalid' AND key = ?", tag).one().count);
+    expect(count).toBe(3); // 2 before + 1, not 5
+    // 3 more failures reach the rule's 6.
+    const codes = [];
+    for (let i = 0; i < 3; i++) codes.push((await openNote(n.id, n.fragment, 'wrong', { ip })).res.status);
+    expect(codes).toEqual([403, 403, 429]);
+    expect((await unblock(ip)).status).toBe(200);
+    expect((await setInvalid(60)).status).toBe(200);
+    await runInDurableObject(dirOf(), (d) => d.alarm());
+  });
+
+  it('8: a row keyed by an address written after a shard is done (a Worker of the release before) is enforced, and re-keyed by the pass', async () => {
+    await runInDurableObject(dirOf(), (d) => d.alarm());
+    const ip = '198.51.100.244';
+    const legacy = `${ip}/32`;
+    const s = shards()[at(legacy)];
+    expect(await runInDurableObject(s, (g) => g.sql.exec("SELECT COUNT(*) AS c FROM meta WHERE k = 'legacy.done'").one().c)).toBe(1);
+    invalidateGuardCaches();
+    const n = await createNote(oc, { text: 'x', bar: true });
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(200); // this isolate now holds "done" for the shard
+    // The release before blocks it (its Guard key is the address): the shard is not done any more.
+    await s.block('invalid', legacy, now() + 600);
+    expect(await runInDurableObject(s, (g) => g.sql.exec("SELECT COUNT(*) AS c FROM meta WHERE k = 'legacy.done'").one().c)).toBe(0);
+    // The Directory was asked to run its pass soon.
+    const alarm = await runInDurableObject(dirOf(), (d) => d.ctx.storage.getAlarm());
+    expect(alarm - Date.now()).toBeLessThan(5000);
+    // Once this isolate's "done" goes stale (CACHE_MS; here at once), the block applies.
+    invalidateGuardCaches();
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(429);
+    // The pass re-keys it and marks the shard done again; still blocked, now by its tag.
+    await runInDurableObject(dirOf(), (d) => d.alarm());
+    expect(await runInDurableObject(s, (g) => g.sql.exec("SELECT COUNT(*) AS c FROM meta WHERE k = 'legacy.done'").one().c)).toBe(1);
+    expect(await runInDurableObject(s, (g) => g.sql.exec('SELECT COUNT(*) AS c FROM blocks WHERE key = ?', legacy).one().c)).toBe(0);
+    invalidateGuardCaches();
+    expect((await fetchJson(`/api/paste/${n.id}`, { ip })).status).toBe(429);
+    expect((await unblock(ip)).status).toBe(200);
+  });
+
+  it('7: a Drive upload session keeps the network only as a keyed hash', async () => {
+    const { receiver, newReverse, begin, driveOf } = await import('./reverse-helpers.js');
+    const u = await receiver('rec-net');
+    const r = await newReverse(u.cookie);
+    const ip = '198.51.100.245';
+    expect((await begin(r, { ip })).status).toBe(200);
+    const [row] = await runInDurableObject(driveOf(u.id), (i, st) => st.storage.sql.exec('SELECT net FROM rsessions WHERE rid = ?', r.id).toArray());
+    // Not the unkeyed hash of the address the release before stored.
+    const unkeyed = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`secbin-reverse/v1 net\n${r.id}\n${ip}/32`)));
+    expect(row.net).toBeTruthy();
+    expect(row.net).not.toBe(b64urlFromBytes(unkeyed.subarray(0, 3)));
+    expect(row.net).not.toContain(ip);
   });
 });

@@ -19,8 +19,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   location, browser, system and languages), the detail of the activity log's sign-in entries
   (sign-ins, sign-outs, lockouts, passkeys added or removed, blocked and unblocked addresses) and
   the addresses the brute-force guard tracks are sealed with AES-256-GCM (a random IV per value,
-  the table, column and row id as AAD) under a record key derived from the Drive's root MEK
-  (HKDF, `secbin-records/v1`), with the key id stored per row. The throttles compare keyed
+  the table, column, a random row nonce and the row's owner columns as AAD) under a record key
+  derived from the Drive's root MEK (HKDF, `secbin-records/v1`), with the key id stored per row.
+  A record is sealed synchronously and written sealed in one statement (the Worker now runs with
+  the `nodejs_compat` compatibility flag, for `node:crypto`). The throttles compare keyed
   hashes of addresses instead of the addresses; the guard's rows are keyed by one, so Admin →
   Security shows the address the server opens for the owner (`addr`) and the row's key is a
   hash (unblocking by the address still works). A root change, "Go back", a restored root or a
@@ -29,7 +31,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   keyring yet writes records in the clear, as before, and the pass seals them once a keyring
   exists; it also seals the rows stored before this release (Directory migration 19) and
   re-keys the guard's earlier rows. Until a guard shard's earlier rows are re-keyed, lookups
-  check the address too, so blocks and failure counts from before the upgrade keep applying.
+  check the address too, so blocks and failure counts from before the upgrade keep applying,
+  including rows an older Worker writes during the rollout. Admin → Security's block and unblock
+  take an address as typed ("1.2.3.4", a bare IPv6 address, a CIDR block) and key it as the guard
+  does, and a block with no row yet keeps that address for the view and the audit. A Drive
+  Receive upload session keeps the uploader's network only as a keyed hash.
   The server can derive the key: this protects a copy of the stored rows, not the server
   (SECURITY.md, "Records at rest"). Records are not exported.
 - **Take-in holds received items to their link's rules** (audit A-3): the uploader's browser only

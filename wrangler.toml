@@ -8,6 +8,9 @@
 name = "bin"
 main = "src/index.js"
 compatibility_date = "2025-10-11"
+# node:crypto (synchronous AES-256-GCM and HMAC): the sign-in and viewer records are sealed in
+# the statement that writes them (src/lib/records.js; SECURITY.md, "Records at rest").
+compatibility_flags = ["nodejs_compat"]
 
 # ── Smart Placement ──────────────────────────────────────────────────────────
 # Runs the fetch handler where it is fastest overall, which for secbin is near

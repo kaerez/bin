@@ -23,7 +23,7 @@ import { genToken, hashToken } from '../lib/ids.js';
 import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
 import { turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
-import { issueGrant, readGrant, netTag, captchaRequired, verifyCaptcha, HUMAN_HEADER } from '../lib/human.js';
+import { issueGrant, readGrant, netTag, reverseNet, captchaRequired, verifyCaptcha, HUMAN_HEADER } from '../lib/human.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { HARD_MAX_DRIVE_BYTES, NO_EXPIRY, apiExpiry } from '../lib/settings.js';
 import { expireSeconds, isProof, ARGON2, MAX_TTL, MAX_VIEWS } from '../../public/js/format.js';
@@ -649,7 +649,7 @@ export async function handleReversePublic(request, env, url) {
     const proofHash = r.ph && isProof(kp) ? await proofHashOf(kp) : null;
     let s;
     try {
-      s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec, { net: g.key, proofHash, human, kind });
+      s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec, { net: await reverseNet(env, g.key), proofHash, human, kind });
     } catch (e) {
       await dir.refund(uid, quota.refund);
       throw e;
