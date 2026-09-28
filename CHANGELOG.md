@@ -21,8 +21,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   the addresses the brute-force guard tracks are sealed with AES-256-GCM (a random IV per value,
   the table, column, a random row nonce and the row's owner columns as AAD) under a record key
   derived from the Drive's root MEK (HKDF, `secbin-records/v1`), with the key id stored per row.
-  A record is sealed synchronously and written sealed in one statement (the Worker now runs with
-  the `nodejs_compat` compatibility flag, for `node:crypto`). The throttles compare keyed
+  A record is sealed before the step that writes it and written sealed in one statement: it is
+  never stored empty or pending. The throttles compare keyed
   hashes of addresses instead of the addresses; the guard's rows are keyed by one, so Admin →
   Security shows the address the server opens for the owner (`addr`) and the row's key is a
   hash (unblocking by the address still works). A root change, "Go back", a restored root or a

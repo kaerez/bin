@@ -47,44 +47,52 @@ async function lab(name, { keys = true } = {}) {
 const rows = (stub, q, ...args) => runInDurableObject(stub, (d) => d.sql.exec(q, ...args).toArray());
 
 describe('records.js', () => {
-  it('seals and opens a value; the AAD binds the table, the column, the row nonce and the owner columns', () => {
-    const rk = deriveRecordKey(randomBytes(32));
-    const k = tableKey(rk, 'opens');
+  it('seals and opens a value; the AAD binds the table, the column, the row nonce and the owner columns', async () => {
+    const rk = await deriveRecordKey(randomBytes(32));
+    const k = await tableKey(rk, 'opens');
     const where = { table: 'opens', col: 'ip', rn: recordNonce(), bind: ['share-1', 'user-1'] };
-    const v = sealRecord(k, where, '203.0.113.9');
+    const v = await sealRecord(k, where, '203.0.113.9');
     expect(isSealedRecord(v)).toBe(true);
     expect(v).not.toContain('203.0.113.9');
-    expect(openRecord(k, where, v)).toBe('203.0.113.9');
+    expect(await openRecord(k, where, v)).toBe('203.0.113.9');
     // Two seals of one value differ (a random IV each), and so do two rows' nonces.
-    expect(sealRecord(k, where, '203.0.113.9')).not.toBe(v);
+    expect(await sealRecord(k, where, '203.0.113.9')).not.toBe(v);
     expect(recordNonce()).not.toBe(where.rn);
     for (const other of [{ ...where, rn: recordNonce() }, { ...where, col: 'city' }, { ...where, bind: ['share-2', 'user-1'] }, { ...where, bind: ['share-1', 'user-2'] }, { ...where, bind: ['share-1'] }]) {
-      expect(() => openRecord(k, other, v)).toThrow();
+      await expect(openRecord(k, other, v)).rejects.toThrow();
     }
     // Another table's key (the same record key) does not open it either, nor another root's record key.
-    expect(() => openRecord(tableKey(rk, 'activity'), { ...where, table: 'activity' }, v)).toThrow();
-    expect(() => openRecord(tableKey(deriveRecordKey(randomBytes(32)), 'opens'), where, v)).toThrow();
+    await expect(openRecord(await tableKey(rk, 'activity'), { ...where, table: 'activity' }, v)).rejects.toThrow();
+    await expect(openRecord(await tableKey(await deriveRecordKey(randomBytes(32)), 'opens'), where, v)).rejects.toThrow();
     // A cut ciphertext or a changed byte is refused.
-    expect(() => openRecord(k, where, v.slice(0, -2))).toThrow();
-    expect(() => openRecord(k, where, `${v.slice(0, -1)}${v.endsWith('A') ? 'B' : 'A'}`)).toThrow();
+    await expect(openRecord(k, where, v.slice(0, -2))).rejects.toThrow();
+    await expect(openRecord(k, where, `${v.slice(0, -1)}${v.endsWith('A') ? 'B' : 'A'}`)).rejects.toThrow();
     // An empty value round-trips too (most sign-in entries have no detail).
-    const e = sealRecord(k, where, '');
+    const e = await sealRecord(k, where, '');
     expect(isSealedRecord(e)).toBe(true);
-    expect(openRecord(k, where, e)).toBe('');
-    expect(() => openRecord(k, { ...where, col: 'city' }, e)).toThrow();
+    expect(await openRecord(k, where, e)).toBe('');
+    await expect(openRecord(k, { ...where, col: 'city' }, e)).rejects.toThrow();
     // null and '' are different owner values.
+    const ak = await tableKey(rk, 'activity');
     const w2 = { table: 'activity', col: 'detail', rn: recordNonce(), bind: [null, 'u', 'login'] };
-    const v2 = sealRecord(tableKey(rk, 'activity'), w2, 'x');
-    expect(() => openRecord(tableKey(rk, 'activity'), { ...w2, bind: ['', 'u', 'login'] }, v2)).toThrow();
+    const v2 = await sealRecord(ak, w2, 'x');
+    await expect(openRecord(ak, { ...w2, bind: ['', 'u', 'login'] }, v2)).rejects.toThrow();
   });
 
-  it('an earlier root\'s record key is wrapped under the root, bound to its id', () => {
+  it('an earlier root\'s record key is wrapped under the root, bound to its id', async () => {
     const root = randomBytes(32);
-    const rk = deriveRecordKey(randomBytes(32));
-    const w = wrapRecordKey(root, 'kidA', rk);
-    expect([...unwrapRecordKey(root, 'kidA', w)]).toEqual([...rk]);
-    expect(() => unwrapRecordKey(root, 'kidB', w)).toThrow();
-    expect(() => unwrapRecordKey(randomBytes(32), 'kidA', w)).toThrow();
+    const rk = await deriveRecordKey(randomBytes(32));
+    const w = await wrapRecordKey(root, 'kidA', rk);
+    expect([...await unwrapRecordKey(root, 'kidA', w)]).toEqual([...rk]);
+    await expect(unwrapRecordKey(root, 'kidB', w)).rejects.toThrow();
+    await expect(unwrapRecordKey(randomBytes(32), 'kidA', w)).rejects.toThrow();
+  });
+
+  it('the tests run strict: a sign-in record written unsealed would throw (test/setup-records.js)', async () => {
+    const { Directory, RECORDS } = await import('../src/directory-do.js');
+    expect(RECORDS.strict).toBe(true);
+    // The Directory the tests talk to is this module's (so the flag reaches it).
+    expect(await runInDurableObject(dirOf(), (d) => d instanceof Directory)).toBe(true);
   });
 });
 
@@ -485,7 +493,7 @@ describe('the Guard routes and the pass (review of #86)', () => {
     const ip = '198.51.100.243';
     const legacy = `${ip}/32`;
     const t = now();
-    const tag = guardTag(bytesFromB64url(await runInDurableObject(dirOf(), async (d) => (await d.guardKeys()).tag)), legacy);
+    const tag = await guardTag(bytesFromB64url(await runInDurableObject(dirOf(), async (d) => (await d.guardKeys()).tag)), legacy);
     await runInDurableObject(shards()[at(legacy)], (g) => {
       g.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'");
       g.sql.exec("INSERT OR REPLACE INTO tracking (scope, key, count, start, expires) VALUES ('invalid', ?, 2, ?, ?)", legacy, t - 10, t + 590);

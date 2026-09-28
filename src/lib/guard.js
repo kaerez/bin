@@ -86,7 +86,7 @@ export async function guardKeyTyped(env, text) {
 /** An address the owner typed, sealed as the `scope` row of `tag` keeps it ({ addr, rk }). */
 export async function sealedTyped(env, scope, tag, text) {
   const k = await guardKeys(env);
-  return k.seal ? { addr: sealRecord(k.seal, guardWhere(scope, tag), text), rk: k.kid } : { addr: text, rk: null };
+  return k.seal ? { addr: await sealRecord(k.seal, guardWhere(scope, tag), text), rk: k.kid } : { addr: text, rk: null };
 }
 
 /**
@@ -106,7 +106,7 @@ async function tagOf(env, g) {
 async function sealedAddr(env, g, scope, tag) {
   const k = await guardKeys(env);
   if (!k.seal) return { addr: g.key, rk: null };
-  return { addr: sealRecord(k.seal, guardWhere(scope, tag), g.key), rk: k.kid };
+  return { addr: await sealRecord(k.seal, guardWhere(scope, tag), g.key), rk: k.kid };
 }
 
 /**

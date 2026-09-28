@@ -1274,10 +1274,15 @@ The rest of the activity log (settings, roles, shares, the Drive, imports) is st
   before, still serving during a rollout) clears the shard's flag and asks the Directory to run
   its pass soon; the Worker re-reads each shard's flag at most every 30 seconds, so such a row is
   looked up within that time and re-keyed by the next pass.
-- **Writing.** A record is sealed synchronously (`node:crypto`; the Worker runs with the
-  `nodejs_compat` flag) and written sealed in one statement, inside the transaction of whatever
-  it records: no row is ever stored empty, pending or in the clear while there is a keyring, and
-  an object that stops right after a write loses nothing. The Guard's addresses are sealed by the
+- **Writing.** A record is sealed (Web Crypto) *before* the synchronous section of the call that
+  writes it: its row nonce is chosen first, so the seal does not wait for the row id. The call
+  then checks what it depends on afresh (nothing awaits from there) and writes the sealed row in
+  one statement with its other writes. No row is ever stored empty, pending or in the clear
+  while there is a keyring, and an object that stops right after a write loses nothing. Where an
+  entry names state read before its seal (how many recovery codes are left, a passkey's name),
+  that state is read again after the seal, and the entry sealed again if it changed. A code path
+  that skipped this would write its entry in the clear, flagged, for the pass to seal within
+  seconds (never lost); the tests fail on any such path. The Guard's addresses are sealed by the
   Worker with the Guard's table key before the Guard is asked.
 - **Typed addresses.** The owner's block and unblock routes take a row's key or an address as
   typed: a bare IPv4 address is keyed as its "/32", a bare IPv6 address as the Guard's IPv6
@@ -1888,7 +1893,7 @@ AES-256-GCM under HKDF of the user's KEK and a 32-byte per-item salt; the KEK is
 the root MEK and a sub-MEK with the user salt, all held by the server (docs/DRIVE.md §3; fixed
 vectors in `test-node/drivekeys.test.js`).
 Sign-in and viewer records: AES-256-GCM with a random 96-bit IV per value under HKDF-SHA256 of
-the root MEK (`secbin-records/v1`), then per table, with the table, column, a random row nonce and the row's owner columns as AAD (sealed synchronously, in the statement that writes the row);
+the root MEK (`secbin-records/v1`), then per table, with the table, column, a random row nonce and the row's owner columns as AAD (sealed before the synchronous section that writes the row, and written sealed in one statement);
 equality lookups on addresses use HMAC-SHA256 under HKDF subkeys of the Directory's secret
 ("Records at rest" in §6).
 

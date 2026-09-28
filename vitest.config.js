@@ -24,7 +24,7 @@ export default defineConfig({
         // attaches (workerd#4042); DecompressionStream errors both stream sides
         // and trips this, which vitest 4 then reports as an unhandled error.
         // This flag defers the event until the microtask checkpoint completes.
-        compatibilityFlags: ['nodejs_compat', 'unhandled_rejection_after_microtask_checkpoint'],
+        compatibilityFlags: ['unhandled_rejection_after_microtask_checkpoint'],
       },
     }),
   ],
@@ -34,6 +34,8 @@ export default defineConfig({
     // (vitest.dom.config.js) — keep both out of the workerd pool; test-e2e/
     // holds manual browser scripts (test-e2e/README.md), never run by vitest.
     exclude: ['**/node_modules/**', 'cli/**', 'test-dom/**', 'test-node/**', 'test-e2e/**'],
+    // Every sign-in record must be sealed before its write: a path that skips it throws in the tests.
+    setupFiles: ['./test/setup-records.js'],
     coverage: {
       // istanbul (source instrumentation), NOT v8: the v8 provider needs
       // node:inspector, which doesn't exist inside workerd.

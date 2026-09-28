@@ -413,6 +413,16 @@ const RECORD_ACTIONS = new Set(['login', 'login.password_ok', 'logout', 'account
 const RECORD_ACTIONS_SQL = `action IN (${[...RECORD_ACTIONS].map((a) => `'${a}'`).join(', ')})`;
 export const UNSEALED_ACTIVITY = `rk IS NULL AND ${RECORD_ACTIONS_SQL}`;
 export const UNSEALED_OPENS = 'rk IS NULL';
+/** The key a sealed entry (#preseal) is found by in #log: who, about whom, what, and the exact detail. */
+const presealKey = (actorId, subject, action, text) => JSON.stringify([actorId ?? null, subject ?? null, action, text]);
+/**
+ * `strict`: a sign-in record written with a keyring but not sealed first (a
+ * code path that skipped #preseal) throws instead of being written in the
+ * clear for the pass. On in the tests (test/setup-records.js), so that every
+ * such path fails there; off in production, where losing the entry would be
+ * worse.
+ */
+export const RECORDS = { strict: false };
 /** A read receipt's sealed columns (all of what the request revealed about the opener). */
 const OPEN_COLS = ['ip', 'country', 'region', 'city', 'browser', 'browser_ver', 'os', 'langs'];
 /** Rows per table the records pass seals per run; with more left, it runs again after RECORD_PASS_AGAIN_MS. */
@@ -682,7 +692,7 @@ export class Directory extends DurableObject {
    * shows the truth), or { id, adm: true } when the owner acted directly from
    * the admin panel on the subject's data (never shown in the user's own log).
    */
-  #log(actor, subject, action, detail = '') {
+  #log(actor, subject, action, detail = '', pre = null) {
     // Enforce the size limit now and then, not only in the hourly alarm.
     this.logWrites = ((this.logWrites ?? 0) + 1) % 500;
     if (this.logWrites === 0) this.#pruneLogs();
@@ -690,16 +700,30 @@ export class Directory extends DurableObject {
     const imp = !!(obj && actor.imp);
     const adm = !!(obj && actor.adm);
     const actorIdValue = obj ? actor.id : actor;
-    // A sign-in record (RECORD_ACTIONS) with a keyring: its detail is sealed here and the row
-    // written sealed, in one statement (the seal is synchronous: nothing is ever stored empty or
-    // in the clear meanwhile). Without a keyring it is stored as before (rk NULL) and sealed by
-    // the pass later.
-    let text = cleanDetail(detail);
-    const k = RECORD_ACTIONS.has(action) ? this.#sealKey('activity') : null;
-    const rn = k ? recordNonce() : null;
-    if (k) text = sealRecord(k.key, Directory.#activityWhere({ rn, actor_id: actorIdValue ?? null, subject_id: subject ?? null, action }), text);
+    // A sign-in record (RECORD_ACTIONS) is written as the caller sealed it before its synchronous
+    // section (`pre`, from #preseal), in this one statement: it is never stored empty, pending or
+    // in the clear while there is a keyring. Without a keyring it is stored as before (rk NULL)
+    // and sealed by the pass later.
+    const text = cleanDetail(detail);
+    let stored = text;
+    let rk = null;
+    let rn = null;
+    if (RECORD_ACTIONS.has(action)) {
+      const key = presealKey(actorIdValue, subject, action, text);
+      const p = pre?.get(key);
+      if (p) {
+        pre.delete(key); // each sealed entry once (its nonce is the row's)
+        ({ rn, kid: rk, sealed: stored } = p);
+      } else if (this.#recordKid()) {
+        // A path that did not seal its entry first (a bug: the tests make it throw). Never lost:
+        // in the clear, flagged, and sealed by the pass within seconds. Only the action is logged.
+        if (RECORDS.strict) throw new Error(`sign-in record not sealed before its write: ${action}`);
+        console.warn('secbin: a sign-in record was written unsealed; the pass seals it', action);
+        this.#passSoon().catch(() => {});
+      }
+    }
     this.sql.exec('INSERT INTO activity (ts, actor_id, subject_id, action, detail, imp, adm, rk, rn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      now(), actorIdValue ?? null, subject ?? null, action, text, imp ? 1 : 0, adm ? 1 : 0, k ? k.kid : null, rn);
+      now(), actorIdValue ?? null, subject ?? null, action, stored, imp ? 1 : 0, adm ? 1 : 0, rk, rn);
   }
   #settings() {
     const rows = {};
@@ -857,27 +881,31 @@ export class Directory extends DurableObject {
   }
 
   async login({ username, verifier, lockoutOff = false }) {
-    const u = this.#loginUser(username);
+    const found = this.#loginUser(username);
     const ts = now();
     const s = this.#settings();
-    if (!u) {
+    // Every entry this sign-in may write, sealed first (they depend on the account's id alone);
+    // then the account is read and checked afresh, and nothing below awaits until the writes.
+    const pre = found ? await this.#preseal([[found.id, found.id, 'login.password_ok', 'awaiting passkey'], [found.id, found.id, 'login'], Directory.#lockedEntry(found, ts, s)]) : null;
+    const u = found && this.#loginUser(username);
+    if (!u || u.id !== found.id) {
       timingSafeEqualHex(String(verifier), '0'.repeat(64)); // similar work either way
       return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or password.');
     }
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     if (typeof verifier !== 'string' || !timingSafeEqualHex(verifier, u.pw_verifier)) {
-      this.#passwordFailure(u, ts, s, lockoutOff);
+      this.#passwordFailure(u, ts, s, lockoutOff, pre);
       return fail(401, 'invalid_login', 'Wrong username or password.');
     }
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
     if (this.#needsSecondFactor(u)) {
       // No session yet: the browser answers this challenge with a passkey (or
       // a recovery code) — see secondFactor().
-      this.#log(u.id, u.id, 'login.password_ok', 'awaiting passkey');
+      this.#log(u.id, u.id, 'login.password_ok', 'awaiting passkey', pre);
       return { ok: true, secondFactor: { ...this.#newChallenge('second', u.id), allow: this.#allowList(u.id), recoveryLeft: this.#recoveryLeft(u.id) } };
     }
-    this.#log(u.id, u.id, 'login');
+    this.#log(u.id, u.id, 'login', '', pre);
     return this.#sessionFor(u, s);
   }
 
@@ -903,8 +931,13 @@ export class Directory extends DurableObject {
     return f && f.locked_until > ts ? f.locked_until : 0;
   }
 
+  /** The lockout entry a failure at `ts` may write (#passwordFailure), to seal with the others first. */
+  static #lockedEntry(u, ts, s) {
+    return [null, u.id, 'account.locked', `until=${ts + s['lockout.lockSec']}`];
+  }
+
   /** Count one wrong password (login or password change) toward lockout. */
-  #passwordFailure(u, ts, s, lockoutOff) {
+  #passwordFailure(u, ts, s, lockoutOff, pre = null) {
     if (u.role === 'owner' || lockoutOff) return;
     const f = this.sql.exec('SELECT * FROM failures WHERE user_id = ?', u.id).toArray()[0];
     const fresh = !f || ts - f.start > s['lockout.windowSec'];
@@ -913,7 +946,7 @@ export class Directory extends DurableObject {
     const lockedUntil = count >= s['lockout.max'] ? ts + s['lockout.lockSec'] : 0;
     this.sql.exec('INSERT INTO failures (user_id, count, start, locked_until) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start, locked_until = excluded.locked_until',
       u.id, lockedUntil ? 0 : count, lockedUntil ? ts : start, lockedUntil);
-    if (lockedUntil && !u.id.startsWith('n:')) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`);
+    if (lockedUntil && !u.id.startsWith('n:')) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`, pre);
   }
 
   /** Session timeouts: the server-wide ones, or the account's role's (never for the owner). */
@@ -959,8 +992,9 @@ export class Directory extends DurableObject {
 
   async revokeSession(sid, exp, actorId, subjectId) {
     if (typeof sid !== 'string') return;
+    const pre = subjectId ? await this.#preseal([[actorId, subjectId, 'logout']]) : null;
     this.sql.exec('INSERT OR REPLACE INTO revoked_sessions (sid, exp) VALUES (?, ?)', sid, Number(exp) || now() + 86400 * 400);
-    if (subjectId) this.#log(actorId, subjectId, 'logout');
+    if (subjectId) this.#log(actorId, subjectId, 'logout', '', pre);
   }
 
   /**
@@ -1106,7 +1140,10 @@ export class Directory extends DurableObject {
    * {challengeId, credential} for a "reauth" challenge of this account).
    * Returns null when confirmed, else the failure to return.
    */
-  async #stepUp(u, { current, reauth, origin, rpId } = {}, lockoutOff = false) {
+  async #stepUp(given, { current, reauth, origin, rpId } = {}, lockoutOff = false) {
+    // The entry a failure may write (every session ended), sealed first; the account is then read afresh.
+    const pre = await this.#preseal([[null, given.id, 'sessions.revoked', 'too many failed confirmations']]);
+    const u = this.#user(given.id) ?? given;
     if (current === undefined && reauth && typeof reauth === 'object') {
       const c = this.#takeChallenge(reauth.challengeId, 'reauth');
       let ok = false;
@@ -1119,21 +1156,21 @@ export class Directory extends DurableObject {
         this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
         return null;
       }
-      return this.#stepUpFailure(u, lockoutOff, 'reauth_failed', 'The passkey could not be verified.');
+      return this.#stepUpFailure(u, lockoutOff, 'reauth_failed', 'The passkey could not be verified.', pre);
     }
-    return this.#checkCurrent(u, current, lockoutOff);
+    return this.#checkCurrent(u, current, lockoutOff, pre);
   }
 
-  #checkCurrent(u, current, lockoutOff) {
+  #checkCurrent(u, current, lockoutOff, pre = null) {
     if (typeof current !== 'string' || !timingSafeEqualHex(current, u.pw_verifier)) {
-      return this.#stepUpFailure(u, lockoutOff, 'wrong_password', 'The current password is incorrect.');
+      return this.#stepUpFailure(u, lockoutOff, 'wrong_password', 'The current password is incorrect.', pre);
     }
     this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
     return null;
   }
 
   /** A failed step-up: after lockout.max within the window, every session of the account ends. */
-  #stepUpFailure(u, lockoutOff, code, message) {
+  #stepUpFailure(u, lockoutOff, code, message, pre = null) {
     const ts = now();
     if (!lockoutOff) {
       const st = this.#settings();
@@ -1143,7 +1180,7 @@ export class Directory extends DurableObject {
       if (count >= st['lockout.max']) {
         this.sql.exec('DELETE FROM pwchange_failures WHERE user_id = ?', u.id);
         this.sql.exec('UPDATE users SET sess_ver = sess_ver + 1, updated = ? WHERE id = ?', ts, u.id);
-        this.#log(null, u.id, 'sessions.revoked', 'too many failed confirmations');
+        this.#log(null, u.id, 'sessions.revoked', 'too many failed confirmations', pre);
         return fail(401, 'session_revoked', 'Too many failed confirmations: you have been signed out everywhere. Log in again.');
       }
       this.sql.exec('INSERT INTO pwchange_failures (user_id, count, start) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start',
@@ -1448,7 +1485,7 @@ export class Directory extends DurableObject {
     if (!r.ok) return fail(400, 'invalid_passkey', `The passkey could not be verified (${r.reason}).`);
     // Every await is behind us from here: the checks, the insert and the
     // decision to issue codes happen in one uninterrupted step.
-    const prepared = await this.#prepareCodes();
+    const [prepared, pre] = await Promise.all([this.#prepareCodes(), this.#preseal([[actorId, uid, 'passkey.added', `name=${label}`]])]);
     if (this.sql.exec('SELECT 1 FROM passkeys WHERE id = ?', r.credentialId).toArray().length) {
       return fail(409, 'passkey_exists', 'That passkey is already registered.');
     }
@@ -1457,7 +1494,7 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM meta WHERE k = ?', handleAlias(r.credentialId)); // registered here: the account's own handle
     this.sql.exec('INSERT INTO passkeys (id, user_id, name, public_key, alg, sign_count, transports, backup_eligible, backed_up, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       r.credentialId, uid, label, r.publicKey, r.alg, r.signCount, r.transports.join(','), r.backupEligible ? 1 : 0, r.backedUp ? 1 : 0, now());
-    this.#log(actorId, uid, 'passkey.added', `name=${label}`);
+    this.#log(actorId, uid, 'passkey.added', `name=${label}`, pre);
     // The first passkey comes with a fresh set of recovery codes, shown once.
     let codes = null;
     if (first || this.#recoveryLeft(uid) === 0) {
@@ -1473,11 +1510,15 @@ export class Directory extends DurableObject {
     if (!u) return fail(404, 'not_found', 'User not found.');
     const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
-    const p = this.sql.exec('SELECT name FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid).toArray()[0];
-    if (!p) return fail(404, 'not_found', 'Passkey not found.');
+    // The entry names the passkey: sealed with the name read, which is read again (unchanged) before the delete.
+    const nameOf = () => this.sql.exec('SELECT name FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid).toArray()[0]?.name;
+    const name = nameOf();
+    if (name === undefined) return fail(404, 'not_found', 'Passkey not found.');
+    const pre = await this.#preseal([[actorId, uid, 'passkey.removed', `name=${name}`]]);
+    if (nameOf() !== name) return fail(409, 'changed', 'The passkey changed meanwhile: try again.');
     this.sql.exec('DELETE FROM passkeys WHERE id = ? AND user_id = ?', String(id), uid);
     this.sql.exec('DELETE FROM meta WHERE k = ?', handleAlias(String(id)));
-    this.#log(actorId, uid, 'passkey.removed', `name=${p.name}`);
+    this.#log(actorId, uid, 'passkey.removed', `name=${name}`, pre);
     // Without passkeys, recovery codes and the second-factor choice mean nothing.
     if (!this.#passkeyCount(uid)) {
       this.#dropPasskeys(uid);
@@ -1545,7 +1586,7 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM webauthn_spent WHERE exp <= ?', ts);
     const fresh = this.sql.exec('INSERT INTO webauthn_spent (challenge, exp) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING challenge', challengeId, exp).toArray().length;
     if (!fresh) return fail(400, 'challenge_expired', 'That sign-in request was already used. Try again.');
-    const r = await this.#checkAssertion(p, credential, challengeId, origin, rpId);
+    const [r, pre] = await Promise.all([this.#checkAssertion(p, credential, challengeId, origin, rpId), this.#preseal([[u.id, u.id, 'login', `passkey=${p.name}`]])]);
     if (!r.ok) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
     const handle = this.#passkeyHandle(p, u);
     if (r.userHandle && handle && r.userHandle !== handle) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
@@ -1553,17 +1594,33 @@ export class Directory extends DurableObject {
     if (mode === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for this account.');
     if (mode === 'second') return fail(403, 'password_first', 'This account signs in with its password first, then the passkey.');
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
-    this.#log(u.id, u.id, 'login', `passkey=${p.name}`);
+    this.#log(u.id, u.id, 'login', `passkey=${p.name}`, pre);
     return this.#sessionFor(u);
   }
 
   /** Sign in with a recovery code alone (in every passkey mode). */
   async recoveryLogin({ username, code, lockoutOff = false }) {
-    const u = this.#loginUser(username);
+    const found = this.#loginUser(username);
     const ts = now();
     const s = this.#settings();
     const hash = await this.#codeHash(code);
-    if (!u) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.');
+    if (!found) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.');
+    // The entries it may write, sealed first. The sign-in names how many codes are left: that
+    // count is read before the seal and again after it, and a code spent meanwhile elsewhere
+    // means sealing again (a few times at most).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const left = this.#recoveryLeft(found.id);
+      const pre = await this.#preseal([[found.id, found.id, 'login', `recovery code (${left - 1} left)`], Directory.#lockedEntry(found, ts, s)]);
+      const u = this.#loginUser(username);
+      if (!u || u.id !== found.id) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.');
+      if (this.#recoveryLeft(u.id) !== left) continue;
+      return this.#recoveryLoginChecked(u, hash, ts, s, lockoutOff, pre);
+    }
+    return fail(409, 'busy', 'Please try again.');
+  }
+
+  /** recoveryLogin's checks and writes, with its entries sealed (`pre`): nothing here awaits. */
+  #recoveryLoginChecked(u, hash, ts, s, lockoutOff, pre) {
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     // A recovery code is the way back in when everything else is lost: it
@@ -1573,12 +1630,12 @@ export class Directory extends DurableObject {
     // account stays disabled.
     const valid = hash && this.sql.exec('SELECT 1 FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash).toArray().length;
     if (!valid) {
-      this.#passwordFailure(u, ts, s, lockoutOff);
+      this.#passwordFailure(u, ts, s, lockoutOff, pre);
       return fail(401, 'invalid_login', 'Wrong username or recovery code.');
     }
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
     this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ? AND hash = ?', u.id, hash);
-    this.#log(u.id, u.id, 'login', `recovery code (${this.#recoveryLeft(u.id)} left)`);
+    this.#log(u.id, u.id, 'login', `recovery code (${this.#recoveryLeft(u.id)} left)`, pre);
     return { ...this.#sessionFor(u, s), recoveryLeft: this.#recoveryLeft(u.id) };
   }
 
@@ -1589,10 +1646,35 @@ export class Directory extends DurableObject {
    */
   async secondFactor({ challengeId, credential, code, origin, rpId, lockoutOff = false }) {
     const ts = now();
-    const c = typeof challengeId === 'string' && challengeId.length <= 40
-      && this.sql.exec("SELECT * FROM webauthn_challenges WHERE id = ? AND purpose = 'second'", challengeId).toArray()[0];
+    const challenge = () => (typeof challengeId === 'string' && challengeId.length <= 40
+      && this.sql.exec("SELECT * FROM webauthn_challenges WHERE id = ? AND purpose = 'second'", challengeId).toArray()[0]) || null;
+    const byCode = typeof code === 'string' && !!code;
+    const hash = byCode ? await this.#codeHash(code) : null;
+    // The entries it may write, sealed first (the recovery-code sign-in names how many are left:
+    // read before the seal and again after it; a code spent meanwhile means sealing again).
+    let c;
+    let u;
+    let pre = null;
+    let left = null;
+    for (let attempt = 0; attempt < 3 && !pre; attempt++) {
+      c = challenge();
+      if (!c || c.exp <= ts) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
+      u = this.#user(c.user_id);
+      if (!u) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
+      const id = byCode ? null : assertionId(credential);
+      const p = id && this.sql.exec('SELECT * FROM passkeys WHERE id = ? AND user_id = ?', id, u.id).toArray()[0];
+      left = this.#recoveryLeft(u.id);
+      const sealed = await this.#preseal([
+        byCode ? [u.id, u.id, 'login', `password + recovery code (${left - 1} left)`] : [u.id, u.id, 'login', `password + passkey=${p ? p.name : ''}`],
+        Directory.#lockedEntry(u, ts, this.#settings()),
+      ]);
+      if (!byCode || this.#recoveryLeft(u.id) === left) pre = sealed;
+    }
+    if (!pre) return fail(409, 'busy', 'Please try again.');
+    // From here as before, with the challenge and the account read afresh after the seal.
+    c = challenge();
     if (!c || c.exp <= ts) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
-    const u = this.#user(c.user_id);
+    u = this.#user(c.user_id);
     if (!u) return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
@@ -1603,9 +1685,9 @@ export class Directory extends DurableObject {
     }
     const s = this.#settings();
     let how = null;
-    if (typeof code === 'string' && code) {
-      const hash = await this.#codeHash(code);
-      if (hash && this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ? AND hash = ? RETURNING hash', u.id, hash).toArray().length) {
+    if (byCode) {
+      // The count the entry was sealed with (checked above, nothing awaited since).
+      if (hash && this.#recoveryLeft(u.id) === left && this.sql.exec('DELETE FROM recovery_codes WHERE user_id = ? AND hash = ? RETURNING hash', u.id, hash).toArray().length) {
         how = `recovery code (${this.#recoveryLeft(u.id)} left)`;
       }
     } else {
@@ -1614,15 +1696,15 @@ export class Directory extends DurableObject {
       if (p && (await this.#checkAssertion(p, credential, c.challenge, origin, rpId)).ok) how = `passkey=${p.name}`;
     }
     if (!how) {
-      this.#passwordFailure(u, ts, s, lockoutOff);
-      return fail(401, 'invalid_second_factor', typeof code === 'string' && code ? 'That recovery code is not valid (each works once).' : 'The passkey could not be verified.');
+      this.#passwordFailure(u, ts, s, lockoutOff, pre);
+      return fail(401, 'invalid_second_factor', byCode ? 'That recovery code is not valid (each works once).' : 'The passkey could not be verified.');
     }
     // Spend the challenge; a concurrent success already did → refuse this one.
     if (!this.sql.exec('DELETE FROM webauthn_challenges WHERE id = ? RETURNING id', c.id).toArray().length) {
       return fail(400, 'challenge_expired', 'The sign-in expired. Enter your password again.');
     }
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
-    this.#log(u.id, u.id, 'login', `password + ${how}`);
+    this.#log(u.id, u.id, 'login', `password + ${how}`, pre);
     // recoveryLeft only when a code was spent (the browser then points to Account).
     return typeof code === 'string' && code ? { ...this.#sessionFor(u, s), recoveryLeft: this.#recoveryLeft(u.id) } : this.#sessionFor(u, s);
   }
@@ -2158,9 +2240,11 @@ export class Directory extends DurableObject {
   // activity log (RECORD_ACTIONS: their detail) and the Guard's addresses are
   // sealed under the record key of the current root MEK (src/lib/records.js),
   // with its fingerprint as the row's key id (rk) and a random row nonce (rn).
-  // The seal is synchronous: a record is sealed in the statement that writes
-  // it, so no row is ever stored empty, pending or in the clear while there is
-  // a keyring. What stays in the clear is what the indexes, throttles and
+  // A sign-in record is sealed before the synchronous section that writes it
+  // (#preseal: its row nonce is chosen first, so nothing waits for the row
+  // id) and written sealed, in one statement, with the caller's other writes:
+  // no row is ever stored empty, pending or in the clear while there is a
+  // keyring. What stays in the clear is what the indexes, throttles and
   // retention need: ids, times, the share and account a row belongs to, the
   // action, and keyed hashes of addresses (the owner columns are bound in the
   // AAD). Without a keyring (an instance from before the Drive, or one whose
@@ -2193,48 +2277,71 @@ export class Directory extends DurableObject {
    * sealed under the root (record_keys). A key id names one root's key for
    * good, so what is found is cached.
    */
-  #recordKeyBytes(kid) {
+  async #recordKeyBytes(kid) {
     this.recordKeys ??= new Map();
     if (this.recordKeys.has(kid)) return this.recordKeys.get(kid);
     const roots = [this.#keyRoot(), this.#keyRoot('mek.rootOld')].filter(Boolean);
     let key = null;
     const own = roots.find((r) => r.fp === kid);
-    if (own) key = deriveRecordKey(own.key);
+    if (own) key = await deriveRecordKey(own.key);
     else {
       const w = this.sql.exec('SELECT sealed, under FROM record_keys WHERE kid = ?', kid).toArray()[0];
       const by = w && roots.find((r) => r.fp === w.under);
-      if (by) { try { key = unwrapRecordKey(by.key, kid, w.sealed); } catch { key = null; } }
+      if (by) { try { key = await unwrapRecordKey(by.key, kid, w.sealed); } catch { key = null; } }
     }
     if (key) this.recordKeys.set(kid, key);
     return key;
   }
 
   /** One table's key under record key `kid` (32 bytes), or null when that record key is not available. */
-  #tableKey(kid, table) {
+  async #tableKey(kid, table) {
     this.tableKeys ??= new Map();
     const id = `${kid}\n${table}`;
     if (!this.tableKeys.has(id)) {
-      const rk = this.#recordKeyBytes(kid);
+      const rk = await this.#recordKeyBytes(kid);
       if (!rk) return null;
-      this.tableKeys.set(id, tableKey(rk, table));
+      this.tableKeys.set(id, await tableKey(rk, table));
     }
     return this.tableKeys.get(id);
   }
 
   /** The current table key → { kid, key } or null (no keyring: records are written in the clear). */
-  #sealKey(table) {
+  async #sealKey(table) {
     const kid = this.#recordKid();
-    const key = kid ? this.#tableKey(kid, table) : null;
+    const key = kid ? await this.#tableKey(kid, table) : null;
     return key ? { kid, key } : null;
   }
 
   /** One stored record value as it reads: in the clear (rk NULL), opened, or null (it does not open, or "!…": it did not before). */
-  #recordValue(rk, where, value) {
+  async #recordValue(rk, where, value) {
     if (rk === null || rk === undefined) return value;
     if (!isKid(rk) || !where.rn) return null;
-    const key = this.#tableKey(rk, where.table);
+    const key = await this.#tableKey(rk, where.table);
     if (!key) return null;
-    try { return openRecord(key, where, value); } catch { return null; }
+    try { return await openRecord(key, where, value); } catch { return null; }
+  }
+
+  /**
+   * Seal sign-in records ahead of their write: `entries` [[actor, subject,
+   * action, detail]] (as #log takes them; other actions are skipped) → the
+   * sealed entries #log writes (`pre`), each once. Called before the
+   * synchronous section that decides and writes; a caller whose detail
+   * depends on state read before this await checks that state again after it.
+   * Empty without a keyring (#log then writes in the clear, flagged).
+   */
+  async #preseal(entries) {
+    const out = new Map();
+    const k = await this.#sealKey('activity');
+    if (!k) return out;
+    for (const [actor, subject, action, detail = ''] of entries) {
+      if (!RECORD_ACTIONS.has(action)) continue;
+      const actorId = actor && typeof actor === 'object' ? actor.id : actor;
+      const text = cleanDetail(detail);
+      const rn = recordNonce();
+      const where = Directory.#activityWhere({ rn, actor_id: actorId ?? null, subject_id: subject ?? null, action });
+      out.set(presealKey(actorId, subject, action, text), { rn, kid: k.kid, sealed: await sealRecord(k.key, where, text) });
+    }
+    return out;
   }
 
   /** Where an activity row's detail is sealed: its nonce and owner columns. */
@@ -2251,11 +2358,13 @@ export class Directory extends DurableObject {
    * details opened (UNREADABLE when a key is gone); `keep`: the columns
    * returned (rn and rk never are).
    */
-  #openDetails(rows, keep) {
-    return rows.map((r) => {
-      const detail = r.rk === null || r.rk === undefined ? r.detail : (this.#recordValue(r.rk, Directory.#activityWhere(r), r.detail) ?? UNREADABLE);
-      return Object.fromEntries(keep.map((k) => [k, k === 'detail' ? detail : r[k]]));
-    });
+  async #openDetails(rows, keep) {
+    const out = [];
+    for (const r of rows) {
+      const detail = r.rk === null || r.rk === undefined ? r.detail : ((await this.#recordValue(r.rk, Directory.#activityWhere(r), r.detail)) ?? UNREADABLE);
+      out.push(Object.fromEntries(keep.map((k) => [k, k === 'detail' ? detail : r[k]])));
+    }
+    return out;
   }
 
   /**
@@ -2264,19 +2373,19 @@ export class Directory extends DurableObject {
    * previous one) that stops being derivable once it goes. A key that opens
    * under none of the roots here stays as it is. → [{ kid, sealed, under, created }].
    */
-  #rewrapRecordKeys(target, add = []) {
+  async #rewrapRecordKeys(target, add = []) {
     const roots = [this.#keyRoot(), this.#keyRoot('mek.rootOld'), target].filter(Boolean);
     const out = [];
     for (const r of this.sql.exec('SELECT kid, sealed, under, created FROM record_keys ORDER BY kid').toArray()) {
       if (r.kid === target.fp) continue; // derived from the root itself
       const by = roots.find((x) => x.fp === r.under);
       let key = null;
-      if (by) { try { key = unwrapRecordKey(by.key, r.kid, r.sealed); } catch { key = null; } }
-      out.push(key ? { kid: r.kid, sealed: wrapRecordKey(target.key, r.kid, key), under: target.fp, created: r.created } : r);
+      if (by) { try { key = await unwrapRecordKey(by.key, r.kid, r.sealed); } catch { key = null; } }
+      out.push(key ? { kid: r.kid, sealed: await wrapRecordKey(target.key, r.kid, key), under: target.fp, created: r.created } : r);
     }
     for (const a of add) {
       if (!a || a.fp === target.fp || out.some((x) => x.kid === a.fp)) continue;
-      out.push({ kid: a.fp, sealed: wrapRecordKey(target.key, a.fp, deriveRecordKey(a.key)), under: target.fp, created: now() });
+      out.push({ kid: a.fp, sealed: await wrapRecordKey(target.key, a.fp, await deriveRecordKey(a.key)), under: target.fp, created: now() });
     }
     return out;
   }
@@ -2286,7 +2395,7 @@ export class Directory extends DurableObject {
    * already; a previous root put back from a kit may not have. → the list to
    * write, or null when there is nothing to add.
    */
-  #keepOldRecordKey(old) {
+  async #keepOldRecordKey(old) {
     const root = this.#keyRoot();
     if (!root || !old || this.sql.exec('SELECT 1 FROM record_keys WHERE kid = ?', old.fp).toArray().length) return null;
     return this.#rewrapRecordKeys(root, [old]);
@@ -2318,7 +2427,7 @@ export class Directory extends DurableObject {
    */
   async guardKeys() {
     const tag = b64urlFromBytes(await this.#purposeBits(KEY_INFO.guardTag));
-    const k = this.#sealKey('guard');
+    const k = await this.#sealKey('guard');
     return { tag, kid: k ? k.kid : null, key: k ? b64urlFromBytes(k.key) : null };
   }
 
@@ -2334,7 +2443,7 @@ export class Directory extends DurableObject {
       if (!r || typeof r.key !== 'string') { out.push(''); continue; }
       if (!isGuardTag(r.key)) { out.push(r.key); continue; }
       if (typeof r.addr !== 'string') { out.push(''); continue; }
-      out.push(this.#recordValue(r.rk ?? null, guardWhere(r.scope, r.key), r.addr) ?? UNREADABLE);
+      out.push((await this.#recordValue(r.rk ?? null, guardWhere(r.scope, r.key), r.addr)) ?? UNREADABLE);
     }
     return out;
   }
@@ -2348,7 +2457,8 @@ export class Directory extends DurableObject {
     if (action !== 'guard.blocked' && action !== 'guard.unblocked') return fail(400, 'invalid', 'Unknown action.');
     const [stored] = row?.addr ? await this.openGuardAddrs([{ scope, key, addr: row.addr, rk: row.rk ?? null }]) : [''];
     const addr = (stored && stored !== UNREADABLE ? stored : null) ?? (typeof typed === 'string' && typed ? typed : null) ?? stored ?? key;
-    this.#log(actorId, null, action, `${scope} ${addr || key}${seconds ? ` ${seconds}s` : ''}`);
+    const detail = `${scope} ${addr || key}${seconds ? ` ${seconds}s` : ''}`;
+    this.#log(actorId, null, action, detail, await this.#preseal([[actorId, null, action, detail]]));
     return { ok: true };
   }
 
@@ -2361,13 +2471,13 @@ export class Directory extends DurableObject {
    * (#guardPass). → true when work is left.
    */
   async #recordPass() {
-    const cur = this.#sealKey('opens') && this.#recordKid();
+    const cur = (await this.#sealKey('opens')) && this.#recordKid();
     let more = false;
     if (cur) {
       // The earlier keys that still open (only their rows can be sealed again).
       const others = [];
       for (const k of new Set([this.#keyRoot('mek.rootOld')?.fp, ...this.sql.exec('SELECT kid FROM record_keys').toArray().map((r) => r.kid)])) {
-        if (k && k !== cur && this.#recordKeyBytes(k)) others.push(k);
+        if (k && k !== cur && await this.#recordKeyBytes(k)) others.push(k);
       }
       const earlier = JSON.stringify(others);
       const OPEN_SEL = `id, rn, rk, share_id, user_id, ip_h, ${OPEN_COLS.join(', ')}`;
@@ -2383,20 +2493,22 @@ export class Directory extends DurableObject {
       ];
       for (const { table, cols, rows } of batches) {
         if (rows.length >= RECORD_PASS_ROWS) more = true;
-        const key = this.#tableKey(cur, table);
+        const key = await this.#tableKey(cur, table);
         const whereOf = (r, rn, c) => (table === 'opens' ? Directory.#opensWhere({ ...r, rn }, c) : Directory.#activityWhere({ ...r, rn }));
         for (const r of rows) {
           const plain = {};
-          for (const c of cols) plain[c] = r.rk === null ? r[c] : this.#recordValue(r.rk, whereOf(r, r.rn, c), r[c]);
+          for (const c of cols) plain[c] = r.rk === null ? r[c] : await this.#recordValue(r.rk, whereOf(r, r.rn, c), r[c]);
           if (cols.some((c) => plain[c] === null)) {
             this.sql.exec(`UPDATE ${table} SET rk = ? WHERE id = ? AND rk = ?`, `!${r.rk}`, r.id, r.rk);
             continue;
           }
           // A row from before migration 19, or never sealed, gets its nonce now.
           const rn = r.rn ?? recordNonce();
-          const vals = cols.map((c) => sealRecord(key, whereOf(r, rn, c), plain[c]));
+          const vals = [];
+          for (const c of cols) vals.push(await sealRecord(key, whereOf(r, rn, c), plain[c]));
           const extra = table === 'opens' ? { ip_h: r.ip_h ?? await this.#recordHash(plain.ip) } : {};
           const set = [...cols, ...Object.keys(extra)].map((c) => `${c} = ?`).join(', ');
+          // Only if the row is as it was read (the seals above awaited).
           this.sql.exec(`UPDATE ${table} SET ${set}, rn = ?, rk = ? WHERE id = ? AND rk IS ? AND rn IS ?`, ...vals, ...Object.values(extra), rn, cur, r.id, r.rk, r.rn);
         }
       }
@@ -2428,8 +2540,8 @@ export class Directory extends DurableObject {
       return false;
     }
     const tagKey = await this.#purposeBits(KEY_INFO.guardTag);
-    const gkey = kid ? this.#tableKey(kid, 'guard') : null;
-    const seal = (scope, tag, addr) => (gkey ? sealRecord(gkey, guardWhere(scope, tag), addr) : addr);
+    const gkey = kid ? await this.#tableKey(kid, 'guard') : null;
+    const seal = async (scope, tag, addr) => (gkey ? sealRecord(gkey, guardWhere(scope, tag), addr) : addr);
     const plan = shards.map(() => ({ reseal: [], adopt: [], drop: [], take: [] }));
     let more = false;
     for (let i = 0; i < shards.length; i++) {
@@ -2438,22 +2550,22 @@ export class Directory extends DurableObject {
         if (!isGuardTag(r.key)) {
           if (r.t === 'tracking') plan[i].take.push({ scope: r.scope, key: r.key });
           else {
-            const tag = guardTag(tagKey, r.key);
-            plan[guardShardIndex(tag)].adopt.push({ ...r, key: tag, addr: seal(r.scope, tag, r.key), rk: gkey ? kid : null });
+            const tag = await guardTag(tagKey, r.key);
+            plan[guardShardIndex(tag)].adopt.push({ ...r, key: tag, addr: await seal(r.scope, tag, r.key), rk: gkey ? kid : null });
             plan[i].drop.push({ t: r.t, scope: r.scope, key: r.key });
           }
           continue;
         }
         if (!gkey) continue;
-        const addr = this.#recordValue(r.rk, guardWhere(r.scope, r.key), r.addr);
-        plan[i].reseal.push({ t: r.t, scope: r.scope, key: r.key, addr: addr === null ? null : seal(r.scope, r.key, addr), rk: addr === null ? null : kid, was: { addr: r.addr, rk: r.rk } });
+        const addr = await this.#recordValue(r.rk, guardWhere(r.scope, r.key), r.addr);
+        plan[i].reseal.push({ t: r.t, scope: r.scope, key: r.key, addr: addr === null ? null : await seal(r.scope, r.key, addr), rk: addr === null ? null : kid, was: { addr: r.addr, rk: r.rk } });
       }
     }
     // Failure counters: taken out of their old shards, then added to their tags' (never both at once).
     const taken = await Promise.all(shards.map((s, i) => (plan[i].take.length ? s.takeLegacy(plan[i].take) : [])));
     for (const r of taken.flat()) {
-      const tag = guardTag(tagKey, r.key);
-      plan[guardShardIndex(tag)].adopt.push({ ...r, t: 'tracking', key: tag, addr: seal(r.scope, tag, r.key), rk: gkey ? kid : null });
+      const tag = await guardTag(tagKey, r.key);
+      plan[guardShardIndex(tag)].adopt.push({ ...r, t: 'tracking', key: tag, addr: await seal(r.scope, tag, r.key), rk: gkey ? kid : null });
     }
     // Every re-keyed block lands in its new shard before its old key goes.
     await Promise.all(shards.map((s, i) => (plan[i].reseal.length || plan[i].adopt.length ? s.apply({ reseal: plan[i].reseal, adopt: plan[i].adopt }) : null)));
@@ -2474,23 +2586,26 @@ export class Directory extends DurableObject {
     const t = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, n);
     const values = { ip: t(info.ip, 64), country: t(info.country, 8), region: t(info.region, 64), city: t(info.city, 64),
       browser: t(info.browser, 32), browser_ver: t(info.version, 8), os: t(info.os, 32), langs: t(info.langs, 200) };
-    // The address's keyed hash, before anything is read: nothing below awaits until the row is written.
+    // The address's keyed hash and, with a keyring, the sealed details (bound to the share and its
+    // sender, read first and again after the seals): nothing below awaits until the row is written.
     const ipH = await this.#recordHash(values.ip);
-    const r = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0];
-    if (!r) return;
+    const ownerOf = () => this.sql.exec('SELECT user_id FROM shares WHERE id = ?', shareId).toArray()[0]?.user_id ?? null;
+    const sender = ownerOf();
+    if (!sender) return;
+    const k = await this.#sealKey('opens');
+    const rn = k ? recordNonce() : null;
+    const cells = [];
+    for (const c of OPEN_COLS) cells.push(k ? await sealRecord(k.key, Directory.#opensWhere({ rn, share_id: shareId, user_id: sender }, c), values[c]) : values[c]);
+    if (ownerOf() !== sender) return; // the share went (or changed hands) meanwhile: no receipt
     const ts = now();
     this.sql.exec('UPDATE shares SET opens_total = opens_total + 1 WHERE id = ?', shareId);
     // Throttle (see OPENS_*): the same address (its keyed hash) again within the window, or a
     // burst beyond the per-minute cap, is counted but not stored again.
     if (this.sql.exec('SELECT 1 FROM opens WHERE share_id = ? AND ip_h = ? AND ts > ? LIMIT 1', shareId, ipH, ts - OPENS_DEDUPE_SEC).toArray().length) return;
     if (this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ? AND ts > ?', shareId, ts - 60).one().c >= OPENS_PER_MINUTE) return;
-    // With a keyring the details are sealed here and the row written sealed, in one statement;
-    // without one they are stored in the clear (rk NULL) until the pass seals them.
-    const k = this.#sealKey('opens');
-    const rn = k ? recordNonce() : null;
-    const cells = OPEN_COLS.map((c) => (k ? sealRecord(k.key, Directory.#opensWhere({ rn, share_id: shareId, user_id: r.user_id }, c), values[c]) : values[c]));
+    // Written sealed in one statement; without a keyring in the clear (rk NULL) until the pass seals it.
     this.sql.exec(`INSERT INTO opens (share_id, user_id, ts, ip_h, rk, rn, ${OPEN_COLS.join(', ')})
-      VALUES (?, ?, ?, ?, ?, ?, ${OPEN_COLS.map(() => '?').join(', ')})`, shareId, r.user_id, ts, ipH, k ? k.kid : null, rn, ...cells);
+      VALUES (?, ?, ?, ?, ?, ?, ${OPEN_COLS.map(() => '?').join(', ')})`, shareId, sender, ts, ipH, k ? k.kid : null, rn, ...cells);
     const c = this.sql.exec('SELECT COUNT(*) AS c FROM opens WHERE share_id = ?', shareId).one().c;
     if (c > MAX_OPENS_PER_SHARE) {
       // Keep the first receipts (who opened it first) and the most recent ones.
@@ -2527,7 +2642,7 @@ export class Directory extends DurableObject {
       let unreadable = false;
       for (const c of OPEN_COLS) {
         if (!keys.has(c)) continue;
-        const v = this.#recordValue(r.rk, Directory.#opensWhere(r, c), r[c]);
+        const v = await this.#recordValue(r.rk, Directory.#opensWhere(r, c), r[c]);
         if (v === null) unreadable = true;
         row[c] = v ?? '';
       }
@@ -4292,8 +4407,9 @@ export class Directory extends DurableObject {
   }
 
   async unlockUser(id, actorId) {
+    const pre = await this.#preseal([[actorId, id, 'account.unlocked']]);
     this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
-    this.#log(actorId, id, 'account.unlocked');
+    this.#log(actorId, id, 'account.unlocked', '', pre);
     return { ok: true };
   }
 
@@ -5306,7 +5422,8 @@ export class Directory extends DurableObject {
   }
 
   async adminLog(entry, actorId) {
-    this.#log(actorId, entry.subject ?? null, entry.action, entry.detail ?? '');
+    const pre = await this.#preseal([[actorId, entry.subject ?? null, entry.action, entry.detail ?? '']]);
+    this.#log(actorId, entry.subject ?? null, entry.action, entry.detail ?? '', pre);
   }
 
   async audit({ before = null, limit = 100, subject = null } = {}) {
