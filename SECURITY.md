@@ -89,7 +89,23 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
   deliberate, bounded leak (which *kinds* of files, never their names, count per type, or
   sizes) that exists only for accounts under a policy. Like the file-count limits, the
   declaration is not verifiable: it stops honest mistakes and makes the rule auditable, not a
-  modified client. The owner is never subject to it.
+  modified client. The owner is never subject to it. The same policy covers the account's
+  **Drive**: each upload's reservation (`POST /api/private/drive/files`) declares that file's one
+  `{extension, MIME type}` (an empty or longer list is refused, so nothing passes an allow list
+  by declaring nothing), checked in `src/lib/drivepolicy.js` and never stored. Unlike a file
+  share, the Drive's rule does not rest on the declaration alone: the Worker already opens a new
+  Drive file's sealed name and metadata to check its seal (`checkNewItem`), so it enforces the
+  rule on what is stored — the name's extension and the metadata's MIME type, with the same rule
+  function (`sealedTypeRefusal`) — and refuses a declaration that does not match them
+  (`403 file_type_not_allowed`), as well as metadata whose type cannot be checked. A modified
+  client that declares a false type is refused. The opened name and type stay in the Worker's
+  memory for that check only: they are zeroed after it, and never logged, stored or returned
+  (the refusal names neither). The folder-depth
+  limit needs no declaration there — the Drive object checks it against its own tree on an
+  upload, a new folder, a move (a folder with the folders inside it) and a take-in. A take-in
+  from a Receive link is held to the role's Drive rules as well as the link's own, so a link
+  cannot bring into the Drive a type or depth the role refuses there. Files already in a Drive
+  are never deleted by a new or tighter rule.
 - Access-proof *hashes*, delete/upload/grant/API-key *hashes*, and password verifiers
   (`SHA-256("secbin-auth/v2" ‖ Argon2id(password))`).
 
@@ -144,8 +160,9 @@ compromise. Defenses:
     make every page cross-origin isolated.
   - **Every response the Worker returns** — API answers, chunk downloads, errors, redirects and
     pages — carries COOP `same-origin` (a page's own COOP is kept: the check page's is
-    `same-origin-allow-popups`), CORP `same-origin`, `X-Frame-Options: DENY`, `nosniff` and
-    `no-referrer` (`withBaselineHeaders`, `src/lib/http.js`). Anything that is not HTML gets
+    `same-origin-allow-popups`), CORP `same-origin`, `X-Frame-Options: DENY`, `nosniff`,
+    `no-referrer`, the two-year HSTS and the Permissions-Policy below (`withBaselineHeaders`,
+    `src/lib/http.js`). Anything that is not HTML gets
     `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`: opened as a
     document it has an opaque origin and runs nothing, and a window opened to it (by a script on
     a share's CAPTCHA page, say) lands in its own browsing context group. HTML pages keep their
@@ -302,6 +319,16 @@ CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
   If siteverify cannot be reached the request is refused (`503`, fail closed). Cloudflare's
   published testing keys return no hostname or action, so their results are accepted as they
   come; never deploy with testing keys.
+- **Metering of these calls.** Every token siteverify **rejects** from these forms (sign-in,
+  account changes, anonymous creation) counts towards the network's `turnstile-verify` scope.
+  Once a network (the Guard's key) has had 60 tokens rejected within 10 minutes, its tokens get
+  `429 rate_limited` with `Retry-After` for 10 minutes, before any call to Cloudflare. Accepted
+  tokens are never counted: each one cost a solved CAPTCHA, so many sign-ins behind one busy
+  address never use up the scope; only rejected tokens can. A request without a token, with an
+  over-long one, or from another site (`Sec-Fetch-Site: cross-site` / `same-site`) is refused
+  before anything is counted or sent. The share and reverse-share CAPTCHA routes count theirs under
+  `captcha-verify` instead (below), never twice. The owner sees and lifts `turnstile-verify`
+  blocks with the others.
 - **The only third-party code, confined to those pages.** Login, Account, the home page
   (only while anonymous sharing is on) and the CAPTCHA page of a share that has one
   (`/p/<id>?check`, `/r/<id>?check`, only while Turnstile is on) get a CSP that adds
@@ -386,8 +413,12 @@ the Turnstile check above — before anything of it is served. It is a role opti
   for 10 minutes, before any call to Cloudflare. A missing or failed token counts as an invalid
   request, like a wrong link. Renewing a grant (an HMAC check) is not limited. The check page
   is behind the Guard's block and at most 60 loads per network per 10 minutes (`429`), and looks
-  nothing up. The owner sees and lifts these blocks with the others (scopes `captcha-verify`,
-  `captcha-page`).
+  nothing up. Only this site's own document navigations to it are served and counted
+  (`Sec-Fetch-Dest: document` with `Sec-Fetch-Site: same-origin` or `none`: the viewer's own
+  redirect, or a typed or bookmarked address). Any other request (another site's `<img>`,
+  `<iframe>` or link, or one without Fetch Metadata) is redirected back to the share's page
+  before the Guard is asked, so another site cannot use up a network's check pages. The owner
+  sees and lifts these blocks with the others (scopes `captcha-verify`, `captcha-page`).
 - **Grants** (`src/lib/human.js`): `h1.<claims>.<HMAC-SHA-256>` under a key derived from `SIG`;
   claims: the kind (share or reverse), the share id, a keyed hash of the caller's network (the
   Guard's key: an IPv4 address or an IPv6 prefix), when the check passed and when the grant
@@ -577,7 +608,18 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   for unknown usernames (an HMAC under a key of its own, derived from the Directory's secret with
   HKDF-SHA-256 and the info `secbin-directory/prelogin-salt/v1`, so the salts anyone can ask for
   say nothing about the tracker tags and quota subjects, which have keys of their own), and every account uses the same Argon2id time cost, so the response
-  never reveals whether an account exists. Minimum length (12) is enforced client-side — the
+  never reveals whether an account exists. Prelogin is limited per network (`prelogin`: at most
+  600 per 10 minutes) and per network and username (`prelogin-user`: at most 20 per 10 minutes
+  for one name, counted under a keyed hash of the name as typed, lowercased), then
+  `429 rate_limited` with `Retry-After` for 10 minutes. Both are counted before the Directory is
+  asked and only for same-origin JSON requests (another site cannot send one). Neither depends
+  on whether the account exists, and both refuse alike, so the answer says nothing about
+  accounts. Only prelogin is refused: no account is locked, and the sign-in routes do not look
+  at these scopes. The web client needs prelogin for a password sign-in, so heavy abuse from one
+  network can delay password sign-in on that network (for one name, or for every name at the
+  network limit) until the window ends; passkey and recovery-code sign-in are unaffected, and
+  the owner sees and lifts `prelogin` and `prelogin-user` blocks with the others. Minimum
+  length (12) is enforced client-side — the
   server cannot see the password. Trade-off: the stretched value is password-equivalent in
   transit (TLS-protected), as with any client-side stretching scheme.
 - **Sessions**: `__Host-` cookie, HttpOnly, Secure, SameSite=Strict, containing a JWS (HS256,
@@ -824,7 +866,15 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     share's link-proof hash (the same value the share's own record held) for the 30 days it
     keeps ended shares, so a **wrong `#` key** for an ended share is still counted, as for a
     live one. The first metadata fetch carries no proof and is not counted for a known share.
-    Shares created before this change have no stored hash and are never counted;
+    Shares created before this change have no stored hash and are never counted. Chunk
+    downloads (`/api/file/<id>/chunk/…`, file and Drive shares) follow the same rule: a share
+    that ended while a recipient was still downloading (expired, used up, revoked, deleted) has
+    lost its grants, so a chunk fetch with any well-formed grant for a share the index knows
+    answers `410` uncounted (as the extend route does), and only an id that was never a share is
+    counted. Those uncounted answers each cost a Directory lookup, so they have a generous
+    per-network limit of their own (`ended-chunks`: at most 600 per 10 minutes, then
+    `429 rate_limited` with `Retry-After`), which is never an invalid fetch and which the owner
+    sees and lifts with the others;
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking. The Guard's rows are keyed by a keyed hash of the network and hold its address
     only sealed ("Records at rest" below);
@@ -872,7 +922,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
       - lifetimes and views: `maxExpireSec`, `reverseMaxExpireSec`, `maxViews` and
         `reverseMaxViews` raised or removed (no limit); `allowUnlimitedViews`,
         `reverseAllowUnlimitedViews` and `reverseNoExpiry` turned on;
-      - what may be shared: `url`, `secret` and `apiEnabled` turned on; `fileTypeMode`
+      - what may be shared: `files`, `url`, `secret` and `apiEnabled` turned on; `reverseFiles`,
+        `reverseUrl` and `reverseSecret` turned on (Receive links that may take files, links or
+        credentials); `fileTypeMode`
         towards any (allow → block → any), or, with the same mode, a type added to an allow
         list or removed from a block list; `urlRules` gaining a rule;
     - IP rules: adding an allow rule.
@@ -1195,7 +1247,7 @@ The rest of the activity log (settings, roles, shares, the Drive, imports) is st
 - **Without a keyring** (an instance from before the Drive, or one whose keyring is lost),
   records are written in the clear with `rk` NULL, as before. Once there is a keyring, new rows
   are sealed as they are written, and the **background pass** (the Directory's alarm, run within
-  seconds of the keyring's creation, of a root change and of this release's migration 18) seals
+  seconds of the keyring's creation, of a root change and of this release's migration 19) seals
   the rows written before, 500 per table per run. It also re-keys the Guard rows from before this
   release (they were keyed by the address, in the address's shard) to their keyed hash. Until the
   pass has done so for a shard (its meta flag `legacy.done`; a shard made by this release starts
@@ -1346,9 +1398,17 @@ overwritten.
     unblocks it.
   - A creation must carry the id in both the cookie and the `X-Secbin-Aid` header, and they
     must match; a cross-site form can do neither (plus the usual `Sec-Fetch-Site` check).
-  - An id is stored on its first creation, at most `public.newTrackersPerIp` (default 5) new ids
-    per network per `public.newTrackersWindowSec` (default a day; `429 tracker_rate_limited`)
-    and at most 200 000 in all (`429 busy`). Clearing browser storage therefore yields a new id
+  - An id is stored on its first **successful** creation: a create that is refused after the id
+    was looked at (a malformed share, a quota) gives its new row, and the network's allowance,
+    back. At most `public.newTrackersPerIp` (default 5) new ids per network per
+    `public.newTrackersWindowSec` (default a day; `429 tracker_rate_limited`), and, for IPv6,
+    at most 16 times that per /48 (the Guard scope `public-trackers`, which the owner sees and
+    lifts with the others), so rotating /64s inside one allocation does not multiply it. The /48
+    counts an id only once its create has succeeded, so refused creates from one /64 never block
+    the rest of its /48; parallel first creates can pass that count by the few in flight. At most
+    200 000 are stored: when the table is full, the 1 000 least recently seen ids that are not
+    blocked are removed with their usage counters (as if they had idled out; logged as
+    `tracker.evicted`), and only a table of blocked ids answers `429 busy`. Clearing browser storage therefore yields a new id
     and a fresh per-id quota, but only that many times per network per window: tracker mode
     allows up to *new ids × quota* shares per network per window. Use a `both-*` mode to cap the
     network as a whole.
@@ -1473,9 +1533,50 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   under `/api/reverse/<id>/` are anonymous and exempt (they read no session); the link proof, the
   session grant, the upload token, Turnstile, the password lockout and the Guard guard them (see
   "CSRF" above).
+- **Notes, links and credentials** (docs/REVERSE.md §3.1). A link may accept, besides files, the
+  types regular shares carry — a note, a link, a credential — as the user chooses per link and
+  the role allows (`reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret`; links and
+  credentials off in the Default role). Each is one item of its own upload session, encrypted in
+  the uploader's browser exactly like a file, with its kind inside the metadata sealed to the
+  link's key. The uploader's browser **declares the kind of each session** at `begin`: the server
+  sees that kind (it checks it against the link and the user's role as it is at that moment, and
+  again at every reservation; it counts it in the quotas; it keeps it with the session until the
+  session ends, and with each item it reserves — sealed at rest, never in plain text — until the
+  item is taken in) and each item's ciphertext size, never its text, URL, fields, title or
+  format, and a stored item carries no plaintext kind. Per-kind quotas (`receive-file`,
+  `receive-note`, `receive-url`, `receive-secret`, where the owner sets them) keep counts only —
+  sessions per kind per quota window, no content — each count row until 400 days after its
+  window's first count. The server holds a declared note, link or credential session to one
+  item of its kind's size, but cannot see what the item is: **the user's browser fails at take-in
+  an item whose sealed kind is not the one its session declared, that exceeds its kind's cap, or
+  that the link no longer accepts under the user's role as it is then** (so a modified uploader
+  cannot pass a file off as a note to escape the file limits or quotas, or send a credential
+  once the role stopped allowing them). The server refuses the take-in too (`409
+  kind_not_accepted`) unless the declared kind, opened from the wrap sealed at rest, is one the
+  link accepts and the role allows then; a received item's name, metadata or wrap stored in
+  plain text is never trusted (no fallback: it fails as `kind`). Like every Drive item a received credential is **not
+  end-to-end encrypted**: the recipient's server can decrypt it, and the uploader page says so on
+  the credential form ("The recipient's server can decrypt this"). In the Drive each opens only
+  in the inert viewers of regular shares (`public/js/typedview.js`): a note as text or through
+  the safe Markdown subset, a link spelled out with its warnings and opened only through a
+  confirmed click, only for the schemes a page may open and only when the user's own URL rules
+  allow it (else Copy only, with the reason), a credential masked. A download is a text file: a
+  link as a plain `.txt` with its URL, never an Internet Shortcut (`.url`), whose target the
+  shell would follow; a credential as a plain-text export that says what it holds, after a
+  confirmation; ZIPs never include credentials. A viewer never renders an item past its kind's
+  size. A Drive share records what the sender's role allowed it to share as notes, links and
+  credentials when it was made, and the recipient's page shows an entry as one only where that
+  allows it (the manifest's markers are the sender's own). A marker or content that does not parse
+  is never rendered as a link or a credential.
 - **Declared file types.** When the user limits a link to some file types, the uploader's
   browser declares each file's `{ extension, MIME type }`; the server checks it against the
-  link's rules and does not store it (as for file shares: a modified client could lie).
+  link's rules and does not store it (as for file shares: a modified client could lie). Unlike a
+  file share, the declarer is the anonymous party the rules restrain, so the **user's browser
+  enforces them on what really arrived** when it takes an item in: the real, decrypted name and
+  type against the link's file types, a file's size against its largest file, and the item's
+  kind (a file, or a note, link or credential) against what the link accepts. A mismatch is
+  never added to the Drive: it is recorded as failed (`type`, `size`, `kind`) and listed, to
+  delete.
 - **Taking files in.** The user's browser opens each received file with the link's private key
   and seals its name, metadata and file key (its DEK) under the user's current KEK, like a new
   Drive file (checked by the Worker); the content chunks are not re-encrypted. From then on it is
@@ -1525,8 +1626,12 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   `reverseNoExpiry` allows it), views, files, total bytes, largest file, file types; per role:
   `reverseEnabled` (with `driveEnabled`), `reverseMaxActive`, `reverseMaxBytes`,
   `reverseMaxExpireSec`, `reverseNoExpiry`, `reverseMaxViews`, `reverseAllowUnlimitedViews`,
-  `reversePassword`, `reverseEdit`, `reverseCaptcha`; always the Drive's capacity and largest
-  file. The server checks every one on create and on every change (for an API key, with the
+  `reversePassword`, `reverseEdit`, `reverseCaptcha`, and the kinds a link may accept
+  (`reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret`, checked on create, on each kind a
+  change adds, and at every upload with the role as it is then); always the Drive's capacity and
+  largest file. The server holds a note, link or credential session to one item of bounded size
+  (a note 2 MiB, a link 2048 characters, a credential the regular credential's fields), and the
+  user's browser holds what really arrives to the declared kind and that size at take-in. The server checks every one on create and on every change (for an API key, with the
   role's API limits on top); the pages only reflect them. The role's current
   `reverseMaxBytes` applies to existing links too: a link is held to the smaller of its own
   byte limit and the role's (lowering the role's cap takes effect at once; raising it does not
@@ -1569,7 +1674,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   is sent in plain text, but like the uploads to the link they are not end-to-end (the server
   holds the keys that open the link's key, so it can read the note and test guesses at the
   password; a copy of the Drive object alone cannot). A change that weakens the link — its
-  password removed or changed, its CAPTCHA turned off, no expiry, unlimited views — needs the
+  password removed or changed, its CAPTCHA turned off, no expiry, unlimited views, or accepting
+  files, links or credentials it did not (each a new way for an anonymous sender to reach the
+  user: a file of any type, a link to follow, a secret entrusted to a channel that is not
+  end-to-end; a note is plain text shown inertly, so adding one is not weakening) — needs the
   account password or a passkey, as creating a link does (a stolen session alone cannot turn a
   link into an open, lasting upload channel), and is refused for API keys even with `manage`
   (`403 step_up_required`); the owner acting as the user confirms nothing. Tightening a link
@@ -1580,9 +1688,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   password, the note, the limits and the CAPTCHA are the user's. Changes are refused on revoked,
   ended or locked links, and need the CSRF token and the role checks like every change. The
   activity log names what changed (`share.updated`: expiry, views, CAPTCHA, `password=set` /
-  `removed`, `note=set` / `removed`, `limits`), never a value.
+  `removed`, `note=set` / `removed`, `limits`, `accept=<kinds>`), never a value.
 - **Quotas on Receive.** The owner can cap, per role, the upload sessions a user's links receive
-  (`receive-upload`, and `receive` with new links) in a fixed window. A session is counted for
+  (`receive-upload`, and `receive` with new links; and by what a session sends: `receive-file`,
+  `receive-note`, `receive-url`, `receive-secret`) in a fixed window. A session is counted for
   the user when it starts (before the password is checked), atomically in the Directory, and
   given back when it does not start or ends having sent no file. At the quota `begin` answers
   `429 not_accepting` ("This link can’t accept more uploads right now. Try again later."): the
@@ -1620,8 +1729,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - Every value is re-validated server-side (formats, views, expiry, limits, quotas, settings).
 - **Quotas** (role option lists; public/js/quotakinds.js) are checked and counted in one
   synchronous Directory step, so concurrent creations cannot pass a quota: outgoing shares
-  (every share, or by type), Drive uploads (`drive-upload`, each file, at the upload's start) and
-  Receive (`receive-link`, `receive-upload`). An API-only quota narrows API creations only; the
+  (every share, or by type), Drive uploads (`drive-upload`, each file, and `drive-bytes`, its
+  size, checked together in the same step at the upload's start: one refused, neither counted) and
+  Receive (`receive-link`, `receive-upload`, and `receive-file`, `receive-note`, `receive-url`,
+  `receive-secret` by what an upload session sends). An API-only quota narrows API creations only; the
   Drive and Receive have no API channel. The public account's quotas count per anonymous
   subject and take only the kinds it can use. The owner is never counted.
 - Reads that spend views need custom headers (non-simple): ambient GETs never consume anything.

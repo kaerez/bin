@@ -6,7 +6,7 @@
 import { json, err, readJsonBody, assertIntent, assertNotCrossSite, methodNotAllowed } from '../lib/http.js';
 import { authnToken, sessionKeys } from '../lib/config.js';
 import { readSession, issueSession, logoutCookie, unconfigured, checkCsrf } from '../lib/auth.js';
-import { ipContext, isBlocked, recordFailure, rateLimit, directory, SETUP_CANDIDATE } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, rateLimit, PRELOGIN, PRELOGIN_USER, SETUP_CANDIDATE } from '../lib/guard.js';
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { requestOptions } from '../lib/webauthn.js';
@@ -162,8 +162,23 @@ export async function handleAuth(request, env, url) {
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
-    const body = await readJsonBody(request);
+    const body = await readJsonBody(request); // same-origin JSON only: another site cannot count here
     if (typeof body.username !== 'string' || body.username.length > 64) return err(400, 'invalid_username', 'Enter your username.');
+    // Counted before the Directory is asked: per network (PRELOGIN), and per network
+    // and username (PRELOGIN_USER, under a keyed hash of the name as typed, lowercased).
+    // Neither depends on whether the account exists, and both refuse alike, so the
+    // answer says nothing about accounts. Only prelogin is refused: no account is locked
+    // and the sign-in routes do not look at these scopes. The web client needs prelogin
+    // for a password sign-in, so heavy abuse from one network can delay password
+    // sign-in on that network (passkeys and recovery codes are unaffected), until the
+    // window ends or the owner lifts the block.
+    let rl = await rateLimit(env, g, 'prelogin', PRELOGIN);
+    if (rl.ok) rl = await rateLimit(env, { ...g, key: `${g.key}#${await preloginUserKey(env, body.username)}` }, 'prelogin-user', PRELOGIN_USER);
+    if (!rl.ok) {
+      const res = err(429, 'rate_limited', 'Too many sign-in attempts from your network. Try again later.');
+      res.headers.set('retry-after', String(PRELOGIN.blockSec));
+      return res;
+    }
     return json(await directory(env).prelogin(body.username));
   }
 
@@ -232,4 +247,18 @@ export async function handleAuth(request, env, url) {
   }
 
   return null;
+}
+
+/**
+ * The per-username part of the prelogin limit's Guard key: 16 hex characters
+ * of an HMAC (under the Worker's SIG secret, so the Guard's list shows no
+ * guessable hash of what was typed) of the name as typed, lowercased.
+ */
+async function preloginUserKey(env, username) {
+  const name = utf8(`secbin-prelogin-limit/v1\n${String(username).toLowerCase()}`);
+  const secret = typeof env.SIG === 'string' && env.SIG ? env.SIG : null;
+  const mac = secret
+    ? new Uint8Array(await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', utf8(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), name))
+    : new Uint8Array(await crypto.subtle.digest('SHA-256', name));
+  return [...mac.subarray(0, 8)].map((x) => x.toString(16).padStart(2, '0')).join('');
 }

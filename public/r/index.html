@@ -10,11 +10,11 @@
         <meta name="color-scheme" content="dark light" />
         <meta name="theme-color" content="#0d1117" />
         <title>Send files · secbin</title>
-        <meta name="description" content="Send files to the person who shared this link: they are encrypted in your browser before they are sent." />
+        <meta name="description" content="Send files, notes, links or credentials to the person who shared this link: they are encrypted in your browser before they are sent, to a key the recipient’s server can decrypt." />
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="secbin" />
         <meta property="og:title" content="secbin · send files" />
-        <meta property="og:description" content="Send files to the person who shared this link: they are encrypted in your browser before they are sent." />
+        <meta property="og:description" content="Send files, notes, links or credentials to the person who shared this link: they are encrypted in your browser before they are sent, to a key the recipient’s server can decrypt." />
         <meta name="twitter:card" content="summary" />
         <link rel="icon" type="image/svg+xml" href="/img/favicon.svg" />
         <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png" />
@@ -97,7 +97,7 @@
             <!-- The uploader of a reverse share (docs/REVERSE.md): built by
                  /js/reverse.js with DOM calls only. The key is in the #fragment. -->
             <div id="reverse-app">
-                <p class="msg" id="reverse-fallback">This page needs JavaScript: your files are encrypted in your browser before they are sent.</p>
+                <p class="msg" id="reverse-fallback">This page needs JavaScript: what you send is encrypted in your browser before it is sent.</p>
             </div>
 
         </main>
@@ -118,7 +118,7 @@
                 <span class="feat" role="listitem">Notes &amp; files</span>
             </div>
             <p class="foot-crypto mono">
-                AES-256-GCM · ECDH P-256 · HKDF-SHA256 · The link’s public key is in the URL
+                AES-256-GCM · Argon2id · ECDH P-256 · HKDF-SHA256 · Link keys stay in the URL
                 <span class="foot-frag">#fragment</span>
             </p>
         </footer>

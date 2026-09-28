@@ -5,7 +5,7 @@
 // per-address throttles still work on the keyed hashes; a root change and its
 // undo keep every record readable; an instance without a keyring writes in
 // the clear, flagged, and the background pass seals those rows later.
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { owner, makeUser, fetchJson, createNote, openNote, freshIp, proofFor, OWNER_STEP } from './helpers.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
@@ -30,8 +30,10 @@ async function openAs(n, ip) {
   return fetchJson(`/api/paste/${n.id}/open`, { method: 'POST', ip, headers: { 'x-link-proof': a.linkProof, 'x-key-proof': a.keyProof, 'user-agent': UA, 'accept-language': 'he-IL,he;q=0.9' } });
 }
 
+const labs = new Set();
 /** A Directory of its own (no keyring until `keys`), with an owner and one share of theirs in the index. */
 async function lab(name, { keys = true } = {}) {
+  labs.add(name);
   const ownerId = `own${name}`.replace(/[^A-Za-z0-9]/g, '').padEnd(16, 'x').slice(0, 16);
   const shareId = `sh${name}`.replace(/[^A-Za-z0-9]/g, '').padEnd(21, 'y').slice(0, 21);
   await runInDurableObject(dirOf(name), async (d) => {
@@ -278,8 +280,17 @@ describe('no keyring yet (an instance from before the Drive)', () => {
 });
 
 describe('Guard rows from before the tags', () => {
-  /** The Guard shards as the release before left them: no "legacy.done" (nothing re-keyed yet). */
-  const upgraded = () => Promise.all(shards().map((s) => runInDurableObject(s, (g) => g.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'"))));
+  // The lab Directories above share the Guard shards with the real one (a deployment has one
+  // Directory): their alarms' passes, with their own secrets, must not run in these tests.
+  beforeAll(() => Promise.all([...labs].map((name) => runInDurableObject(dirOf(name), (d) => d.ctx.storage.deleteAlarm()))));
+  // Nor the real Directory's own alarm between "after the upgrade" and the pass these tests run by hand.
+  const holdPass = () => runInDurableObject(dirOf(), (d) => d.ctx.storage.deleteAlarm());
+  afterAll(() => runInDurableObject(dirOf(), (d) => d.ctx.storage.setAlarm(Date.now() + 3600 * 1000)));
+  /** The Guard shards as the release before left them: no "legacy.done" (nothing re-keyed yet); `seed` writes rows there in the same step. */
+  const upgraded = (seed = {}) => Promise.all(shards().map((s, i) => runInDurableObject(s, (g) => {
+    g.sql.exec("DELETE FROM meta WHERE k = 'legacy.done'");
+    seed[i]?.(g.sql);
+  })));
   const doneFlags = () => Promise.all(shards().map((s) => runInDurableObject(s, (g) => g.sql.exec("SELECT COUNT(*) AS c FROM meta WHERE k = 'legacy.done'").one().c)));
   const tagOf = (legacy) => runInDurableObject(dirOf(), async (d) => guardTag(await importTagKey(bytesFromB64url((await d.guardKeys()).tag)), legacy));
 
@@ -287,9 +298,9 @@ describe('Guard rows from before the tags', () => {
     const ip = '203.0.113.201';
     const legacy = `${ip}/32`;
     const t = now();
-    await upgraded();
+    await holdPass();
     // A block the release before left: keyed by the address, in the shard of the address.
-    await runInDurableObject(shards()[at(legacy)], (g) => g.sql.exec("INSERT OR REPLACE INTO blocks (scope, key, until, since) VALUES ('invalid', ?, ?, ?)", legacy, t + 600, t));
+    await upgraded({ [at(legacy)]: (sql) => sql.exec("INSERT OR REPLACE INTO blocks (scope, key, until, since) VALUES ('invalid', ?, ?, ?)", legacy, t + 600, t) });
     invalidateGuardCaches();
     const n = await createNote(oc, { text: 'x', bar: true });
     // Right after the deploy, before any pass: still blocked.
@@ -314,12 +325,12 @@ describe('Guard rows from before the tags', () => {
   });
 
   it('failures counted before the upgrade still count toward the block before the pass', async () => {
-    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': 3, 'guard.invalid.windowSec': 600, 'guard.invalid.blockSec': 600, ...OWNER_STEP } });
+    expect((await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'guard.invalid.max': 3, 'guard.invalid.windowSec': 600, 'guard.invalid.blockSec': 600, ...OWNER_STEP } })).status).toBe(200);
     const ip = '203.0.113.202';
     const legacy = `${ip}/32`;
     const t = now();
-    await upgraded();
-    await runInDurableObject(shards()[at(legacy)], (g) => g.sql.exec("INSERT OR REPLACE INTO tracking (scope, key, count, start, expires) VALUES ('invalid', ?, 2, ?, ?)", legacy, t - 10, t + 590));
+    await holdPass();
+    await upgraded({ [at(legacy)]: (sql) => sql.exec("INSERT OR REPLACE INTO tracking (scope, key, count, start, expires) VALUES ('invalid', ?, 2, ?, ?)", legacy, t - 10, t + 590) });
     invalidateGuardCaches();
     const n = await createNote(oc, { text: 'x', bar: true, password: 'pw-123456789' });
     // Two failures before the upgrade, one after: the third blocks.

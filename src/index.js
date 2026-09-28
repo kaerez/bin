@@ -133,7 +133,9 @@ const pageNotFound = () => withSecurityHeaders(new Response('Not found', { statu
  *   • /p/<id>?check and /r/<id>?check — the check page (public/check/), for
  *     any well-formed id while the server has Turnstile keys (else a redirect
  *     back), so it says nothing about the share; behind the Guard's block and
- *     a per-network rate limit, with no share lookup. Its CSP adds Turnstile
+ *     a per-network rate limit, with no share lookup. Only a same-origin (or
+ *     'none') document navigation is counted and served; any other request
+ *     (another site's <img> or <iframe>) is redirected back, uncounted. Its CSP adds Turnstile
  *     and forbids workers; COOP same-origin-allow-popups. It never gets a key.
  * Never stored. Any other /p/ or /r/ path is not found.
  */
@@ -148,8 +150,15 @@ async function sharePage(request, env, url, kind) {
   if (!env.ASSETS) return new Response('Not found', { status: 404 });
   const asset = (path) => env.ASSETS.fetch(new Request(new URL(path, url), { method: request.method, headers: request.headers }));
   const home = `/${kind}/${m[1]}`;
+  const h = (k) => request.headers.get(k) || '';
   if (url.searchParams.has('check')) {
     if (!valid || !(await turnstileKeys(env))) return withSecurityHeaders(redirect(home, 302));
+    // Only this site's own document navigation (the viewer's location.replace, or a
+    // typed / bookmarked address) is counted and served: another site's <img>,
+    // <iframe> or fetch gets the redirect back, before the Guard is asked, so it
+    // can never use up a network's budget of check pages.
+    const site = h('sec-fetch-site');
+    if (h('sec-fetch-dest') !== 'document' || (site !== 'same-origin' && site !== 'none')) return withSecurityHeaders(redirect(home, 302));
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'invalid');
     const rl = b.blocked ? { ok: false } : await rateLimit(env, g, 'captcha-page', CAPTCHA_PAGE);
@@ -159,7 +168,6 @@ async function sharePage(request, env, url, kind) {
     return withSecurityHeaders(await asset('/check/'), { check: true });
   }
   const page = withSecurityHeaders(await asset(kind === 'r' ? '/r/' : '/'));
-  const h = (k) => request.headers.get(k) || '';
   const nav = h('sec-fetch-dest') === 'document' && h('sec-fetch-mode') === 'navigate'
     && (h('sec-fetch-site') === 'none' || h('sec-fetch-site') === 'same-origin');
   const Rewriter = globalThis.HTMLRewriter; // the Workers runtime's streaming HTML rewriter

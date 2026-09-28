@@ -60,9 +60,16 @@ export async function guardKeyFor(env, trackingKeyText) {
   return guardTag((await guardKeys(env)).tag, trackingKeyText);
 }
 
-/** The caller's Guard key (a tag of its tracking key), once per request. */
+/**
+ * The caller's Guard key (a tag of its tracking key), once per request and
+ * key: callers pass `{ ...g, key: other }` for a scope keyed otherwise (a
+ * wider network, a network and a username), which must not reuse g's tag.
+ */
 async function tagOf(env, g) {
-  g.tag ??= (async () => guardTag((await guardKeys(env)).tag, g.key))();
+  if (!g.tag || g.tagFor !== g.key) {
+    g.tagFor = g.key;
+    g.tag = (async () => guardTag((await guardKeys(env)).tag, g.key))();
+  }
   return g.tag;
 }
 
@@ -203,12 +210,35 @@ export const CAPTCHA_PAGE = { max: 61, windowSec: 600, blockSec: 600 };
  */
 export const EXTEND_DOWNLOADS = { max: 121, windowSec: 600, blockSec: 600 };
 /**
+ * The CAPTCHA on sign-in, account changes and anonymous creation
+ * (turnstile.js requireTurnstile): once siteverify has rejected
+ * TURNSTILE_VERIFY.max tokens from a network within a window, that network's
+ * tokens are refused without a call for `blockSec`. Accepted tokens are never
+ * counted (each one cost a solved CAPTCHA).
+ */
+export const TURNSTILE_VERIFY = { max: 60, windowSec: 600, blockSec: 600 };
+/**
+ * POST /api/auth/prelogin (anonymous; it reaches the Directory): a network may
+ * ask at most PRELOGIN.max − 1 times per window, and at most
+ * PRELOGIN_USER.max − 1 times for one username. Only prelogin itself is
+ * refused beyond them (the sign-in routes do not look at these scopes), and the
+ * answer never depends on whether the account exists.
+ */
+export const PRELOGIN = { max: 601, windowSec: 600, blockSec: 600 };
+export const PRELOGIN_USER = { max: 21, windowSec: 600, blockSec: 600 };
+/**
+ * Chunk fetches of a share that has ended (GET /api/file/:id/chunk/…, answered
+ * 410 and never counted as invalid, public.js downloadChunk): a network may make
+ * at most ENDED_CHUNKS.max − 1 per window before `429 rate_limited`.
+ */
+export const ENDED_CHUNKS = { max: 601, windowSec: 600, blockSec: 600 };
+/**
  * The set-up page's key proposals (POST /api/auth/setup/candidate, the setup
  * token checked first): a network may ask SETUP_CANDIDATE.max − 1 times per
  * window ("Generate again" a few times is plenty).
  */
 export const SETUP_CANDIDATE = { max: 21, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
-export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'setup-candidate'];
+export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'prelogin-user', 'public-trackers', 'ended-chunks', 'setup-candidate'];
 
 export { shard as guardShardFor };

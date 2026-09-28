@@ -28,7 +28,11 @@ import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { captchaBox } from '../../js/captcha.js';
 import { SESSION_CHANGED_EVENT, updateShare } from '../../js/api.js';
-import { reverseViews, reversePasswordChoice, reverseEditForm, saveReverseEdit } from './reverse-edit.js';
+import { reverseViews, reversePasswordChoice, reverseEditForm, saveReverseEdit, acceptChoice, acceptBox } from './reverse-edit.js';
+import { KIND_LABELS, KIND_PLURALS, itemExport, SECRET_EXPORT_WARNING } from '../../js/receivekinds.js';
+import { linkCard, secretCard, stopTotp, noteKind, drawNote } from '../../js/typedview.js';
+import { urlRulesOf, ShareTypeError } from '../../js/sharetypes.js';
+import { saveText } from '../../js/downloads.js';
 
 export { reverseViews, reversePasswordChoice };
 
@@ -96,12 +100,13 @@ function mbToBytes(raw) {
 
 /**
  * The "Receive…" options → { expire, views, maxFiles, maxBytes, maxFileBytes,
- * types, expiryText } or { error, field }. `noExpiry`: no expiry (expire
+ * types, accept, expiryText } or { error, field }. `accept`: what senders can
+ * send (files, note, url, secret; each as the role allows). `noExpiry`: no expiry (expire
  * "never", where the role allows it). `L` is the profile's limits
  * (reverseMaxExpireSec, reverseNoExpiry, reverseMaxViews,
  * reverseAllowUnlimitedViews, reverseMaxBytes); the server checks them again.
  */
-export function reverseOptions({ n, unit, noExpiry = false, views, unlimited = true, maxFiles, maxMb, fileMb, typeMode, typeRules }, L = {}) {
+export function reverseOptions({ n, unit, noExpiry = false, views, unlimited = true, maxFiles, maxMb, fileMb, typeMode, typeRules, accept = ['files'] }, L = {}) {
   const nRaw = String(n ?? '').trim();
   let expire = 'never';
   let expiryText = 'as long as the link is not revoked';
@@ -137,7 +142,18 @@ export function reverseOptions({ n, unit, noExpiry = false, views, unlimited = t
     if (!rules.length) return { error: 'List at least one file type (for example ext:pdf), or accept any type.', field: 'types' };
     types = { mode: typeMode, rules };
   }
-  return { expire, views: v.views, maxFiles: files, maxBytes: maxBytes ?? roleMax, maxFileBytes, types, expiryText };
+  // What senders can send: at least one kind, each one the role allows (acceptChoice).
+  const list = Array.isArray(accept) ? accept : [];
+  if (!list.length) return { error: 'Choose at least one thing senders can send.', field: 'accept' };
+  const off = list.filter((k) => !acceptChoice(L).includes(k));
+  if (off.length) return { error: `Your account does not allow upload links to accept ${off.map((k) => KIND_PLURALS[k]).join(' or ')}.`, field: 'accept' };
+  return { expire, views: v.views, maxFiles: files, maxBytes: maxBytes ?? roleMax, maxFileBytes, types, accept: list, expiryText };
+}
+
+/** What a link accepts in a sentence: "files", "files or notes", "files, notes or links". */
+export function acceptWords(accept) {
+  const w = (Array.isArray(accept) && accept.length ? accept : ['files']).map((k) => KIND_PLURALS[k] ?? k);
+  return w.length > 1 ? `${w.slice(0, -1).join(', ')} or ${w.at(-1)}` : w[0];
 }
 
 /** The client's progress, onProgress(bytesDone, total) → a fraction in [0, 1]. */
@@ -512,6 +528,9 @@ function upgradeBox(client, deps) {
 
 function mountApp(mount, client, deps) {
   const L = (deps.profile && deps.profile.limits) || {};
+  // The role's file-type rules and folder-depth limit apply to the Drive too (checked before anything is sent, and by the server).
+  client.setPolicy(L);
+  const depthLimited = Number.isInteger(L.maxFolderDepth);
   let current = ROOT;
   // The folder being opened (current until it has loaded) and whether that open was asked to move
   // focus: a refresh in the background (received files taken in) re-lists where the person is
@@ -734,13 +753,20 @@ function mountApp(mount, client, deps) {
     const name = c.name || (c.upgrading ? '(waiting for the upgrade)' : '(unnamed)');
     const check = h('input', { type: 'checkbox', 'aria-label': `Select ${name}`, checked: selected.has(c.id) });
     check.addEventListener('change', () => { if (check.checked) selected.add(c.id); else selected.delete(c.id); updateButtons(); });
+    // A note, link or credential received through a Receive link: its kind's icon and label (the
+    // label is text, so it is read), and its name opens it in the matching viewer.
     const nameCell = c.kind === 'dir'
       ? h('button.tree-open.drive-open', { type: 'button', title: `Open ${name}`, on: { click: () => open(c.id, { focus: true }) } }, h('span.tree-icon', { 'aria-hidden': 'true' }), c.name ? nameEl(name) : h('span', { text: name }))
-      : h('span.drive-fname', {}, c.name ? nameEl(name) : h('span', { text: name }),
-        // A received file whose name was cleaned when it was taken in (or an older name with such characters).
-        c.renamed ? h('span.tree-sub.mono.renamed-note', { text: ' renamed: hidden characters removed' }) : null);
+      : c.item
+        ? h('span.drive-item', {},
+          h('button.tree-open.drive-open', { type: 'button', title: `Open ${name}`, dataset: { kind: c.item.kind }, on: { click: (e) => openItem(c, e.currentTarget) } },
+            h(`span.drive-kind-icon.kind-${c.item.kind}`, { 'aria-hidden': 'true' }), nameEl(name)),
+          h(`span.pill.drive-kind.kind-${c.item.kind}`, { text: KIND_LABELS[c.item.kind] }))
+        : h('span.drive-fname', {}, c.name ? nameEl(name) : h('span', { text: name }),
+          // A received file whose name was cleaned when it was taken in (or an older name with such characters).
+          c.renamed ? h('span.tree-sub.mono.renamed-note', { text: ' renamed: hidden characters removed' }) : null);
     const sharesBtn = h('button.btn.tree-btn', { type: 'button', text: 'Shares', 'aria-label': `Shares of ${name}`, on: { click: () => sharesDialog(c) } });
-    return h('tr', { dataset: { id: c.id, kind: c.kind } },
+    return h('tr', { dataset: { id: c.id, kind: c.kind, ...(c.item ? { item: c.item.kind } : {}) } },
       h('td.cell-check', {}, h('label.check-hit', {}, check)),
       h('td', { dataset: { label: 'Name' } }, nameCell),
       h('td.mono', { dataset: { label: 'Size' }, text: c.kind === 'dir' ? '—' : formatBytes(Number(c.size) || 0) }),
@@ -807,7 +833,7 @@ function mountApp(mount, client, deps) {
     const [it] = selectedItems();
     if (!it) return;
     nameDialog({
-      title: `Rename ${it.kind === 'dir' ? 'folder' : 'file'}`,
+      title: `Rename ${it.kind === 'dir' ? 'folder' : it.item ? KIND_LABELS[it.item.kind].toLowerCase() : 'file'}`,
       sub: `Currently “${it.name}”.`,
       value: it.name,
       action: 'Rename',
@@ -845,7 +871,8 @@ function mountApp(mount, client, deps) {
       d.clearError();
       const done = [];
       try {
-        for (const it of items) { await client.move(it.id, target); done.push(it.id); }
+        const level = depthLimited ? await client.levelOf(target) : undefined;
+        for (const it of items) { await client.move(it.id, target, { kind: it.kind, level }); done.push(it.id); }
         toast(`Moved ${describe(items)}.`);
         d.close();
       } catch (e) {
@@ -921,10 +948,13 @@ function mountApp(mount, client, deps) {
     let done = 0;
     const label = files.length === 1 ? `Uploading ${files[0].name}` : `Uploading ${files.length} files`;
     const ok = await transfer(label, async (progress, signal) => {
+      // The role's file policy, for every file before any is sent.
+      await client.checkUpload(target, files.map((f) => ({ path: f.name, file: f })));
+      const level = depthLimited ? await client.levelOf(target) : undefined;
       // A name already in the folder gets " (2)", " (3)"… (one read of the folder for the batch).
       const { names: taken } = await client.names(target);
       for (const f of files) {
-        await client.upload(target, f, { signal, taken, onProgress: (d) => progress(done + d, total) });
+        await client.upload(target, f, { signal, taken, level, onProgress: (d) => progress(done + d, total) });
         done += f.size;
       }
     });
@@ -948,8 +978,93 @@ function mountApp(mount, client, deps) {
   function downloadSel() {
     const [it] = selectedItems();
     if (!it) return;
-    if (it.kind === 'dir') transfer(`Preparing ${it.name}.zip`, (progress, signal) => client.downloadFolder(it.id, { onProgress: progress, signal }));
+    if (it.kind === 'dir') {
+      // Credentials never go into a ZIP (each leaves in plain text only on its own, after a confirmation).
+      let left = 0;
+      transfer(`Preparing ${it.name}.zip`, async (progress, signal) => { left = (await client.downloadFolder(it.id, { onProgress: progress, signal }))?.left ?? 0; })
+        .then((ok) => { if (ok && left) showMsg(msg, `${left} credential${left === 1 ? ' was' : 's were'} left out of the ZIP: download ${left === 1 ? 'it' : 'each'} on ${left === 1 ? 'its' : 'their'} own (it asks first, as it leaves in plain text).`, false); });
+    } else if (it.item) downloadItem(it);
     else transfer(`Downloading ${it.name}`, async (progress, signal) => (await client.download(it.id, { onProgress: progress, signal })).save());
+  }
+
+  /**
+   * A note, link or credential as a text file (receivekinds.js itemExport): a
+   * note as .md or .txt, a link as .txt with its URL, a credential as a
+   * plain-text export — after a confirmation that says so.
+   */
+  function downloadItem(it, { from = null } = {}) {
+    const go = () => transfer(`Downloading ${it.name}`, async (progress, signal) => {
+      const r = await client.readItem(it.id, { onProgress: progress, signal });
+      let out;
+      try { out = itemExport(r.item, r.name, r.bytes); } catch (e) {
+        if (!(e instanceof ShareTypeError)) throw e;
+        out = null;
+      }
+      // One whose content does not parse is saved as it is (never rendered).
+      if (out) saveText(out.filename, out.text); else await (await client.download(it.id)).save();
+    });
+    if (it.item.kind !== 'secret') { go(); return; }
+    const d = openDialog({
+      title: `Download “${it.name}” in plain text?`,
+      sub: `${SECRET_EXPORT_WARNING} The file says so at the top.`,
+      fallback: () => (from && from.isConnected ? from.focus() : focusPane()),
+    });
+    const cancel = btn('Cancel', () => d.close(), 'modal-btn');
+    const ok = primary('Download in plain text', () => { d.close(); go(); });
+    ok.id = 'drive-item-download-confirm';
+    d.setActions(cancel, ok);
+    cancel.focus();
+  }
+
+  /**
+   * Open a note, link or credential in the viewer of regular shares
+   * (typedview.js): a note rendered (Markdown, code) with Raw and Copy; a link
+   * spelled out, with the account's URL rules deciding whether it opens from
+   * here; a credential masked, with Reveal and Copy.
+   */
+  function openItem(c, opener) {
+    const what = KIND_LABELS[c.item.kind].toLowerCase();
+    const body = h('div.drive-item-view', { id: 'drive-item-view' }, h('p.msg', { role: 'status', text: `Opening the ${what}…` }));
+    const d = openDialog({
+      title: c.name,
+      sub: `A ${what} received through one of your “Receive” links. Like your other Drive files it is encrypted with keys the server holds, so it is not end-to-end encrypted.`,
+      body: [body], wide: true, fallback: () => (opener && opener.isConnected ? opener.focus() : focusPane()),
+      onClose: stopTotp,
+    });
+    const actions = [btn('Close', () => d.close(), 'modal-btn')];
+    const dl = btn('Download', () => { d.close(); downloadItem(c, { from: opener }); }, 'modal-btn');
+    dl.id = 'drive-item-download';
+    d.setActions(dl, ...actions);
+    (async () => {
+      let r;
+      try { r = await client.readItem(c.id); } catch (e) { body.replaceChildren(); d.error(`It could not be opened: ${friendlyError(e)}`); return; }
+      if (!d.open) return;
+      try {
+        if (r.item.kind === 'note') {
+          const k = noteKind(r.item.fmt, r.text);
+          const view = h('div.drive-note', { id: 'drive-item-note' });
+          let raw = false;
+          const draw = () => drawNote(view, r.text, { ...k, raw });
+          draw();
+          const tools = h('div.btn-row');
+          if (k.markdown) {
+            const rawBtn = h('button.btn', { type: 'button', id: 'drive-item-raw', text: 'Raw', 'aria-pressed': 'false' });
+            rawBtn.addEventListener('click', () => { raw = !raw; rawBtn.setAttribute('aria-pressed', String(raw)); draw(); });
+            tools.appendChild(rawBtn);
+          }
+          tools.appendChild(h('button.btn', { type: 'button', id: 'drive-item-copy', text: 'Copy', 'aria-label': 'Copy the note', on: { click: async () => toast((await copyText(r.text)) ? 'copied to clipboard' : 'copy failed') } }));
+          body.replaceChildren(h('p.mono.muted', { text: k.markdown ? 'Markdown' : k.code ? 'Code' : 'Plain text' }), view, tools);
+        } else if (r.item.kind === 'url') {
+          body.replaceChildren(linkCard(r.text, { rules: urlRulesOf(L.urlRules), lead: 'This item is a link to' }));
+        } else {
+          body.replaceChildren(secretCard(r.text));
+        }
+      } catch (e) {
+        if (!(e instanceof ShareTypeError)) throw e;
+        // Malformed: never rendered as a link or credential; Download saves what it holds.
+        body.replaceChildren(h('p.msg.error', { text: `${e.message} Download it to see what it holds.` }));
+      }
+    })().catch((e) => d.error(friendlyError(e)));
   }
 
   // ── share ──────────────────────────────────────────────────────────────
@@ -1100,14 +1215,17 @@ function mountApp(mount, client, deps) {
     if (!impersonating) (deps.canUsePasskey || canUsePasskey)().then((ok) => { withPasskey = !!ok; confirmText.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
     const confirm = impersonating ? async () => ({}) : deps.confirm || ((input) => confirmStep(input, deps.profile?.user?.username, withPasskey));
     const listBox = h('div.drive-reverse-list', { id: 'drive-rev-list' }, h('p.msg', { role: 'status', text: 'Loading this folder’s links…' }));
+    // What senders can send: the kinds the role allows (files by default).
+    const accept = acceptBox({ id: 'drive-rev-accept', L, legend: 'What senders can send' });
     const cap = captchaBox({ id: 'drive-rev-captcha', profile: deps.profile, which: 'reverse' });
     const form = h('div.drive-reverse-form', { id: 'drive-rev-form' },
       h('div.label-row', {}, h('label.field-label', { for: 'drive-rev-label', text: 'Label (optional, for your own reference)' }), labelIn, hint),
       field('Note to the people who upload (optional; encrypted to the link — like the Drive, not end-to-end)', noteIn),
+      accept.el,
       h('div.drive-reverse-grid', {},
         h('div.opt', { role: 'group', 'aria-labelledby': 'drive-rev-expire-l' }, h('label.opt-label', { id: 'drive-rev-expire-l', for: 'drive-rev-expire', text: 'Accept files for' }), expN, expU),
         h('div.opt', { role: 'group', 'aria-labelledby': 'drive-rev-views-l' }, h('label.opt-label', { id: 'drive-rev-views-l', for: 'drive-rev-views', text: 'Views' }), viewsIn, viewsInf),
-        field('Most files (empty: no limit)', files),
+        field('Most files (empty: no limit; notes, links and credentials count as one each)', files),
         field('Most in total, MB (empty: no limit)', maxMb),
         field('Largest file, MB (empty: no limit)', fileMb)),
       noExpBox,
@@ -1121,7 +1239,7 @@ function mountApp(mount, client, deps) {
       h('div.dfield', { hidden: impersonating }, confirmText, confirmIn));
     const d = openDialog({
       title: `Receive into “${folder.name}”`,
-      sub: 'Anyone with the link can upload files and folders into this folder, without an account. They are encrypted in the uploader’s browser to this link’s key, which the server keeps under your Drive keys (so the server can open them, as it can your other Drive files); the next time your Drive opens they are taken in and sealed like your other files. Uploads count towards your Drive’s storage.',
+      sub: 'Anyone with the link can send into this folder, without an account: files and folders, and — as you choose below — notes, links and credentials. What they send is encrypted in their browser to this link’s key, which the server keeps under your Drive keys (so the server can open it, as it can your other Drive files); the next time your Drive opens it is taken in and sealed like your other files. Everything received counts towards your Drive’s storage.',
       body: [form, listBox],
       wide: true,
       fallback: focusPane,
@@ -1129,8 +1247,8 @@ function mountApp(mount, client, deps) {
     const create = primary('Create link', async () => {
       d.clearError();
       const o = reverseOptions({ n: expN.value, unit: expU.value, noExpiry: noExp.checked, views: viewsIn.value, unlimited: viewsInf.getAttribute('aria-pressed') === 'true',
-        maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value }, L);
-      if (o.error) { d.error(o.error, { expire: noExp.checked ? noExp : expN, views: viewsIn.disabled ? viewsInf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules }[o.field] || null); return; }
+        maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value, accept: accept.value() }, L);
+      if (o.error) { d.error(o.error, { expire: noExp.checked ? noExp : expN, views: viewsIn.disabled ? viewsInf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules, accept: [...accept.boxes.values()][0] }[o.field] || null); return; }
       let password = '';
       if (pwOn.checked) {
         if (!pw1.value) { d.error('Enter a password, or turn the password off.', pw1); return; }
@@ -1153,7 +1271,7 @@ function mountApp(mount, client, deps) {
         return;
       }
       try {
-        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, views: o.views, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, step, captcha: cap.value() });
+        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, views: o.views, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, accept: o.accept, step, captcha: cap.value() });
         pw1.value = pw2.value = '';
         reverseResult(d, r, o, folder);
       } catch (e) {
@@ -1185,7 +1303,7 @@ function mountApp(mount, client, deps) {
   function reverseResult(d, r, o, folder) {
     d.setTitle('Your upload link');
     const views = o.views === null ? '' : ` (${o.views} view${o.views === 1 ? '' : 's'})`;
-    d.subEl.textContent = `Anyone with this link can send files into “${folder.name}” ${o.expire === 'never' ? o.expiryText : `for ${o.expiryText}`}${views}, within the limits you chose. Keep it to the people you want files from — the key that encrypts their uploads for you is inside the link. Revoke it any time here or under “my shares”; files already received stay.`;
+    d.subEl.textContent = `Anyone with this link can send ${acceptWords(o.accept)} into “${folder.name}” ${o.expire === 'never' ? o.expiryText : `for ${o.expiryText}`}${views}, within the limits you chose. Keep it to the people you want to hear from — the key that encrypts what they send you is inside the link. Revoke it any time here or under “my shares”; what was already received stays.`;
     d.subEl.hidden = false;
     const { nodes, copy } = linkBlock(r.url, 'drive-rev');
     d.setBody(...nodes);
@@ -1274,9 +1392,9 @@ function mountApp(mount, client, deps) {
           h('td', { dataset: { label: 'Label' }, text: s.label || '(no label)' }),
           h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),
           h('td.mono', { dataset: { label: 'Expires' }, text: expiresText(s, now) }),
-          h('td.mono', { dataset: { label: 'Received' }, text: `${s.files} file${s.files === 1 ? '' : 's'}, ${formatBytes(s.bytes)}` }),
+          h('td.mono', { dataset: { label: 'Received' }, text: `${s.files} ${(s.accept || ['files']).join() === 'files' ? `file${s.files === 1 ? '' : 's'}` : `item${s.files === 1 ? '' : 's'}`}, ${formatBytes(s.bytes)}` }),
           h('td.mono', { dataset: { label: 'Views' }, text: s.views === null || s.views === undefined ? 'unlimited' : `${s.left ?? 0} left of ${s.views}` }),
-          h('td.mono', { dataset: { label: 'Status' }, text: `${s.status}${s.password ? ' · password' : ''}${s.captcha ? ' · CAPTCHA' : ''}` }),
+          h('td.mono', { dataset: { label: 'Status' }, text: `${s.status}${s.password ? ' · password' : ''}${s.captcha ? ' · CAPTCHA' : ''} · accepts ${acceptWords(s.accept)}` }),
           cell));
       }
       box.replaceChildren(h('h3.field-label', { id: 'drive-rev-list-h', text: 'Upload links of this folder' }),
@@ -1301,16 +1419,22 @@ function mountApp(mount, client, deps) {
       showMsg(receivedMsg, `Received files could not be added now: ${friendlyError(e)}`);
       return;
     }
+    const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+    // What was added, by kind: "2 files and 1 note" (files only: as before).
+    const k = r.kinds || { files: r.added };
+    const what = [['files', 'file', 'files'], ['note', 'note', 'notes'], ['url', 'link', 'links'], ['secret', 'credential', 'credentials']]
+      .filter(([kind]) => k[kind]).map(([kind, one, many]) => n(k[kind], one, many));
+    const whatText = what.length > 1 ? `${what.slice(0, -1).join(', ')} and ${what.at(-1)}` : what[0];
+    const onlyFiles = !k.note && !k.url && !k.secret;
     if (r.added) {
       // The take-in runs in the background: a modal dialog opened meanwhile gets no toast about the
       // page behind it (nothing outside a modal dialog is shown or read); the status line below
       // says the same and stays.
-      if (!document.querySelector('[aria-modal="true"]')) toast(`Added ${r.added} received file${r.added === 1 ? '' : 's'}.`);
+      if (!document.querySelector('[aria-modal="true"]')) toast(onlyFiles ? `Added ${r.added} received file${r.added === 1 ? '' : 's'}.` : `Added what you received: ${whatText}.`);
       await refresh();
     }
-    const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
     const parts = [];
-    if (r.added) parts.push(`${n(r.added, 'new received file was', 'new received files were')} added to your folders.`);
+    if (r.added) parts.push(onlyFiles ? `${n(r.added, 'new received file was', 'new received files were')} added to your folders.` : `New items you received were added to your folders: ${whatText}.`);
     if (r.renamed) parts.push(`${n(r.renamed, 'name had', 'names had')} hidden direction or spacing characters, removed.`);
     if (r.flattened) parts.push(`${n(r.flattened, 'file was', 'files were')} in folders nested too deeply (or in too many new folders at once) and ${r.flattened === 1 ? 'was' : 'were'} put in the deepest folder allowed.`);
     if (r.deferred) parts.push(`${n(r.deferred, 'file', 'files')} could not be added now; ${r.deferred === 1 ? 'it is' : 'they are'} tried again the next time your Drive opens.`);
@@ -1336,7 +1460,11 @@ function mountApp(mount, client, deps) {
   const FAIL_TEXT = {
     unreadable: 'does not open with this Drive’s key (damaged, or not sent for this link)',
     name: 'its name or folder path cannot be used',
-    place: 'your Drive refused it (full, or its folder is full)',
+    place: 'your Drive refused it (full, its folder is full, or nested deeper than your account allows)',
+    // What it really is breaks the link's rules or the role's (the sender's browser declared something else).
+    type: 'its file type is one this link does not accept, or your account does not allow in the Drive',
+    size: 'it is larger than this link’s largest file, or than a note, link or credential can be',
+    kind: 'it is not what its sender declared, or a kind this link (or your role, now) does not accept (a file, note, link or credential)',
   };
 
   /** The received files that could not be added: link, size, time, why; delete or try again. */
@@ -1344,7 +1472,7 @@ function mountApp(mount, client, deps) {
     const status = h('p.msg', { role: 'status', text: 'Loading…' });
     const d = openDialog({
       title: 'Received files that could not be added',
-      sub: 'These uploads reached your Drive but could not be opened or placed. Their names are encrypted, so only the link, size and time are shown. Delete them to free the space, or try again (for example after making room).',
+      sub: 'These uploads reached your Drive but could not be opened or placed. Their names are encrypted, so only the link, size and time are shown; a note, link or credential that could not be added is listed here too (what an item is stays encrypted with it). Delete them to free the space, or try again (for example after making room).',
       body: [status], wide: true, fallback: focusPane,
     });
     d.setActions(btn('Close', () => d.close(), 'modal-btn'));

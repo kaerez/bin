@@ -27,10 +27,71 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   dropped previous root keep the earlier record keys sealed under the root, so every record stays
   readable, and a background pass seals them again under the current key. An instance with no
   keyring yet writes records in the clear, as before, and the pass seals them once a keyring
-  exists; it also seals the rows stored before this release (Directory migration 18) and
+  exists; it also seals the rows stored before this release (Directory migration 19) and
   re-keys the guard's earlier rows. Until a guard shard's earlier rows are re-keyed, lookups
-  check the address too, so blocks and failure counts from before the upgrade keep applying. The server can derive the key: this protects a copy of the
-  stored rows, not the server (SECURITY.md, "Records at rest"). Records are not exported.
+  check the address too, so blocks and failure counts from before the upgrade keep applying.
+  The server can derive the key: this protects a copy of the stored rows, not the server
+  (SECURITY.md, "Records at rest"). Records are not exported.
+- **Take-in holds received items to their link's rules** (audit A-3): the uploader's browser only
+  declares a file's type and a send's kind to the server, so the user's browser now checks the
+  real, decrypted name and type against the link's file types, a file's size against its largest
+  file, and each item's kind against what the link accepts. A mismatch is never added to the
+  Drive: it is recorded as failed (new reasons `type`, `size`, `kind`) and listed, to delete.
+  Each item is also held to the kind its session declared (the server seals that kind with the
+  item until it is taken in), a note, link or credential to its kind's size, and the link's
+  kinds to what the user's role allows at take-in, so a modified uploader cannot pass a file off
+  as a note to escape the file limits and quotas, or send a kind the role has since dropped.
+- **Drive shares of notes, links and credentials are held to the sender's role on the
+  recipient's side:** the server records what the sender's role allowed when the share was made
+  (`kinds`, returned by `open`), and the recipient's page shows an entry as a note, link or
+  credential only where that allows it (otherwise a plain file, Download only). Item viewers never
+  read or render an item larger than its kind can be. A credential's Download on a Drive share's
+  page asks first, as in the Drive, and ZIPs (Drive folders, a Drive share's "Download all" and
+  folders) leave credentials out and say how many.
+- **A Receive link cannot be made on a folder deeper than the role's folder depth limit**
+  (`maxFolderDepth`, by the Drive's own depth rule; `403 folder_too_deep` with `max`): nothing it
+  received could be placed there. A link's folder moved deeper later takes nothing in.
+- **The server holds a take-in to the declared kind too:** `409 kind_not_accepted` unless the
+  kind the item's session declared is one its link accepts and the user's role allows at
+  take-in; a link the role now allows no kind for takes nothing in (the browser no longer reads
+  an empty list as "files"). A received item's fields stored in plain text at rest are refused
+  (no fallback), failed as `kind`.
+- **Per-network limits and the invalid-fetch rule, from the security audit of `main`:**
+  - **The share CAPTCHA page** (`/p|r/<id>?check`) is served and counted only for this site's
+    own document navigations (`Sec-Fetch-Dest: document`, `Sec-Fetch-Site: same-origin` or
+    `none`). Another site's `<img>`, `<iframe>` or link is redirected back to the share's page
+    uncounted. Before, such requests used up the network's 60 check pages per 10 minutes.
+  - **Chunk downloads of a share that ended mid-download** (revoked, deleted, used up, expired)
+    answer `410 gone` without counting as invalid requests when the share index knows the id,
+    as the extend route already did. Before, the recipient's correct grant was counted, and at
+    60 counts the whole network was blocked from every share.
+    Those uncounted answers have a generous per-network limit of their own (`ended-chunks`:
+    600 per 10 minutes, then `429 rate_limited`), never an invalid fetch.
+  - **Turnstile's siteverify** is behind a per-network limit on sign-in, account changes and
+    anonymous creation (`turnstile-verify`): after 60 rejected tokens in 10 minutes a network's
+    tokens get `429 rate_limited` with `Retry-After`, before any call to Cloudflare. Accepted
+    tokens are never counted, so a busy network's sign-ins never use it up. A missing or
+    over-long token and a cross-site request are refused before anything is counted. The share
+    CAPTCHA routes keep `captcha-verify`.
+  - **`POST /api/auth/prelogin`** is limited per network (`prelogin`: 600 per 10 minutes) and
+    per network and username (`prelogin-user`: 20 per 10 minutes, under a keyed hash of the
+    name). Only well-formed same-origin requests count, the refusal is the same for every
+    username (the fake salt stays), and only prelogin is refused: no account is locked. Heavy
+    abuse from one network can delay password sign-in on that network; passkeys and recovery
+    codes are unaffected, and the owner can lift the block.
+  - **Anonymous trackers:**
+    - A new id is kept only once it has created a share; a refused create gives the row and
+      the network's allowance back.
+    - New ids are also counted per IPv6 /48 (`public-trackers`: 16 × `public.newTrackersPerIp`
+      per window), once their create has succeeded: refused creates from one /64 never block
+      its /48.
+    - A full table (200 000) removes its 1 000 least recently seen unblocked ids, with their
+      usage counters (`tracker.evicted`), instead of answering `429 busy` to every new sender.
+  - **HSTS and the Permissions-Policy** are on every Worker response (API answers, JSON, chunks,
+    errors and redirects), not only on pages.
+  - The owner sees and lifts the new `turnstile-verify`, `prelogin`, `prelogin-user`,
+    `public-trackers` and `ended-chunks` blocks with the others.
+
 - **Impersonation no longer extends the owner's session.** Starting an impersonation and
   "Return to admin" each issue a new session that keeps the absolute end of the owner's sign-in
   (`session.absSec` counts from the sign-in, and a new session never ends later than the one it
@@ -44,7 +105,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   role); in a role (the public account's too, and its API restrictions), loosening passkeys,
   the password policy, session timeouts or log retention, the CAPTCHA and uploader-password
   options and their defaults, longer or unlimited expiry and views, links with no expiry, and
-  allowing link or credential shares, API keys, more file types or more links; and adding an
+  allowing file, link or credential shares (`files`, `url`, `secret`), Receive links that take
+  files, links or credentials (`reverseFiles`, `reverseUrl`, `reverseSecret`), API keys, more
+  file types or more links; and adding an
   allow IP rule. Missing, the server answers `400 reauth_required` with what the change weakens, and
   the admin panel then shows the confirmation field; tightening asks for nothing (SECURITY.md
   "admin changes that weaken a control").
@@ -544,6 +607,69 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **"Receive" links take what regular shares carry** (docs/REVERSE.md §3.1): besides files, a
+  link may accept a **note** (plain text, Markdown or code, with an optional title), a **link**
+  and a **credential** (the regular credential's fields), as the user chooses when making it
+  ("What senders can send") or later (Edit). Links made before accept files only.
+  - Role options `reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret` (Default: files and
+    notes on, links and credentials off, as for regular shares; the Owner: all; not for the public
+    account; restrictable for API keys; in import / export like every role option). Directory
+    migration 18 gives the Default role their values. The server checks them on create, on each
+    kind an Edit adds, and at every upload — `open`, `begin` and each reservation — with the role
+    as it is then.
+  - The uploader page offers the accepted kinds as tabs, with the composer's note formats, the link
+    field (destination spelled out) and the credential form, under the warning that the
+    recipient's server can decrypt it. Each send is one upload session of one kind, declared at
+    `begin` (`{ type }`; `403 kind_not_accepted`): one view, counted under `receive`,
+    `receive-upload` and a new quota kind per kind of send — `receive-file`, `receive-note`,
+    `receive-url`, `receive-secret` — given back as before when it sends nothing. A note, link or
+    credential session carries one item (`409 one_item`) of bounded size (`413 item_too_large`);
+    the file types and the largest file apply to files only; the password and the CAPTCHA gate
+    every kind.
+  - Taken in, each becomes a Drive item of its own kind (its kind in the sealed metadata; the
+    server sees the kind of a send, never its content), in the link's folder, named after a note's
+    title or "Note / Link / Credential from <date>". The Drive lists it with an icon and a label
+    and opens it with the regular shares' viewers (`public/js/typedview.js`, shared with the share
+    page): a note rendered, a link under the user's URL rules, a credential masked. Download saves
+    text (`.md` / `.txt`; a link as `.txt`, never a `.url` shortcut; a credential as a plain-text
+    export after a confirmation); Share… carries them as what they are (the manifest's `item`),
+    where the account may share links and credentials.
+  - The server keeps each item's declared kind sealed with it until it is taken in; the user's
+    browser fails an item whose sealed kind differs from what its session declared, that exceeds
+    its kind's cap, or that the link no longer accepts under the user's role as it is then
+    (reason `kind` / `size`). Viewers never render an item past its kind's cap. A Drive share
+    records what the sender's role allowed (`kinds`) and its recipient's page shows items as what
+    they are only where that allows (otherwise as plain files). A credential leaves in plain text only on its own, after a confirmation
+    (in the Drive and on a Drive share's page); ZIPs leave credentials out.
+  - Adding files, links or credentials to what a link accepts weakens it: it needs the account
+    password or a passkey, and an API key cannot do it (`403 step_up_required`, `weakens:
+    ["accept"]`). Adding a note does not.
+  - The CLI does not send to Receive links; it is unchanged.
+
+- **Drive quota: bytes uploaded** (`drive-bytes`, Admin → Roles → Quotas → Drive → "Bytes
+  uploaded"; README "Quotas", docs/DRIVE.md §5, docs/API.md). The bytes uploaded to the Drive
+  per period: each file's size, counted with the file (`drive-upload`, unchanged) in one atomic
+  Directory step when its upload is reserved (one refused, neither counted), and given back as
+  `drive-upload` is (the Drive refuses the file, or the upload is deleted unfinished or purged).
+  Web only, as `drive-upload`; not for the public account; files taken in from Receive links are
+  not counted. Its max is in bytes, up to 1 PiB, and the editor takes it in MiB or GiB; the
+  refusal and the Account page name a size: "Quota reached: 1.0 GB uploaded to the Drive per
+  1d."
+- **The Drive follows the role's file rules** (docs/DRIVE.md §5, SECURITY.md "File policy"):
+  the file-type rules (`fileTypeMode` / `fileTypeRules`) and the folder-depth limit
+  (`maxFolderDepth`) now apply to Drive uploads, new folders and moves, not only to Drive
+  shares. An upload declares its file's type, as a file share does (`types`, checked at the
+  reservation: `400 declaration_required`, `403 file_type_not_allowed`), and the server enforces
+  the rule from the stored metadata too: the sealed name's extension and the metadata's type,
+  which the Worker opens in memory to check the seal (never logged), must pass the rules and
+  match the declaration, so a modified client that declares a false type is refused (uploads and
+  take-ins alike); the depth is checked by
+  the Drive against its own tree (`403 folder_too_deep`). The Drive page checks both first and
+  says why (a whole batch before any of it is sent). Files taken in from a Receive link keep the
+  link's own type rules and are held to the role's Drive rules too (a refused type is recorded as
+  failed with the new reason `type`; paths are flattened to the depth limit), so a Receive link
+  cannot bring into the Drive what the role refuses there. Files already in a Drive are not
+  deleted by a new or tighter rule.
 - **Admin → Import / export: user id lists for the account export and import**, as the Drive
   keys card has had (`public/dashboard/js/id-list.js`, now shared by both cards). Export: each
   row shows the user's id; a search by user name or id, Select all / Deselect all of the rows
@@ -862,8 +988,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 - **Admin → Users:** the owner creates, edits and revokes a user's API keys (a new key is shown
   once).
 - **Signed in:** opening the home page or the login page goes straight to the dashboard.
-- **Footer:** "Private · End-to-end encrypted · Notes & files" appears once, in every page's
-  footer (it was in the page body, and differed between pages).
+- **Footer:** "Private · Encrypted in your browser · Notes & files" appears once, in every page's
+  footer, the same on every page (it was in the page body, and differed between pages). That
+  notes and file shares are end-to-end encrypted is said where it applies: the landing page, the
+  composer's introduction, the viewer (a note; a file share; a share from a Drive, which is
+  not end-to-end) and the glossary ("Encrypted in your browser", "End-to-end encrypted").
 - **Link rules editor:** the tester is always shown, including while the rules are inherited. It
   names the rule that allows a link, or says why it is refused (e.g. an incomplete `https://`),
   and flags patterns that are not anchored. A help panel explains schemes and the regex engine

@@ -163,7 +163,7 @@ export class FileShare extends DurableObject {
    * A Drive share: active at once, referencing Drive files (`refs`) instead of
    * an upload. The encrypted manifest must declare what was authorized.
    */
-  async initRefs({ id, dth, refs, views, expire, ttl, deletable = false, paste, acc, hc = false }) {
+  async initRefs({ id, dth, refs, views, expire, ttl, deletable = false, paste, acc, hc = false, kinds = null }) {
     return this.ctx.blockConcurrencyWhile(async () => {
       if (await this.#rec()) return { status: 'exists' };
       if (paste.adata.bar !== (views !== null) || paste.meta.expire !== expire
@@ -177,6 +177,9 @@ export class FileShare extends DurableObject {
         id, state: 'active', dth, padded: 0, chunks: 0, views, left: views, expire, ttl, expires, acc, grants: [], hc: hc === true,
         refs: refs.map((r) => ({ key: r.key, chunks: r.chunks, size: r.size })),
         paste: { v: paste.v, ct: paste.ct, wk: paste.wk, adata: paste.adata, meta },
+        // What the sender's role allowed it to share as notes, links and credentials when it was
+        // made (the manifest's `item` markers are the sender's; the recipient's page obeys this).
+        kinds: { note: kinds?.note === true, url: kinds?.url === true, secret: kinds?.secret === true },
       });
       await this.ctx.storage.setAlarm(expires * 1000);
       return { status: 'ok', created, expires };
@@ -246,7 +249,11 @@ export class FileShare extends DurableObject {
         paste: { v: p.v, ct: p.ct, wk: p.wk, adata: p.adata, meta: this.#metaOut(rec) },
         grantExpires: gexp, chunks: rec.chunks, padded: rec.padded,
       };
-      if (Array.isArray(rec.refs)) out.refs = rec.refs.map((r) => ({ chunks: r.chunks, size: r.size }));
+      if (Array.isArray(rec.refs)) {
+        out.refs = rec.refs.map((r) => ({ chunks: r.chunks, size: r.size }));
+        // A Drive share made before this record: none of its entries is shown as a note, link or credential.
+        out.kinds = { note: rec.kinds?.note === true, url: rec.kinds?.url === true, secret: rec.kinds?.secret === true };
+      }
       return out;
     });
   }

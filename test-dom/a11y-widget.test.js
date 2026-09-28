@@ -120,24 +120,20 @@ describe('every page', () => {
     }
   });
 
-  it('shows "Private · End-to-end encrypted · Notes & files" once, in the footer (the Drive page, the uploader\'s page and My shares, which lists Drive shares and receive links: "Encrypted in your browser", as Drive files and uploads are not end-to-end, docs/DRIVE.md §2)', () => {
-    const DRIVE = 'public/dashboard/drive/index.html';
-    const UPLOAD = 'public/r/index.html';
-    const SHARES = 'public/dashboard/shares/index.html';
-    expect(pages()).toContain(DRIVE);
-    expect(pages()).toContain(UPLOAD);
-    expect(pages()).toContain(SHARES);
+  it('shows the same footer on every page: "Private · Encrypted in your browser · Notes & files" once, never "End-to-end encrypted" (which notes and file shares say in the page itself: the Drive, Drive shares and Receive uploads are not end-to-end, docs/DRIVE.md §2)', () => {
+    const foots = new Map();
     for (const p of pages()) {
       const s = read(p);
       expect(s.match(/class="features\b/g) || [], p).toHaveLength(1);
-      const foot = s.slice(s.indexOf('<footer'), s.indexOf('</footer>'));
-      if (p === DRIVE || p === UPLOAD || p === SHARES) {
-        expect(foot, p).toMatch(/class="features foot-feats"[\s\S]*Private[\s\S]*Encrypted in your browser[\s\S]*Notes &amp; files/);
-        expect(foot, p).not.toMatch(/End-to-end encrypted/);
-      } else {
-        expect(foot, p).toMatch(/class="features foot-feats"[\s\S]*Private[\s\S]*End-to-end encrypted[\s\S]*Notes &amp; files/);
-      }
+      const foot = s.slice(s.indexOf('<footer'), s.indexOf('</footer>') + '</footer>'.length);
+      expect(foot, p).toMatch(/class="features foot-feats"[\s\S]*Private[\s\S]*Encrypted in your browser[\s\S]*Notes &amp; files/);
+      expect(foot, p).not.toMatch(/End-to-end/i);
+      // Identical HTML on every page; only the statement page marks its own link as the current page.
+      foots.set(p, p === 'public/accessibility/index.html' ? foot.replace(' aria-current="page"', '') : foot);
     }
+    expect(foots.size).toBeGreaterThanOrEqual(11);
+    expect(new Set(foots.values()).size, [...foots.keys()].join(', ')).toBe(1);
+    expect(read('public/accessibility/index.html')).toContain('<a href="/accessibility/" aria-current="page">Accessibility statement</a>');
   });
 
   it('the statement page is rendered from the settings (see statement.test.js), with a fallback', () => {

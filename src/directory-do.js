@@ -29,7 +29,8 @@ import { refusedTypes, checkDeclaredTypes, describeType, MAX_FOLDER_DEPTH } from
 import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
 import { publicStatement } from '../public/js/a11ystatement.js';
-import { ACTIONS, quotaCovers, shareAction, kindWhat } from '../public/js/quotakinds.js';
+import { ACTIONS, quotaCovers, shareAction, kindWhat, quotaAmount } from '../public/js/quotakinds.js';
+import { KIND_OPTIONS, KIND_PLURALS, KIND_ACTIONS, RECEIVE_KINDS, isKind } from '../public/js/receivekinds.js';
 import {
   deriveKek, deriveUserKey, deriveFieldKey, keyFingerprint, keyCheckValue, saltCheckValue, sameCheck, sealSubMek, openSubMek,
   newMekId, newKey, newSalt, KEY_RE, MEK_ID_RE, effectiveAt, mekStatus, checkTimeline,
@@ -285,7 +286,12 @@ const MIGRATIONS = [
     }
     materializeDefaultRole(m.sql);
   },
-  // 18: sign-in and viewer records sealed at rest (SECURITY.md, "Records at rest"): each
+  // 18: what Receive links may be sent (docs/REVERSE.md §3.1): the role
+  // options reverseFiles, reverseText, reverseUrl and reverseSecret join the
+  // Default role (files and notes on, links and credentials off). Links made
+  // before keep accepting files only (their limits have no `accept`).
+  (m) => materializeDefaultRole(m.sql),
+  // 19: sign-in and viewer records sealed at rest (SECURITY.md, "Records at rest"): each
   // record row's key id (activity.rk, opens.rk: NULL in the clear, else the
   // fingerprint of the root MEK its record key comes from), the opener
   // address's keyed hash for the per-address throttle (opens.ip_h), and the
@@ -405,13 +411,17 @@ const isKid = (rk) => typeof rk === 'string' && KID_RE.test(rk);
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
 const TRACKER_RE = /^[A-Za-z0-9_-]{32}$/;
-// Hard ceiling on stored trackers (each costs one row in this singleton).
-const MAX_TRACKERS = 200000;
+// Hard ceiling on stored trackers (each costs one row in this singleton). When
+// it is reached, the TRACKER_EVICT least recently seen (unblocked) rows make room.
+export const MAX_TRACKERS = 200000;
+export const TRACKER_EVICT = 1000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
 /** What the activity log may name when a reverse share's details change (the names only, never a value). */
 const REVERSE_DETAIL = ['password=set', 'password=removed', 'note=set', 'note=removed', 'limits'];
+/** What a changed Receive link accepts, as its log entry says it ("accept=files,note"): known kinds only. */
+const ACCEPT_DETAIL_RE = /^accept=(?:files|note|url|secret)(?:,(?:files|note|url|secret)){0,3}$/;
 /** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
 const PENDING_REVERSE_SEC = 600;
 /**
@@ -516,9 +526,10 @@ const expiryFilter = (expiry) => (expiry === 'none' ? ' AND expires >= ?' : expi
  * A reverse share's expiry and views against the resolved limits `L`:
  * `expireSec` (seconds from now; null: no expiry, reverseNoExpiry) and
  * `views` (null: unlimited, reverseAllowUnlimitedViews; else at most
- * reverseMaxViews); undefined skips a check. → { ok } or a failure.
+ * reverseMaxViews), `kinds` (what the link is made to accept, or the kinds
+ * a change adds: receiveKinds); undefined skips a check. → { ok } or a failure.
  */
-function reverseLimits(L, { expireSec, views, via = '' }) {
+function reverseLimits(L, { expireSec, views, kinds, via = '' }) {
   if (expireSec === null) {
     if (!L.reverseNoExpiry) return fail(403, 'no_expiry_disabled', `Upload links without an expiry are not allowed for this account${via}.`);
   } else if (expireSec !== undefined && L.reverseMaxExpireSec !== null && expireSec > L.reverseMaxExpireSec) {
@@ -529,7 +540,21 @@ function reverseLimits(L, { expireSec, views, via = '' }) {
   } else if (views !== undefined && L.reverseMaxViews !== null && views > L.reverseMaxViews) {
     return fail(403, 'too_many_views', `An upload link may have at most ${L.reverseMaxViews} views${via}.`, { max: L.reverseMaxViews });
   }
-  return { ok: true };
+  return receiveKinds(L, kinds, via);
+}
+
+/**
+ * The kinds a link is made to accept, or added to one (`kinds`; undefined:
+ * no check), against the role options reverseFiles, reverseText, reverseUrl
+ * and reverseSecret of the resolved limits `L` → { ok } or 403
+ * receive_kind_disabled naming them (`kinds`).
+ */
+function receiveKinds(L, kinds, via = '') {
+  if (kinds === undefined) return { ok: true };
+  const off = kinds.filter((k) => !isKind(k) || L[KIND_OPTIONS[k]] !== true);
+  if (!off.length) return { ok: true };
+  const words = off.map((k) => KIND_PLURALS[k] ?? String(k));
+  return fail(403, 'receive_kind_disabled', `Your role does not allow upload links to accept ${words.join(' or ')}${via}.`, { kinds: off });
 }
 
 function cleanLabel(s) {
@@ -540,8 +565,8 @@ function cleanLabel(s) {
   return v.length <= 100 ? v : null;
 }
 
-/** A quota in the audit log: "10 uploads received per 1d [receive-upload]" (and "via the API" for an API-only one). */
-const quotaText = (q) => `${q.max} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''} [${q.kind}]`;
+/** A quota in the audit log: "10 uploads received per 1d [receive-upload]", "1.0 GB uploaded to the Drive per 1d [drive-bytes]" (and "via the API" for an API-only one). */
+const quotaText = (q) => `${quotaAmount(q.kind, q.max)} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''} [${q.kind}]`;
 
 function cleanDetail(s) {
   // eslint-disable-next-line no-control-regex
@@ -569,7 +594,7 @@ export class Directory extends DurableObject {
         this.#setMeta('viewer_seeded', '1');
       }
       if ((await ctx.storage.getAlarm()) === null) await ctx.storage.setAlarm(Date.now() + 3600 * 1000);
-      // Records stored before they were sealed (migration 18): the background pass runs soon.
+      // Records stored before they were sealed (migration 19): the background pass runs soon.
       if (this.#meta('records.pass')) {
         this.sql.exec("DELETE FROM meta WHERE k = 'records.pass'");
         await this.#passSoon();
@@ -1688,41 +1713,49 @@ export class Directory extends DurableObject {
     for (const h of hits) {
       // Public hits carry their subject key; the account's own hits use uid.
       const key = typeof h.key === 'string' && uid === PUBLIC_ID && h.key.startsWith('pub:') ? h.key : uid;
-      this.sql.exec('UPDATE usage SET count = MAX(0, count - 1) WHERE quota_id = ? AND user_id = ? AND bucket = ?', h.quota_id, key, h.bucket);
+      // What the hit counted: one action, or (a quota counted in bytes) the file's size.
+      const n = Number.isSafeInteger(h.n) && h.n > 0 ? h.n : 1;
+      this.sql.exec('UPDATE usage SET count = MAX(0, count - ?) WHERE quota_id = ? AND user_id = ? AND bucket = ?', n, h.quota_id, key, h.bucket);
     }
   }
 
   /**
-   * Check and count one `action` (public/js/quotakinds.js ACTIONS) against
-   * every quota of the account that covers it, atomically (nothing here
-   * awaits): refused (429 quota_exceeded, naming the quota) when a quota is
-   * reached, else counted in each quota's current window → { ok, hits } (the
-   * hits give it back: refund). `channel` 'api' also counts the API-only
-   * quotas. `keys`: who is counted (the public account's anonymous subjects;
-   * by default the account); `needAll`: refused only when every key is over.
-   * The owner is never counted.
+   * Check and count `action` (public/js/quotakinds.js ACTIONS: one of it) —
+   * or several actions at once, `[{ action, n }]` (a Drive upload: one file,
+   * and its size in bytes) — against every quota of the account that covers
+   * them, atomically (nothing here awaits): refused (429 quota_exceeded,
+   * naming the quota) when a quota would go past its max, else counted in
+   * each quota's current window → { ok, hits } (the hits give it back:
+   * refund). `channel` 'api' also counts the API-only quotas. `keys`: who is
+   * counted (the public account's anonymous subjects; by default the
+   * account); `needAll`: refused only when every key is over. The owner is
+   * never counted.
    */
   #chargeQuotas(uid, channel, action, { keys = [uid], needAll = false } = {}) {
     const u = this.#user(uid);
     if (!u || u.role === 'owner') return { ok: true, hits: [] };
     const ts = now();
-    const applicable = this.#applicableQuotas(uid).filter((q) => quotaCovers(q.kind, action) && (q.channel === 'all' || channel === 'api'));
+    const charges = typeof action === 'string' ? [{ action, n: 1 }] : action;
+    const covered = (q) => charges.filter((c) => quotaCovers(q.kind, c.action));
+    const applicable = this.#applicableQuotas(uid).filter((q) => covered(q).length && (q.channel === 'all' || channel === 'api'));
     const hits = [];
     for (const q of applicable) {
+      // How much this quota counts now: one per action, or the bytes (drive-bytes).
+      const n = covered(q).reduce((sum, c) => sum + c.n, 0);
       const bucket = quotaBucket(q, ts);
       const over = keys.map((k) => {
         const row = this.sql.exec('SELECT count FROM usage WHERE quota_id = ? AND user_id = ? AND bucket = ?', q.id, k, bucket).toArray()[0];
-        return (row ? row.count : 0) >= q.max;
+        return (row ? row.count : 0) + n > q.max;
       });
       if (needAll ? over.every(Boolean) : over.some(Boolean)) {
-        return fail(429, 'quota_exceeded', `Quota reached: ${q.max} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''}.`, { quota: { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max } });
+        return fail(429, 'quota_exceeded', `Quota reached: ${quotaAmount(q.kind, q.max)} ${kindWhat(q.kind)} per ${q.n}${q.unit}${q.channel === 'api' ? ' via the API' : ''}.`, { quota: { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max } });
       }
-      for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k });
+      if (n > 0) for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k, n });
     }
     this.ctx.storage.transactionSync(() => {
       for (const h of hits) {
-        this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, 1, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + 1',
-          h.quota_id, h.key, h.bucket, ts);
+        this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, ?, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + excluded.count',
+          h.quota_id, h.key, h.bucket, h.n, ts);
       }
     });
     return { ok: true, hits };
@@ -1750,28 +1783,84 @@ export class Directory extends DurableObject {
   }
 
   /**
-   * Count one file added to the Drive by an upload (not one taken in from a
-   * Receive link) against the quotas of kind drive-upload (the Drive has no
-   * API channel) → { ok, refund } or 429 quota_exceeded.
+   * Give back Drive uploads that never completed (deleted unfinished, or
+   * purged): `files` = [{ t, size }] (when each was counted, and its size) —
+   * one file each for the quotas of kind drive-upload and its size for those
+   * of kind drive-bytes, in the window it was counted in (never below zero).
    */
-  async authorizeDriveUpload(uid) {
+  async refundDriveUploads(uid, files) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'owner' || u.role === 'public' || !Array.isArray(files)) return { ok: true };
+    const list = files.filter((f) => f && Number.isSafeInteger(f.t) && f.t > 0 && Number.isSafeInteger(f.size) && f.size >= 0).slice(0, 10000);
+    if (!list.length) return { ok: true };
+    const applicable = this.#applicableQuotas(uid).filter((q) => q.channel === 'all' && (quotaCovers(q.kind, 'drive-upload') || quotaCovers(q.kind, 'drive-bytes')));
+    this.ctx.storage.transactionSync(() => {
+      for (const q of applicable) {
+        for (const f of list) {
+          const n = (quotaCovers(q.kind, 'drive-upload') ? 1 : 0) + (quotaCovers(q.kind, 'drive-bytes') ? f.size : 0);
+          if (n > 0) this.sql.exec('UPDATE usage SET count = MAX(0, count - ?) WHERE quota_id = ? AND user_id = ? AND bucket = ?', n, q.id, uid, quotaBucket(q, f.t));
+        }
+      }
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Count one file added to the Drive by an upload (not one taken in from a
+   * Receive link): one against the quotas of kind drive-upload and its `size`
+   * against those of kind drive-bytes, together and atomically (the Drive has
+   * no API channel) → { ok, refund } or 429 quota_exceeded.
+   */
+  async authorizeDriveUpload(uid, { size } = {}) {
     const u = this.#user(uid);
     if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
-    const q = this.#chargeQuotas(uid, 'all', 'drive-upload');
+    if (!Number.isSafeInteger(size) || size < 0) return fail(400, 'invalid_size', 'size must be the file’s size in bytes.');
+    const q = this.#chargeQuotas(uid, 'all', [{ action: 'drive-upload', n: 1 }, { action: 'drive-bytes', n: size }]);
     return q.ok ? { ok: true, refund: q.hits } : q;
   }
 
   /**
    * Count one upload session through a Receive link of `uid` (the link's
-   * user, never the anonymous uploader) against the quotas of kind
-   * receive-upload and receive → { ok, refund } or 429 quota_exceeded (the
+   * user, never the anonymous uploader) of kind `kind` (files, note, url or
+   * secret: public/js/receivekinds.js) against the quotas of kind receive,
+   * receive-upload and the kind's own (receive-file, receive-note,
+   * receive-url, receive-secret) → { ok, refund } or 429 quota_exceeded (the
    * Worker tells the uploader only that the link cannot accept uploads now).
    */
-  async authorizeReceiveUpload(uid) {
+  async authorizeReceiveUpload(uid, kind = 'files') {
     const u = this.#user(uid);
     if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
-    const q = this.#chargeQuotas(uid, 'all', 'receive-upload');
+    if (!isKind(kind)) return fail(400, 'invalid', 'Unknown kind of upload.');
+    const q = this.#chargeQuotas(uid, 'all', KIND_ACTIONS[kind]);
     return q.ok ? { ok: true, refund: q.hits } : q;
+  }
+
+  /**
+   * What `uid`'s role lets it share as a note, a link or a credential now
+   * (`text`, and `url` / `secret` with it, as the composer), for `channel`:
+   * a Drive share records it, and its recipient's page shows a note, link or
+   * credential entry only where it allows (the server cannot see what an
+   * item is) → { note, url, secret }.
+   */
+  async shareKindsOf(uid, channel = 'all') {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return { note: false, url: false, secret: false };
+    const eff = this.#effective(u);
+    const L = channel === 'api' ? eff.api : eff.all;
+    return { note: L.text === true, url: L.text === true && L.url === true, secret: L.text === true && L.secret === true };
+  }
+
+  /**
+   * The kinds `uid`'s role lets Receive links accept now (reverseFiles,
+   * reverseText, reverseUrl, reverseSecret) — what the user's browser holds
+   * received items to at take-in (a role that turned reverse shares off
+   * ends its links; what they received before is still taken in by kind).
+   */
+  async receiveKindsOf(uid) {
+    const u = this.#user(uid);
+    if (!u || u.disabled || u.role === 'public') return [];
+    const L = this.#effective(u).all;
+    return RECEIVE_KINDS.filter((k) => L[KIND_OPTIONS[k]] === true);
   }
 
   // ── public access: profile, trackers, subjects ────────────────────────────
@@ -1883,8 +1972,11 @@ export class Directory extends DurableObject {
 
   /**
    * The quota subject for a create request's tracker. The first create by an
-   * id stores it, at most `public.newTrackersPerIp` new ids per network per
-   * `public.newTrackersWindowSec` (and `MAX_TRACKERS` in all).
+   * id stores it (`fresh: true`; the caller gives it back with dropNewTracker
+   * when that create is refused), at most `public.newTrackersPerIp` new ids
+   * per network per `public.newTrackersWindowSec`. At `MAX_TRACKERS` rows the
+   * least recently seen ones go first (never a blocked one, which must stay
+   * blocked), with their usage counters, as if they had idled out.
    */
   async trackerSubject(value, ipKey) {
     const t = await this.#checkTracker(value);
@@ -1906,10 +1998,26 @@ export class Directory extends DurableObject {
       return fail(429, 'tracker_rate_limited', 'Too many new anonymous senders from your network. Try again later.');
     }
     if (this.sql.exec('SELECT COUNT(*) AS c FROM trackers').one().c >= MAX_TRACKERS) {
-      return fail(429, 'busy', 'Anonymous sharing is at capacity. Try again later.');
+      const old = this.sql.exec('SELECT id_hash FROM trackers WHERE blocked = 0 ORDER BY last_seen, created LIMIT ?', TRACKER_EVICT).toArray();
+      if (!old.length) return fail(429, 'busy', 'Anonymous sharing is at capacity. Try again later.');
+      for (const r of old) {
+        this.sql.exec('DELETE FROM usage WHERE user_id = ?', `pub:t:${r.id_hash}`);
+        this.sql.exec('DELETE FROM trackers WHERE id_hash = ?', r.id_hash);
+      }
+      this.#log(null, PUBLIC_ID, 'tracker.evicted', `${old.length} least recently seen (the table was full)`);
     }
     this.sql.exec('INSERT INTO trackers (id_hash, created, last_seen, ip_hash) VALUES (?, ?, ?, ?)', t.h, ts, ts, ipHash);
-    return { ok: true, subject: `pub:t:${t.h}` };
+    return { ok: true, subject: `pub:t:${t.h}`, fresh: true };
+  }
+
+  /**
+   * Give back a tracker row stored by this request's trackerSubject when the
+   * create was refused: a row is kept only once its id has created a share.
+   * Kept anyway when it has been used or counted meanwhile (a parallel create).
+   */
+  async dropNewTracker(subject) {
+    if (typeof subject !== 'string' || !subject.startsWith('pub:t:')) return;
+    this.sql.exec('DELETE FROM trackers WHERE id_hash = ? AND uses = 0 AND blocked = 0 AND NOT EXISTS (SELECT 1 FROM usage WHERE user_id = ?)', subject.slice(6), subject);
   }
 
   /** Count one share created under a tracker subject (after it succeeded). */
@@ -2235,7 +2343,7 @@ export class Directory extends DurableObject {
 
   /**
    * The records' background pass (from the alarm): rows stored in the clear
-   * (before there was a keyring, or before migration 18) are sealed, and rows
+   * (before there was a keyring, or before migration 19) are sealed, and rows
    * under an earlier root's record key are sealed again under the current one,
    * RECORD_PASS_ROWS per table per run; a row that does not open under its key
    * is marked so ("!…") and skipped from then on. The Guard's rows likewise
@@ -2476,7 +2584,7 @@ export class Directory extends DurableObject {
     // A reverse share's CAPTCHA (its uploaders pass it before a session starts: reverseTarget reads it here).
     if (captcha !== undefined && row.kind === 'reverse') { this.sql.exec('UPDATE shares SET captcha = ? WHERE id = ?', captcha ? 1 : 0, id); parts.push(`captcha=${captcha ? 'on' : 'off'}`); }
     // What else changed on a reverse share (names only: never a value the user typed).
-    for (const d of Array.isArray(detail) ? detail : []) if (REVERSE_DETAIL.includes(d)) parts.push(d);
+    for (const d of Array.isArray(detail) ? detail : []) if (REVERSE_DETAIL.includes(d) || (typeof d === 'string' && ACCEPT_DETAIL_RE.test(d))) parts.push(d);
     if (status !== undefined) {
       this.sql.exec("UPDATE shares SET status = ?, ended = CASE WHEN ? = 'active' THEN NULL ELSE COALESCE(ended, ?) END WHERE id = ?", status, status, now(), id);
       parts.push(`status=${status}`);
@@ -2630,6 +2738,8 @@ export class Directory extends DurableObject {
       current,
       // The Drive made before the key model v2 still waits for its upgrade.
       migration: mig ? mig.state : null,
+      // The role's file policy (as for file shares): the types Drive uploads and take-ins may have, how deep folders nest.
+      policy: { mode: L.fileTypeMode ?? 'any', rules: Array.isArray(L.fileTypeRules) ? L.fileTypeRules : [], maxFolderDepth: L.maxFolderDepth ?? null },
       // The user's personal kit against the keys now (the pages' "download a new kit" notice).
       kit: this.#userKitState(uid, current),
     };
@@ -3844,10 +3954,11 @@ export class Directory extends DurableObject {
    * share.
    * `expireSec` null: no expiry (reverseNoExpiry); `views` null: unlimited
    * (reverseAllowUnlimitedViews), else at most reverseMaxViews; `password`:
-   * whether the link has one (reversePassword).
+   * whether the link has one (reversePassword); `accept`: the kinds it takes
+   * (reverseFiles, reverseText, reverseUrl, reverseSecret).
    * → { ok, maxBytes (the share's effective limit, null: none), captcha, expires }.
    */
-  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null, captcha, views = null, password = false }) {
+  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null, captcha, views = null, password = false, accept = ['files'] }) {
     if (typeof id !== 'string' || !/^r[A-Za-z0-9_-]{22}$/.test(id)) return fail(400, 'invalid', 'Invalid reverse-share id.');
     const h = await reverseIdHash(id); // before any check: nothing below awaits
     const u = this.#user(uid);
@@ -3856,7 +3967,7 @@ export class Directory extends DurableObject {
     const L = this.#effective(u).all;
     if (!L.driveEnabled) return fail(403, 'drive_disabled', 'Your role does not include a Drive.');
     if (!L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
-    const lim = reverseLimits(L, { expireSec, views });
+    const lim = reverseLimits(L, { expireSec, views, kinds: accept });
     if (!lim.ok) return lim;
     const pw = checkReversePassword(L, password === true);
     if (!pw.ok) return fail(403, pw.error, pw.message);
@@ -3894,7 +4005,10 @@ export class Directory extends DurableObject {
    * as on create — the expiry (`expires`: a time, or null for none) against
    * reverseMaxExpireSec / reverseNoExpiry, the views against reverseMaxViews /
    * reverseAllowUnlimitedViews, the byte limit against reverseMaxBytes, the
-   * CAPTCHA against reverseCaptcha, the password against reversePassword.
+   * CAPTCHA against reverseCaptcha, the password against reversePassword, the
+   * kinds a change of `accept` adds (`added`) against their role options (a
+   * kind the link already takes may stay; its uploads are refused while the
+   * role does not allow it).
    * The owner changing another user's link directly (`admin`) is held only to
    * that user's reverseNoExpiry. → { ok } or a failure.
    */
@@ -3912,7 +4026,8 @@ export class Directory extends DurableObject {
     if (!L.driveEnabled || !L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
     const detail = Object.keys(change).some((k) => k !== 'label');
     if (detail && !L.reverseEdit) return fail(403, 'reverse_edit_disabled', `Your role does not allow changing an upload link after it is made${via}.`);
-    const lim = reverseLimits(L, { expireSec: change.expires === undefined ? undefined : change.expires === null ? null : change.expires - now(), views: change.views, via });
+    const lim = reverseLimits(L, { expireSec: change.expires === undefined ? undefined : change.expires === null ? null : change.expires - now(), views: change.views,
+      kinds: change.accept === undefined ? undefined : Array.isArray(change.added) ? change.added : change.accept, via });
     if (!lim.ok) return lim;
     // The byte limit as on create: at most the role's, which "none" means (null).
     const roleMax = L.reverseMaxBytes ?? null;
@@ -3977,6 +4092,8 @@ export class Directory extends DurableObject {
     const cap = (v) => (v === null || v === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, v));
     return {
       ok: true, uid: r.user_id, lh: r.lh, expires: r.expires, captcha: r.captcha === 1,
+      // The kinds the user's role lets links accept now (a link takes the ones it accepts among them).
+      kinds: RECEIVE_KINDS.filter((k) => L[KIND_OPTIONS[k]] === true),
       capacity: cap(L.driveMaxBytes), maxFile: cap(L.driveMaxFileBytes), roleMaxBytes: cap(L.reverseMaxBytes),
       pendingSec: this.#caps(u, L, this.#settings()).pendingSec,
     };

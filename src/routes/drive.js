@@ -37,6 +37,7 @@ import { binding } from '../lib/config.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { NODE_ID_RE, ROOT, KEYS_PAGE } from '../drive-do.js';
 import { handleReverseOwner } from './reverse.js';
+import { driveTypeRefusal, sealedTypeRefusal, typedPolicy } from '../lib/drivepolicy.js';
 import { userKeys, keksOf, openItem, checkNewItem, checkField, checkLinkKey, openLink, fieldKeys, toRest, fromRest } from '../lib/mek.js';
 
 const fromDir = (r) => {
@@ -168,7 +169,7 @@ export async function handleDrive(request, env, url) {
 
   // Reverse shares and the files they received (docs/REVERSE.md §6.1).
   if (p === '/api/private/drive/reverse' || p === '/api/private/drive/received' || p.startsWith('/api/private/drive/received/')) {
-    const r = await handleReverseOwner(request, env, url, a);
+    const r = await handleReverseOwner(request, env, url, a, pol);
     if (r) return withAuth(a, r);
   }
 
@@ -200,7 +201,8 @@ export async function handleDrive(request, env, url) {
     if (!parent || !name || !id || !kf || (meta === null && body.meta !== undefined && body.meta !== null)) return invalid('Send { id?, parent, name: {iv, ct}, meta?, ks, mek }.');
     const keys = await userKeys(env, uid);
     const mfp = await checkNewItem(uid, keys, { kind: 'dir', ...kf, name, meta });
-    const r = await drive().createFolder(uid, { id, parent, name, meta, ...kf, mfp, capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES });
+    // The role's folder-depth limit (maxFolderDepth): the Drive checks it against its tree.
+    const r = await drive().createFolder(uid, { id, parent, name, meta, ...kf, mfp, capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxDepth: pol.policy.maxFolderDepth });
     if (!r.ok) return withAuth(a, fromDir(r));
     await dir.setDriveUsed(uid, r.used);
     await driveLog('drive.folder_created', `id=${r.id}`);
@@ -219,19 +221,28 @@ export async function handleDrive(request, env, url) {
     const id = body.id === undefined ? genId('f').slice(1) : typeof body.id === 'string' && NODE_ID_RE.test(body.id) ? body.id : null;
     if (!parent || !name || !meta || !dek || !kf || !id) return invalid('Send { id?, parent, name, meta, size, dek, ks, mek } (sealed fields as {iv, ct}).');
     if (!Number.isSafeInteger(body.size) || body.size < 0 || body.size > HARD_MAX_DRIVE_BYTES) return err(400, 'invalid_size', 'size must be the file’s size in bytes.');
+    // The role's file-type rules, as for file shares: checked against what the browser declares.
+    const typeRefused = driveTypeRefusal(pol.policy, body.types);
+    if (typeRefused) return withAuth(a, typeRefused);
     const keys = await userKeys(env, uid);
-    const mfp = await checkNewItem(uid, keys, { kind: 'file', ...kf, name, meta, dek });
+    // …and on what is stored: the sealed name's extension and the metadata's type, opened in memory only.
+    let sealedRefused = null;
+    const mfp = await checkNewItem(uid, keys, { kind: 'file', ...kf, name, meta, dek },
+      typedPolicy(pol.policy) ? (n, m) => { sealedRefused = sealedTypeRefusal(pol.policy, n, m, body.types); } : null);
+    if (sealedRefused) return withAuth(a, sealedRefused);
     const uploadToken = genToken();
     // One file added to the Drive: the quotas of kind drive-upload count it
-    // now, and give it back when the Drive refuses it (below) or the upload
-    // never completes (deleted unfinished, or purged: the Drive reports it).
-    const quota = await dir.authorizeDriveUpload(uid);
+    // (and those of kind drive-bytes its size) now, and give it back when the
+    // Drive refuses it (below: full, too deep…) or the upload never completes
+    // (deleted unfinished, or purged: the Drive reports it).
+    const quota = await dir.authorizeDriveUpload(uid, { size: body.size });
     if (!quota.ok) return withAuth(a, fromDir(quota));
     let r;
     try {
       r = await drive().createFile(uid, {
         id, parent, name, meta, size: body.size, dek, ...kf, mfp, uploadHash: await hashToken(uploadToken),
         capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxFile: pol.maxFile ?? HARD_MAX_DRIVE_BYTES, pendingSec: pol.pendingSec,
+        maxDepth: pol.policy.maxFolderDepth,
       });
     } catch (e) {
       await dir.refund(uid, quota.refund);
@@ -311,7 +322,7 @@ export async function handleDrive(request, env, url) {
         if (patch.name !== undefined) await checkField(uid, keys, kf, 'name', patch.name);
         if (patch.meta) await checkField(uid, keys, kf, 'meta', patch.meta);
       }
-      const r = await drive().patchNode(uid, id, { ...patch, capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES });
+      const r = await drive().patchNode(uid, id, { ...patch, capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxDepth: pol.policy.maxFolderDepth });
       if (!r.ok) return withAuth(a, fromDir(r));
       await dir.setDriveUsed(uid, r.used);
       await driveLog('drive.item_changed', `id=${id} ${[patch.parent !== undefined ? 'moved' : '', patch.name !== undefined ? 'renamed' : ''].filter(Boolean).join(' ') || 'meta'}`);
@@ -322,7 +333,7 @@ export async function handleDrive(request, env, url) {
       binding(env, 'FILES'); // never report a delete that left ciphertext in R2
       const r = await drive().deleteNode(uid, id);
       if (!r.ok) return withAuth(a, fromDir(r));
-      if (r.unfinished?.length) await dir.refundAt(uid, 'drive-upload', r.unfinished);
+      if (r.unfinished?.length) await dir.refundDriveUploads(uid, r.unfinished); // the files and their bytes
       await endShares(env, dir, uid, r.shares, actorId(a));
       // Reverse shares of a deleted folder end with it (no FileShare record to revoke).
       if (r.reverse.length) await dir.endDriveShares(uid, r.reverse, actorId(a));
@@ -895,6 +906,9 @@ async function createShare(request, env, dir, a) {
     types: body.types, depth: body.depth, deletable, captcha: body.captcha,
   });
   if (!auth.ok) return fromDir(auth);
+  // What the sender's role lets it share as a note, a link or a credential (the server cannot see
+  // what an item is: the recipient's page shows an entry as one only where this allows it).
+  const kinds = await dir.shareKindsOf(uid, a.channel);
   const deleteToken = genDeleteToken();
   let id;
   let r;
@@ -903,7 +917,7 @@ async function createShare(request, env, dir, a) {
       id = genId('f');
       r = await fileStub(env, id).initRefs({
         id, dth: await hashToken(deleteToken), refs: refsR.refs, views, expire, ttl, deletable, paste: clean, acc: clean.acc,
-        hc: auth.captcha === true,
+        hc: auth.captcha === true, kinds,
       });
       if (r.status !== 'exists') break;
       if (attempt >= 4) throw new Error('id allocation failed');

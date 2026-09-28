@@ -136,8 +136,10 @@
                     <dd>Data encryption key: the random key that encrypts one Drive file, in your browser. It is stored sealed under your KEK.</dd>
                     <dt>Drive</dt>
                     <dd>Your file storage in secbin, with folders. Files, their names and folders are encrypted in your browser, but the Drive is not end-to-end encrypted: the server holds the keys your Drive key is made from (the MEKs), so the server, and the administrator, can open your Drive files. A copy of the stored files alone reveals nothing.</dd>
+                    <dt>Encrypted in your browser</dt>
+                    <dd>What every page’s footer says: what you share or keep in secbin is encrypted on your device before it is sent. Notes and file shares are also end-to-end encrypted (below). The Drive, shares of Drive files and anything sent to you through a “Receive” link are encrypted with keys the server holds, so the server can decrypt them.</dd>
                     <dt>End-to-end encrypted</dt>
-                    <dd>Encrypted on the sender’s device and decrypted only on the recipient’s. The server stores only data it cannot read. Notes and file shares are; the Drive, shares of Drive files and files sent to you through a “Receive” link are not.</dd>
+                    <dd>Encrypted on the sender’s device and decrypted only on the recipient’s. The server stores only data it cannot read. Notes and file shares are; the Drive, shares of Drive files and anything sent to you through a “Receive” link are not.</dd>
                     <dt>Escrow key</dt>
                     <dd>The administrator’s key of the previous release, which opened every user’s Drive in the administrator’s browser. It is used only to upgrade Drives made before this release, and removed once every Drive is upgraded.</dd>
                     <dt>Fragment (#fragment)</dt>
@@ -161,7 +163,7 @@
                     <dt>QR code</dt>
                     <dd>A square pattern that a phone camera can scan to open a link.</dd>
                     <dt>Receive (link)</dt>
-                    <dd>A link that lets anyone send you files and folders into a Drive folder, without an account. What they send is encrypted in their browser, to a key the server keeps under your Drive keys: like the Drive, it is not end-to-end encrypted, before or after it is received.</dd>
+                    <dd>A link that lets anyone send you files and folders into a Drive folder, without an account — and, as you choose per link, a note, a link or a credential. What they send is encrypted in their browser, to a key the server keeps under your Drive keys: like the Drive, it is not end-to-end encrypted, before or after it is received.</dd>
                     <dt>Recovery code</dt>
                     <dd>A one-time code you save when you add a passkey. Each code signs you in once, instead of your password and passkey.</dd>
                     <dt>Share</dt>
@@ -171,7 +173,7 @@
                     <dt>URL</dt>
                     <dd>Uniform Resource Locator: the address of a web page, a link.</dd>
                     <dt>View limit</dt>
-                    <dd>How many times a share can be opened before it is deleted. For a Receive link: how many visits may start sending files (after its password and CAPTCHA); then it takes no more until you add views.</dd>
+                    <dd>How many times a share can be opened before it is deleted. For a Receive link: how many visits may start sending something — files, a note, a link or a credential (after its password and CAPTCHA); then it takes no more until you add views.</dd>
                     <dt>WCAG</dt>
                     <dd>Web Content Accessibility Guidelines, the international guidelines secbin is built to.</dd>
                     <dt>Zero-knowledge</dt>
@@ -192,11 +194,11 @@
             </nav>
             <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
                 <span class="feat" role="listitem">Private</span>
-                <span class="feat" role="listitem">End-to-end encrypted</span>
+                <span class="feat" role="listitem">Encrypted in your browser</span>
                 <span class="feat" role="listitem">Notes &amp; files</span>
             </div>
             <p class="foot-crypto mono">
-                AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                AES-256-GCM · Argon2id · ECDH P-256 · HKDF-SHA256 · Link keys stay in the URL
                 <span class="foot-frag">#fragment</span>
             </p>
         </footer>

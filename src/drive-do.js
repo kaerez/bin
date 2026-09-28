@@ -27,6 +27,7 @@ import { timingSafeEqualHex, utf8, b64urlFromBytes } from '../public/js/bytes.js
 import { CHUNK, TAG } from '../public/js/files.js';
 import { chunkHash, ciphertextHash } from '../public/js/drivekeys.js';
 import { NO_EXPIRY } from './lib/settings.js';
+import { acceptOf, isKind, KIND_ACTIONS, ITEM_MAX_BYTES } from '../public/js/receivekinds.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, parent TEXT, kind TEXT NOT NULL CHECK(kind IN ('dir','file')),
@@ -83,6 +84,10 @@ CREATE TABLE IF NOT EXISTS rhuman (j TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 // — a view is one upload session granted (docs/REVERSE.md §5); counted for
 // every link from this release on. reverse.expires is NO_EXPIRY for a link
 // with no expiry (src/lib/settings.js): never expired, never pruned by it.
+// rsessions.kind: what the session sends, as the uploader's browser declared
+// it at its start (files, note, url or secret: public/js/receivekinds.js; a
+// session from before this column sends files) — for its limits and to give
+// its quota back; received items themselves carry no plaintext kind.
 // archive_*: an owner's Drive started over in the release before; kept as it
 // is until the owner deletes it (Admin → Security → Keys); nothing here opens
 // it, and it does not count towards the Drive's capacity.
@@ -98,6 +103,7 @@ const COLUMNS = [
   ['reverse', 'captcha', 'INTEGER NOT NULL DEFAULT 1'],
   ['reverse', 'retired', 'INTEGER'],
   ['reverse', 'views', 'INTEGER'], ['reverse', 'used', 'INTEGER NOT NULL DEFAULT 0'],
+  ['rsessions', 'kind', 'TEXT'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
 const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify', 'wrapsHeld'];
@@ -136,8 +142,17 @@ export const PW_WINDOW_SEC = 900;
 export const PW_LOCK_SEC = 900;
 /** Received files per page of GET /received. */
 export const RECEIVED_PAGE = 500;
-/** Why the user's browser could not take a received file in (nodes.rwhy). */
-export const RECEIVED_FAIL_REASONS = ['unreadable', 'name', 'place'];
+/**
+ * Why the user's browser could not take a received file in (nodes.rwhy):
+ * it does not open, its name or place cannot be used, or what it really is
+ * breaks the rules — a file type the link does not accept, or the role's
+ * file-type rules keep out of the Drive (`type`), a file larger than the
+ * link's largest file or an item past its kind's cap (`size`), a kind the
+ * link or the role does not accept, or not the one its session declared
+ * (`kind`: files, notes, links, credentials). The uploader's browser declared
+ * otherwise to the server; the user's browser checks what it opened.
+ */
+export const RECEIVED_FAIL_REASONS = ['unreadable', 'name', 'place', 'type', 'size', 'kind'];
 /** An ended reverse share is kept (for its lists) this long — as long as the share index keeps its row. */
 const REVERSE_KEEP_SEC = 30 * 86400;
 /**
@@ -152,6 +167,8 @@ const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.len
 const REVERSE_EDITABLE = ['expires', 'views', 'ph', 'salt', 't', 'note', 'captcha', 'opts'];
 /** A reverse share's views left (null: unlimited). */
 const viewsLeft = (r) => (r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)));
+/** What upload session `x` sends (sessions from before rsessions.kind send files). */
+const sessionKind = (x) => (x && isKind(x.kind) ? x.kind : 'files');
 /** The smaller of two byte limits (null: none). */
 const capBytes = (a, b) => (a === null || a === undefined ? b ?? null : b === null || b === undefined ? a : Math.min(a, b));
 
@@ -254,6 +271,21 @@ export class Drive extends DurableObject {
   #subtree(id) {
     return this.sql.exec(`WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
       SELECT n.* FROM sub JOIN nodes n ON n.id = sub.id`, id).toArray();
+  }
+  /** How many folder levels there are below folder `id` (none, or only files: 0). */
+  #dirHeight(id) {
+    return this.sql.exec(`WITH RECURSIVE sub(id, lvl) AS (SELECT ?, 0 UNION ALL SELECT n.id, sub.lvl + 1 FROM nodes n JOIN sub ON n.parent = sub.id WHERE n.kind = 'dir')
+      SELECT MAX(lvl) AS h FROM sub`, id).one().h ?? 0;
+  }
+  /**
+   * The role's folder-depth limit (maxFolderDepth, as for file shares; null:
+   * none): an item may not end up deeper than `max` — a folder at its own
+   * depth (one in the top folder: 1), a file at its folder's. `depth` is the
+   * deepest level the change makes → the refusal, or null.
+   */
+  #tooDeep(depth, max) {
+    if (max === null || max === undefined || depth <= max) return null;
+    return fail(403, 'folder_too_deep', `Folders may be nested at most ${max} level${max === 1 ? '' : 's'} deep in your Drive.`, { max });
   }
   /** How many folder levels a subtree adds below its top (a lone file or empty folder: 0). */
   #height(id) {
@@ -759,12 +791,17 @@ export class Drive extends DurableObject {
     return { ok: true, node: this.#out(n), children, path };
   }
 
-  /** A folder (its name sealed under `mek` with salt `ks`); its sealed name (and meta) count towards the capacity. */
-  async createFolder(uid, { id, parent, name, meta = null, ks, mek, mfp, capacity = null }) {
+  /**
+   * A folder (its name sealed under `mek` with salt `ks`); its sealed name (and meta) count towards the capacity.
+   * `maxDepth`: the role's folder-depth limit (null: none).
+   */
+  async createFolder(uid, { id, parent, name, meta = null, ks, mek, mfp, capacity = null, maxDepth = null }) {
     this.#bind(uid);
     const bad = this.#checkNew(id) || this.#checkParent(parent) || this.#fits(name.length + (meta ? meta.length : 0) + ks.length, capacity);
     if (bad) return bad;
     if (this.#depth(parent) + 1 > MAX_DEPTH) return fail(409, 'too_deep', `Folders nest at most ${MAX_DEPTH} levels.`);
+    const deep = this.#tooDeep(this.#depth(parent) + 1, maxDepth);
+    if (deep) return deep;
     const t = nowSec();
     this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, state, created, updated, ks, mek, mfp) VALUES (?, ?, 'dir', ?, ?, 'ready', ?, ?, ?, ?, ?)",
       id, parent, name, meta, t, t, ks, mek, mfp);
@@ -774,11 +811,12 @@ export class Drive extends DurableObject {
   /**
    * Reserve a file: capacity and the largest-file limit are checked here, at
    * once, against every file already stored or being uploaded (and the
-   * sealed fields of every item, this one's included).
+   * sealed fields of every item, this one's included). `maxDepth`: the role's
+   * folder-depth limit (null: none) — no file goes into a folder deeper.
    */
-  async createFile(uid, { id, parent, name, meta = null, size, dek, ks, mek, mfp, uploadHash, capacity, maxFile, pendingSec }) {
+  async createFile(uid, { id, parent, name, meta = null, size, dek, ks, mek, mfp, uploadHash, capacity, maxFile, pendingSec, maxDepth = null }) {
     this.#bind(uid);
-    const bad = this.#checkNew(id) || this.#checkParent(parent);
+    const bad = this.#checkNew(id) || this.#checkParent(parent) || this.#tooDeep(this.#depth(parent), maxDepth);
     if (bad) return bad;
     if (size > maxFile) return fail(413, 'file_too_large', `A Drive file may be at most ${maxFile} bytes.`, { max: maxFile });
     const used = this.#used();
@@ -876,9 +914,10 @@ export class Drive extends DurableObject {
    * Move (`parent`) and / or rename (`name`, `meta`) an item. The root can
    * do neither. A new name or metadata is sealed under the item's own keys:
    * `mek` and `ks` must still be the item's (else `409 stale_keys`: it was
-   * re-sealed meanwhile, and the browser seals again).
+   * re-sealed meanwhile, and the browser seals again). `maxDepth`: the role's
+   * folder-depth limit (null: none) — a move may not put anything deeper.
    */
-  async patchNode(uid, id, { parent, name, meta, mek, ks, capacity = null }) {
+  async patchNode(uid, id, { parent, name, meta, mek, ks, capacity = null, maxDepth = null }) {
     this.#bind(uid);
     if (id === ROOT) return fail(400, 'root', 'The top folder cannot be moved or renamed.');
     const n = this.#node(id);
@@ -898,6 +937,9 @@ export class Drive extends DurableObject {
       // A folder cannot go into itself or anything below it.
       if (parent === id || this.#ancestors(parent).some((a) => a.id === id)) return fail(409, 'cycle', 'A folder cannot be moved into itself or one of its sub-folders.');
       if (this.#depth(parent) + 1 + this.#height(id) > MAX_DEPTH) return fail(409, 'too_deep', `Folders nest at most ${MAX_DEPTH} levels.`);
+      // A folder lands one level below `parent` with its sub-folders under it; a file at `parent`'s level.
+      const deep = this.#tooDeep(this.#depth(parent) + (n.kind === 'dir' ? 1 + this.#dirHeight(id) : 0), maxDepth);
+      if (deep) return deep;
     }
     const t = nowSec();
     this.ctx.storage.transactionSync(() => {
@@ -942,7 +984,7 @@ export class Drive extends DurableObject {
       });
       this.#dropEndedReverse();
       // Uploads that never completed (the browser deletes one it cancelled): the Worker gives their quota back.
-      const unfinished = rows.filter((r) => r.kind === 'file' && r.state === 'pending' && !r.rs).map((r) => r.created);
+      const unfinished = rows.filter((r) => r.kind === 'file' && r.state === 'pending' && !r.rs).map((r) => ({ t: r.created, size: r.size }));
       return { ok: true, deleted: ids.length, shares: [...shares], reverse, unfinished, used: this.#used() };
     });
   }
@@ -1064,7 +1106,7 @@ export class Drive extends DurableObject {
     const o = {
       id: r.id, folder: r.folder, created: r.created, expires: r.expires, status: this.#reverseState(r),
       password: !!r.ph, note: !!r.note, captcha: r.captcha !== 0, maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null,
-      maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, files: r.files, bytes: r.bytes,
+      maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, accept: acceptOf(opts), files: r.files, bytes: r.bytes,
       views: r.views ?? null, used: r.used ?? 0, left: viewsLeft(r),
       pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NULL", r.id).one().c,
       failed: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NOT NULL", r.id).one().c,
@@ -1129,7 +1171,11 @@ export class Drive extends DurableObject {
         console.warn('secbin: reverse upload not logged', e && e.message ? e.message : e);
       }
     }
-    await this.#refundAt('receive-upload', stale.filter((x) => !x.files && x.started).map((x) => x.started));
+    // Given back per kind of send (the quota action it was counted as).
+    const empty = stale.filter((x) => !x.files && x.started);
+    for (const [kind, action] of Object.entries(KIND_ACTIONS)) {
+      await this.#refundAt(action, empty.filter((x) => sessionKind(x) === kind).map((x) => x.started));
+    }
   }
   /** Give back the quota of actions counted at `times` (Directory refundAt): a failure is only logged. */
   async #refundAt(action, times) {
@@ -1140,6 +1186,15 @@ export class Drive extends DurableObject {
       console.warn('secbin: quota not given back', e && e.message ? e.message : e);
     }
   }
+  /** Give back Drive uploads that never completed, [{ t, size }] (Directory refundDriveUploads): a failure is only logged. */
+  async #refundUploads(files) {
+    const uid = this.#meta('uid');
+    if (!uid || !files.length) return;
+    const ns = this.env.DIRECTORY;
+    try { await ns.get(ns.idFromName('directory')).refundDriveUploads(uid, files); } catch (e) {
+      console.warn('secbin: quota not given back', e && e.message ? e.message : e);
+    }
+  }
 
   /** A new reverse share on folder `rec.folder` (values arrive validated; `priv` sealed under the KEK of `rec.mek`). */
   async createReverse(uid, rec) {
@@ -1147,6 +1202,11 @@ export class Drive extends DurableObject {
     const f = this.#node(rec.folder);
     if (!f || f.rs) return fail(404, 'not_found', 'The folder does not exist.');
     if (f.kind !== 'dir') return fail(400, 'not_a_folder', 'Files can only be received into a folder.');
+    // A folder deeper than the role's folder-depth limit (`maxDepth`) takes no link: the Drive's own
+    // rule (#tooDeep, a file at its folder's depth, as the take-in checks it) would refuse everything
+    // it received.
+    const deep = this.#tooDeep(this.#depth(rec.folder), rec.maxDepth);
+    if (deep) return deep;
     if (this.#reverse(rec.id)) return fail(409, 'exists', 'A reverse share with this id already exists.');
     this.#dropEndedReverse();
     if (this.sql.exec('SELECT COUNT(*) AS c FROM reverse').one().c >= MAX_REVERSE) return fail(409, 'too_many_reverse', `A Drive holds at most ${MAX_REVERSE} reverse shares.`);
@@ -1176,7 +1236,9 @@ export class Drive extends DurableObject {
     if (!r) return { status: 'gone' };
     const st = this.#reverseState(r);
     // Paused (the owner started over) is not ended: the link resumes when the archive is restored.
-    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0 };
+    let opts = {};
+    try { opts = JSON.parse(r.opts); } catch { /* none */ }
+    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0, accept: acceptOf(opts) };
     if (st === 'paused') return { status: 'ok', paused: true, files: r.files, bytes: r.bytes, expires: r.expires, ...v };
     return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires, ...v } : { status: 'gone', state: st, files: r.files, bytes: r.bytes, ...v };
   }
@@ -1215,7 +1277,7 @@ export class Drive extends DurableObject {
    * - `password` ({ ph, salt, t } or null: none): the uploader's gate only;
    *   the link's lockout state stays as it is;
    * - `note` (the sealed note as stored, or null), `opts` (a partial
-   *   { maxFiles, maxBytes, maxFileBytes, types }), `captcha` (true / false).
+   *   { maxFiles, maxBytes, maxFileBytes, types, accept }), `captcha` (true / false).
    * Sessions already started keep going. → { status: 'ok' | 'gone' | 'invalid', … }.
    */
   async updateReverse(uid, id, change = {}) {
@@ -1247,7 +1309,7 @@ export class Drive extends DurableObject {
     if (change.opts !== undefined) {
       let opts = {};
       try { opts = JSON.parse(r.opts); } catch { /* none */ }
-      for (const k of ['maxFiles', 'maxBytes', 'maxFileBytes', 'types']) if (change.opts[k] !== undefined) opts[k] = change.opts[k];
+      for (const k of ['maxFiles', 'maxBytes', 'maxFileBytes', 'types', 'accept']) if (change.opts[k] !== undefined) opts[k] = change.opts[k];
       set.opts = JSON.stringify(opts);
     }
     // Column names come only from the fixed keys above; every value is bound.
@@ -1256,7 +1318,9 @@ export class Drive extends DurableObject {
     const prev = Object.fromEntries(cols.map((c) => [c, r[c] ?? null]));
     if (cols.length) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => set[c]), id);
     const n = this.#reverse(id);
-    return { status: 'ok', expires: n.expires, views: n.views ?? null, used: n.used ?? 0, left: viewsLeft(n), captcha: n.captcha !== 0, password: !!n.ph, prev };
+    let nopts = {};
+    try { nopts = JSON.parse(n.opts); } catch { /* none */ }
+    return { status: 'ok', expires: n.expires, views: n.views ?? null, used: n.used ?? 0, left: viewsLeft(n), captcha: n.captcha !== 0, password: !!n.ph, accept: acceptOf(nopts), prev };
   }
 
   /** Undo an updateReverse (`prev`, as it returned it): only the columns it can change. */
@@ -1271,9 +1335,11 @@ export class Drive extends DurableObject {
    * What the uploader's page needs (after the Worker checked the link proof
    * against `lh`): the sealed note, the password parameters and the limits
    * left. 'paused' while the owner's archive holds the link's key (no
-   * session, no upload); 'gone' unless active.
+   * session, no upload); 'gone' unless active. `session` (a grant's hash):
+   * also that session's kind of send (`session: { kind }`, or null when it
+   * is not one of this link's open sessions).
    */
-  async reverseOpen(uid, id, { roleMaxBytes = null } = {}) {
+  async reverseOpen(uid, id, { roleMaxBytes = null, session = null } = {}) {
     this.#bind(uid);
     const r = this.#reverse(id);
     const st = this.#reverseState(r);
@@ -1284,10 +1350,13 @@ export class Drive extends DurableObject {
     return {
       // Its views used up: no new session (sessions already started keep going).
       status: 'ok', lh: r.lh, ph: r.ph, usedUp: viewsLeft(r) === 0,
+      ...(session !== null ? { session: (() => { const x = this.#session(id, session); return x ? { kind: sessionKind(x) } : null; })() } : {}),
       head: {
         note: r.note ? JSON.parse(r.note) : null,
         password: r.ph ? { salt: r.salt, t: r.t, lockedUntil: r.pwlock && r.pwlock > nowSec() ? r.pwlock : null } : null,
         expires: r.expires,
+        // The kinds the link accepts (the Worker keeps those the user's role allows now).
+        accept: o.accept,
         limits: { maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types,
           filesLeft: o.maxFiles === null ? null : Math.max(0, o.maxFiles - r.files), bytesLeft: o.maxBytes === null ? null : Math.max(0, o.maxBytes - this.#bytesUsed(r)) },
       },
@@ -1301,9 +1370,10 @@ export class Drive extends DurableObject {
    * from any network, lock the link's password for PW_LOCK_SEC (the right one
    * too: 'pw_locked'). A session with no unfinished file lapses after
    * SESSION_IDLE_SEC; at most MAX_SESSIONS_PER_NET are open per uploader
-   * network (`net`, the Guard's key) and MAX_SESSIONS per link.
+   * network (`net`, the Guard's key) and MAX_SESSIONS per link. `kind`: what
+   * the session sends (the Worker checked that the link accepts it now).
    */
-  async reverseBegin(uid, id, hash, ttl, { net = null, proofHash = null, human = null } = {}) {
+  async reverseBegin(uid, id, hash, ttl, { net = null, proofHash = null, human = null, kind = 'files' } = {}) {
     this.#bind(uid);
     const tag = await this.#netTag(id, net); // before any check: nothing below awaits
     const r = this.#reverse(id);
@@ -1335,7 +1405,8 @@ export class Drive extends DurableObject {
     }
     // Sessions that lapsed having sent nothing are forgotten here: `lapsed`
     // (their starts) lets the Worker give their quota back.
-    const lapsed = this.sql.exec('SELECT started FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0 AND started IS NOT NULL', id, t).toArray().map((x) => x.started);
+    const lapsed = this.sql.exec('SELECT started, kind FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0 AND started IS NOT NULL', id, t).toArray()
+      .map((x) => ({ started: x.started, kind: sessionKind(x) }));
     this.sql.exec('DELETE FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0', id, t);
     if (this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND expires > ?', id, t).one().c >= MAX_SESSIONS) return { status: 'busy', lapsed };
     if (tag && this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND net = ? AND expires > ?', id, tag, t).one().c >= MAX_SESSIONS_PER_NET) {
@@ -1346,7 +1417,7 @@ export class Drive extends DurableObject {
     // so concurrent starts are counted one after another (never over its views).
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('UPDATE reverse SET used = used + 1 WHERE id = ?', id);
-      this.sql.exec('INSERT INTO rsessions (hash, rid, expires, net, started) VALUES (?, ?, ?, ?, ?)', hash, id, expires, tag, t);
+      this.sql.exec('INSERT INTO rsessions (hash, rid, expires, net, started, kind) VALUES (?, ?, ?, ?, ?, ?)', hash, id, expires, tag, t, isKind(kind) ? kind : 'files');
     });
     await this.#schedulePurge();
     return { status: 'ok', expires, lapsed };
@@ -1379,7 +1450,10 @@ export class Drive extends DurableObject {
    * Reserve one received file in the share's folder: every limit is checked
    * here at once — the share's (files, bytes, file size, declared types, as
    * checked by the Worker), the Drive's capacity and largest file, and the
-   * tree's ceilings.
+   * tree's ceilings. A session that sends a note, a link or a credential
+   * (rsessions.kind) reserves one item, of at most ITEM_MAX_BYTES of its
+   * kind; the link's largest-file limit and file types are for files only.
+   * Every received item counts towards the link's most files (`maxFiles`).
    */
   async reverseCreateFile(uid, id, hash, { node, name, meta, size, wrap, uploadHash, capacity, maxFile, pendingSec, roleMaxBytes = null }) {
     this.#bind(uid);
@@ -1388,11 +1462,18 @@ export class Drive extends DurableObject {
     const x = this.#session(id, hash);
     if (!x) return fail(403, 'bad_grant', 'This upload session has ended. Reload the page to start again.');
     const opts = JSON.parse(r.opts);
+    const kind = sessionKind(x);
+    // A note, a link or a credential: one item per session, of bounded size.
+    if (kind !== 'files') {
+      const had = x.files + this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rsess = ? AND state = 'pending'", hash).one().c;
+      if (had >= 1) return fail(409, 'one_item', 'This upload session has already sent its item. Start again to send another.');
+      if (size > ITEM_MAX_BYTES[kind]) return fail(413, 'item_too_large', `This item may be at most ${ITEM_MAX_BYTES[kind]} bytes.`, { max: ITEM_MAX_BYTES[kind] });
+    }
     // The link's byte limit, or the role's current one when that is smaller (lowered since the link was made).
     const maxBytes = capBytes(opts.maxBytes, roleMaxBytes);
     if (opts.maxFiles !== null && opts.maxFiles !== undefined && r.files + 1 > opts.maxFiles) return fail(409, 'too_many_files', `This link accepts at most ${opts.maxFiles} files.`, { max: opts.maxFiles });
     if (r.files + 1 > MAX_REVERSE_FILES) return fail(409, 'too_many_files', `A link accepts at most ${MAX_REVERSE_FILES} files.`, { max: MAX_REVERSE_FILES });
-    if (opts.maxFileBytes !== null && opts.maxFileBytes !== undefined && size > opts.maxFileBytes) return fail(413, 'file_too_large', `Each file may be at most ${opts.maxFileBytes} bytes.`, { max: opts.maxFileBytes });
+    if (kind === 'files' && opts.maxFileBytes !== null && opts.maxFileBytes !== undefined && size > opts.maxFileBytes) return fail(413, 'file_too_large', `Each file may be at most ${opts.maxFileBytes} bytes.`, { max: opts.maxFileBytes });
     if (size > maxFile) return fail(413, 'file_too_large', `Each file may be at most ${maxFile} bytes.`, { max: maxFile });
     // The wrap as the Worker stores it (sealed at rest; before the field layer: the JSON { kind: 'rs', data }).
     const fk = wrap;
@@ -1510,7 +1591,7 @@ export class Drive extends DurableObject {
     const x = this.#session(id, hash);
     if (!x) return { status: 'bad_grant' };
     this.sql.exec('DELETE FROM rsessions WHERE hash = ?', hash);
-    return { status: 'ok', files: x.files, bytes: x.bytes, started: x.started ?? null };
+    return { status: 'ok', files: x.files, bytes: x.bytes, started: x.started ?? null, kind: sessionKind(x) };
   }
 
   /**
@@ -1541,8 +1622,30 @@ export class Drive extends DurableObject {
     const items = page.map((r) => ({
       id: r.id, parent: r.parent, rs: r.rs, name: r.name, meta: r.meta, fk: r.fk, size: r.size, chunks: r.chunks, created: r.created,
     }));
-    const keys = [...new Set(items.map((i) => i.rs))].map((rid) => this.#reverse(rid)).filter(Boolean).map((r) => ({ id: r.id, priv: r.priv, mek: r.mek ?? null }));
+    // Each link's key, with the rules the user's browser holds what it takes in to (an uploader's
+    // browser declares types and kinds; the user's checks the real ones: docs/REVERSE.md §3).
+    const keys = [...new Set(items.map((i) => i.rs))].map((rid) => this.#reverse(rid)).filter(Boolean).map((r) => {
+      let opts = {};
+      try { opts = JSON.parse(r.opts); } catch { /* none */ }
+      return { id: r.id, priv: r.priv, mek: r.mek ?? null, types: opts.types ?? null, maxFileBytes: opts.maxFileBytes ?? null, accept: acceptOf(opts) };
+    });
     return { ok: true, items, keys, more, next };
+  }
+
+  /**
+   * A received item waiting to be taken in: its wrap as stored (sealed at
+   * rest, with the kind its session declared) and what its link accepts →
+   * { ok, wrap, accept }, or 409 not_received. The Worker holds a take-in to
+   * the declared kind (docs/REVERSE.md §3).
+   */
+  async receivedDeclared(uid, node) {
+    this.#bind(uid);
+    const n = this.#node(node);
+    const rv = n && n.rs ? this.#reverse(n.rs) : null;
+    if (!n || !rv || n.state !== 'ready' || (rv.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    let opts = {};
+    try { opts = JSON.parse(rv.opts); } catch { /* none */ }
+    return { ok: true, wrap: n.fk, accept: acceptOf(opts) };
   }
 
   /**
@@ -1562,9 +1665,10 @@ export class Drive extends DurableObject {
   /**
    * A received file taken in by the user's browser (its DEK, name and
    * metadata sealed under the KEK of the current sub-MEK, checked by the
-   * Worker): from now on an ordinary Drive file (in `parent`).
+   * Worker): from now on an ordinary Drive file (in `parent`). `maxDepth`:
+   * the role's folder-depth limit (null: none), as for an upload.
    */
-  async acceptReceived(uid, node, { parent, name, meta, dek, ks, mek, mfp }) {
+  async acceptReceived(uid, node, { parent, name, meta, dek, ks, mek, mfp, maxDepth = null }) {
     this.#bind(uid);
     const n = this.#node(node);
     if (!n || !n.rs || n.state !== 'ready' || (this.#reverse(n.rs)?.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
@@ -1572,6 +1676,8 @@ export class Drive extends DurableObject {
       const bad = this.#checkParent(parent);
       if (bad) return bad;
     }
+    const deep = this.#tooDeep(this.#depth(parent), maxDepth);
+    if (deep) return deep;
     this.sql.exec('UPDATE nodes SET parent = ?, name = ?, meta = ?, fk = NULL, dek = ?, ks = ?, mek = ?, mfp = ?, rs = NULL, rfail = NULL, rwhy = NULL, updated = ? WHERE id = ?',
       parent, name, meta, dek, ks, mek, mfp, nowSec(), node);
     if (!n.ch) await this.#scheduleHashes(); // received before the chunk hashes were kept
@@ -1597,11 +1703,11 @@ export class Drive extends DurableObject {
         for (const f of stale) this.#dropPending(f);
       });
       purged = stale.length;
-      unfinished = stale.filter((f) => !f.rs).map((f) => f.created);
+      unfinished = stale.filter((f) => !f.rs).map((f) => ({ t: f.created, size: f.size }));
     });
     if (purged) await this.#reportUsage();
-    // Drive uploads that never completed give their quota back.
-    await this.#refundAt('drive-upload', unfinished);
+    // Drive uploads that never completed give their quota back (the file, and its bytes).
+    await this.#refundUploads(unfinished);
     await this.#lapseSessions();
     this.#dropEndedReverse();
     const more = await this.#hashStored(uid).catch((e) => { console.warn('secbin: drive hashes not computed', e && e.message ? e.message : e); return false; });

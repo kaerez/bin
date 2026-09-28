@@ -41,7 +41,7 @@ describe('Drive access', () => {
     await driveLimits(u.id, { driveEnabled: false });
     // The role options live in LIMITS; migration 13 put them in the Default role.
     expect(await dirStub().schemaVersion()).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(18); // 13: the Drive; 14: reverse shares (reverse.test.js); 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2; 17: reverse-share options (reverse-parity.test.js); 18: sign-in records sealed (records.test.js)
+    expect(SCHEMA_VERSION).toBe(19); // 13: the Drive; 14: reverse shares (reverse.test.js); 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2; 17: reverse-share options (reverse-parity.test.js); 18: what Receive links accept (receive-types.test.js); 19: sign-in records sealed (records.test.js)
     const rows = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key LIKE 'drive%' ORDER BY key").toArray());
     expect(rows).toEqual([
       { key: 'driveEnabled', value: 'false' },

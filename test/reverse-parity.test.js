@@ -675,8 +675,8 @@ describe('migration 17 from the Directory the release before left', () => {
         defaults: Object.fromEntries(sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all'").toArray().map((x) => [x.key, JSON.parse(x.value)])),
       };
     });
-    expect(SCHEMA_VERSION).toBe(18); // 18: sign-in records sealed (records.test.js)
-    expect(after.version).toBe('18');
+    expect(SCHEMA_VERSION).toBe(19);
+    expect(after.version).toBe('19'); // 18 (what Receive links accept) and 19 (sign-in records sealed) run after it
     expect(after.cols).toContain('ended');
     expect(after.rows).toEqual(expect.arrayContaining([
       { user_id: '', channel: 'all', value: '86400' },
@@ -706,11 +706,12 @@ describe('migration 17 from the Directory the release before left', () => {
 });
 
 describe('the uploader sees nothing new', () => {
-  it('open does not reveal the views or who changed what', async () => {
+  it('open does not reveal the views or who changed what (only what the link accepts, which the page offers)', async () => {
     const u = await receiver('rp-open');
     const r = await newReverse(u.cookie, { views: 3 });
     const head = await (await rv(r.id, '/open', { headers: { 'x-link-proof': await linkProof(r.pub) }, ip: freshIp() })).json();
-    expect(Object.keys(head).sort()).toEqual(['captcha', 'expires', 'limits', 'note', 'password']);
+    expect(Object.keys(head).sort()).toEqual(['accept', 'captcha', 'expires', 'limits', 'note', 'password']);
+    expect(head.accept).toEqual(['files']);
     expect(Object.keys(head.limits).sort()).toEqual(['bytesLeft', 'filesLeft', 'maxBytes', 'maxFileBytes', 'maxFiles', 'types']);
   });
 });

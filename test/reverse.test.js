@@ -45,8 +45,8 @@ const audit = async (subject) => (await (await fetchJson(`/api/private/admin/aud
 
 describe('role options and migration 14', () => {
   it('reverse shares are off by default, need the Drive too, and join the Default role', async () => {
-    expect(SCHEMA_VERSION).toBe(18); // 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2 (drive-keys.test.js); 17: reverse-share options (reverse-parity.test.js); 18: sign-in records sealed (records.test.js)
-    expect(await dirStub().schemaVersion()).toBe(18);
+    expect(SCHEMA_VERSION).toBe(19); // 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2 (drive-keys.test.js); 17: reverse-share options (reverse-parity.test.js); 18: what Receive links accept (receive-types.test.js); 19: sign-in records sealed (records.test.js)
+    expect(await dirStub().schemaVersion()).toBe(19);
     const rows = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key LIKE 'reverse%' ORDER BY key").toArray());
     expect(rows).toEqual([
       // Migration 17: views, expiry, the password and editing (reverse-parity.test.js).
@@ -56,6 +56,8 @@ describe('role options and migration 14', () => {
       { key: 'reverseCaptchaDefault', value: '"on"' },
       { key: 'reverseEdit', value: 'true' },
       { key: 'reverseEnabled', value: 'false' },
+      // Migration 18: what Receive links may be sent (receive-types.test.js).
+      { key: 'reverseFiles', value: 'true' },
       { key: 'reverseMaxActive', value: '10' },
       { key: 'reverseMaxBytes', value: String(1024 ** 3) },
       { key: 'reverseMaxExpireSec', value: 'null' },
@@ -63,6 +65,9 @@ describe('role options and migration 14', () => {
       { key: 'reverseNoExpiry', value: 'false' },
       { key: 'reversePassword', value: '"allow"' },
       { key: 'reversePasswordDefault', value: '"off"' },
+      { key: 'reverseSecret', value: 'false' },
+      { key: 'reverseText', value: 'true' },
+      { key: 'reverseUrl', value: 'false' },
     ]);
     const u = await makeUser('rev-off');
     const me = async () => (await (await fetchJson('/api/private/me', { cookie: u.cookie })).json()).caps.reverseEnabled;
@@ -427,7 +432,7 @@ describe('the uploader', () => {
       expect(on.headers.get('cross-origin-embedder-policy')).toBe('require-corp');
       expect(on.headers.get('cache-control')).toBe('no-store');
       expect(await on.text()).toContain('/js/reverse.js');
-      const check = await tsFetch(`/r/${r.id}?check`);
+      const check = await tsFetch(`/r/${r.id}?check`, { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin' });
       expect(check.status).toBe(200);
       // The Turnstile policy with no workers at all (no service worker registration from the check page).
       expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP.replace("worker-src 'self'", "worker-src 'none'"));

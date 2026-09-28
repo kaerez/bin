@@ -147,6 +147,11 @@ function memorySink() {
   return { parts, write: async (b) => { parts.push(b.slice()); }, close: async () => {}, abort: async () => {} };
 }
 
+/** Save `text` as a UTF-8 text file named `filename` (a note, link or credential export: small, in memory). */
+export function saveText(filename, text) {
+  triggerDownload(new Blob([text], { type: 'text/plain;charset=utf-8' }), filename);
+}
+
 /** Save one file (raw, not zipped). */
 export async function saveFile(reader, entry, onBytes) {
   const name = basename(entry.path);
@@ -164,11 +169,12 @@ export async function saveFile(reader, entry, onBytes) {
 
 /**
  * Save a ZIP of folder `dirPath` ('' = the whole share), preserving the tree
- * below it (and its empty folders).
+ * below it (and its empty folders). `keep(entry)`: which files go in (all by
+ * default; a Drive share leaves its credentials out).
  */
-export async function saveZip(reader, dirPath, zipName, onBytes) {
+export async function saveZip(reader, dirPath, zipName, onBytes, { keep = () => true } = {}) {
   const entries = reader.manifest.entries;
-  const files = filesUnder(entries, dirPath);
+  const files = filesUnder(entries, dirPath).filter(keep);
   const prefix = dirPath ? dirPath + '/' : '';
   const dirs = entries.filter((e) => e.dir && (e.path + '/').startsWith(prefix) && e.path !== dirPath);
   const total = files.reduce((n, f) => n + f.size, 0);

@@ -7,7 +7,7 @@ import { HARD_MAX_SHARE_BYTES, RENDERERS } from '../../public/js/files.js';
 import { FILE_TYPE_MODES, MAX_FOLDER_DEPTH, normalizeRules } from '../../public/js/filepolicy.js';
 import { DEFAULT_URL_RULES, normalizeUrlRules } from '../../public/js/sharetypes.js';
 import { A11Y_SETTINGS, checkStatement } from '../../public/js/a11ystatement.js';
-import { QUOTA_KINDS, PUBLIC_QUOTA_KINDS, KINDS as QUOTA_KIND_INFO } from '../../public/js/quotakinds.js';
+import { QUOTA_KINDS, PUBLIC_QUOTA_KINDS, KINDS as QUOTA_KIND_INFO, MAX_QUOTA_BYTES } from '../../public/js/quotakinds.js';
 
 const MIN = 60;
 const HOUR = 3600;
@@ -201,9 +201,10 @@ const WEAKER_LIMITS = {
   reversePassword: 'rank', reversePasswordDefault: 'unset',
   maxExpireSec: 'max', maxViews: 'max', allowUnlimitedViews: 'on',
   reverseMaxExpireSec: 'max', reverseMaxViews: 'max', reverseNoExpiry: 'on', reverseAllowUnlimitedViews: 'on',
-  url: 'on', secret: 'on', apiEnabled: 'on',
-  // TODO(claude/receive-types): add reverseUrl: 'on' and reverseSecret: 'on' here when those
-  // role options reach main (they do not exist yet).
+  files: 'on', url: 'on', secret: 'on', apiEnabled: 'on',
+  // Receive links that may take files, links or credentials, as the outgoing files / url / secret
+  // (a link adding files, links or credentials to what it accepts needs the user's step-up too).
+  reverseFiles: 'on', reverseUrl: 'on', reverseSecret: 'on',
   fileTypeMode: 'rank', fileTypeRules: 'types', urlRules: 'added',
 };
 /** Exported for the docs and tests: what counts as weakening. */
@@ -372,11 +373,23 @@ export const LIMITS = {
   reversePassword:     { type: 'enum', values: CAPTCHA_MODES, def: 'allow', owner: 'allow' },
   reversePasswordDefault: { type: 'enum', values: CAPTCHA_DEFAULTS, def: 'off', owner: 'off' },
   reverseEdit:         { type: 'bool', def: true, owner: true },
+  // What a Receive link may be sent (docs/REVERSE.md §3.1, public/js/
+  // receivekinds.js), as the regular shares' text, files, url and secret:
+  // files, notes (plain text, Markdown or code), links and credentials. The
+  // user picks a link's kinds among the allowed ones; the server checks them
+  // when the link is made or changed and at every upload session, with the
+  // role as it is then. Links and credentials are off by default, as for
+  // regular shares. The owner: all of them.
+  reverseFiles:        { type: 'bool', def: true, owner: true },
+  reverseText:         { type: 'bool', def: true, owner: true },
+  reverseUrl:          { type: 'bool', def: false, owner: true },
+  reverseSecret:       { type: 'bool', def: false, owner: true },
 };
 
 /** The reverse-share role options (none applies to the public account). */
 export const REVERSE_KEYS = ['reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes', 'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews',
-  'reverseAllowUnlimitedViews', 'reversePassword', 'reversePasswordDefault', 'reverseEdit'];
+  'reverseAllowUnlimitedViews', 'reversePassword', 'reversePasswordDefault', 'reverseEdit',
+  'reverseFiles', 'reverseText', 'reverseUrl', 'reverseSecret'];
 /** The password modes of reverse shares (reversePassword) and their per-link defaults (reversePasswordDefault). */
 export const PASSWORD_MODES = CAPTCHA_MODES;
 export const PASSWORD_DEFAULTS = CAPTCHA_DEFAULTS;
@@ -450,10 +463,12 @@ export const DEFAULT_KEY_SCOPES = Object.freeze(['notes', 'files', 'policy']);
 // Keys the API channel may restrict further (never widen).
 // Reverse shares are created in the browser only, but an API key with "manage"
 // reaches them (PATCH and revoke /api/private/shares/<id>): their expiry,
-// views and edit options can be restricted for the API too.
+// views, edit options and the kinds a link accepts can be restricted for the
+// API too.
 export const API_LIMIT_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec',
   'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth',
-  'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reverseEdit'];
+  'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reverseEdit',
+  'reverseFiles', 'reverseText', 'reverseUrl', 'reverseSecret'];
 
 export function checkLimit(key, value, channel = 'all') {
   const s = Object.prototype.hasOwnProperty.call(LIMITS, key) ? LIMITS[key] : null;
@@ -527,7 +542,8 @@ export { QUOTA_KINDS, PUBLIC_QUOTA_KINDS };
  * A quota as stored, or throws. `publicAccount`: the public (anonymous)
  * account's list, which takes only the kinds it can use (no Drive, no
  * Receive). A kind done only in the web app (Drive shares, Drive uploads,
- * Receive) takes no "API only" channel: nothing would ever count.
+ * Receive) takes no "API only" channel: nothing would ever count. A kind
+ * counted in bytes (drive-bytes) takes a max of up to MAX_QUOTA_BYTES.
  */
 export function checkQuota(q, { publicAccount = false } = {}) {
   if (!q || typeof q !== 'object') throw new Error('invalid quota');
@@ -537,7 +553,9 @@ export function checkQuota(q, { publicAccount = false } = {}) {
   if (q.channel === 'api' && QUOTA_KIND_INFO[q.kind].gui) throw new Error(`quota kind ${q.kind} is only ever counted in the web app: its channel must be all`);
   if (!Object.prototype.hasOwnProperty.call(QUOTA_UNITS, q.unit)) throw new Error('quota unit must be s, m, h, d, mo or y');
   if (!Number.isSafeInteger(q.n) || q.n < 1 || q.n > 100000) throw new Error('quota period must be 1–100000');
-  if (!Number.isSafeInteger(q.max) || q.max < 0 || q.max > 10000000) throw new Error('quota max must be 0–10000000');
+  if (QUOTA_KIND_INFO[q.kind].bytes) {
+    if (!Number.isSafeInteger(q.max) || q.max < 0 || q.max > MAX_QUOTA_BYTES) throw new Error(`quota max of kind ${q.kind} must be 0–${MAX_QUOTA_BYTES} bytes`);
+  } else if (!Number.isSafeInteger(q.max) || q.max < 0 || q.max > 10000000) throw new Error('quota max must be 0–10000000');
   return { channel: q.channel, kind: q.kind, n: q.n, unit: q.unit, max: q.max };
 }
 

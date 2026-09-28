@@ -72,6 +72,9 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     keyVersion: { n: 0, at: null }, // the keyring's version (docs/DRIVE.md §3.1): up by one on every key change here
     userKit: null, // the user's last personal-kit download: { at, v, meks }
     meCalls: 0, // GET /api/private/me (the page recording its session)
+    // Refusals the real server makes and this fake does not decide itself (the role's file policy, a quota):
+    // { method, path: RegExp, status, error, message, extra } — the first match answers instead.
+    refusals: [],
   };
   let clock = 1700000000;
   const tick = () => ++clock;
@@ -162,6 +165,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (p === '/api/config' && method === 'GET') return ok({ turnstile: S.turnstile || null });
     S.requests.push({ method, path: p, body, headers: init.headers || {} });
     if (needsCsrf(method, p) && headerOf(init.headers, 'x-secbin-csrf') !== FAKE_CSRF) return fail(403, 'csrf_mismatch');
+    const refusal = S.refusals.find((r) => r.method === method && r.path.test(p));
+    if (refusal) return ok({ error: refusal.error, message: refusal.message, ...(refusal.extra || {}) }, refusal.status);
     let m;
     if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: S.impersonatedBy });
     if (p === '/api/auth/prelogin' && method === 'POST') return ok({ salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3 });
@@ -247,8 +252,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       const t = Math.floor(Date.now() / 1000);
       // "never": no expiry (the API says null); views as sent (none: unlimited), none used yet.
       const expires = body.expire === 'never' ? null : t + 7 * 86400;
-      S.reverse.push({ ...body, status: 'active', files: 0, bytes: 0, created: t, expires, views: body.views ?? null, used: 0 });
-      return ok({ id: body.id, expires, views: body.views ?? null }, 201);
+      S.reverse.push({ ...body, status: 'active', files: 0, bytes: 0, created: t, expires, views: body.views ?? null, used: 0, accept: body.accept ?? ['files'] });
+      return ok({ id: body.id, expires, views: body.views ?? null, accept: body.accept ?? ['files'] }, 201);
     }
     if (p === '/api/private/drive/reverse' && method === 'GET') {
       const folder = u.searchParams.get('folder');
@@ -256,6 +261,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         id: r.id, folder: r.folder, label: r.label || '', created: r.created, expires: r.expires, status: r.status, locked: false, priv: r.priv, mek: r.mek ?? null,
         password: !!r.password, note: !!r.note, captcha: r.captcha === true, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
         views: r.views ?? null, used: r.used ?? 0, left: r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)),
+        accept: r.accept ?? ['files'],
       }));
       return ok({ reverse: rows });
     }
@@ -272,8 +278,14 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (failed) {
         return ok({ items: page.map((n) => ({ id: n.id, rs: n.rs, label: S.reverse.find((r) => r.id === n.rs)?.label || '', size: n.size, created: n.created, failed: n.rfail, reason: n.rwhy })), more, next });
       }
-      const items = page.map((n) => ({ id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created }));
-      const keys = [...new Set(items.map((i) => i.rs))].map((id) => S.reverse.find((r) => r.id === id)).filter(Boolean).map((r) => ({ id: r.id, priv: r.priv, mek: r.mek ?? null }));
+      // `declared`: the kind the item's session declared (sealed with its wrap on the server); each
+      // link's `accept` as the user's role allows it now (S.roleKinds, as the server filters it).
+      // `unsealed`: a field the server found in plain text at rest (no fields, no declared kind).
+      const items = page.map((n) => (n.unsealed ? { id: n.id, parent: n.parent, rs: n.rs, name: null, meta: null, fk: null, size: n.size, chunks: n.chunks, created: n.created, declared: null, unreadable: true, unsealed: true }
+        : { id: n.id, parent: n.parent, rs: n.rs, name: n.name, meta: n.meta, fk: n.fk, size: n.size, chunks: n.chunks, created: n.created, declared: n.declared ?? null }));
+      const roleKinds = S.roleKinds || ['files', 'note', 'url', 'secret'];
+      const keys = [...new Set(items.map((i) => i.rs))].map((id) => S.reverse.find((r) => r.id === id)).filter(Boolean)
+        .map((r) => ({ id: r.id, priv: r.priv, mek: r.mek ?? null, types: r.types ?? null, maxFileBytes: r.maxFileBytes ?? null, accept: (r.accept ?? ['files']).filter((k) => roleKinds.includes(k)) }));
       return ok({ items, keys, more, next });
     }
     if ((m = p.match(/^\/api\/private\/drive\/received\/([^/]+)\/failed$/))) {
@@ -298,7 +310,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       const rv = S.reverse.find((x) => x.id === m[1]);
       if (!rv) return fail(404, 'not_found');
       S.patches = (S.patches || []).concat([{ id: rv.id, body }]);
-      for (const k of ['label', 'expires', 'views', 'maxFiles', 'maxBytes', 'maxFileBytes', 'types', 'captcha', 'password', 'note']) if (body[k] !== undefined) rv[k] = body[k];
+      for (const k of ['label', 'expires', 'views', 'maxFiles', 'maxBytes', 'maxFileBytes', 'types', 'captcha', 'password', 'note', 'accept']) if (body[k] !== undefined) rv[k] = body[k];
       return ok({ ok: true, expires: rv.expires, views: rv.views ?? null });
     }
     if ((m = p.match(/^\/api\/private\/shares\/([^/]+)\/revoke$/)) && method === 'POST') {
@@ -630,18 +642,21 @@ export async function seedTree(S, tree, parent = 'root', prefix = '', ids = new 
  * A file received through reverse share `rid` (public key `pub`), stored as
  * the uploader's browser would have sent it: content under a fresh file key,
  * path and metadata sealed with a metadata key, both wrapped to `pub`.
- * `bad: true` stores a wrap that does not open. → the node id.
+ * `bad: true` stores a wrap that does not open; `item`: a note, link or
+ * credential's kind marker (sealed in its metadata); `declared`: the kind its
+ * session declared to the server (default: what it is; null: none); `unsealed`:
+ * listed as the server lists a wrap it found in plain text. → the node id.
  */
-export async function seedReceived(S, { rid, pub, folder = 'root', path, bytes, type = 'text/plain', bad = false }) {
+export async function seedReceived(S, { rid, pub, folder = 'root', path, bytes, type = 'text/plain', bad = false, item = null, created = 1700000000, declared = item ? item.kind : 'files', unsealed = false }) {
   const id = newNodeId();
   const fk = randomBytes(32);
   const n = Math.ceil(bytes.length / CHUNK);
   const key = await importFileKey(b64urlFromBytes(fk));
   for (let i = 0; i < n; i++) S.chunks.set(`${id}/${i}`, await encryptChunk(key, i, n, bytes.slice(i * CHUNK, (i + 1) * CHUNK)));
-  const sealed = await sealUpload(pub, bad ? `r${'A'.repeat(22)}` : rid, id, fk, { path, type, mtime: 1700000000000, size: bytes.length });
+  const sealed = await sealUpload(pub, bad ? `r${'A'.repeat(22)}` : rid, id, fk, { path, type, mtime: 1700000000000, size: bytes.length, item });
   S.nodes.set(id, {
     id, parent: folder, kind: 'file', name: sealed.name, meta: sealed.meta, fk: { kind: 'rs', data: sealed.wrap },
-    size: bytes.length, chunks: n, state: 'ready', created: 1700000000, updated: 1700000000, rs: rid,
+    size: bytes.length, chunks: n, state: 'ready', created, updated: created, rs: rid, declared, unsealed,
   });
   return id;
 }

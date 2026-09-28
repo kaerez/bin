@@ -652,7 +652,7 @@ fieldset { min-inline-size: 0; }
    from assistive technology, until the same user signs in again. */
 .session-locked { visibility: hidden !important; }
 .api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
-.receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
+.receipt-note, .e2e-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
 .opens-box { padding: .5rem 0; }
 .opens-box .table { font-size: .75rem; }
 .url-rules { display: flex; flex-direction: column; gap: .4rem; min-width: 0; }
@@ -808,6 +808,23 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 .reverse-list { margin: 0; padding: 0 0 0 1.1rem; max-height: 280px; overflow: auto; font-size: .78rem; overflow-wrap: anywhere; }
 .reverse-list:empty { display: none; }
 .reverse-note-text { margin: .4rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The uploader's note, link and credential tabs (public/js/reverse.js). */
+.reverse .reverse-panel { padding: 0; }
+.reverse-editor { min-height: 12rem; resize: vertical; font-family: var(--mono); font-size: .85rem; }
+/* "What senders can send" (the Receive dialog and Edit). */
+.accept-group { display: grid; gap: .35rem; }
+.accept-opt .type-hint { margin: .1rem 0 0 1.6rem; }
+/* A note, link or credential in the Drive: its kind's icon and label (drive-app.js). */
+.drive-item { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .45rem; }
+.drive-kind { font-size: .66rem; padding: .12rem .45rem; }
+.drive-kind-icon { flex: none; position: relative; width: 11px; height: 13px; border: 1.5px solid var(--ink-3); border-radius: 1px; }
+.drive-kind-icon.kind-note::before { content: ''; position: absolute; left: 1.5px; right: 1.5px; top: 2.5px; height: 4px; border-top: 1.5px solid var(--ink-3); border-bottom: 1.5px solid var(--ink-3); }
+.drive-kind-icon.kind-url { width: 14px; height: 8px; border-radius: 4px; }
+.drive-kind-icon.kind-url::before { content: ''; position: absolute; left: 4px; top: 1.5px; width: 4px; height: 0; border-top: 1.5px solid var(--ink-3); }
+.drive-kind-icon.kind-secret { width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+.drive-kind-icon.kind-secret::before { content: ''; position: absolute; left: 6.5px; top: 2px; width: 6px; height: 0; border-top: 1.5px solid var(--ink-3); }
+.drive-item-view { display: grid; gap: .75rem; }
+.drive-note { max-height: 60vh; max-height: 60dvh; overflow: auto; }
 @media (max-width: 640px) {
   .drive-layout { grid-template-columns: 1fr; }
   .drive-tree-toggle { display: inline-flex; justify-self: start; }

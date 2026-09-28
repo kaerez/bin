@@ -651,6 +651,65 @@ describe('audit round 3: taking received files in', () => {
   }, 60000);
 });
 
+// The role's Drive rules on a take-in (on top of the link's own type rules, which the uploader's page applied).
+describe('taking received files in: the role\'s Drive rules apply too', () => {
+  const withLimits = (extra) => ({ ...PROFILE, limits: { ...PROFILE.limits, ...extra } });
+
+  it('a type the role refuses in the Drive is not taken in (failed: "type"); the others declare their type', async () => {
+    await server();
+    const rs = await existingReverse(ids.get('Documents'));
+    const exe = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'setup.exe', bytes: utf8('MZ'), type: 'application/x-msdownload' });
+    const txt = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'notes.txt', bytes: utf8('ok') });
+    const r = await startDrive(mountPoint(), deps(withLimits({ fileTypeMode: 'block', fileTypeRules: ['ext:exe'] })));
+    await r.app.ready;
+    await r.app.received;
+    expect(S.nodes.get(exe)).toMatchObject({ rs: rs.id, rfail: expect.any(Number), rwhy: 'type' });
+    expect(S.accepted.map((x) => x.id)).toEqual([txt]);
+    expect(S.accepted[0].body.types).toEqual([{ ext: 'txt', mime: 'text/plain' }]);
+    expect($('#drive-received').textContent).toMatch(/1 received file could not be added/);
+    // The review says why.
+    $('#drive-received-review').click();
+    await until(() => $('#drive-failed-table'));
+    expect(document.querySelector('#drive-failed-table tbody tr').children[3].textContent).toBe('its file type is one this link does not accept, or your account does not allow in the Drive');
+  }, 60000);
+
+  it('the server refusing the type (a policy the page did not know of) fails the item as "type", and the take-in goes on', async () => {
+    await server();
+    const rs = await existingReverse(ids.get('Documents'));
+    const a = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'a.bin', bytes: utf8('a') });
+    S.refusals.push({ method: 'POST', path: new RegExp(`/received/${a}$`), status: 403, error: 'file_type_not_allowed', message: 'This file type may not be added to your Drive: .bin (text/plain).' });
+    const b = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'b.txt', bytes: utf8('b') });
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    await r.app.received;
+    expect(S.nodes.get(a)).toMatchObject({ rs: rs.id, rwhy: 'type' });
+    expect(S.nodes.get(b).rs).toBeNull();
+  }, 60000);
+
+  it('the depth limit: a path makes folders only down to the role\'s limit (the rest flattened); a link folder deeper than it takes nothing in', async () => {
+    await server();
+    const rs = await existingReverse(ids.get('Documents')); // Documents: level 1
+    const deep = await seedReceived(S, { rid: rs.id, pub: rs.pub, folder: ids.get('Documents'), path: 'x/y/z/a.txt', bytes: utf8('a') });
+    const r = await startDrive(mountPoint(), deps(withLimits({ maxFolderDepth: 2 })));
+    await r.app.ready;
+    await r.app.received;
+    // One folder level fits under Documents: x (level 2); the file lands in it.
+    const parent = S.nodes.get(deep).parent;
+    expect(await fieldOf(parent)).toBe('x');
+    expect(S.nodes.get(parent).parent).toBe(ids.get('Documents'));
+    expect($('#drive-received').textContent).toMatch(/1 file was in folders nested too deeply/);
+    // The role now allows no folders at all: the link's folder (level 1) takes nothing in.
+    await server();
+    const rs2 = await existingReverse(ids.get('Documents'));
+    const late = await seedReceived(S, { rid: rs2.id, pub: rs2.pub, folder: ids.get('Documents'), path: 'late.txt', bytes: utf8('l') });
+    const r2 = await startDrive(mountPoint(), deps(withLimits({ maxFolderDepth: 0 })));
+    await r2.app.ready;
+    await r2.app.received;
+    expect(S.nodes.get(late)).toMatchObject({ rs: rs2.id, rwhy: 'place' });
+    expect(S.requests.filter((q) => q.method === 'POST' && q.path === `/api/private/drive/received/${late}`)).toHaveLength(0);
+  }, 60000);
+});
+
 describe('the owner acting as the user: received files', () => {
   it('opens the user\'s Drive with the user\'s keys (in the page\'s memory only), takes a received file in and downloads it', async () => {
     S = fakeServer({ capacity: 50 * 1024 * 1024 });

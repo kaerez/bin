@@ -1,9 +1,12 @@
 // refsmanifest.js — manifest v3 (docs/DRIVE.md §7): the encrypted manifest of
 // a Drive share. Unlike a v2 file share (one packed stream under one key), each
 // file is its own chunk sequence in the Drive, with its own key:
-//   { v: 3, kind: 'refs', entries: [{ path, size, type, mtime, ref, fk }], dirs: [path], view }
+//   { v: 3, kind: 'refs', entries: [{ path, size, type, mtime, ref, fk, item? }], dirs: [path], view }
 // `ref` indexes the share's `refs` (the server's list of referenced files, in
 // the order the client sent them) and `fk` is that file's key (base64url).
+// `item`: the kind marker of a note, link or credential received through a
+// "Receive" link ({ kind, fmt? }, public/js/receivekinds.js): the recipient's
+// page shows it with the regular viewers.
 // `view` is the sender's viewer-policy snapshot, as in v2 (null = no viewing).
 //
 // validateRefsManifest() returns the shape the readers use for v2 as well:
@@ -11,6 +14,7 @@
 
 import { bytesFromB64url } from './bytes.js';
 import { checkPath, checkMime, ManifestError, MAX_ENTRIES, RENDERERS, CHUNK } from './files.js';
+import { itemOf } from './receivekinds.js';
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const keysAre = (o, list) => Object.keys(o).sort().join(',') === [...list].sort().join(',');
@@ -45,7 +49,10 @@ export function validateRefsManifest(m) {
   const refs = new Set();
   let total = 0;
   for (const e of m.entries) {
-    if (!isPlainObject(e) || !keysAre(e, ['path', 'size', 'type', 'mtime', 'ref', 'fk'])) throw new ManifestError('invalid file entry');
+    const base = ['path', 'size', 'type', 'mtime', 'ref', 'fk'];
+    if (!isPlainObject(e) || !keysAre(e, 'item' in e ? [...base, 'item'] : base)) throw new ManifestError('invalid file entry');
+    const item = 'item' in e ? itemOf(e.item) : null;
+    if ('item' in e && (!item || !isPlainObject(e.item) || !keysAre(e.item, item.kind === 'note' ? ['kind', 'fmt'] : ['kind']) || (item.kind === 'note' && e.item.fmt !== item.fmt))) throw new ManifestError('invalid item');
     const path = checkPath(e.path);
     checkMime(e.type);
     if (!Number.isSafeInteger(e.size) || e.size < 0) throw new ManifestError('invalid size');
@@ -59,7 +66,7 @@ export function validateRefsManifest(m) {
     refs.add(e.ref);
     total += e.size;
     if (!Number.isSafeInteger(total)) throw new ManifestError('invalid size');
-    files.push({ path, size: e.size, type: e.type, mtime: e.mtime, ref: e.ref, fk: e.fk });
+    files.push({ path, size: e.size, type: e.type, mtime: e.mtime, ref: e.ref, fk: e.fk, ...(item ? { item } : {}) });
   }
   const dirPaths = new Set();
   for (const d of m.dirs) {
@@ -78,15 +85,16 @@ export function validateRefsManifest(m) {
 }
 
 /**
- * Build a v3 manifest from `files` = [{ path, size, type, mtime, fk }] (in the
- * order their node ids are sent: `ref` = position), `dirs` = [path] and the
- * viewer snapshot. Returns the plain object to seal (validated first).
+ * Build a v3 manifest from `files` = [{ path, size, type, mtime, fk, item? }]
+ * (in the order their node ids are sent: `ref` = position), `dirs` = [path]
+ * and the viewer snapshot. Returns the plain object to seal (validated first).
  */
 export function buildRefsManifest({ files, dirs = [], view = null }) {
+  const marker = (item) => (item.kind === 'note' ? { kind: 'note', fmt: item.fmt } : { kind: item.kind });
   const m = {
     v: 3,
     kind: 'refs',
-    entries: files.map((f, ref) => ({ path: f.path, size: f.size, type: f.type, mtime: f.mtime ?? 0, ref, fk: f.fk })),
+    entries: files.map((f, ref) => ({ path: f.path, size: f.size, type: f.type, mtime: f.mtime ?? 0, ref, fk: f.fk, ...(f.item ? { item: marker(f.item) } : {}) })),
     dirs: [...dirs],
     view,
   };

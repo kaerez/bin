@@ -3,7 +3,8 @@
 // (Outgoing shares, Drive, Receive) with every kind labelled; the Public role's
 // editor offers only the outgoing kinds the public account can use; a kind
 // used only in the web app takes no "API only" channel; each control keeps its
-// visible label; Save sends the kinds as chosen.
+// visible label; Save sends the kinds as chosen; a kind counted in bytes
+// (Drive → "Bytes uploaded") takes its max in MiB or GiB, and sends bytes.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
@@ -25,8 +26,10 @@ const until = async (fn, ms = 20000) => {
 const BUILTIN = Object.fromEntries(Object.entries(LIMITS).map(([k, v]) => [k, v.def]));
 const SETTING_VALUES = Object.fromEntries(Object.entries(SETTINGS).map(([k, v]) => [k, v.def]));
 const q = (kind, channel = 'all') => ({ id: `q-${kind}-${channel}`, channel, kind, n: 1, unit: 'd', max: 3 });
+const MiB = 1024 * 1024;
+const GiB = 1024 * MiB;
 const state = {
-  defaultQuotas: [q('receive-upload'), q('note', 'api')],
+  defaultQuotas: [q('receive-upload'), q('note', 'api'), { ...q('drive-bytes'), max: 2 * GiB }],
   publicQuotas: [q('url')],
   saved: [],
 };
@@ -84,8 +87,9 @@ describe('Admin → Roles → Quotas: the kinds', () => {
     const [recv, api] = rowsOf();
     expect(groupsOf(kindOf(recv))).toEqual([
       ['OPTGROUP', 'Outgoing shares', OUTGOING],
-      ['OPTGROUP', 'Drive', [['drive-upload', 'Files uploaded']]],
-      ['OPTGROUP', 'Receive', [['receive', 'All receive'], ['receive-link', 'New links'], ['receive-upload', 'Uploads received']]],
+      ['OPTGROUP', 'Drive', [['drive-upload', 'Files uploaded'], ['drive-bytes', 'Bytes uploaded']]],
+      ['OPTGROUP', 'Receive', [['receive', 'All receive'], ['receive-link', 'New links'], ['receive-upload', 'Uploads received'],
+        ['receive-file', 'Uploads with files'], ['receive-note', 'Notes received'], ['receive-url', 'Links received'], ['receive-secret', 'Credentials received']]],
     ]);
     expect(kindOf(recv).value).toBe('receive-upload');
     expect(kindOf(api).value).toBe('note');
@@ -94,7 +98,8 @@ describe('Admin → Roles → Quotas: the kinds', () => {
     // The help says what the groups count.
     const help = [...detail().querySelectorAll('p.mono.muted')].map((p) => p.textContent).join(' ');
     expect(help).toMatch(/"All outgoing shares" counts every note, link, credential, file share and Drive share \(never Drive uploads or Receive\)/);
-    expect(help).toMatch(/"Uploads received" counts each upload session that sends files through one of the user's links/);
+    expect(help).toMatch(/"Uploads received" counts each upload session that sends files through one of the user's links, or a note, link or credential/);
+    expect(help).toMatch(/"Uploads with files", "Notes received", "Links received" and "Credentials received" count those sessions by what they send/);
   }, T);
 
   it('a kind used only in the web app takes no "API only" channel', async () => {
@@ -116,7 +121,46 @@ describe('Admin → Roles → Quotas: the kinds', () => {
     expect(state.saved[0]).toEqual({ scope: 'global', list: [
       { channel: 'all', kind: 'receive-upload', n: 1, unit: 'd', max: 3 },
       { channel: 'api', kind: 'file', n: 1, unit: 'd', max: 3 },
+      { channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 2 * GiB },
     ] });
+  }, T);
+
+  it('"Bytes uploaded" takes its max in MiB or GiB (shown in the unit that fits), and sends bytes; other kinds have no unit', async () => {
+    const [recv, , bytes] = rowsOf();
+    const unitOf = (row) => row.querySelector('select[aria-label="Max unit"]');
+    const maxOf = (row) => row.querySelector('input[aria-label="Max"]');
+    // A count kind: no unit shown.
+    expect(unitOf(recv).closest('label').hidden).toBe(true);
+    // The stored 2 GiB shows as 2 GiB, with a visible, labelled unit select.
+    expect(kindOf(bytes).value).toBe('drive-bytes');
+    expect(unitOf(bytes).closest('label').hidden).toBe(false);
+    expect(unitOf(bytes).closest('label').querySelector('.field-label').textContent).toBe('Max unit');
+    expect([...unitOf(bytes).options].map((o) => o.value)).toEqual(['MiB', 'GiB']);
+    expect(unitOf(bytes).value).toBe('GiB');
+    expect(maxOf(bytes).value).toBe('2');
+    expect(channelOf(bytes).querySelector('option[value="api"]').disabled).toBe(true); // web only, as "Files uploaded"
+    // 1.5 GiB and 300 MiB, as entered.
+    maxOf(bytes).value = '1.5';
+    button('Add quota').click();
+    const added = rowsOf().at(-1);
+    expect(unitOf(added).closest('label').hidden).toBe(true);
+    choose(kindOf(added), 'drive-bytes');
+    expect(unitOf(added).closest('label').hidden).toBe(false);
+    expect(unitOf(added).value).toBe('MiB');
+    maxOf(added).value = '300';
+    button('Save quotas').click();
+    await until(() => state.saved.length > 1);
+    expect(state.saved[1].list.slice(2)).toEqual([
+      { channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 1.5 * GiB },
+      { channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 300 * MiB },
+    ]);
+    // Back to a count kind: the unit goes, and the max is a plain number again.
+    choose(kindOf(added), 'drive-upload');
+    expect(unitOf(added).closest('label').hidden).toBe(true);
+    maxOf(added).value = '7';
+    button('Save quotas').click();
+    await until(() => state.saved.length > 2);
+    expect(state.saved[2].list.at(-1)).toEqual({ channel: 'all', kind: 'drive-upload', n: 1, unit: 'd', max: 7 });
   }, T);
 
   it('the Public role offers only the outgoing kinds the public account can use', async () => {

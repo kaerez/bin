@@ -381,7 +381,7 @@ describe('the Edit form of a Receive link', () => {
     const g = mount(reverseEditForm(cur, { limits: { reverseNoExpiry: false, reversePassword: 'require', reverseCaptcha: 'require' } }));
     expect(radios(0)).toEqual(['Keep it', 'Extend it']);
     expect(radios(1)).toEqual(['Keep it', 'Change it']);
-    expect(document.querySelector('input[type="checkbox"]').disabled).toBe(true);
+    expect(document.querySelector('input[type="checkbox"][id$="-captcha"]').disabled).toBe(true); // the CAPTCHA box (the kinds' boxes come first)
     // Passwords off, the link without one: nothing to choose, no group.
     mount(reverseEditForm({ ...cur, password: false }, { limits: { reversePassword: 'off' } }));
     expect(document.querySelectorAll('fieldset.rev-edit-group')).toHaveLength(2);

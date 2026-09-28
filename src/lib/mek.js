@@ -95,14 +95,22 @@ export async function sealItem(uid, { kek, mek, mfp }, { name, meta = null, dek 
  * Check what a browser sealed for a new (or taken-in) item: it must open
  * under the current sub-MEK's KEK (so the server can re-seal it later), with
  * a 32-byte DEK for a file. The opened values are dropped at once.
+ * `inspect(name, meta)` (optional) sees the opened name and metadata bytes
+ * first, in memory only (the role's file-type rules: src/lib/drivepolicy.js);
+ * they are zeroed after it, whatever it does.
  */
-export async function checkNewItem(uid, keys, item) {
+export async function checkNewItem(uid, keys, item, inspect = null) {
   if (item.mek !== keys.current) throw new HttpError(409, 'mek_not_current', 'The Drive key changed: reload the page to use the current one.');
   const { kek } = currentKek(keys);
   let r;
   try { r = await openItem(uid, [kek], item); } catch { throw new HttpError(400, 'bad_seal', 'The item is not sealed under your current Drive key.'); }
-  r.name.fill(0);
-  if (r.dek) r.dek.fill(0);
+  try {
+    if (inspect) inspect(r.name, r.meta);
+  } finally {
+    r.name.fill(0);
+    if (r.meta) r.meta.fill(0);
+    if (r.dek) r.dek.fill(0);
+  }
   return keys.keks.get(keys.current).fp;
 }
 
@@ -167,10 +175,15 @@ export function toRest(fk, uid, field, ref, text) {
 /**
  * A value stored at rest back as text: opened with the field key (the one
  * now, then the previous one during a root change). A value stored before
- * the field layer (plain JSON text) comes back as it is.
+ * the field layer (plain JSON text) comes back as it is, unless `plain` is
+ * false: then it is refused (`not_at_rest`), for fields that were always
+ * sealed at rest (a received item's name, metadata and wrap).
  */
-export async function fromRest(fk, uid, field, ref, value) {
-  if (!isAtRest(value)) return value;
+export async function fromRest(fk, uid, field, ref, value, { plain = true } = {}) {
+  if (!isAtRest(value)) {
+    if (plain) return value;
+    throw new HttpError(500, 'not_at_rest', 'A stored value is not sealed at rest.');
+  }
   for (const set of [fk.cur, fk.old]) {
     if (!set) continue;
     try { return await openAtRest(set[field], { userId: uid, field, ref }, value); } catch { /* the next one */ }
