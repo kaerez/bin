@@ -68,6 +68,50 @@ export function checkPath(p) {
   return p;
 }
 
+/**
+ * A received path as it is shown and saved: cleaned (cleanName), then checked
+ * again (checkPath). Cleaning can turn an accepted path into a refused one:
+ * "." U+200B "." becomes "..", and a leading U+200B segment an absolute path.
+ */
+export function cleanPath(p) {
+  return checkPath(cleanName(p));
+}
+
+/** Throw unless no file is also a folder (explicit, or implied by another path). */
+function checkTree(filePaths, dirPaths) {
+  for (const p of [...filePaths, ...dirPaths]) {
+    const segs = p.split('/');
+    for (let i = 1; i < segs.length; i++) {
+      if (filePaths.has(segs.slice(0, i).join('/'))) throw new ManifestError('file/folder conflict');
+    }
+  }
+  for (const d of dirPaths) if (filePaths.has(d)) throw new ManifestError('file/folder conflict');
+}
+
+/**
+ * The entries of a validated manifest (validateManifest, or refsmanifest.js
+ * validateRefsManifest) with every path cleaned (cleanPath); an entry whose
+ * path changed is marked `renamed: true`. Returns `entries` itself when no
+ * path changed. Throws ManifestError (fail closed) when a cleaned path is
+ * unsafe, two entries clean to the same path, or a file becomes a folder.
+ */
+export function cleanEntries(entries) {
+  const filePaths = new Set();
+  const dirPaths = new Set();
+  let changed = false;
+  const out = entries.map((e) => {
+    const path = cleanPath(e.path);
+    const seen = e.dir ? dirPaths : filePaths;
+    if (seen.has(path)) throw new ManifestError('duplicate path');
+    seen.add(path);
+    if (path === e.path) return e;
+    changed = true;
+    return { ...e, path, renamed: true };
+  });
+  checkTree(filePaths, dirPaths);
+  return changed ? out : entries;
+}
+
 /** Lowercased `type/subtype` or throw. Parameters (";charset=…") are not allowed. */
 export function checkMime(t) {
   if (typeof t !== 'string' || !MIME_RE.test(t)) throw new ManifestError('invalid MIME type');
@@ -135,14 +179,7 @@ function checkEntries(entries, total) {
     out.push({ path, type: e.type, size: e.size, mtime: e.mtime, off: e.off });
   }
   if (expectOff !== total) throw new ManifestError('size mismatch');
-  // A file may not also be a folder (explicit, or implied by another path).
-  for (const p of [...filePaths, ...dirPaths]) {
-    const segs = p.split('/');
-    for (let i = 1; i < segs.length; i++) {
-      if (filePaths.has(segs.slice(0, i).join('/'))) throw new ManifestError('file/folder conflict');
-    }
-  }
-  for (const d of dirPaths) if (filePaths.has(d)) throw new ManifestError('file/folder conflict');
+  checkTree(filePaths, dirPaths);
   return out;
 }
 

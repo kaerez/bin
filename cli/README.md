@@ -203,6 +203,11 @@ directory). Only the chunks that cover the selected files are downloaded.
 A share whose sender required a CAPTCHA opens in a browser only: `secbin get` stops with
 `This share requires a CAPTCHA; open it in a browser` (exit 1), and nothing is spent.
 
+Received names are saved and listed without the characters that can disguise a name (bidi
+controls, U+200B, U+FEFF, U+0085, U+2028, U+2029), and `secbin get` says how many were
+renamed. Each cleaned path is checked again: a share whose path is safe only before cleaning,
+or whose names clean to the same path, is refused before anything is written.
+
 Downloads are confined to the output folder. Every target must resolve inside `--out`.
 Every path component below it is checked right before use, and a symbolic link found there
 is never written through, even with `--force`. Existing files are only replaced with

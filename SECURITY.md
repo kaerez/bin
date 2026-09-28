@@ -165,7 +165,11 @@ compromise. Defenses:
   something else — bidi overrides, embeddings and isolates (U+202A–U+202E, U+2066–U+2069) —
   and U+200B, U+FEFF, U+0085, U+2028 and U+2029 are removed from every file and folder name
   (then NFC; `files.js` `cleanName`) when a file share, a Drive item or a CLI share is made and
-  when a received one is shown or saved (marked "renamed"); names are never refused for them.
+  when a received one is shown or saved, in the browser and by `secbin get` (marked "renamed");
+  names are never refused for them. A received path is cleaned first and then checked again
+  (`files.js` `cleanPath` / `cleanEntries`): a path that is safe only before cleaning (`.`,
+  U+200B, `.` becomes `..`; a leading U+200B segment becomes an absolute path), or two names
+  that clean to the same path, refuse the whole manifest.
   Every name is shown in a bidi isolate with its extension as its own left-to-right isolate
   (`common.js` `nameEl`), so `invoice<U+202E>fdp.exe` appears as `invoicefdp.exe` with the
   extension `.exe`. Everything real names use stays: Hebrew and Arabic (with niqqud and
@@ -220,7 +224,10 @@ compromise. Defenses:
   has the share locked or after a file share's last view, counts wrong proofs as invalid
   attempts, and spends no view.
 - **Downloads** are always `application/octet-stream` / `application/zip` with sanitized
-  names; ZIP member names come from validated paths (no absolute or `../` entries).
+  names; ZIP member names come from cleaned and validated paths, and the ZIP writer
+  (`zip.js` `memberName`) cleans and checks every name again right before writing it: no
+  absolute, `../`, drive-letter (`C:`), backslash, empty-segment or duplicate entries (file
+  shares, Drive shares and Drive folders alike).
 
 ### Cloudflare Turnstile (optional human check)
 

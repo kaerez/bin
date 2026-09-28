@@ -44,6 +44,18 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - The owner sees and lifts the new `turnstile-verify`, `prelogin` and `public-trackers`
     blocks with the others.
 
+- **Received names are cleaned first, then checked again (ZIP slip).** The viewer checked a
+  file or Drive share's paths before removing their hidden characters and never after, so a
+  modified sender could write `.`, U+200B, `.` (which becomes `..`) or a leading U+200B segment
+  (which becomes `/`) and get `../` or absolute members into **Download all** / **Download
+  folder** ZIPs. Every received path is now cleaned and then validated (`files.js`
+  `cleanPath` / `cleanEntries`); such a path, or two names that clean to the same path, refuse
+  the manifest. The ZIP writer (`zip.js` `memberName`) cleans and checks each member name again
+  right before writing it and refuses `..`, absolute paths, drive letters, backslashes, empty
+  segments and duplicates, for file shares, Drive shares and Drive folders. `secbin get` now
+  also saves and lists names cleaned (it kept the hidden characters on disk), reports how many
+  were renamed, cleans `--path`, and refuses to write a name that still holds them.
+
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left
   empty, a fresh passkey assertion (`POST /api/private/me/reauth`, then `{ reauth }`), verified
