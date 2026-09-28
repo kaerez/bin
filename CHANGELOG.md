@@ -15,6 +15,36 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Impersonation no longer extends the owner's session.** Starting an impersonation and
+  "Return to admin" each issue a new session that keeps the absolute end of the owner's sign-in
+  (`session.absSec` counts from the sign-in, and a new session never ends later than the one it
+  replaces), and revoke the session they replace, so a copy of the old cookie stops working.
+  Cycling "Log in as" and "Return to admin" kept a stolen owner session alive indefinitely and
+  left each replaced session valid until its own timeout.
+- **Admin changes that weaken a security control need the owner's password or a passkey**:
+  turning CSRF tokens off or anonymous sharing on; loosening the account lockout, the per-IP
+  brute-force rules, the IPv6 tracking prefix, the owner's session timeouts, the
+  new-anonymous-sender allowance or the log retention (Settings, the Owner role, the Public
+  role); in a role (the public account's too, and its API restrictions), loosening passkeys,
+  the password policy, session timeouts or log retention, the CAPTCHA and uploader-password
+  options and their defaults, longer or unlimited expiry and views, links with no expiry, and
+  allowing link or credential shares, API keys, more file types or more links; and adding an
+  allow IP rule. Missing, the server answers `400 reauth_required` with what the change weakens, and
+  the admin panel then shows the confirmation field; tightening asks for nothing (SECURITY.md
+  "admin changes that weaken a control").
+- **The owner's own username changes only on Account** (with the password or a passkey):
+  `PATCH /api/private/admin/users/<owner>` with a username answers `403 use_account_page`, as
+  the owner's own password already did.
+- **Separate keys for the prelogin fake salt, the anonymous tracker's tag and the public quota
+  subjects** (HKDF-SHA-256 from the Directory's secret, one `info` each). They shared one HMAC
+  key, so a prelogin request for a crafted username returned a valid tracker tag, and anyone
+  could mint tracker ids the server accepted as its own. Tracker ids issued before this release
+  no longer verify: browsers get a new id on their next visit, and the anonymous per-id and
+  per-network counters start again.
+- **Migration 17 on a multi-version upgrade:** a Directory from before migration 16 now keeps
+  each role's `maxExpireSec` as its `reverseMaxExpireSec` (the Default role had been left at
+  "no limit"). The step is corrected in place; a Directory that already ran it is unchanged.
+- **CI:** every GitHub Action is pinned to a full commit SHA (its tag in a comment).
 - **Received names are cleaned first, then checked again (ZIP slip).** The viewer checked a
   file or Drive share's paths before removing their hidden characters and never after, so a
   modified sender could write `.`, U+200B, `.` (which becomes `..`) or a leading U+200B segment
@@ -26,6 +56,31 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   segments and duplicates, for file shares, Drive shares and Drive folders. `secbin get` now
   also saves and lists names cleaned (it kept the hidden characters on disk), reports how many
   were renamed, cleans `--path`, and refuses to write a name that still holds them.
+
+- **The Drive personal kit has the CAPTCHA, and says when it is out of date** (docs/DRIVE.md
+  §3.1). With Turnstile on, the Account page's personal kit card has its own widget: Download
+  and Verify stay disabled until it has passed, and `POST /api/private/drive/kit` and
+  `…/kit/verify` need a fresh token for `account` (checked before the step-up); without
+  Turnstile keys nothing changes. The Directory now counts every key change (the **key
+  version**: a sub-MEK added, rotated, deleted, made current or its dates edited, a root change
+  or its undo, a restore that writes a key); both kit files hold it, both kit cards show
+  "Version N, <date>", and Verify compares a file's version with the server's. Each
+  personal-kit download is recorded (its date, version and the sub-MEKs it holds; removed with
+  the account): after a key change, or once a scheduled sub-MEK the kit lacks has started, the
+  Account page and the Drive page say "Your Drive’s keys were updated. Download a new personal
+  kit and keep it safe.", with no key detail, until the user downloads a new one; the kit card
+  shows the last download. The owner acting as the user cannot download one, so cannot clear
+  the notice (`GET /api/private/drive/kit`; `kit` in `GET /api/private/drive`).
+- **Set-up proposes the Drive keys for the owner to choose.** The set-up page shows the root
+  MEK and first sub-MEK the server generated (`POST /api/auth/setup/candidate`, with the setup
+  token), masked until Show, with "Use these", "Generate again" and "Enter manually", as
+  Security → Keys' key chooser does (shared: `public/js/keychoice.js`). Nothing is stored until
+  the set-up sends the chosen pair; a pair no longer kept (10 minutes, or replaced) is refused
+  before the owner account is made. Proposals need an unspent token and no owner yet (`410
+  token_used`), are limited to 20 per network per 10 minutes, and are not logged (only the
+  adopted pair is, as `keys.created`). The chosen or entered keys are written in the same
+  transaction as the owner. Copying a key clears the clipboard after 60 s where the page may
+  read it back; this site's Permissions-Policy denies that, so the page says to clear it.
 
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left

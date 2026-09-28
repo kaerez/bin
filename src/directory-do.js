@@ -21,7 +21,7 @@ import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES, MAX_REVERSE_ACTIVE,
-  CAPTCHA_KEYS, resolveCaptcha, REVERSE_KEYS, NO_EXPIRY, checkReversePassword,
+  CAPTCHA_KEYS, resolveCaptcha, REVERSE_KEYS, NO_EXPIRY, checkReversePassword, weakenedSettings, weakenedLimits,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT
 // release. SCHEMA above always describes the latest shape (fresh instances need
 // nothing); each step only adds what an older instance lacks, and the applied
 // version is recorded in meta so a step runs at most once. Never edit a
-// shipped step — append a new one.
+// shipped step — append a new one — unless the edit only corrects what the
+// step does when older steps run before it in the same upgrade, and changes
+// nothing for a Directory that runs that step alone (step 17).
 const MIGRATIONS = [
   // 1: activity.imp (impersonation flag)
   (m) => m.addColumn('activity', 'imp', 'INTEGER NOT NULL DEFAULT 0'),
@@ -263,10 +265,16 @@ const MIGRATIONS = [
   // the Default role gets a value for every new option. shares.ended: when a
   // share stopped being active (an indefinite one is pruned from the index
   // 30 days after it ended, as the others are after their expiry).
+  // The bound is written over any reverseMaxExpireSec already there: no
+  // release before this step knew the option, so a value present now was
+  // written earlier in this same run (materializeDefaultRole in steps 10–15,
+  // with today's defaults: no limit), never by the owner. Only the jump from
+  // 15 or older runs into this; 16 → 17 finds no such row either way.
   (m) => {
     m.addColumn('shares', 'ended', 'INTEGER');
     for (const r of m.sql.exec("SELECT user_id, channel, value FROM limits WHERE key = 'maxExpireSec' AND (user_id = '' OR user_id LIKE 'r:%')").toArray()) {
-      m.sql.exec("INSERT OR IGNORE INTO limits (user_id, channel, key, value) VALUES (?, ?, 'reverseMaxExpireSec', ?)", r.user_id, r.channel, r.value);
+      m.sql.exec("INSERT INTO limits (user_id, channel, key, value) VALUES (?, ?, 'reverseMaxExpireSec', ?) ON CONFLICT(user_id, channel, key) DO UPDATE SET value = excluded.value",
+        r.user_id, r.channel, r.value);
     }
     materializeDefaultRole(m.sql);
   },
@@ -337,6 +345,16 @@ export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'rece
   'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes',
   ...REVERSE_KEYS, ...CAPTCHA_KEYS]);
 const PUBLIC_NAME = '(public)';
+/**
+ * HKDF `info` of the keys derived from the Directory's secret (#purposeKey),
+ * one per use. Changing one invalidates what it made: tracker ids and
+ * subjects made under an older key are simply re-issued / counted afresh.
+ */
+const KEY_INFO = Object.freeze({
+  prelogin: 'secbin-directory/prelogin-salt/v1',
+  trackerTag: 'secbin-directory/tracker-tag/v1',
+  subject: 'secbin-directory/public-subject/v1',
+});
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
 const TRACKER_RE = /^[A-Za-z0-9_-]{32}$/;
@@ -367,6 +385,8 @@ const SQL_BATCH = 90;
 const ADMIN_DRIVE_ACTIONS = ['drive.escrow_used', 'drive.migrated', 'drive.keys_viewed', 'drive.keys_imported', 'drive.kit_restored', 'drive.links_retired', 'drive.archive_deleted'];
 /** A generated key candidate (Admin → Security → Keys) is kept this long for the owner's session. */
 const MEK_CANDIDATE_SEC = 600;
+/** The candidates of the set-up page (no session there): a sid no session can have. */
+const SETUP_SID = 'setup:';
 /** Key kit checks per owner session and window (seconds). */
 const KIT_VERIFY_MAX = 30;
 const KIT_VERIFY_SEC = 600;
@@ -657,8 +677,17 @@ export class Directory extends DurableObject {
     };
   }
 
-  async setup({ authnHash, username, salt, t, verifier }) {
+  async setup({ authnHash, username, salt, t, verifier, keys = null }) {
     if (typeof authnHash !== 'string' || !HEX64_RE.test(authnHash)) return fail(404, 'setup_disabled', 'Setup is disabled.');
+    // The Drive keys the owner chose (a proposal) or entered: made in the same transaction as the
+    // owner, so the set-up never ends with other keys than the ones the page showed. Prepared
+    // first: everything below runs without an await, so nothing can come between the checks
+    // and the writes.
+    let prep = null;
+    if (keys) {
+      if (!KEY_RE.test(keys.root ?? '') || !KEY_RE.test(keys.sub ?? '')) return fail(400, 'invalid_key', 'Enter the root MEK and the first sub-MEK (32 bytes each), or generate them.');
+      if (!this.#hasKeyring()) prep = await this.#prepareKeys(bytesFromB64url(keys.root), bytesFromB64url(keys.sub));
+    }
     if (this.#meta(`authn_used:${authnHash}`)) {
       return fail(410, 'token_used', 'This setup token was already used. Set a new AUTHN value to run setup again.');
     }
@@ -670,6 +699,7 @@ export class Directory extends DurableObject {
     const clash = this.#userByName(username);
     if (clash && (!owner || clash.id !== owner.id)) return fail(409, 'username_taken', 'That username belongs to another account.');
     let recovered = false;
+    let made = null;
     this.ctx.storage.transactionSync(() => {
       if (owner) {
         recovered = true;
@@ -687,8 +717,12 @@ export class Directory extends DurableObject {
         this.#log(id, id, 'owner.created', `username=${username}`);
       }
       this.#setMeta(`authn_used:${authnHash}`, String(ts));
+      if (keys) {
+        if (prep && !this.#hasKeyring()) { this.#writeKeys(prep, keys.how || 'at set-up', null); made = 'created'; } else made = 'kept';
+        this.sql.exec('DELETE FROM mek_candidates WHERE sid = ?', SETUP_SID);
+      }
     });
-    return { ok: true, recovered, ...(recovered ? { ownerId: owner.id } : {}) };
+    return { ok: true, recovered, ...(recovered ? { ownerId: owner.id } : {}), ...(made ? { keys: made } : {}) };
   }
 
   // ── login / sessions ─────────────────────────────────────────────────────
@@ -696,10 +730,28 @@ export class Directory extends DurableObject {
     const u = this.#loginUser(username);
     if (u) return { salt: u.pw_salt, t: u.pw_t };
     // Unknown user: a stable, secret-keyed fake salt, so the response does not
-    // reveal whether the account exists.
-    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(String(username).toLowerCase())));
+    // reveal whether the account exists. Anyone may ask for one for any name,
+    // so its key serves this alone (#purposeKey).
+    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', await this.#purposeKey(KEY_INFO.prelogin), utf8(String(username).toLowerCase())));
     return { salt: b64urlFromBytes(mac.subarray(0, 16)), t: ARGON2.tDefault };
+  }
+
+  /**
+   * The HMAC key of one use of the Directory's secret, derived with
+   * HKDF-SHA-256 and that use's `info` (KEY_INFO): the prelogin fake salt, the
+   * anonymous tracker's tag and the public quota subjects each have their own
+   * key, so an output of one (such as the fake salt, which anyone may ask for)
+   * reveals nothing about another and cannot stand in for it.
+   */
+  async #purposeKey(info) {
+    this.purposeKeys ??= new Map();
+    let key = this.purposeKeys.get(info);
+    if (!key) {
+      const ikm = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), 'HKDF', false, ['deriveKey']);
+      key = await crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: utf8(info) }, ikm, { name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign']);
+      this.purposeKeys.set(info, key);
+    }
+    return key;
   }
 
   async login({ username, verifier, lockoutOff = false }) {
@@ -809,21 +861,36 @@ export class Directory extends DurableObject {
     if (subjectId) this.#log(actorId, subjectId, 'logout');
   }
 
-  async impersonate(ownerId, targetId) {
+  /**
+   * Start impersonating `targetId`. `replaced` ({ sid, exp }) is the owner's
+   * session that the impersonation session replaces: it is revoked here, so a
+   * copy of the old cookie stops working (the Worker gives the new session the
+   * old one's absolute timeout).
+   */
+  async impersonate(ownerId, targetId, replaced = null) {
     const o = this.#user(ownerId);
     const t = this.#user(targetId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can impersonate.');
     if (!t || t.id === o.id || t.role === 'public') return fail(404, 'not_found', 'User not found.');
     if (t.disabled) return fail(409, 'account_disabled', 'That account is disabled.');
+    this.#revokeReplaced(replaced);
     this.#log(o.id, t.id, 'impersonate.start', `as=${t.username}`);
     return { ok: true, target: this.#publicUser(t), ver: o.sess_ver, settings: this.#sessionSettings() };
   }
 
-  async endImpersonation(ownerId, targetId) {
+  /** "Return to admin": `replaced` is the impersonation session, revoked as above. */
+  async endImpersonation(ownerId, targetId, replaced = null) {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner' || o.disabled) return fail(403, 'forbidden', 'Not impersonating.');
+    this.#revokeReplaced(replaced);
     this.#log(o.id, targetId, 'impersonate.end');
     return { ok: true, user: this.#publicUser(o), ver: o.sess_ver, settings: this.#sessionSettings() };
+  }
+
+  /** Revoke the session a new one replaces (kept on the revoked list until it would have expired). */
+  #revokeReplaced(replaced) {
+    if (!replaced || typeof replaced.sid !== 'string' || !Number.isSafeInteger(replaced.exp)) return;
+    this.sql.exec('INSERT OR REPLACE INTO revoked_sessions (sid, exp) VALUES (?, ?)', replaced.sid, replaced.exp);
   }
 
   // ── the signed-in user ───────────────────────────────────────────────────
@@ -1698,7 +1765,7 @@ export class Directory extends DurableObject {
   }
 
   async #subjectHash(kind, value) {
-    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const key = await this.#purposeKey(KEY_INFO.subject);
     return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(`secbin-public/${kind}:${value}`))).subarray(0, 18));
   }
 
@@ -1708,8 +1775,7 @@ export class Directory extends DurableObject {
   }
 
   async #hmacTag(data) {
-    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    return new Uint8Array(await crypto.subtle.sign('HMAC', key, data)).subarray(0, 8);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', await this.#purposeKey(KEY_INFO.trackerTag), data)).subarray(0, 8);
   }
 
   /** A fresh, stateless tracker id (nothing is stored until it creates a share). */
@@ -2204,6 +2270,7 @@ export class Directory extends DurableObject {
     const s = this.#settings();
     const used = this.sql.exec('SELECT used FROM drive_usage WHERE user_id = ?', uid).toArray()[0]?.used ?? 0;
     const mig = this.sql.exec('SELECT state FROM drive_migration WHERE user_id = ?', uid).toArray()[0];
+    const current = effectiveAt(this.#mekRows(), now())?.id ?? null;
     return {
       ok: true,
       enabled: !!L.driveEnabled,
@@ -2212,11 +2279,13 @@ export class Directory extends DurableObject {
       maxFile: L.driveMaxFileBytes === null || L.driveMaxFileBytes === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxFileBytes),
       pendingSec: this.#caps(u, L, s).pendingSec,
       used,
-      current: effectiveAt(this.#mekRows(), now())?.id ?? null,
+      current,
       // The Drive made before the key model v2 still waits for its upgrade.
       migration: mig ? mig.state : null,
       // The role's file policy (as for file shares): the types Drive uploads and take-ins may have, how deep folders nest.
       policy: { mode: L.fileTypeMode ?? 'any', rules: Array.isArray(L.fileTypeRules) ? L.fileTypeRules : [], maxFolderDepth: L.maxFolderDepth ?? null },
+      // The user's personal kit against the keys now (the pages' "download a new kit" notice).
+      kit: this.#userKitState(uid, current),
     };
   }
 
@@ -2279,30 +2348,96 @@ export class Directory extends DurableObject {
   }
 
   async #createKeys(root, sub, how, actorId) {
+    const prep = await this.#prepareKeys(root, sub);
+    // Another call may have made them meanwhile (nothing above wrote).
+    if (this.#hasKeyring()) return { ok: true, created: false };
+    this.ctx.storage.transactionSync(() => this.#writeKeys(prep, how, actorId));
+    return { ok: true, created: true, root: prep.rfp, sub: { id: prep.id, fp: prep.sfp } };
+  }
+  /** There is a keyring, or there was one (a lost one is restored, never made anew). */
+  #hasKeyring() {
+    return !!(this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever'));
+  }
+  /** The first keyring's rows, made ready outside any transaction (sealing and fingerprints are async). */
+  async #prepareKeys(root, sub) {
     const id = newMekId();
     const [sealed, rfp, sfp] = await Promise.all([sealSubMek(root, id, sub), keyFingerprint(root), keyFingerprint(sub)]);
-    // Another call may have made them meanwhile (nothing above wrote).
-    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) return { ok: true, created: false };
+    return { id, root: b64urlFromBytes(root), sealed, rfp, sfp };
+  }
+  /** Write the first keyring (inside the caller's transaction). */
+  #writeKeys(prep, how, actorId) {
     const ts = now();
-    this.ctx.storage.transactionSync(() => {
-      this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(root), fp: rfp, created: ts }));
-      this.#setMeta('mek.ever', '1');
-      this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, NULL, ?, ?)', id, sealed, sfp, ts, ts, '');
-      this.#keyLog(actorId, 'keys.created', `root MEK ${rfp}, sub-MEK ${id} (${sfp}), ${how}`);
-    });
-    return { ok: true, created: true, root: rfp, sub: { id, fp: sfp } };
+    this.#setMeta('mek.root', JSON.stringify({ key: prep.root, fp: prep.rfp, created: ts }));
+    this.#setMeta('mek.ever', '1');
+    this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, NULL, ?, ?)', prep.id, prep.sealed, prep.sfp, ts, ts, '');
+    // The first keyring: version 1.
+    this.#setMeta('mek.version', JSON.stringify({ n: 1, at: ts }));
+    this.#keyLog(actorId, 'keys.created', `root MEK ${prep.rfp}, sub-MEK ${prep.id} (${prep.sfp}), ${how}`);
   }
 
   /**
-   * Set-up (the AUTHN page): the root MEK and the first sub-MEK, generated
-   * here (`generate`) or entered by the owner (`root`, `sub`: 32 bytes each,
-   * base64url, checked by the Worker). Keys that exist are never replaced.
+   * Set-up (the AUTHN page) with no keys chosen or entered (the API's
+   * default): the root MEK and the first sub-MEK generated here, after the
+   * owner account is made. Keys that exist are never replaced. The keys the
+   * page showed (a proposal chosen) or the owner entered are made with the
+   * owner instead, in one transaction (setup `keys`).
    */
-  async setupKeys({ generate = true, root = null, sub = null } = {}) {
-    if (this.#keyRoot() || this.#mekRows().length || this.#meta('mek.ever')) return { ok: true, created: false };
-    if (!generate && !(KEY_RE.test(root ?? '') && KEY_RE.test(sub ?? ''))) return fail(400, 'invalid_key', 'Enter the root MEK and the first sub-MEK (32 bytes each), or generate them.');
-    const r = await this.#createKeys(generate ? newKey() : bytesFromB64url(root), generate ? newKey() : bytesFromB64url(sub), generate ? 'generated at set-up' : 'entered at set-up', null);
+  async setupKeys() {
+    const drop = () => this.sql.exec('DELETE FROM mek_candidates WHERE sid = ?', SETUP_SID);
+    if (this.#hasKeyring()) { drop(); return { ok: true, created: false }; }
+    const r = await this.#createKeys(newKey(), newKey(), 'generated at set-up', null);
+    drop();
     return r;
+  }
+
+  /**
+   * Set-up (the AUTHN page): a proposed root MEK and first sub-MEK, generated
+   * here for whoever holds the set-up token (the Worker checked it) and shown
+   * on the page, masked until "Show". They are only candidates (as Admin →
+   * Security → Keys makes them): kept for 10 minutes, and no keyring exists
+   * until the set-up uses them ("Use these"); a new pair ("Generate again")
+   * replaces the one before. Only for an unspent setup token with no owner
+   * yet, while there is no keyring and never was one. Not logged: the pair
+   * the set-up adopts is (keys.created, by fingerprint).
+   */
+  async setupCandidates(authnHash) {
+    const refused = () => {
+      // The set-up call's own check: a spent token (one set-up per AUTHN value), or an owner already (a recovery keeps the keys).
+      if (typeof authnHash !== 'string' || this.#meta(`authn_used:${authnHash}`) || this.#owner()) return fail(410, 'token_used', 'This setup token was already used, or the owner exists (a recovery keeps the Drive keys): there are no keys to propose.');
+      if (this.#hasKeyring()) return fail(409, 'keys_exist', 'The Drive keys exist already: the set-up keeps them.');
+      return null;
+    };
+    const no = refused();
+    if (no) return no;
+    const pair = [['root', newKey(), newId()], ['sub', newKey(), newId()]];
+    const fps = await Promise.all(pair.map(([, key]) => keyFingerprint(key)));
+    const exp = now() + MEK_CANDIDATE_SEC;
+    // Checked again after the await (nothing may have changed meanwhile). Not in the admin audit:
+    // only the pair the set-up uses is (keys.created, by fingerprint), so proposals cannot flood it.
+    const again = refused();
+    if (again) return again;
+    this.ctx.storage.transactionSync(() => {
+      this.#purgeCandidates();
+      this.sql.exec('DELETE FROM mek_candidates WHERE sid = ?', SETUP_SID);
+      for (const [purpose, key, id] of pair) this.sql.exec('INSERT INTO mek_candidates (id, sid, key, exp, purpose) VALUES (?, ?, ?, ?, ?)', id, SETUP_SID, b64urlFromBytes(key), exp, purpose);
+    });
+    const out = (i) => ({ id: pair[i][2], key: b64urlFromBytes(pair[i][1]), fp: fps[i] });
+    return { ok: true, root: out(0), sub: out(1), expires: exp };
+  }
+
+  /**
+   * The pair the set-up page chose ("Use these": the ids setupCandidates
+   * gave) → { root, sub } (the keys, base64url, for setup's `keys`), or 410 when
+   * either is gone (10 minutes, or a newer pair). Checked before the owner
+   * account is made, so that a set-up never ends without the keys it showed.
+   */
+  async setupChosen({ root, sub } = {}) {
+    this.#purgeCandidates();
+    const get = (id, purpose) => (typeof id === 'string' ? this.sql.exec('SELECT key FROM mek_candidates WHERE id = ? AND sid = ? AND purpose = ? AND exp > ?', id, SETUP_SID, purpose, now()).toArray()[0] : null);
+    const r = get(root, 'root');
+    const s = get(sub, 'sub');
+    if (!r || !s) return fail(410, 'candidate_expired', 'The generated Drive keys are no longer available (they are kept for 10 minutes): generate them again.');
+    return { ok: true, root: r.key, sub: s.key };
   }
 
   /**
@@ -2338,7 +2473,7 @@ export class Directory extends DurableObject {
       if (old) k.kekOld = b64urlFromBytes(await deriveKek(old.key, s.key, salt, uid));
       keys.push(k);
     }
-    return { ok: true, userId: uid, salt, current: cur?.id ?? null, changing: !!old, keys, missing, broken };
+    return { ok: true, userId: uid, salt, current: cur?.id ?? null, changing: !!old, keys, missing, broken, version: this.#keyVersion().n };
   }
 
   /**
@@ -2458,6 +2593,7 @@ export class Directory extends DurableObject {
       current: cur ? cur.id : null,
       job: this.#json('mek.job'),
       kit, kitFresh: kit ? await this.#kitFresh(kit, root, rows) : false,
+      version: this.#keyVersion(),
       users: this.sql.exec("SELECT COUNT(*) AS c FROM users WHERE role IN ('owner', 'user')").one().c,
       now: t,
     };
@@ -2479,6 +2615,60 @@ export class Directory extends DurableObject {
     if (!kit || !root || kit.root !== root.fp) return false;
     const have = new Set(Array.isArray(kit.subs) ? kit.subs : []);
     return rows.every((r) => have.has(r.fp)) && kit.users === await this.#usersHash();
+  }
+
+  /**
+   * The keyring's version (docs/DRIVE.md §3.1) → { n, at }: `n` goes up by
+   * one on every key change (a sub-MEK added, rotated, deleted, made current
+   * or its dates edited; a root change or its undo; a restore that writes a
+   * key), `at` is when. Both kits carry it; 0 before there is a keyring. A
+   * keyring from before versions were kept is version 1, as of its latest key.
+   */
+  #keyVersion() {
+    const v = this.#json('mek.version');
+    if (v && Number.isSafeInteger(v.n) && v.n > 0) return { n: v.n, at: Number.isSafeInteger(v.at) ? v.at : null };
+    const root = this.#keyRoot();
+    const rows = this.#mekRows();
+    if (!root && !rows.length) return { n: 0, at: null };
+    return { n: 1, at: Math.max(root?.created ?? 0, ...rows.map((r) => r.created ?? 0)) || null };
+  }
+  /** One key change more (inside the change's own transaction). */
+  #bumpKeyVersion() {
+    this.#setMeta('mek.version', JSON.stringify({ n: this.#keyVersion().n + 1, at: now() }));
+  }
+
+  /**
+   * The user's personal kit against the keys now (the Account and Drive
+   * pages' notice): { version, versionAt, last: { at, version } | null,
+   * stale }. `stale`: a kit was downloaded, and since then the keys changed
+   * (a later version) or the current sub-MEK is one it does not hold (a
+   * scheduled one that has started). Never a key or a fingerprint.
+   */
+  #userKitState(uid, current = effectiveAt(this.#mekRows(), now())?.id ?? null) {
+    const v = this.#keyVersion();
+    const r = this.#json(`ukit:${uid}`);
+    const last = r && Number.isSafeInteger(r.at) && Number.isSafeInteger(r.v) ? { at: r.at, version: r.v } : null;
+    const held = new Set(Array.isArray(r?.meks) ? r.meks : []);
+    return { version: v.n, versionAt: v.at, last, stale: !!last && (last.version < v.n || (!!current && !held.has(current))) };
+  }
+  /** The personal kit's state for the signed-in user (never while the owner acts as them: the route refuses). */
+  async userKitStatus(uid) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    return { ok: true, ...this.#userKitState(uid) };
+  }
+  /**
+   * The user downloaded a personal kit of key version `version` holding the
+   * KEKs of `meks` (what driveKeys gave it): recorded, for the notice.
+   * → the new state.
+   */
+  async userKitDownloaded(uid, { version, meks = [] } = {}) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (!Number.isSafeInteger(version) || version < 0) return fail(400, 'invalid', 'Invalid key version.');
+    const ids = (Array.isArray(meks) ? meks : []).filter((x) => typeof x === 'string' && MEK_ID_RE.test(x)).slice(0, 200);
+    this.#setMeta(`ukit:${uid}`, JSON.stringify({ at: now(), v: version, meks: ids }));
+    return { ok: true, ...this.#userKitState(uid) };
   }
 
   /**
@@ -2575,6 +2765,7 @@ export class Directory extends DurableObject {
       this.#writeTimeline(next, rows);
       this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, NULL, ?, ?)', id, sealed, fp, start, t, text);
       if (k.candidate) this.sql.exec('DELETE FROM mek_candidates WHERE id = ?', k.candidate);
+      this.#bumpKeyVersion();
       this.#keyLog(ownerId, rotate ? 'keys.rotated' : 'keys.added', `sub-MEK ${id} (${fp}), ${k.how}, from ${start}`);
     });
     return { ok: true, id, fp, from: start };
@@ -2595,6 +2786,8 @@ export class Directory extends DurableObject {
     if (bad) return fail(409, 'invalid_dates', bad);
     this.ctx.storage.transactionSync(() => {
       this.#writeTimeline(next, rows);
+      // A note is not a key change; new dates are.
+      if (m.from !== r.from || m.until !== r.until) this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.dates', `sub-MEK ${id} (${r.fp}): from ${m.from} until ${m.until ?? 'open'}`);
     });
     return { ok: true };
@@ -2620,6 +2813,7 @@ export class Directory extends DurableObject {
     if (bad) return fail(409, 'invalid_dates', bad);
     this.ctx.storage.transactionSync(() => {
       this.#writeTimeline(next, rows);
+      if (next.some((x) => { const p = rows.find((y) => y.id === x.id); return p.from !== x.from || p.until !== x.until; })) this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.current', `sub-MEK ${id} (${r.fp}) is current from ${t}`);
     });
     return { ok: true };
@@ -2645,6 +2839,7 @@ export class Directory extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       this.#writeTimeline(next, rows);
       this.sql.exec('DELETE FROM meks WHERE id = ?', id);
+      this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.removed', `sub-MEK ${id} (${r.fp})`);
     });
     return { ok: true };
@@ -2700,6 +2895,7 @@ export class Directory extends DurableObject {
       this.sql.exec("DELETE FROM meta WHERE k = 'mek.rootCheck'");
       for (const [id, sealed] of resealed) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
       if (k.candidate) this.sql.exec('DELETE FROM mek_candidates WHERE id = ?', k.candidate);
+      this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.root_changed', `root MEK ${root.fp} → ${fp} (${k.how}); sub-MEKs re-sealed: ${rows.length}`);
     });
     k.key.fill(0);
@@ -2733,6 +2929,7 @@ export class Directory extends DurableObject {
       this.#setMeta('mek.rootOld', JSON.stringify({ key: b64urlFromBytes(root.key), fp: root.fp, created: root.created, origin: 'changed' }));
       this.sql.exec("DELETE FROM meta WHERE k = 'mek.rootCheck'");
       for (const [id, sealed] of resealed) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
+      this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.root_changed', `root change undone: back to root MEK ${old.fp} (from ${root.fp}${old.origin === 'changed' ? '' : '; it was put back from a key kit and opened items here'}); every item is re-sealed under it`);
     });
     return { ok: true, fp: old.fp, old: root.fp };
@@ -2832,7 +3029,8 @@ export class Directory extends DurableObject {
       salts[r.id] = { salt: r.salt, username: r.name };
     }
     const t = now();
-    const rec = { at: t, root: root.fp, subs: rows.map((r) => r.fp), users: await this.#usersHash() };
+    const version = this.#keyVersion();
+    const rec = { at: t, root: root.fp, subs: rows.map((r) => r.fp), users: await this.#usersHash(), v: version.n };
     this.ctx.storage.transactionSync(() => {
       this.#setMeta('mek.kit', JSON.stringify(rec));
       this.#keyLog(ownerId, 'keys.kit_exported', `root MEK ${root.fp}${old ? ` (and the previous one, ${old.fp}, during the root change)` : ''}; sub-MEKs: ${rows.length}; user salts: ${Object.keys(salts).length}`);
@@ -2840,7 +3038,7 @@ export class Directory extends DurableObject {
     return {
       ok: true, kit: rec,
       material: {
-        made: t, current: effectiveAt(rows, t)?.id ?? null,
+        made: t, current: effectiveAt(rows, t)?.id ?? null, keyVersion: version,
         root: { key: b64urlFromBytes(root.key), fp: root.fp, created: root.created },
         ...(old ? { rootOld: { key: b64urlFromBytes(old.key), fp: old.fp, created: old.created } } : {}),
         subs: rows.map((r) => ({ id: r.id, key: b64urlFromBytes(subs.get(r.id).key), fp: r.fp, from: r.from, until: r.until, created: r.created, note: r.note })),
@@ -2883,7 +3081,7 @@ export class Directory extends DurableObject {
     out.salts.extra = Object.keys(salts || {}).filter((id) => !users.some((u) => u.id === id)).length;
     const complete = out.root === 'match' && out.subs.every((s) => s.result === 'match') && out.salts.match === out.salts.total;
     this.#keyLog(ownerId, 'keys.kit_verified', `${complete ? 'complete' : 'incomplete'}: root ${out.root}; sub-MEKs ${out.subs.filter((s) => s.result === 'match').length}/${out.subs.length}; salts ${out.salts.match}/${out.salts.total}`);
-    return { ok: true, complete, now: t, ...out };
+    return { ok: true, complete, now: t, version: this.#keyVersion(), ...out };
   }
 
   /** A fixed-window counter kept in meta (key kit checks): → { ok, retryAfter }. */
@@ -3023,6 +3221,8 @@ export class Directory extends DurableObject {
         this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, ?, ?, ?)', r.id, r.sealed, r.fp, r.from, r.until, r.created, r.note);
       }
       for (const [uid, salt] of addSalts) this.sql.exec('INSERT OR IGNORE INTO user_salts (user_id, salt, created) VALUES (?, ?, ?)', uid, salt, t);
+      // A root MEK or a sub-MEK written is a key change (user salts alone are not).
+      if (newRoot || oldRoot || reseal.length || next.length !== rows.length) this.#bumpKeyVersion();
       this.#keyLog(ownerId, 'keys.restored', `root MEK ${out.root}${newRoot ? ` (${rootFp})` : ''}${oldRoot ? `; the previous root MEK ${oldRoot.fp} put back (the root change's re-seal is to run again)` : ''}; sub-MEKs ${out.subs.filter((s) => /restored|added/.test(s.result)).length} put back; user salts ${addSalts.length} put back`);
     });
     return { ok: true, dryRun: false, changed: true, ...out };
@@ -3491,6 +3691,10 @@ export class Directory extends DurableObject {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in: turn public access on or off in its settings.');
+    // The owner renames their own account from Account, which asks for the
+    // password or a passkey (as for the owner's password, setPassword below):
+    // this route has no confirmation, so it never changes the owner's sign-in name.
+    if (u.role === 'owner' && username !== undefined) return fail(403, 'use_account_page', 'Change your own username from Account, with your password or a passkey.');
     if (disabled !== undefined) {
       if (typeof disabled !== 'boolean') return fail(400, 'invalid', 'disabled must be true or false');
       if (u.role === 'owner' && disabled) return fail(403, 'forbidden', 'The owner cannot be disabled.');
@@ -3526,7 +3730,7 @@ export class Directory extends DurableObject {
       this.sql.exec('DELETE FROM meta WHERE k IN (SELECT ? || id FROM passkeys WHERE user_id = ?)', handleAlias(''), id);
       for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges', 'drive_usage', 'user_salts', 'drive_migration']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
       this.sql.exec('DELETE FROM users WHERE id = ?', id);
-      this.sql.exec('DELETE FROM meta WHERE k = ?', `drive.escrowKid:${id}`);
+      this.sql.exec('DELETE FROM meta WHERE k IN (?, ?)', `drive.escrowKid:${id}`, `ukit:${id}`);
       this.#log(actorId, id, 'user.deleted', `username=${u.username}`);
     });
     return { ok: true, shares };
@@ -3629,7 +3833,37 @@ export class Directory extends DurableObject {
     return fail(404, 'not_found', 'Not found.');
   }
 
-  async setLimits(scopeIn, channel, patch, actorId) {
+  /**
+   * The owner's confirmation for an admin change that weakens a security
+   * control (`weak`: what it weakens, see weakenedSettings / weakenedLimits
+   * in settings.js; [] for none): the password or a passkey (`step`), checked
+   * as every step-up. Missing → 400 reauth_required with the list, so the
+   * admin panel asks for it only then. Returns null when nothing is needed or
+   * the step-up passed, else the failure to return.
+   */
+  async #confirmWeakening(actorId, weak, step) {
+    if (!weak.length) return null;
+    const actor = this.#user(actorId);
+    if (!actor || actor.role !== 'owner' || actor.disabled) return fail(403, 'forbidden', 'Only the owner can change this.');
+    if (!step || (step.current === undefined && !step.reauth)) {
+      return fail(400, 'reauth_required', `This change weakens a security control (${weak.join(', ')}): confirm with your password or a passkey.`, { weakens: weak });
+    }
+    return this.#stepUp(actor, step, step.lockoutOff === true);
+  }
+
+  /**
+   * The limits admin scope `key` resolves to on `channel`, from the scope's
+   * own rows for that channel (`rows`): the all-channel limits (the Default
+   * role's rows, then the scope's), or the API's, which only narrow them.
+   */
+  #scopeLimits(key, channel, rows) {
+    const own = channel === 'all' ? rows : this.#limitRows(key, 'all');
+    const all = key === '' ? resolveLimits(own, {}) : resolveLimits(this.#limitRows('', 'all'), own);
+    if (channel === 'all') return all;
+    return key === '' ? restrictForApi(all, rows, {}) : restrictForApi(all, this.#limitRows('', 'api'), rows);
+  }
+
+  async setLimits(scopeIn, channel, patch, actorId, step = null) {
     const sc = this.#adminScope(scopeIn);
     if (sc.ok === false) return sc;
     const scopeUserId = sc.key;
@@ -3647,6 +3881,15 @@ export class Directory extends DurableObject {
     } catch (e) {
       return fail(400, 'invalid_limit', e.message);
     }
+    // Loosening sign-in, sessions, the log, or what the role's shares, links
+    // and API keys may be (weakenedLimits) needs the owner's confirmation,
+    // compared on what the scope resolves to on this channel.
+    const rows = this.#limitRows(scopeUserId, channel);
+    const next = { ...rows };
+    for (const [k, v] of ops) { if (v === undefined) delete next[k]; else next[k] = v; }
+    const weak = weakenedLimits(this.#scopeLimits(scopeUserId, channel, rows), this.#scopeLimits(scopeUserId, channel, next), this.#settings());
+    const wrong = await this.#confirmWeakening(actorId, weak, step);
+    if (wrong) return wrong;
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) {
         if (v === undefined) this.sql.exec('DELETE FROM limits WHERE user_id = ? AND channel = ? AND key = ?', scopeUserId, channel, k);
@@ -3864,7 +4107,7 @@ export class Directory extends DurableObject {
     return this.#settings();
   }
 
-  async setSettings(patch, actorId) {
+  async setSettings(patch, actorId, step = null) {
     if (!patch || typeof patch !== 'object') return fail(400, 'invalid', 'patch must be an object');
     const ops = [];
     try {
@@ -3872,10 +4115,18 @@ export class Directory extends DurableObject {
     } catch (e) {
       return fail(400, 'invalid_setting', e.message);
     }
-    const cur = this.#settings();
+    let cur = this.#settings();
     const merged = { ...cur, ...Object.fromEntries(ops) };
     const bad = crossCheckSettings(merged);
     if (bad) return fail(400, 'invalid_setting', bad);
+    // Turning CSRF tokens off, loosening the lockout, the brute-force or rate
+    // limits, the sessions or the log retention needs the owner's confirmation.
+    const weak = weakenedSettings(cur, merged);
+    if (weak.length) {
+      const wrong = await this.#confirmWeakening(actorId, weak, step);
+      if (wrong) return wrong;
+      cur = this.#settings(); // as it is now, for the log below
+    }
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
     });
@@ -3919,7 +4170,7 @@ export class Directory extends DurableObject {
     return this.sql.exec('SELECT id, cidr, action, expires, note, created FROM ip_rules WHERE expires IS NULL OR expires > ? ORDER BY created DESC', ts).toArray();
   }
 
-  async addIpRule({ cidr, action, expires, note, callerIp = null }, actorId) {
+  async addIpRule({ cidr, action, expires, note, callerIp = null }, actorId, step = null) {
     const c = normalizeRule(cidr);
     if (!c) return fail(400, 'invalid_cidr', 'Enter an IPv4/IPv6 address, a CIDR block (10.0.0.0/8) or a range (10.0.0.5-10.0.0.20).');
     if (action !== 'allow' && action !== 'block') return fail(400, 'invalid_action', 'action must be allow or block');
@@ -3933,6 +4184,13 @@ export class Directory extends DurableObject {
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
     const n = cleanLabel(note);
     if (n === null) return fail(400, 'invalid_note', 'Notes are up to 100 characters.');
+    // An allow rule exempts its addresses from every brute-force block and
+    // rate limit (src/lib/guard.js), whatever its size: it needs the owner's
+    // confirmation. A block rule only tightens.
+    if (action === 'allow') {
+      const wrong = await this.#confirmWeakening(actorId, ['ipRule.allow'], step);
+      if (wrong) return wrong;
+    }
     const id = newId();
     this.sql.exec('INSERT INTO ip_rules (id, cidr, action, expires, note, created) VALUES (?, ?, ?, ?, ?, ?)', id, c, action, expires ?? null, n, now());
     this.#log(actorId, null, 'iprule.added', `${action} ${c}${n ? ` (${n})` : ''}`);

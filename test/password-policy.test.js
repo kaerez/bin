@@ -2,11 +2,11 @@
 // per user (pw* limits); /me hands it to the browser, which enforces it. The
 // owner always gets the built-in policy.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson } from './helpers.js';
+import { owner, makeUser, fetchJson, OWNER_STEP } from './helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
-const limits = (scope, patch) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope, channel: 'all', patch } });
+const limits = (scope, patch) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope, channel: 'all', patch, ...OWNER_STEP } });
 const policy = async (cookie) => (await (await fetchJson('/api/private/me', { cookie })).json()).passwordPolicy;
 
 describe('password policy', () => {

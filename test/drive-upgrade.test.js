@@ -15,7 +15,7 @@
 // the release before holds while a Drive waits. Synthetic data only.
 import { env, SELF, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { ORIGIN, owner, makeUser, fetchJson, intent, cookieOf, proofFor, salt16, freshIp } from './helpers.js';
+import { ORIGIN, owner, makeUser, fetchJson, intent, cookieOf, proofFor, salt16, freshIp, liveCookie } from './helpers.js';
 import { enableDrive, driveKeys, openStored, node, sealed } from './drive-helpers.js';
 import { openLinkPriv, driveOf, dirStub } from './reverse-helpers.js';
 import * as main from './fixtures/drivekeys-main.js';
@@ -60,7 +60,7 @@ afterAll(() => { globalThis.fetch = realFetch; delete globalThis.sessionStorage;
  * /api/private/me at load; nav.js bindSession).
  */
 async function actAs(cookie) {
-  as = cookie;
+  as = liveCookie(cookie);
   bindSession(await (await fetchJson('/api/private/me', { cookie })).json());
 }
 

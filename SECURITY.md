@@ -279,6 +279,8 @@ signed-in browser session makes to its own account on the Account page:
 | Create an API key | `POST /api/private/me/keys` | `account` |
 | Change an API key (name, scopes) | `PATCH /api/private/me/keys/:id` | `account` |
 | Revoke an API key | `DELETE /api/private/me/keys/:id` | `account` |
+| Download the Drive personal kit | `POST /api/private/drive/kit` | `account` |
+| Verify a Drive personal kit | `POST /api/private/drive/kit/verify` | `account` |
 
 Asking for a challenge changes nothing and needs no token: the passkey registration options
 (`POST /api/private/me/passkeys/options`) and the passkey "confirm it's you" challenge
@@ -295,7 +297,8 @@ CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
   the widget has issued a token, and again after each token is used (one token per call) until
   the next one arrives; if the widget cannot load they stay disabled and the page says why. On
   the Account page each card that changes something (username, password, passkeys and recovery
-  codes, API keys) has its own always-visible widget; one widget serves every button of its card,
+  codes, API keys) or hands out keys (the Drive personal kit: Download and Verify) has its own
+  always-visible widget; one widget serves every button of its card,
   including the Remove and Revoke buttons of each table row. This is a usability guard: the
   server-side check below is what enforces it.
 - **Server-side verification** (`src/lib/turnstile.js`). Each protected call must carry
@@ -584,7 +587,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   code point, so spaces, emoji and combining marks all count).
 - **Passwords** never reach the server: the client sends `Argon2id(password, salt)`; the server
   stores `SHA-256("secbin-auth/v2" ‖ that)`. Prelogin returns a stable, secret-keyed fake salt
-  for unknown usernames, and every account uses the same Argon2id time cost, so the response
+  for unknown usernames (an HMAC under a key of its own, derived from the Directory's secret with
+  HKDF-SHA-256 and the info `secbin-directory/prelogin-salt/v1`, so the salts anyone can ask for
+  say nothing about the tracker tags and quota subjects, which have keys of their own), and every account uses the same Argon2id time cost, so the response
   never reveals whether an account exists. Minimum length (12) is enforced client-side — the
   server cannot see the password. Trade-off: the stretched value is password-equivalent in
   transit (TLS-protected), as with any client-side stretching scheme.
@@ -592,7 +597,10 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   `SIG`) inside a JWE (A256GCM, `ENC`). Strict parsing (exact headers, no `alg: none`, no
   algorithm confusion). Every request re-checks revocation, disabled state and the per-user
   session version (bumped by password change/reset/disable), plus admin-configured idle and
-  absolute timeouts. Missing/invalid `SIG`/`ENC` ⇒ login is unavailable (`503`), public links
+  absolute timeouts. Starting an impersonation and "Return to admin" each issue a new session
+  (a new id, so a new CSRF token) that keeps the absolute end of the sign-in it came from, and
+  revoke the session they replace: switching back and forth never extends a session or leaves
+  the old cookie usable. Missing/invalid `SIG`/`ENC` ⇒ login is unavailable (`503`), public links
   keep working.
 - **When a session ends in an open page** (public/dashboard/js/session-timeout.js): the page
   warns two minutes before (WCAG 2.2.1), measuring its clock against the server's time (`now` in
@@ -713,7 +721,8 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
         limit (see "Reverse shares"). The uploader page's client (`public/js/reverseclient.js`,
         through `api.js`'s `reverseApi`) sends no token and never asks `/api/private/me`.
     - **Owner switch:** Admin → Settings → CSRF tokens (`csrfTokens`, on by default,
-      server-wide). Off, the server stops requiring `X-Secbin-CSRF` (the header is ignored); the
+      server-wide). Turning it off needs the owner's password or a passkey (see "Admin changes
+      that weaken a control"); turning it on needs nothing. Off, the server stops requiring `X-Secbin-CSRF` (the header is ignored); the
       cookie is still issued, and every other guard above stays enforced. The value is read
       with the session in the same Directory call, so the switch adds no round trip and takes
       effect on the next request. Turning it on again covers open pages through the one retry.
@@ -771,7 +780,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   the owner-only admin audit keeps the start, end and real actor.
   - **Who:** the owner only, never nested, never of the owner's own account. The session is
     bound to the owner's session version, so it ends when the owner's password changes or the
-    owner is disabled; it also ends when the user is disabled.
+    owner is disabled; it also ends when the user is disabled. It keeps the absolute end of the
+    owner's sign-in, and starting it (or returning to admin) revokes the session it replaces
+    (see Sessions above).
   - **What stays out of reach:** the admin panel (every `/api/private/admin/*` route but
     "Return to admin" refuses with `impersonating`), and with it minting keys for the owner.
     Keys created on the user's Account page are the user's.
@@ -831,7 +842,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     and tracking;
   - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges
     (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard). A block rule
-    that covers the owner's own address is refused unless an allow rule covers them first;
+    that covers the owner's own address is refused unless an allow rule covers them first.
+    Adding an allow rule, of any size, needs the owner's password or a passkey (its addresses are
+    never blocked or rate-limited); a block rule needs nothing;
   - account lockout after X failed logins (owner exempt — recover via setup if needed). Per-IP
     protection and account lockout are complementary: the first stops one source guessing
     (any account), the second stops many sources guessing one account. Usernames that do not
@@ -845,9 +858,40 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - **the owner and global settings:** limits, quotas, the global share-size cap, the viewer
     switch and size, and lockout never apply to the owner. Security controls that protect the
     owner do: session timeouts, per-IP brute-force protection and IP rules (so an owner with no
-    lockout still cannot be guessed at without limit). The owner's own password cannot be reset
-    from the admin UI or API (`403 use_account_page`); it changes on Account, with the current
-    password, or through setup recovery;
+    lockout still cannot be guessed at without limit). The owner's own password cannot be reset,
+    and the owner's own username cannot be changed, from the admin UI or API (`403
+    use_account_page`); they change on Account, with the password or a passkey (the password
+    also through setup recovery);
+  - **admin changes that weaken a control** need the owner's password or a passkey, checked as
+    every step-up (failures count toward the account's limit and the network's login failures;
+    `400 reauth_required` with the list of what the change weakens when it is missing).
+    Tightening, and every other change, needs nothing. What counts (`src/lib/settings.js`):
+    - Settings: CSRF tokens off; a higher `lockout.max` or `guard.*.max`, a shorter
+      `lockout.windowSec`, `lockout.lockSec`, `guard.*.windowSec` or `guard.*.blockSec`; a
+      longer `guard.v6Prefix`; longer `session.idleSec` or `session.absSec` (the owner's own
+      sessions); `public.enabled` turned on; a higher `public.newTrackersPerIp` or a shorter
+      `public.newTrackersWindowSec`; a shorter `log.maxAgeSec` or a smaller `log.maxEntries`;
+      a `log.ownerMaxAgeSec` or `log.ownerMaxEntries` where there was none, or a smaller one;
+    - role options, the public account's included (each channel, compared on what the scope
+      resolves to, so "same as Default" and lifting an API restriction count too):
+      - sign-in and sessions: `passkeys` towards off (second → any → off); a lower
+        `pwMinLength`, or `pwUpper` / `pwLower` / `pwDigit` / `pwSymbol` turned off; longer
+        `sessionIdleSec` or `sessionAbsSec`; a `logMaxAgeSec` or `logMaxEntries` where there
+        was none, or a smaller one;
+      - the human check and passwords: `shareCaptcha`, `reverseCaptcha` and `reversePassword`
+        towards off (require → allow → off); `shareCaptchaDefault`, `reverseCaptchaDefault`
+        and `reversePasswordDefault` on → off;
+      - lifetimes and views: `maxExpireSec`, `reverseMaxExpireSec`, `maxViews` and
+        `reverseMaxViews` raised or removed (no limit); `allowUnlimitedViews`,
+        `reverseAllowUnlimitedViews` and `reverseNoExpiry` turned on;
+      - what may be shared: `url`, `secret` and `apiEnabled` turned on; `fileTypeMode`
+        towards any (allow → block → any), or, with the same mode, a type added to an allow
+        list or removed from a block list; `urlRules` gaining a rule;
+    - IP rules: adding an allow rule.
+    The Turnstile keys (Security → CAPTCHA) need the step-up for every change, removing them
+    included.
+    Imports already need the step-up for every part. The owner acting as a user cannot reach
+    any admin route;
   - **password change** is never blocked by a lockout, so a stranger failing logins cannot stop
     a user from changing a password they fear is compromised. It still cannot become a guessing
     oracle for a stolen session:
@@ -930,15 +974,18 @@ codes as safe as the password.
   A flood of requests therefore cannot push out anyone's pending sign-in.
 - **Step-up and Turnstile.** When Turnstile is on, every confirmation above made from the
   Account page also needs a fresh human-check token (see *Cloudflare Turnstile*). The owner's
-  confirmations in the admin panel (for example log clearing and the owner's own keys and
-  passkeys there) check the password or a passkey, but not Turnstile. All of them need a
+  confirmations in the admin panel (for example log clearing, the owner's own keys and
+  passkeys there, and changes that weaken a control: "admin changes that weaken a control"
+  above) check the password or a passkey, but not Turnstile. All of them need a
   signed-in session, wrong answers count toward the same limit as a password change (all
   sessions end after `lockout.max`), and the IP login guard applies.
 - **Losing everything.**
   - The admin can remove any account's passkeys and codes, the owner's included (Users →
-    Manage → Passkeys), after which the password alone signs in. This needs the acting
-    admin's own current password, so a stolen admin session alone cannot strip anyone's
-    second factor; wrong passwords count as for a password change.
+    Manage → Passkeys), after which the password alone signs in. For another user's account
+    this needs no confirmation from the owner (as for setting their password: the owner's
+    session is the authority), so a stolen owner session can remove another user's second
+    factor. For the owner's own account it needs the owner's password or a passkey, as on
+    Account; wrong answers count as for a password change.
   - Passwords and passkeys are separate. An admin password reset and a user's own password
     change keep the passkeys and recovery codes, and an import never changes an existing
     account's password, recovery codes or passkeys (it can only add passkeys). After a takeover, remove them as well. After a user's own change, Account
@@ -1007,10 +1054,36 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   never gets a new random salt in place of a lost one). A generated key is used only for what it
   was made for (a root MEK or a sub-MEK), and an unused one is deleted after 10 minutes. Every
   keyring change, and the previews of a restore or an import, need the step-up.
+- **Set-up keys.** The set-up page shows the root MEK and first sub-MEK the server proposes,
+  masked until Show, with "Use these", "Generate again" and "Enter manually". The proposal
+  (`POST /api/auth/setup/candidate`) is made only for a request with an unspent setup token
+  (checked in constant time; wrong tokens count against the network like the set-up's own) and
+  the intent header, only while no owner exists (a spent token, or an owner: `410 token_used`)
+  and there is no keyring and never was one. A network gets at most 20 proposals per 10 minutes
+  (the Guard's `setup-candidate` scope, which the owner sees and lifts like the others). A
+  proposal is kept as two candidates (a sid no session can have) for 10 minutes and a new one
+  replaces the last; proposals are not written to the admin audit, so they cannot flood it:
+  only the pair the set-up adopts is (`keys.created`, by fingerprint). No keyring exists until
+  the set-up sends the pair's ids, checked before anything is written (`410 candidate_expired`
+  otherwise); the pair (or keys entered by hand) is then written in the same transaction as the
+  owner account, so a failure leaves neither and the set-up can be run again. Copying a key
+  (the set-up page, Security → Keys) clears the clipboard after 60 s only where the page may
+  read it back and it still holds that key; the site's Permissions-Policy denies
+  `clipboard-read`, which is kept, so in practice the page tells the owner to clear the
+  clipboard (and any clipboard history) instead.
 - **Kits.** The personal kit (every user) holds the user's salt and KEKs; the key kit (the
   owner) the root MEK, every sub-MEK and every user salt. Each is sealed in the browser under an
   optional passphrase (Argon2id, AES-256-GCM, bound to the account and the origin) and never sent
-  to the server; verify sends check values only. **Only the owner restores from a kit**, in
+  to the server; verify sends check values only. On the Account page, Download and Verify also
+  need a fresh Turnstile token (the action `account`) when Turnstile is on, checked before the
+  step-up, as every other Account change. Both kits hold the keyring's version (a counter the
+  Directory raises on every key change, never a key or a fingerprint), and Verify compares it
+  with the server's. For each account the Directory records the date and key version of its
+  last personal-kit download and which sub-MEKs that kit held (meta `ukit:<userId>`, removed
+  with the account); from that the Account and Drive pages say, with no key detail, when the
+  keys changed after that download. Only the user's own session downloads a kit and so updates
+  the record: the owner acting as the user is refused (`403 impersonating`) and cannot clear
+  the notice. **Only the owner restores from a kit**, in
   Admin → Security → Keys: the key kit, and a user's personal kit ("Restore a user's personal
   kit": the user chosen there, the kit opened in the owner's browser for that user only, the
   server refusing a kit whose id is another user's). The Account page offers Download and Verify
@@ -1024,7 +1097,10 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   is in the admin audit by ids and counts only. **A key kit opens every Drive** (with a copy of
   the stored ciphertext): store it offline, like the AUTHN secret. Losing the Directory's keys
   and every key kit loses every Drive file. What these controls can and cannot enforce: the
-  step-up on a kit download gates the server's handing out of the keys; the throttle on failed
+  step-up on a kit download gates the kit file (and its audit entry), not the keys in it: a
+  signed-in session already gets its own user's KEKs from `POST /api/private/drive/keys`
+  without a step-up (see "In the tab"), and the user salt the kit adds opens nothing without the
+  root MEK; the throttle on failed
   kit openings is in the page's memory only (guessing a passphrase offline needs only the file);
   kit checks are limited to 30 per session per 10 minutes.
 - **In the tab.** The KEKs are never written to browser storage (`sessionStorage`,
@@ -1192,11 +1268,12 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   - `both-restrictive` — both are counted, and a creation is refused when **either** is over a
     quota;
   - `both-permissive` — both are counted, and a creation is refused only when **both** are over.
-  Subjects are stored only as HMAC-SHA-256 values keyed with a per-deployment secret held in the
-  Directory; the raw id and the address are never stored. An import that changes any `public.*`
+  Subjects are stored only as HMAC-SHA-256 values keyed with a key derived from a per-deployment
+  secret held in the Directory (HKDF-SHA-256, info `secbin-directory/public-subject/v1`); the raw id and the address are never stored. An import that changes any `public.*`
   setting is called out in the import preview.
 - **The tracker** is a random id the server issues and authenticates with an HMAC tag
-  (12 random bytes ‖ issue time ‖ 8-byte tag, keyed with the per-deployment secret). It is
+  (12 random bytes ‖ issue time ‖ 8-byte tag, under a key derived from the per-deployment secret
+  for this use alone: HKDF-SHA-256, info `secbin-directory/tracker-tag/v1`). It is
   **stateless until it first creates a share**: page visits store nothing on the server. The
   browser keeps it in four places: the `__Host-secbin_aid` cookie (HttpOnly, Secure,
   SameSite=Strict, 400 days), the ETag of `GET /api/public/t` (`Cache-Control: private,

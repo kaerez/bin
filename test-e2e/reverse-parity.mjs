@@ -82,6 +82,17 @@ async function upload(link, name, password, { ctx } = {}) {
   return { done, msg, limits };
 }
 const receiveRow = (p) => p.locator('#shares-body tr', { has: p.locator('td[data-label="Type"]:text-is("receive")') }).first();
+/**
+ * My shares: choose expiry filter `value` and wait for the list it asks for. The change reloads
+ * the list in the background and its render replaces every row, so the rows shown before must be
+ * gone first: an Edit clicked on one of them would open under a row that is about to be removed.
+ */
+async function filterExpiry(p, value) {
+  const before = await p.$('#shares-body tr');
+  await p.selectOption('#shares-expiry', value);
+  if (before) await p.waitForFunction((tr) => !tr.isConnected, before, { timeout: 30000 });
+  await p.waitForSelector('#shares-body tr');
+}
 
 try {
   // ── the owner; alice, whose role allows links with no expiry ──
@@ -90,6 +101,8 @@ try {
   watch(op);
   await op.goto(`${BASE}/dashboard/setup/`);
   await op.fill('#setup-token', TOKEN); await op.fill('#setup-user', 'owner'); await op.fill('#setup-pass', PW); await op.fill('#setup-pass2', PW);
+  // The Drive keys the server proposes: generated, then "Use these" (the release before has no such step).
+  if (await op.$('#setup-keys-gen')) { await op.click('#setup-keys-gen'); await op.click('#setup-keys-use'); }
   await op.click('#setup-btn');
   await op.waitForFunction(() => /created/.test(document.querySelector('#setup-msg').textContent), null, { timeout: 30000 });
   await login(op, 'owner', PW);
@@ -109,16 +122,19 @@ try {
   await noExpSel.waitFor();
   check('admin: the Default role has "no expiry" off, with its default hint', (await noExpSel.inputValue()) === 'false'
     && /default: no/.test(await noExpSel.locator('xpath=..').textContent()));
-  const roleSet = await op.evaluate(async () => {
+  const roleSet = await op.evaluate(async (pw) => {
     const H = { 'content-type': 'application/json', 'x-secbin-intent': '1', 'x-secbin-csrf': (document.cookie.match(/__Host-secbin_csrf=([^;]+)/) || [])[1] || '' };
     const role = await (await fetch('/api/private/admin/roles', { method: 'POST', headers: H, body: JSON.stringify({ name: 'Receivers' }) })).json();
+    // No expiry and no CAPTCHA widen what the role's links may be: the owner's password confirms it.
+    const { stretch } = await import('/js/pwauth.js');
+    const { salt, t } = await (await fetch('/api/auth/prelogin', { method: 'POST', headers: H, body: JSON.stringify({ username: 'owner' }) })).json();
     const lim = await fetch('/api/private/admin/limits', { method: 'PATCH', headers: H, body: JSON.stringify({ scope: `role:${role.id}`, channel: 'all',
-      patch: { driveEnabled: true, reverseEnabled: true, reverseNoExpiry: true, reverseMaxViews: 10, reverseCaptcha: 'off' } }) });
+      patch: { driveEnabled: true, reverseEnabled: true, reverseNoExpiry: true, reverseMaxViews: 10, reverseCaptcha: 'off' }, current: await stretch(pw, salt, t) }) });
     const users = (await (await fetch('/api/private/admin/users')).json()).users;
     const alice = users.find((u) => u.username === 'alice');
     const set = await fetch(`/api/private/admin/users/${alice.id}/role`, { method: 'PUT', headers: H, body: JSON.stringify({ roleId: role.id }) });
     return lim.status === 200 && set.status === 200;
-  });
+  }, PW);
   check('admin: a role with Receive links, no expiry allowed, at most 10 views, given to alice', roleSet);
 
   // ── alice: a link with no expiry, a password and 2 views ──
@@ -128,6 +144,8 @@ try {
   await login(ap, 'alice', ALICE_PW);
   await ap.goto(`${BASE}/dashboard/drive/`);
   await ap.waitForSelector('#drive-app', { timeout: 60000 });
+  // The Drive's root listed (its name in the pane title): "Receive…" acts on the open folder.
+  await ap.waitForFunction(() => document.querySelector('#drive-pane-title')?.textContent === 'My Drive', null, { timeout: 60000 });
   check('drive: the toolbar says "Receive…"', (await ap.textContent('#drive-receive')).trim() === 'Receive…');
   await ap.click('#drive-receive');
   await ap.waitForSelector('#drive-rev-none');
@@ -166,7 +184,7 @@ try {
   let row = receiveRow(ap);
   check('My shares: the link says "No expiry"', (await row.locator('td[data-label="Expires"]').textContent()) === 'No expiry');
   check('My shares: its views are used up', /0 left of 2 views/.test(await row.locator('td[data-label="Views"]').textContent()), await row.locator('td[data-label="Views"]').textContent());
-  await ap.selectOption('#shares-expiry', 'none');
+  await filterExpiry(ap, 'none');
   await ap.waitForFunction(() => [...document.querySelectorAll('#shares-body tr')].every((tr) => tr.querySelector('td[data-label="Expires"]')?.textContent === 'No expiry'), null, { timeout: 30000 });
   check('My shares: the "no expiry" filter', (await ap.locator('#shares-body tr').count()) === 1);
   row = receiveRow(ap);
@@ -200,8 +218,7 @@ try {
   check('uploader: the new password sends', /^Sent 1 file/.test(fresh.done || ''), fresh.done || fresh.msg);
 
   // ── alice: give it an expiry ──
-  await ap.selectOption('#shares-expiry', '');
-  await ap.waitForSelector('#shares-body tr');
+  await filterExpiry(ap, '');
   row = receiveRow(ap);
   await row.locator('button:has-text("Edit")').click();
   await ap.waitForSelector('.extend-row .rev-edit', { timeout: 60000 });

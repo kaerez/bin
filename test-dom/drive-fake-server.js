@@ -67,8 +67,10 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     migration: null, // what GET /api/private/drive says of the upgrade (null: nothing to upgrade)
     audit: [], // the owner's key actions: { action, detail }
     activity: [], // the user's own activity rows the fake records
-    kitRecord: null, // the key kit's record (at, root, subs)
+    kitRecord: null, // the key kit's record (at, root, subs, v)
     kitVerifyLeft: 30,
+    keyVersion: { n: 0, at: null }, // the keyring's version (docs/DRIVE.md §3.1): up by one on every key change here
+    userKit: null, // the user's last personal-kit download: { at, v, meks }
     meCalls: 0, // GET /api/private/me (the page recording its session)
     // Refusals the real server makes and this fake does not decide itself (the role's file policy, a quota):
     // { method, path: RegExp, status, error, message, extra } — the first match answers instead.
@@ -83,7 +85,16 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     const open = S.subs.find((x) => x.until === null);
     if (open && until === null) open.until = from;
     S.subs.push(s);
+    S.bumpKeys();
     return s;
+  };
+  /** A key change: the keyring's version goes up (as the Directory's #bumpKeyVersion). */
+  S.bumpKeys = () => { S.keyVersion = { n: S.keyVersion.n + 1, at: now() }; };
+  /** The personal kit's state, as the Directory's #userKitState. */
+  S.kitState = () => {
+    const last = S.userKit ? { at: S.userKit.at, version: S.userKit.v } : null;
+    const cur = S.current()?.id ?? null;
+    return { version: S.keyVersion.n, versionAt: S.keyVersion.at, last, stale: !!last && (last.version < S.keyVersion.n || (!!cur && !S.userKit.meks.includes(cur))) };
   };
   S.current = () => effectiveAt(S.subs, now());
   S.kekOf = async (mekId, uid = S.user.id, salt = S.salt) => {
@@ -150,6 +161,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       S.meCalls++;
       return ok({ user: S.user, impersonatedBy: S.impersonatedBy, csrf: FAKE_CSRF });
     }
+    // The public config (the CAPTCHA's site key when `S.turnstile` is set): not a Drive request.
+    if (p === '/api/config' && method === 'GET') return ok({ turnstile: S.turnstile || null });
     S.requests.push({ method, path: p, body, headers: init.headers || {} });
     if (needsCsrf(method, p) && headerOf(init.headers, 'x-secbin-csrf') !== FAKE_CSRF) return fail(403, 'csrf_mismatch');
     const refusal = S.refusals.find((r) => r.method === method && r.path.test(p));
@@ -161,7 +174,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (!S.enabled) return ok({ enabled: false });
       const received = [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && !n.rfail).length;
       return ok({
-        enabled: true, capacity: S.capacity, used: used(), current: S.current()?.id ?? null, migration: S.migration,
+        enabled: true, capacity: S.capacity, used: used(), current: S.current()?.id ?? null, migration: S.migration, kit: S.kitState(),
         received, receivedFailed: [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && n.rfail).length,
       });
     }
@@ -176,14 +189,18 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     if (p === '/api/private/drive/kit/restore' || p === '/api/private/drive/kit/items') return fail(403, 'owner_only');
     if (p === '/api/private/drive/kit' || p.startsWith('/api/private/drive/kit/')) {
       if (S.impersonatedBy) return fail(403, 'impersonating');
+      if (p === '/api/private/drive/kit' && method === 'GET') return ok(S.kitState());
       if (p === '/api/private/drive/kit' && method === 'POST') {
+        if (S.turnstile && !headerOf(init.headers, 'x-secbin-turnstile')) return fail(403, 'turnstile_required');
         const f = stepFail(body);
         if (f) return f;
         const k = await keysOut();
         S.activity.push({ action: 'drive.kit_exported', detail: `sub-MEKs: ${k.keys.length}` });
-        return ok({ kit: { id: S.user.id, username: S.user.username, userSalt: S.salt, current: k.current, keks: k.keys }, missing: [], broken: [] });
+        S.userKit = { at: now(), v: S.keyVersion.n, meks: k.keys.map((x) => x.mekId) };
+        return ok({ kit: { id: S.user.id, username: S.user.username, userSalt: S.salt, current: k.current, keyVersion: S.keyVersion.n, keks: k.keys }, missing: [], broken: [], status: S.kitState() });
       }
       if (p === '/api/private/drive/kit/verify' && method === 'POST') {
+        if (S.turnstile && !headerOf(init.headers, 'x-secbin-turnstile')) return fail(403, 'turnstile_required');
         if (S.kitVerifyLeft-- <= 0) return fail(429, 'rate_limited');
         const inUse = new Set([...S.nodes.values()].map((n) => n.mek).filter(Boolean));
         const cur = S.current();
@@ -194,7 +211,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         }));
         const salt = typeof body.salt === 'string' ? (sameCheck(body.salt, await saltCheckValue(S.salt, S.user.id)) ? 'match' : 'mismatch') : 'absent';
         S.activity.push({ action: 'drive.kit_verified', detail: salt });
-        return ok({ complete: salt === 'match' && keks.filter((x) => x.inUse || x.current).every((x) => x.result === 'match'), salt, keks, extra: [], now: now() });
+        return ok({ complete: salt === 'match' && keks.filter((x) => x.inUse || x.current).every((x) => x.result === 'match'), salt, keks, extra: [], version: S.keyVersion.n, now: now() });
       }
       return fail(404, 'not_found');
     }
@@ -366,7 +383,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     return {
       ok: true, ready: true, lost: false, root: { fp: await keyFingerprint(S.root), created: 1700000000, changing: !!S.rootOld, oldFp: S.rootOld ? await keyFingerprint(S.rootOld) : null, oldOrigin: S.rootOld ? (S.rootOldOrigin || 'changed') : null, check: S.rootOld ? (S.rootCheck || null) : null },
       subs: S.subs.map((s) => ({ id: s.id, fp: s.fp, from: s.from, until: s.until, created: s.created, note: s.note, status: mekStatus(S.subs, s, t), opens: true })),
-      current: S.current()?.id ?? null, job: S.job, kit: S.kitRecord, kitFresh: !!S.kitRecord && S.kitRecord.subs === S.subs.length, users: 2, now: t,
+      current: S.current()?.id ?? null, job: S.job, kit: S.kitRecord, kitFresh: !!S.kitRecord && S.kitRecord.subs === S.subs.length, version: S.keyVersion, users: 2, now: t,
     };
   };
   async function keysRoute(method, p, body) {
@@ -399,7 +416,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
           Object.assign(n, { ks, mek: cur.id, name: await sealName(kek2, at2, 'name', name), ...(meta ? { meta: await sealName(kek2, at2, 'meta', meta) } : {}), ...(dek ? { dek: await sealDek(kek2, at2, dek) } : {}) });
           S.job.done++;
         }
-        if (S.job.remove) S.subs = S.subs.filter((s) => s.id !== from);
+        if (S.job.remove) { S.subs = S.subs.filter((s) => s.id !== from); S.bumpKeys(); }
         Object.assign(S.job, { finished: true, drive: 1, drives: 1, result: { ok: true, message: `Nothing is sealed under ${from} any more.` } });
       }
       return ok({ job: S.job });
@@ -414,7 +431,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       const salts = { total: 1, match: 0, mismatch: 0, absent: 0, extra: 0 };
       if (typeof given !== 'string') salts.absent++; else if (sameCheck(given, await saltCheckValue(S.salt, S.user.id))) salts.match++; else salts.mismatch++;
       S.verifyBodies = (S.verifyBodies || []).concat([body]);
-      return ok({ ok: true, complete: root === 'match' && subs.every((x) => x.result === 'match') && salts.match === 1, now: t, root, subs, salts, extraSubs: [] });
+      return ok({ ok: true, complete: root === 'match' && subs.every((x) => x.result === 'match') && salts.match === 1, now: t, version: S.keyVersion, root, subs, salts, extraSubs: [] });
     }
     if (p === '/api/private/admin/keys/export/verify') {
       // As src/routes/keys.js keysVerify: the step-up, check values compared here, each DEK on its file's first chunk.
@@ -487,6 +504,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (method === 'DELETE') {
         if ([...S.nodes.values()].some((n) => n.mek === s.id)) return fail(409, 'in_use');
         S.subs = S.subs.filter((x) => x !== s);
+        S.bumpKeys();
         return ok({ ok: true });
       }
     }
@@ -527,10 +545,10 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       return ok({ ok: true, job: S.job });
     }
     if (p === '/api/private/admin/keys/kit') {
-      S.kitRecord = { at: now(), root: await keyFingerprint(S.root), subs: S.subs.length };
+      S.kitRecord = { at: now(), root: await keyFingerprint(S.root), subs: S.subs.length, v: S.keyVersion.n };
       S.audit.push({ action: 'keys.kit_exported', detail: '' });
       return ok({ ok: true, kit: S.kitRecord, material: {
-        made: now(), current: S.current()?.id ?? null, root: { key: b64urlFromBytes(S.root), fp: await keyFingerprint(S.root), created: 1700000000 },
+        made: now(), current: S.current()?.id ?? null, keyVersion: S.keyVersion, root: { key: b64urlFromBytes(S.root), fp: await keyFingerprint(S.root), created: 1700000000 },
         subs: S.subs.map((s) => ({ id: s.id, key: b64urlFromBytes(s.key), fp: s.fp, from: s.from, until: s.until, created: s.created, note: s.note })),
         salts: { [S.user.id]: { salt: S.salt, username: S.user.username } },
       } });

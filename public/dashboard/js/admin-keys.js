@@ -9,14 +9,15 @@
 
 import { keysApi, drive as driveApi, admin, SESSION_CHANGED_EVENT } from '../../js/api.js';
 import { h, clear, showMsg, formatDate, formatBytes, friendlyError, armConfirm } from '../../js/common.js';
-import { toast, copyText, flashCopied } from '../../js/ui.js';
+import { toast } from '../../js/ui.js';
 import { progressBar } from '../../js/progress.js';
 import { parseManualKey } from '../../js/drivekeys.js';
 import { b64urlFromBytes } from '../../js/bytes.js';
 import { buildKeyKit, verifyKeyKit, restoreKeyKit, restoreUserKit, fpText } from '../../js/keysclient.js';
+import { candidateView, copyKey, MANUAL_KEY_HELP } from '../../js/keychoice.js';
 import { confirmStep, canUsePasskey, confirmLabel } from './confirm.js';
 import {
-  field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff, liveMsg,
+  field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff, liveMsg, versionText,
 } from './kit-ui.js';
 
 export const KEYS_ANCHOR = 'keys';
@@ -35,7 +36,7 @@ const HELP = {
   dates: 'Change when a sub-MEK is in effect. There must always be exactly one open-ended sub-MEK and no gap from now on.',
   show: 'Shows the key’s value for 60 seconds (logged). Anyone who sees it, with the rest of the keyring, can open Drive files.',
   kit: 'After any change, download a fresh key kit and store it somewhere safe, offline. It holds the root MEK, every sub-MEK with its dates and every user salt, and restores everything.',
-  manual: 'Generate a key out of band and paste it here (base64 or hex, exactly 32 bytes), for example: openssl rand -base64 32 — or in PowerShell: [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)) (not Get-Random, which is not a secure generator) — or from a hardware security module or secrets manager. Keep a copy in a secrets manager.',
+  manual: MANUAL_KEY_HELP,
 };
 
 /** The step-up for one action: the password in `input` (cleared), or a passkey when it is empty. */
@@ -61,7 +62,7 @@ if (typeof window !== 'undefined') {
 function reveal(slot, key, label) {
   const val = h('code.mono.key-value', { text: key });
   const copy = h('button.copy-btn', { type: 'button', text: 'copy', 'aria-label': `Copy ${label}` });
-  copy.addEventListener('click', async () => flashCopied(copy, (await copyText(key)) ? 'copied' : 'failed'));
+  copy.addEventListener('click', () => copyKey(copy, key));
   const hide = h('button.btn.mini', { type: 'button', text: 'Hide' });
   const box = h('div.key-reveal', { role: 'status' }, h('span.field-label', { text: `${label} (hidden again in ${SHOW_SEC} seconds): ` }), val, copy, hide);
   const gone = () => { clearTimeout(t); box.remove(); held.delete(gone); };
@@ -97,13 +98,10 @@ function keyChooser({ purpose, profile, confirmIn, box }) {
         msg.hidden = true;
         const use = h('button.btn', { type: 'button', text: 'Use this key' });
         const again = h('button.btn', { type: 'button', text: 'Generate another' });
-        const copy = h('button.copy-btn', { type: 'button', text: 'copy', 'aria-label': 'Copy the generated key' });
-        copy.addEventListener('click', async () => flashCopied(copy, (await copyText(cand.key)) ? 'copied' : 'failed'));
         use.addEventListener('click', () => done({ candidate: cand.id }));
         again.addEventListener('click', () => gen.click());
         shown.replaceChildren(
-          h('p', {}, 'Generated key (fingerprint ', h('span.mono', { text: fpText(cand.fp) }), '): '),
-          h('code.mono.key-value', { text: cand.key }), copy,
+          candidateView({ id: `${purpose}-cand`, label: 'generated key', cand }),
           h('p.type-hint', { text: 'Copy it somewhere safe (a secrets manager), or download the key kit afterwards. Nothing is stored until you choose “Use this key” (enter your password again above first, or leave it empty for a passkey); the server forgets it after 10 minutes.' }),
           h('div.btn-row', {}, use, again));
         use.focus();
@@ -483,9 +481,11 @@ function keyKitCard(st, profile, refreshed) {
     h('p.type-hint', { text: 'Only what this server lost comes back: the root MEK when there is none (or none of the sub-MEKs opens under the one here), sub-MEKs that are missing or do not open, and user salts of accounts that have none. Working keys are never replaced.' }),
     field('Your password, for the preview and again for the restore (or leave it empty to confirm with a passkey)', rmine),
     h('div.btn-row', {}, preview), plan, h('div.btn-row', {}, apply), rlive);
-  const last = st.kit ? `Latest key kit: ${formatDate(st.kit.at)}${st.kitFresh ? ' (it covers every key and user)' : ' (older than the latest change)'}.` : 'No key kit downloaded yet.';
+  const last = st.kit ? `Latest key kit: ${formatDate(st.kit.at)}${Number.isSafeInteger(st.kit.v) ? ` (version ${st.kit.v})` : ''}${st.kitFresh ? ' (it covers every key and user)' : ' (older than the latest change)'}.` : 'No key kit downloaded yet.';
+  const version = st.version && st.version.n ? `Current keys: ${versionText(st.version.n, st.version.at)}.` : null;
   return h('div.card.stack', { id: 'keys-kit', 'aria-labelledby': 'keys-kit-title' },
-    h('h3.section-title', { id: 'keys-kit-title', text: 'Key kit' }), h('p.subtitle', { text: HELP.kit }), h('p.mono', { id: 'keys-kit-last', text: last }),
+    h('h3.section-title', { id: 'keys-kit-title', text: 'Key kit' }), h('p.subtitle', { text: HELP.kit }),
+    version ? h('p.mono', { id: 'keys-kit-version', text: version }) : null, h('p.mono', { id: 'keys-kit-last', text: last }),
     download, verify, restore);
 }
 

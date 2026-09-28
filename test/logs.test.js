@@ -3,7 +3,7 @@
 // one account, older than a date; leaves no record).
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { owner, makeUser, fetchJson, proofFor, createNote } from './helpers.js';
+import { owner, makeUser, fetchJson, proofFor, createNote, OWNER_STEP } from './helpers.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -30,7 +30,7 @@ describe('activity log', () => {
 
   it('prunes by age and size, per account, never the owner\'s entries', async () => {
     const u = await makeUser('log-c');
-    expect((await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { logMaxEntries: 10 } } })).status).toBe(200);
+    expect((await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { logMaxEntries: 10 }, ...OWNER_STEP } })).status).toBe(200);
     for (let i = 0; i < 14; i++) await createNote(u.cookie);
     // Age everything, including the owner's own entries, far into the past.
     await runInDurableObject(dirStub(), async (_inst, state) => { state.storage.sql.exec('UPDATE activity SET ts = ts - ?', 400 * 86400); });

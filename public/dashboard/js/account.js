@@ -1,6 +1,7 @@
 // account.js — my limits and quotas, username, password, passkeys and
 // recovery codes, API keys (if allowed), the Drive personal kit (when the
-// role has a Drive: userkit.js), and my activity log. Every change
+// role has a Drive: userkit.js, with a notice near the top while the user's
+// kit is out of date), and my activity log. Every change
 // is confirmed with the password (stretched locally) or, for an account with
 // a passkey, a fresh passkey check; the password is asked again every time.
 // The owner acting as the user ("Log in as") can change everything here with
@@ -95,8 +96,16 @@ async function renderDriveKit() {
   const slot = $('#drive-kit-slot');
   if (!slot || !(profile.caps && profile.caps.driveEnabled === true)) return;
   try {
-    const [{ personalKitCard, USER_KIT_ANCHOR }, drive] = await Promise.all([import('./userkit.js'), import('../../js/driveclient.js')]);
-    slot.replaceWith(personalKitCard({ profile, drive, confirm: (input) => confirmStep(input) }));
+    const [{ personalKitCard, USER_KIT_ANCHOR, STALE_TEXT }, drive] = await Promise.all([import('./userkit.js'), import('../../js/driveclient.js')]);
+    // Near the top of the page while the user's kit is out of date (the keys changed after
+    // their last download): calm, with no key detail, and gone once a new kit is downloaded.
+    const onStatus = (st) => {
+      $('#acct-kit-notice')?.remove();
+      if (!st || !st.stale) return;
+      $('#view-account .head').after(h('div.card.drive-notice', { id: 'acct-kit-notice', role: 'note' },
+        h('p', { text: STALE_TEXT }), h('p', {}, h('a', { href: `#${USER_KIT_ANCHOR}`, text: 'Go to the Drive personal kit' }))));
+    };
+    slot.replaceWith(personalKitCard({ profile, drive, confirm: (input) => confirmStep(input), onStatus }));
     if (location.hash === `#${USER_KIT_ANCHOR}`) document.getElementById(USER_KIT_ANCHOR)?.focus();
   } catch (e) {
     showMsg(slot.appendChild(h('p.msg')), `The Drive personal kit is unavailable: ${friendlyError(e)}`);

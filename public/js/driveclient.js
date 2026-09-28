@@ -18,7 +18,7 @@ import {
 } from './drivekeys.js';
 import { encryptPaste } from './crypto.js';
 import { utf8, fromUtf8, b64urlFromBytes, bytesFromB64url, randomBytes } from './bytes.js';
-import { sealDriveKit, parseDriveKit, openDriveKit, DriveKitError } from './drivekit.js';
+import { sealDriveKit, parseDriveKit, openDriveKit, DriveKitError, versionCheck } from './drivekit.js';
 import { CHUNK, encryptChunk, importFileKey, checkPath, MAX_ENTRIES, cleanName } from './files.js';
 import { detectMime, normalizeMime, OCTET } from './mime.js';
 import { RefsReader, saveFile, saveZip } from './downloads.js';
@@ -1080,20 +1080,27 @@ function reverseUrl(id, pub) {
 /** A sub-MEK's fingerprint as the pages show it (xxxx-xxxx-xxx). */
 export const fpText = (fp) => (typeof fp === 'string' && fp.length >= 8 ? `${fp.slice(0, 4)}-${fp.slice(4, 8)}-${fp.slice(8)}` : '—');
 
+/** The personal kit's state → { version, versionAt, last: { at, version } | null, stale } (no key detail). */
+export const personalKitStatus = () => api.kitStatus();
+
 /**
- * Build the personal kit → { text, keks, missing } (`text`: the file). The
+ * Build the personal kit → { text, keks, missing, keyVersion, status }
+ * (`text`: the file; `status`: the kit's state after this download). The
  * server hands its content only after the step-up (`step`: { current } |
- * { reauth }), and records the download.
+ * { reauth }) and, with the CAPTCHA on, a fresh token (`human()` → the token
+ * or null, taken just before the request), and records the download. The
+ * file holds the key version (`keyVersion`) its KEKs were made at.
  */
-export async function buildPersonalKit({ user, passphrase = '', step } = {}) {
+export async function buildPersonalKit({ user, passphrase = '', step, human = null } = {}) {
   const u = await whoAmI(user);
   if (u.impersonating) throw new ApiError('A personal kit is the user’s own: return to your account first.', 403, 'impersonating');
-  const r = await api.kit(step || {});
+  const r = await api.kit(step || {}, human ? await human() : null);
   const k = r.kit;
   if (!k || k.id !== u.id || typeof k.userSalt !== 'string' || !Array.isArray(k.keks)) throw malformed();
-  const payload = { v: 2, id: k.id, username: k.username, made: Math.floor(Date.now() / 1000), userSalt: k.userSalt, current: k.current, keks: k.keks.map(({ mekId, fp, from, until, kek }) => ({ mekId, fp, from, until, kek })) };
+  const keyVersion = Number.isSafeInteger(k.keyVersion) ? k.keyVersion : null;
+  const payload = { v: 2, id: k.id, username: k.username, made: Math.floor(Date.now() / 1000), keyVersion, userSalt: k.userSalt, current: k.current, keks: k.keks.map(({ mekId, fp, from, until, kek }) => ({ mekId, fp, from, until, kek })) };
   const text = await sealDriveKit('user', payload, { accountId: u.id, origin: location.origin, passphrase: String(passphrase ?? '') });
-  return { text, keks: payload.keks.length, missing: [...(r.missing || []), ...(r.broken || [])] };
+  return { text, keks: payload.keks.length, missing: [...(r.missing || []), ...(r.broken || [])], keyVersion, status: r.status || null };
 }
 
 /** Open a personal kit's text for `u` → its payload (keys as bytes). Throws DriveKitError. */
@@ -1116,7 +1123,7 @@ async function readPersonalKit(text, passphrase, u) {
  * 'complete' | 'incomplete' | 'failed', checks: [{ id, status, label,
  * detail }], atDate: { mekId, fp, inKit } | null, keks }.
  */
-export async function verifyPersonalKit({ user, text, passphrase = '', date = null } = {}) {
+export async function verifyPersonalKit({ user, text, passphrase = '', date = null, human = null } = {}) {
   const u = await whoAmI(user);
   const checks = [];
   const add = (id, status, label, detail) => checks.push({ id, status, label, detail });
@@ -1135,7 +1142,7 @@ export async function verifyPersonalKit({ user, text, passphrase = '', date = nu
   const body = { keks: {}, salt: await saltCheckValue(kit.userSalt, u.id) };
   for (const [id, k] of kit.keks) body.keks[id] = await keyCheckValue(k.kek, 'kek');
   for (const k of kit.keks.values()) k.kek.fill(0);
-  const r = await api.kitVerify(body);
+  const r = await api.kitVerify(body, human ? await human() : null);
   add('salt', r.salt === 'match' ? 'pass' : 'fail', 'User salt', r.salt === 'match' ? 'It is this account’s salt.' : 'It is not this account’s salt: the kit cannot open this Drive.');
   const used = r.keks.filter((x) => x.inUse || x.current);
   const bad = used.filter((x) => x.result !== 'match');
@@ -1148,8 +1155,9 @@ export async function verifyPersonalKit({ user, text, passphrase = '', date = nu
   add('date', atDate && atDate.inKit ? 'pass' : 'warn', 'The sub-MEK in effect on the chosen date', atDate
     ? `${fpText(atDate.fp)} — ${atDate.inKit ? 'in this kit.' : 'not in this kit (it was added after the kit, or is scheduled): download a fresh kit after it starts.'}`
     : 'No sub-MEK is in effect on that date.');
+  checks.push(versionCheck(kit.keyVersion, r.version));
   const verdict = checks.some((c) => c.status === 'fail') ? 'incomplete' : 'complete';
-  return { verdict, checks, atDate, keks: r.keks };
+  return { verdict, checks, atDate, keks: r.keks, keyVersion: Number.isSafeInteger(kit.keyVersion) ? kit.keyVersion : null, version: r.version ?? null };
 }
 
 // Byte helpers some pages use with the kit.
