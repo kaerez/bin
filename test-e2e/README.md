@@ -62,7 +62,9 @@ values entered at set-up), a generated sub-MEK used only on "Use this key", rota
 sub-MEK entered by hand, a re-seal with progress, deleting a sub-MEK (two steps), a root change;
 the key kit (download with the step-up, verify today and on a later date, a wrong passphrase, a
 restore preview that replaces nothing); a user's keys (masked, Show); the personal kit on Account
-(download, verify, restore); Import / export → Drive keys (parts, the user search, the masked view,
+(download and verify; no Restore section for alice or the owner, and the Account restore routes
+refused with `403 owner_only`); the restore of a user's personal kit in Security → Keys (another
+account's kit refused; on a working server it changes nothing); Import / export → Drive keys (parts, the user search, the masked view,
 the sealed file; an import previewed and applied that replaces nothing); every file still opening
 after each change; the admin audit holding the key actions and no key value; axe on every state.
 It needs a fresh server (no owner yet):
@@ -140,4 +142,20 @@ npx wrangler dev --port 8787 --persist-to .wrangler/captcha-state \
   --var TURNSTILE_SITEKEY:1x00000000000000000000AA --var TURNSTILE_SECRET:1x0000000000000000000000000000000AA
 WT=$PWD BASE=http://localhost:8787 node test-e2e/captcha.mjs
 # behind an HTTPS-intercepting proxy: PROXY_SPKI=<its CA's SPKI hash> (HTTPS_PROXY is used when set)
+```
+
+## `quotas.mjs` — role quota kinds
+
+What it covers (README "Quotas"): Admin → Roles → a custom role → Quotas — the kind select's
+groups (Outgoing shares, Drive, Receive) and labels, "API only" disabled for a Drive or Receive
+kind, a quota of each group saved through the editor; the Public role offering only the outgoing
+kinds it can use; then, as the user, each quota reached through the UI — a second note refused in
+the composer, a second Drive upload refused, a second Receive link refused in its dialog, and the
+anonymous uploader's page refusing a second upload session with "This link can’t accept more
+uploads right now. Try again later." (nothing of the quota shown); the Account page's quota list;
+axe (WCAG 2.2 A/AA) on the editors and every refusal; no page errors or CSP / Trusted Types
+violations. It needs a fresh server (no owner yet):
+
+```sh
+WT=$PWD BASE=http://localhost:8787 node test-e2e/quotas.mjs
 ```

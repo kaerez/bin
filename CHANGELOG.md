@@ -51,6 +51,18 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - **Kits:** the personal kit (`secbin-user-kit/2`, every user, on Account) and the key kit
     (`secbin-key-kit/1`, the owner): download with the step-up, a read-only verify of a
     selected file with a date, and a restore of only what the server lost.
+  - **Only the owner restores from a personal kit:** the Account page's Restore section is gone
+    for every account (the owner's own included; Download and Verify stay), and its routes
+    (`POST /api/private/drive/kit/restore`, `GET`/`PUT …/kit/items`) answer `403 owner_only` to
+    everyone, so no user can change what opens a Drive. Admin → Security → Keys has "Restore a
+    user's personal kit" instead (`POST /api/private/admin/keys/users/<userId>/kit-restore`):
+    the user chosen, the kit opened in the owner's browser for that user only (`400
+    kit_mismatch` for another user's), the step-up for every call, the same rules as before (the
+    salt only when missing and only if it opens the Drive; items under a lost sub-MEK re-sealed
+    under the current one, server-side and compare-and-set; a working key never replaced), in
+    the admin audit by ids and counts (`drive.kit_restored`, `drive.salt_restored`) and no
+    longer in the user's activity. The Drive page's "salt missing" notice no longer points to a
+    restore on Account.
   - **Import / export → Drive keys:** the root MEK, sub-MEKs, user salts and chosen users'
     KEKs and DEKs in a file of their own; imports never replace working keys (a KEK only
     verifies; a DEK restores a broken seal after the GCM check).
@@ -458,6 +470,29 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   has the root's fingerprint and counts only. The export's labels now say that "Download the
   chosen ids" saves a list of user ids with no keys, and what "Build the export" and "Encrypt
   and download" each do.
+
+- **Quota kinds for every share, the Drive and Receive** (Admin → Roles → Quotas; README
+  "Quotas", docs/API.md). The kind select is grouped: *Outgoing shares* — All outgoing shares
+  (`all`, unchanged), Notes, links and credentials (`text`, unchanged), Notes (`note`: plain
+  text, Markdown or code), Links (`url`), Credentials (`secret`), File and Drive shares (`files`,
+  unchanged), File shares (`file`), Drive shares (`drive`); *Drive* — Files uploaded
+  (`drive-upload`: each file uploaded, a folder upload counting every file, not files taken in
+  from Receive links; given back when the Drive refuses the file or the upload never completes,
+  deleted unfinished or purged); *Receive* — All receive (`receive`), New links
+  (`receive-link`) and Uploads received (`receive-upload`: each upload session that sends files
+  through one of the user's links, counted for the user when it starts and given back when it
+  does not start or ends having sent no file). `all` never counts Drive uploads or Receive.
+  - Existing quotas keep their reach: `all`, `text` (notes, links and credentials) and `files`
+    (file shares and Drive shares) count exactly what they counted before; the new kinds narrow.
+  - At a `receive-upload` or `receive` quota the uploader gets `429 not_accepting` ("This link
+    can’t accept more uploads right now. Try again later."), with nothing of the quota.
+  - The Public role's editor offers, and the server accepts for the public account (the API and
+    imports), only the outgoing kinds it can use (notes, links, credentials, file shares). Drive
+    shares, Drive uploads and Receive are web-app only: their quotas take no "API only" channel
+    (the editor disables it; the server refuses it).
+  - `quota_exceeded` messages name each kind ("Quota reached: 3 uploads received per 1d."), the
+    Account page lists them the same way, and `quotas.updated` in the audit spells every quota
+    out ("10 notes per 1d via the API [note]"), in several entries when the list is long.
 
 - **WCAG 2.2 conformance audit** ([docs/WCAG22.md](docs/WCAG22.md)): every success criterion at
   A, AA and AAA with a verdict, evidence and the pages it concerns. On that evidence (Chromium,

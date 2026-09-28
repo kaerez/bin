@@ -203,13 +203,31 @@ working.
   **Admin → Security → Keys** manages the keys (generate or enter, view, add, rotate, edit
   dates, set current, re-seal, delete, change the root), with the **key kit** (the root MEK,
   every sub-MEK and every user salt: it restores everything; store it offline, like the `AUTHN`
-  secret) and the upgrade of Drives made by the previous release. Each user has a **personal
-  kit** on the Account page (their salt and keys). Admin → Import / export has the Drive keys in
+  secret), the upgrade of Drives made by the previous release, and the restore of a user's
+  personal kit. Each user has a **personal kit** on the Account page (their salt and keys:
+  download and verify; only the owner restores from one, so no user can change what opens a
+  Drive). Admin → Import / export has the Drive keys in
   a file of their own (the parts chosen). See [SECURITY.md](./SECURITY.md), "Drive keys", and
   [docs/DRIVE.md](./docs/DRIVE.md).
-- **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
-  file shares. GUI and API creations count together; API-only quotas and API limits can only
-  *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).
+- **Quotas** — at most N per n seconds/minutes/hours/days/months/years (fixed windows), of one
+  kind, in three groups:
+  - *Outgoing shares:* all outgoing shares (`all`: every note, link, credential, file share and
+    Drive share), notes, links and credentials together (`text`), file and Drive shares
+    together (`files`), or one type: notes (`note`: plain text, Markdown or code), links
+    (`url`), credentials (`secret`), file shares (`file`), Drive shares (`drive`);
+  - *Drive:* files uploaded (`drive-upload`: each file, a folder upload counting every file;
+    files taken in from Receive links are not counted), given back when the upload never
+    completes;
+  - *Receive:* all receive (`receive`: both below), new links (`receive-link`) and uploads
+    received (`receive-upload`: each upload session that sends files through one of the user's
+    links, counted for the user; at the quota the uploader is told only that the link cannot
+    take uploads now).
+
+  `all` never counts Drive uploads or Receive. GUI and API creations count together; API-only
+  quotas and API limits can only *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒
+  the API still gets at most 10). Drive shares, the Drive and Receive are used in the web app
+  only, so their quotas are GUI + API. The public account takes the outgoing kinds it can use
+  (not Drive shares, the Drive or Receive). The owner is never counted.
 - **Settings** — server-wide only: brute-force rules, lockout rules, log retention and the
   accessibility statement. Everything an account may do is on its role.
 - **Security** — current blocks and tracked IPs per scope, manual allow/block rules for IPv4/IPv6

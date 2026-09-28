@@ -6,7 +6,8 @@
 // items under the new sub-MEK, old ones keep theirs until a re-seal moves
 // them), deleting a sub-MEK (a re-seal first), changing the root MEK (every
 // item, link key and field-layer value re-sealed), the key kit and the
-// personal kit (download, read-only verify, restore of only what is lost),
+// personal kit (download, read-only verify; a restore of only what is lost,
+// by the owner only, from Admin → Security → Keys),
 // the keys parts of Import / export (imports never replace working keys; a
 // KEK only verifies; a DEK restores a broken seal after the GCM check) and
 // one user's keys for the owner. Synthetic data only.
@@ -14,7 +15,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { owner, makeUser, login, fetchJson, intent, cookieOf, proofFor, USER_PW } from './helpers.js';
 import {
-  enableDrive, mkdir, uploadFile, uploadRealFile, node, driveKeys, sealed, openStored, getChunk,
+  enableDrive, mkdir, uploadFile, uploadRealFile, node, driveKeys, forgetKeys, sealed, openStored, getChunk,
 } from './drive-helpers.js';
 import { newReverse, grantOf, send, received, openLinkPriv, driveOf, dirStub } from './reverse-helpers.js';
 import {
@@ -409,7 +410,7 @@ describe('the personal kit (secbin-user-kit/2)', () => {
     expect(act.some((x) => x.action === 'drive.kit_exported')).toBe(true);
   });
 
-  it('verify: read-only check values, rate limited; restore: the salt only when the account has none, and only if it opens the Drive', async () => {
+  it('verify: read-only check values, rate limited', async () => {
     const u = await makeUser('ukit-verify');
     await enableDrive(u.id);
     await uploadFile(u.cookie, 'root', 10);
@@ -421,17 +422,6 @@ describe('the personal kit (secbin-user-kit/2)', () => {
     expect(ok.keks.find((x) => x.mekId === kit.current)).toMatchObject({ result: 'match', current: true, inUse: true });
     const bad = await (await post('/api/private/drive/kit/verify', { keks: { [kit.current]: await keyCheckValue(randomBytes(32), 'kek') }, salt: await saltCheckValue(newSalt(), u.id) }, u.cookie)).json();
     expect(bad).toMatchObject({ complete: false, salt: 'mismatch' });
-    // Restore: the salt is there, so it is kept (same or not).
-    const restore = (salt) => post('/api/private/drive/kit/restore', { salt, current: proofFor(USER_PW) }, u.cookie);
-    expect((await (await restore(kit.userSalt)).json()).salt).toBe('same');
-    expect((await (await restore(newSalt())).json()).salt).toBe('kept');
-    await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec('DELETE FROM user_salts WHERE user_id = ?', u.id));
-    expect((await (await restore(newSalt())).json()).salt).toBe('wrong'); // does not open the Drive's items
-    expect((await (await restore(kit.userSalt)).json()).salt).toBe('restored');
-    expect((await driveKeys(u.cookie, { fresh: true })).raw.keys.map((x) => x.kek)).toEqual(kit.keks.map((x) => x.kek));
-    // The items the server can open itself are not handed out for a browser re-seal.
-    const items = await fetchJson(`/api/private/drive/kit/items?mek=${kit.current}`, { cookie: u.cookie });
-    expect([items.status, await errorOf(items)]).toEqual([409, 'readable']);
     let last;
     for (let i = 0; i < 30; i++) last = await post('/api/private/drive/kit/verify', checks, u.cookie);
     expect([last.status, await errorOf(last)]).toEqual([429, 'rate_limited']);
@@ -592,3 +582,138 @@ describe('Import / export: the keys parts (secbin-keys-export/1)', () => {
 });
 
 void env;
+
+// Restoring from a personal kit is the owner's only (Admin → Security → Keys): no user, no owner acting as
+// a user and no API key can change what opens a Drive. Last in this file: it loses a sub-MEK of the keyring.
+describe('a user’s personal kit, restored by the owner only', () => {
+  const R = (uid) => `${K}/users/${uid}/kit-restore`;
+  const kitOf = async (u) => (await (await post('/api/private/drive/kit', { current: proofFor(USER_PW) }, u.cookie)).json()).kit;
+  const body = (kit, extra = {}) => ({ kit: { id: kit.id, salt: kit.userSalt, keks: kit.keks.map(({ mekId, kek }) => ({ mekId, kek })) }, ...extra });
+  const USER_ROUTES = (kit) => [
+    ['/api/private/drive/kit/restore', 'POST', { salt: kit.userSalt, current: proofFor(USER_PW) }],
+    ['/api/private/drive/kit/items', 'PUT', { items: [], current: proofFor(USER_PW) }],
+    [`/api/private/drive/kit/items?mek=${kit.current}`, 'GET', undefined],
+  ];
+
+  it('a user gets 403 from every restore route: the Account ones are gone for everyone (the owner too), the admin one is the owner’s', async () => {
+    const u = await makeUser('ukr-user');
+    await enableDrive(u.id);
+    await uploadFile(u.cookie, 'root', 10);
+    const kit = await kitOf(u);
+    for (const [path, method, b] of USER_ROUTES(kit)) {
+      const r = await fetchJson(path, { method, cookie: u.cookie, headers: intent, body: b });
+      expect([r.status, await errorOf(r)], `${method} ${path}`).toEqual([403, 'owner_only']);
+    }
+    const a = await post(R(u.id), body(kit, { current: proofFor(USER_PW) }), u.cookie);
+    expect([a.status, await errorOf(a)]).toEqual([403, 'forbidden']);
+    // The owner's own session on the Account route: refused as well (only the admin route restores).
+    const own = await post('/api/private/drive/kit/restore', { salt: kit.userSalt, ...STEP });
+    expect([own.status, await errorOf(own)]).toEqual([403, 'owner_only']);
+    // The user's KEKs are as they were.
+    expect((await driveKeys(u.cookie, { fresh: true })).raw.keys.map((x) => x.kek)).toEqual(kit.keks.map((x) => x.kek));
+  });
+
+  it('the owner acting as the user gets 403, and so does an API key (the owner’s own, every scope); the owner’s session reaches it', async () => {
+    const u = await makeUser('ukr-imp');
+    await enableDrive(u.id);
+    await uploadFile(u.cookie, 'root', 10);
+    const kit = await kitOf(u);
+    const ic = await impersonate(u.id);
+    const a = await post(R(u.id), body(kit, STEP), ic);
+    expect([a.status, await errorOf(a)]).toEqual([403, 'impersonating']);
+    for (const [path, method, b] of USER_ROUTES(kit)) {
+      const r = await fetchJson(path, { method, cookie: ic, headers: intent, body: b && { ...b, ...STEP } });
+      expect([r.status, await errorOf(r)], `${method} ${path}`).toEqual([403, 'owner_only']);
+    }
+    await fetchJson('/api/private/admin/unimpersonate', { method: 'POST', cookie: ic, headers: intent });
+    const key = (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: oc, body: { current: proofFor(OWNER_PW), name: 'ukr' } })).json()).key;
+    expect(key).toMatch(/^sbk_/);
+    for (const path of [R(u.id), '/api/private/drive/kit/restore', '/api/private/drive/kit/items']) {
+      const r = await fetchJson(path, { method: 'POST', headers: { ...intent, authorization: `Bearer ${key}` }, body: body(kit, STEP) });
+      expect([r.status, await errorOf(r)], path).toEqual([403, 'api_key_not_allowed']);
+    }
+    const ok = await post(R(u.id), body(kit, STEP));
+    expect(ok.status, await ok.clone().text()).toBe(200);
+  });
+
+  it('the owner: the step-up, the chosen user’s kit only, the salt only when missing and only if it opens the Drive; the admin audit has ids and counts, never a key', async () => {
+    const u = await makeUser('ukr-salt');
+    await enableDrive(u.id);
+    await uploadFile(u.cookie, 'root', 10);
+    const kit = await kitOf(u);
+    const other = await makeUser('ukr-other');
+    await enableDrive(other.id);
+    const no = await post(R(u.id), body(kit));
+    expect([no.status, await errorOf(no)]).toEqual([400, 'reauth_required']);
+    expect((await post(R(u.id), body(kit, { current: proofFor('not the password') }))).status).toBe(403);
+    // A kit for another user than the one chosen: refused, nothing done.
+    const mis = await post(R(other.id), body(kit, STEP));
+    expect([mis.status, await errorOf(mis)]).toEqual([400, 'kit_mismatch']);
+    expect((await post(R(u.id), { kit: { id: u.id, salt: 'short', keks: [] }, ...STEP })).status).toBe(400);
+    // The salt is there: kept, the same or not (a salt is never replaced).
+    expect(await (await post(R(u.id), body(kit, STEP))).json()).toEqual({ salt: 'same', unreadable: [], done: 0, failed: 0, left: [], next: null });
+    expect((await (await post(R(u.id), body({ ...kit, userSalt: newSalt() }, STEP))).json()).salt).toBe('kept');
+    expect((await driveKeys(u.cookie, { fresh: true })).raw.keys.map((x) => x.kek)).toEqual(kit.keks.map((x) => x.kek));
+    // Lost: a salt that does not open the Drive is refused (the salt proof), the kit's comes back.
+    await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec('DELETE FROM user_salts WHERE user_id = ?', u.id));
+    expect((await (await post(R(u.id), body({ ...kit, userSalt: newSalt() }, STEP))).json()).salt).toBe('wrong');
+    expect(await errorOf(await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {} }))).toBe('salt_missing');
+    expect((await (await post(R(u.id), body(kit, STEP))).json()).salt).toBe('restored');
+    expect((await driveKeys(u.cookie, { fresh: true })).raw.keys.map((x) => x.kek)).toEqual(kit.keks.map((x) => x.kek));
+    const rows = (await adminAudit()).filter((r) => r.action === 'drive.kit_restored' || r.action === 'drive.salt_restored');
+    expect(rows.filter((r) => r.action === 'drive.salt_restored')).toHaveLength(1);
+    expect(rows.filter((r) => r.action === 'drive.kit_restored').length).toBeGreaterThanOrEqual(4);
+    expect(rows.some((r) => /salt restored/.test(r.detail))).toBe(true);
+    for (const r of rows) {
+      expect(r.detail).not.toContain(kit.userSalt);
+      for (const k of kit.keks) expect(r.detail).not.toContain(k.kek);
+    }
+    // The owner's action: not in the user's own activity.
+    const act = (await (await fetchJson('/api/private/me/activity', { cookie: u.cookie })).json()).rows;
+    expect(act.some((x) => /kit_restored|salt_restored/.test(x.action))).toBe(false);
+  }, 30000);
+
+  it('the owner: items and link keys under a sub-MEK the server lost come back under the current one with the kit’s KEK; a wrong or a working key changes nothing', async () => {
+    const u = await makeUser('ukr-lost');
+    await enableDrive(u.id, { reverseEnabled: true });
+    const f = await mkdir(u.cookie);
+    const file = await uploadRealFile(u.cookie, 'root', new TextEncoder().encode('synthetic quarterly figures'));
+    const link = await newReverse(u.cookie);
+    expect(link.res.status).toBe(201);
+    const kit = await kitOf(u);
+    const lost = kit.current;
+    // Another sub-MEK becomes current, then the old one is lost from the keyring.
+    await addSub({ rotate: true });
+    await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec('DELETE FROM meks WHERE id = ?', lost));
+    const cur = (await status()).current;
+    expect(cur).not.toBe(lost);
+    const meks = () => runInDurableObject(driveOf(u.id), (i, s) => s.storage.sql.exec("SELECT mek FROM nodes WHERE id != 'root' UNION ALL SELECT mek FROM reverse").toArray().map((x) => x.mek));
+    expect(await meks()).toEqual([lost, lost, lost]);
+    // A working key is never replaced: a kit whose KEK for the current sub-MEK differs changes nothing.
+    const curKek = (await driveKeys(u.cookie, { fresh: true })).raw.keys.find((x) => x.mekId === cur).kek;
+    const working = { ...kit, keks: [{ mekId: cur, kek: b64urlFromBytes(randomBytes(32)) }] };
+    expect(await (await post(R(u.id), body(working, STEP))).json()).toMatchObject({ unreadable: [lost], done: 0, failed: 0, left: [lost] });
+    expect((await driveKeys(u.cookie, { fresh: true })).raw.keys.find((x) => x.mekId === cur).kek).toBe(curKek);
+    // A wrong KEK for the lost one: nothing opens with it, nothing changes.
+    const wrong = { ...kit, keks: kit.keks.map((k) => (k.mekId === lost ? { ...k, kek: b64urlFromBytes(randomBytes(32)) } : k)) };
+    expect(await (await post(R(u.id), body(wrong, STEP))).json()).toMatchObject({ salt: 'same', unreadable: [lost], done: 0, failed: 3, left: [], next: null });
+    expect(await meks()).toEqual([lost, lost, lost]);
+    // A call that resumes past everything under it does nothing (a call resumes where the last one stopped).
+    expect(await (await post(R(u.id), body(kit, { ...STEP, resume: { mek: lost, after: `r.${'z'.repeat(22)}` } }))).json()).toMatchObject({ done: 0, failed: 0, next: null });
+    expect(await meks()).toEqual([lost, lost, lost]);
+    // The kit's KEK: the folder, the file and the link key are sealed again under the current sub-MEK.
+    const r = await (await post(R(u.id), body(kit, STEP))).json();
+    expect(r).toEqual({ salt: 'same', unreadable: [lost], done: 3, failed: 0, left: [], next: null });
+    expect(await meks()).toEqual([cur, cur, cur]);
+    forgetKeys();
+    const dir = (await (await node(u.cookie, f.id)).json()).node;
+    expect(dir.mek).toBe(cur);
+    expect((await openStored(u.cookie, dir)).name.length).toBeGreaterThan(0);
+    expect([...(await openStored(u.cookie, (await (await node(u.cookie, file.id)).json()).node)).dek]).toEqual([...file.dek]);
+    // A repeat finds nothing lost.
+    expect(await (await post(R(u.id), body(kit, STEP))).json()).toMatchObject({ unreadable: [], done: 0 });
+    const row = (await adminAudit()).find((x) => x.action === 'drive.kit_restored' && x.detail.includes('re-sealed with the kit: 3'));
+    expect(row.detail).toContain(lost);
+    for (const k of kit.keks) expect(row.detail).not.toContain(k.kek);
+  }, 30000);
+});

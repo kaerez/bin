@@ -776,7 +776,8 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     user's own (no actor, no trace of the impersonation), and in the owner-only admin audit with
     the owner as the real actor (`imp`). Getting the user's keys is the owner's own action
     (`drive.keys_used`, admin audit only). The personal kit and the upgrade are the user's own
-    (`403 impersonating`).
+    (`403 impersonating`); a restore from a personal kit is the owner's only, from Admin →
+    Security → Keys, never while acting as the user (`403`).
 - **Admin share management**: the owner sees every user's shares and can change a share's label, views
   and expiry, revoke it, or **lock** it.
   - **Only metadata:** share management never gains access to share content (notes and file
@@ -986,7 +987,18 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
 - **Kits.** The personal kit (every user) holds the user's salt and KEKs; the key kit (the
   owner) the root MEK, every sub-MEK and every user salt. Each is sealed in the browser under an
   optional passphrase (Argon2id, AES-256-GCM, bound to the account and the origin) and never sent
-  to the server; verify sends check values only. **A key kit opens every Drive** (with a copy of
+  to the server; verify sends check values only. **Only the owner restores from a kit**, in
+  Admin → Security → Keys: the key kit, and a user's personal kit ("Restore a user's personal
+  kit": the user chosen there, the kit opened in the owner's browser for that user only, the
+  server refusing a kit whose id is another user's). The Account page offers Download and Verify
+  only, for every account, and its restore routes answer `403 owner_only` to everyone (the
+  owner's own session, the owner acting as a user; API keys never reach the Drive or the admin
+  routes), so no user can change what opens a Drive or lock the owner out of its files. A
+  personal-kit restore takes only what the server lost — the user salt when the account has
+  none, and only if it opens that Drive; the items under a sub-MEK the server can no longer
+  open, opened with the kit's KEK and sealed again under the current one (compare-and-set) —
+  never replaces a working key, never keeps the kit's KEKs, needs the step-up for every call and
+  is in the admin audit by ids and counts only. **A key kit opens every Drive** (with a copy of
   the stored ciphertext): store it offline, like the AUTHN secret. Losing the Directory's keys
   and every key kit loses every Drive file. What these controls can and cannot enforce: the
   step-up on a kit download gates the server's handing out of the keys; the throttle on failed
@@ -1368,6 +1380,12 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   (`409 busy`), so a late chunk write never lands on, or is deleted from, a finished file; a
   write that finishes after its upload ended (cancelled, revoked, purged) is deleted. An uploader can fill the user's Drive up to the link's limits: the user
   chooses those limits, and revokes the link at any time.
+- **Quotas on Receive.** The owner can cap, per role, the upload sessions a user's links receive
+  (`receive-upload`, and `receive` with new links) in a fixed window. A session is counted for
+  the user when it starts (before the password is checked), atomically in the Directory, and
+  given back when it does not start or ends having sent no file. At the quota `begin` answers
+  `429 not_accepting` ("This link can’t accept more uploads right now. Try again later."): the
+  uploader learns nothing of the quota (no numbers, no window, no `Retry-After`).
 - **Ending.** Revoking a link, its expiry, an admin lock (paused), the role losing the option, or
   deleting its folder stops uploads at once; unfinished uploads are deleted; files already
   received stay. Deleting the account deletes everything.
@@ -1398,6 +1416,12 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - No CORS headers; JSON bodies are read under a streaming byte cap (4 MiB; 8 MiB + 16 B for
   file chunks, with the exact expected size enforced).
 - Every value is re-validated server-side (formats, views, expiry, limits, quotas, settings).
+- **Quotas** (role option lists; public/js/quotakinds.js) are checked and counted in one
+  synchronous Directory step, so concurrent creations cannot pass a quota: outgoing shares
+  (every share, or by type), Drive uploads (`drive-upload`, each file, at the upload's start) and
+  Receive (`receive-link`, `receive-upload`). An API-only quota narrows API creations only; the
+  Drive and Receive have no API channel. The public account's quotas count per anonymous
+  subject and take only the kinds it can use. The owner is never counted.
 - Reads that spend views need custom headers (non-simple): ambient GETs never consume anything.
 - Download grants are stored apart from the share record.
   - One client (an IP, or an IPv6 /64) holds at most 20 live grants per file share; opening

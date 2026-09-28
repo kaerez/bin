@@ -1,4 +1,5 @@
-// keysclient.js — the owner's key kit and the keys parts of Import / export
+// keysclient.js — the owner's key kit, a restore from a user's personal kit
+// and the keys parts of Import / export
 // (docs/DRIVE.md §3.1), in the browser: the server hands the key material
 // after the step-up, and it is sealed here under a passphrase (drivekit.js
 // for the kit, exportcrypt.js for an export) before it is saved. Verify
@@ -88,6 +89,35 @@ export async function restoreKeyKit({ ownerId, text, passphrase = '', step = {},
   const kit = await readKeyKit(text, passphrase, ownerId);
   // A kit made during a root change also holds the root being replaced (`rootOld`).
   return keysApi.restore({ root: kit.root, ...(kit.rootOld ? { rootOld: kit.rootOld } : {}), subs: kit.subs, salts: kit.salts, useRoot, dryRun, ...step });
+}
+
+/**
+ * Restore from a user's personal kit (Admin → Security → Keys, the only place
+ * one restores): the kit opens here for `userId` only (another account's kit
+ * fails with DriveKitError 'owner' before any key is derived), then its salt
+ * and KEKs go to the server, which takes only what it lost: the salt when the
+ * account has none (and only if it opens that Drive), and the items under a
+ * sub-MEK it can no longer open, sealed again under the current one. A large
+ * Drive takes more than one call, each with the step-up: `step(n)` → the
+ * step-up for call n (0 first). → { salt, unreadable, done, failed, left }.
+ */
+export async function restoreUserKit({ userId, text, passphrase = '', step, onProgress } = {}) {
+  const p = await openDriveKit(parseDriveKit(text), { kind: 'user', accountId: userId, origin: location.origin, passphrase: String(passphrase ?? '') });
+  if (p.id !== userId) throw new DriveKitError('This kit belongs to another account.', 'owner');
+  if (typeof p.userSalt !== 'string' || !Array.isArray(p.keks)) throw new DriveKitError('The kit opened, but its content is not valid.', 'payload');
+  const kit = { id: p.id, salt: p.userSalt, keks: p.keks.slice(0, 500).map((k) => ({ mekId: k?.mekId, kek: k?.kek })) };
+  const out = { salt: 'absent', unreadable: [], done: 0, failed: 0, left: [] };
+  let resume = null;
+  for (let n = 0; n < 1000; n++) {
+    const r = await keysApi.userKitRestore(userId, { kit, ...(resume ? { resume } : {}), ...(await step(n)) });
+    if (n === 0) Object.assign(out, { salt: r.salt, unreadable: r.unreadable || [], left: r.left || [] });
+    out.done += r.done || 0;
+    out.failed += r.failed || 0;
+    if (onProgress) onProgress(out.done);
+    resume = r.next || null;
+    if (!resume) break;
+  }
+  return out;
 }
 
 // ── Import / export: the keys parts ────────────────────────────────────────

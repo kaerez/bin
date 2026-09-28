@@ -211,12 +211,9 @@ describe('the Drive API: every call goes through the same token path', () => {
     remove: () => api.drive.remove(ID),
     share: () => api.drive.share({ nodes: [ID] }),
     shares: () => api.drive.shares(ID),
-    // The personal kit, and the upgrade of a Drive made before the key model v2 (own, or the owner's for a user).
+    // The personal kit (download and verify: a restore is the owner's, keysApi), and the upgrade of a Drive made before the key model v2 (own, or the owner's for a user).
     kit: () => api.drive.kit({ current: 'P'.repeat(43) }),
     kitVerify: () => api.drive.kitVerify({ keks: {} }),
-    kitRestore: () => api.drive.kitRestore({ current: 'P'.repeat(43) }),
-    kitItems: () => api.drive.kitItems('mAAAAAAAAAAA'),
-    kitItemsPut: () => api.drive.kitItemsPut({ items: [] }),
     migrate: () => api.drive.migrate(UID),
     migrateItems: () => api.drive.migrateItems(null, UID),
     migratePut: () => api.drive.migratePut({ items: [] }, UID),
@@ -258,7 +255,7 @@ describe('the Drive API: every call goes through the same token path', () => {
     }
     const changes = seen.filter((c) => c.method !== 'GET');
     expect(changes.map((c) => c.name).sort()).toEqual([
-      'acceptReceived', 'createFile', 'createReverse', 'deleteArchive', 'finalize', 'keys', 'kit', 'kitItemsPut', 'kitRestore', 'kitVerify',
+      'acceptReceived', 'createFile', 'createReverse', 'deleteArchive', 'finalize', 'keys', 'kit', 'kitVerify',
       'migrateEscrow', 'migrateFinish', 'migratePut', 'migrateRetire', 'mkdir', 'putChunk', 'receivedFailed', 'receivedRetry', 'remove', 'share', 'update',
     ]);
     for (const c of changes) {
@@ -328,6 +325,7 @@ describe('the Drive keyring API: every call goes through the same token path', (
     verifyExport: () => api.keysApi.verifyExport({ root: 'x', ...STEP }),
     importKeys: () => api.keysApi.importKeys({ dryRun: true, ...STEP }),
     userView: () => api.keysApi.userView(UID, STEP),
+    userKitRestore: () => api.keysApi.userKitRestore(UID, { kit: { id: UID, keks: [] }, ...STEP }),
   };
   beforeEach(() => { api.bindSession(profile()); });
 

@@ -32,8 +32,9 @@ create-user form's Drive note, the reset's "unlock your own Drive" box and the a
 reset's escrow key. The rows below that name them describe the release before. Their
 replacements — the upgrade box of a Drive made before (with its password, recovery-kit and
 "Retire these links" forms), the Drive's notices when its keys cannot be had, the personal kit
-(Account), and Admin → Security → Keys (the keyring, a root change that could not finish, the key
-kit, the Drive upgrade and the archive of the release before) and Import / export → Drive keys —
+(Account: Download and Verify), and Admin → Security → Keys (the keyring, a root change that could
+not finish, the key kit, the Drive upgrade and the archive of the release before, the restore of a
+user's personal kit) and Import / export → Drive keys —
 follow the same fixes: every form's message sits in a status line present from the start
 (`public/dashboard/js/kit-ui.js` `liveMsg`), a kit's passphrase warning describes its field while
 it shows, a notice in place of the Drive is said by the page's own status line, and an open Drive

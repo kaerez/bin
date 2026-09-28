@@ -397,8 +397,9 @@ and to a recipient's "delete now".
 
 Creation limits: `url` and `secret` notes need the account's `text` limit **and** `url` /
 `secret` respectively (`403 url_disabled` / `secret_disabled`); `meta.deletable` needs
-`openerDelete` (`403 opener_delete_disabled`). All three are off by default. They count as notes
-for quotas; the share index records `kind` `url` / `secret`.
+`openerDelete` (`403 opener_delete_disabled`). All three are off by default. For quotas they
+count as links (`url`) and credentials (`secret`), and under `text` (notes, links and
+credentials) and `all`; the share index records `kind` `url` / `secret`.
 
 ---
 
@@ -499,7 +500,10 @@ exact ciphertext size of every chunk: `min(CHUNK, padded − i·CHUNK) + 16`.
 - **Limits** resolve per request: the account's role → the Default role → built-in default. API-channel
   limits and quotas can only restrict further. Quota windows are fixed buckets (UTC calendar
   for months/years); every creation counts toward all-channel quotas, API creations also toward
-  API quotas.
+  API quotas. A quota's kind says what it counts (public/js/quotakinds.js): outgoing shares
+  (`all`; `text` = notes, links and credentials; `files` = file and Drive shares; `note`, `url`,
+  `secret`, `file`, `drive`), Drive uploads (`drive-upload`) and Receive (`receive`,
+  `receive-link`, `receive-upload`).
 - **Guard**: per-IP (IPv6 aggregated to a configurable prefix, default /64) failure counters for
   `login`, `setup` and `invalid`; *X failures within n seconds ⇒ block for n seconds*. Manual
   IP allow/block rules as an address, a CIDR block or an inclusive range `a-b` (same family;

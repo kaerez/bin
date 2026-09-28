@@ -931,7 +931,9 @@ export class Drive extends DurableObject {
         for (const s of shares) this.sql.exec('DELETE FROM refs WHERE share_id = ?', s);
       });
       this.#dropEndedReverse();
-      return { ok: true, deleted: ids.length, shares: [...shares], reverse, used: this.#used() };
+      // Uploads that never completed (the browser deletes one it cancelled): the Worker gives their quota back.
+      const unfinished = rows.filter((r) => r.kind === 'file' && r.state === 'pending' && !r.rs).map((r) => r.created);
+      return { ok: true, deleted: ids.length, shares: [...shares], reverse, unfinished, used: this.#used() };
     });
   }
 
@@ -1100,17 +1102,31 @@ export class Drive extends DurableObject {
       AND (agen IS NULL OR agen NOT IN (SELECT gen FROM archive_meta))`, before, before);
     this.sql.exec('DELETE FROM rsessions WHERE rid NOT IN (SELECT id FROM reverse)');
   }
-  /** Upload sessions past their time: log what they received (count and size), then forget them. */
+  /**
+   * Upload sessions past their time: log what they received (count and
+   * size), give back the quota of those that sent nothing, then forget them.
+   */
   async #lapseSessions() {
     const stale = this.sql.exec('SELECT * FROM rsessions WHERE expires <= ?', nowSec()).toArray();
     if (!stale.length) return;
     this.sql.exec('DELETE FROM rsessions WHERE expires <= ?', nowSec());
     const ns = this.env.DIRECTORY;
+    const dir = ns.get(ns.idFromName('directory'));
     for (const x of stale) {
       if (!x.files) continue;
-      try { await ns.get(ns.idFromName('directory')).reverseEvent(x.rid, 'received', { files: x.files, bytes: x.bytes }); } catch (e) {
+      try { await dir.reverseEvent(x.rid, 'received', { files: x.files, bytes: x.bytes }); } catch (e) {
         console.warn('secbin: reverse upload not logged', e && e.message ? e.message : e);
       }
+    }
+    await this.#refundAt('receive-upload', stale.filter((x) => !x.files && x.started).map((x) => x.started));
+  }
+  /** Give back the quota of actions counted at `times` (Directory refundAt): a failure is only logged. */
+  async #refundAt(action, times) {
+    const uid = this.#meta('uid');
+    if (!uid || !times.length) return;
+    const ns = this.env.DIRECTORY;
+    try { await ns.get(ns.idFromName('directory')).refundAt(uid, action, times); } catch (e) {
+      console.warn('secbin: quota not given back', e && e.message ? e.message : e);
     }
   }
 
@@ -1244,15 +1260,18 @@ export class Drive extends DurableObject {
       }
       if (r.pwfails || r.pwlock) this.sql.exec('UPDATE reverse SET pwfails = 0, pwsince = NULL, pwlock = NULL WHERE id = ?', id);
     }
+    // Sessions that lapsed having sent nothing are forgotten here: `lapsed`
+    // (their starts) lets the Worker give their quota back.
+    const lapsed = this.sql.exec('SELECT started FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0 AND started IS NOT NULL', id, t).toArray().map((x) => x.started);
     this.sql.exec('DELETE FROM rsessions WHERE rid = ? AND expires <= ? AND files = 0', id, t);
-    if (this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND expires > ?', id, t).one().c >= MAX_SESSIONS) return { status: 'busy' };
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND expires > ?', id, t).one().c >= MAX_SESSIONS) return { status: 'busy', lapsed };
     if (tag && this.sql.exec('SELECT COUNT(*) AS c FROM rsessions WHERE rid = ? AND net = ? AND expires > ?', id, tag, t).one().c >= MAX_SESSIONS_PER_NET) {
-      return { status: 'busy' };
+      return { status: 'busy', lapsed };
     }
     const expires = Math.min(r.expires, t + Math.min(ttl, SESSION_IDLE_SEC));
     this.sql.exec('INSERT INTO rsessions (hash, rid, expires, net, started) VALUES (?, ?, ?, ?, ?)', hash, id, expires, tag, t);
     await this.#schedulePurge();
-    return { status: 'ok', expires };
+    return { status: 'ok', expires, lapsed };
   }
 
   #session(id, hash) {
@@ -1403,13 +1422,17 @@ export class Drive extends DurableObject {
     });
   }
 
-  /** The uploader is done: → { files, bytes } finalized in the session (the Worker logs them); the session ends. */
+  /**
+   * The uploader is done: → { files, bytes } finalized in the session (the
+   * Worker logs them) and when it started (a session that sent nothing gives
+   * its quota back); the session ends.
+   */
   async reverseDone(uid, id, hash) {
     this.#bind(uid);
     const x = this.#session(id, hash);
     if (!x) return { status: 'bad_grant' };
     this.sql.exec('DELETE FROM rsessions WHERE hash = ?', hash);
-    return { status: 'ok', files: x.files, bytes: x.bytes };
+    return { status: 'ok', files: x.files, bytes: x.bytes, started: x.started ?? null };
   }
 
   /**
@@ -1486,8 +1509,9 @@ export class Drive extends DurableObject {
     if (!uid) return;
     const sec = Number(this.#meta('pendingSec')) || 3600;
     let purged = 0;
+    let unfinished = [];
     await this.ctx.blockConcurrencyWhile(async () => {
-      const stale = this.sql.exec(`SELECT id, chunks, size, rs FROM nodes WHERE kind = 'file' AND state = 'pending'
+      const stale = this.sql.exec(`SELECT id, chunks, size, rs, created FROM nodes WHERE kind = 'file' AND state = 'pending'
         AND (updated <= ? OR (rs IS NOT NULL AND created <= ?))`, nowSec() - sec, nowSec() - RECEIVE_MAX_SEC).toArray();
       if (!stale.length) return;
       await this.#deleteObjects(uid, stale);
@@ -1495,8 +1519,11 @@ export class Drive extends DurableObject {
         for (const f of stale) this.#dropPending(f);
       });
       purged = stale.length;
+      unfinished = stale.filter((f) => !f.rs).map((f) => f.created);
     });
     if (purged) await this.#reportUsage();
+    // Drive uploads that never completed give their quota back.
+    await this.#refundAt('drive-upload', unfinished);
     await this.#lapseSessions();
     this.#dropEndedReverse();
     const more = await this.#hashStored(uid).catch((e) => { console.warn('secbin: drive hashes not computed', e && e.message ? e.message : e); return false; });

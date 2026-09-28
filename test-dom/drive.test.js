@@ -193,14 +193,16 @@ describe('startDrive states', () => {
     expect(S.requests.filter((x) => x.method !== 'GET').map((x) => `${x.method} ${x.path}`)).toEqual(['POST /api/private/drive/keys']);
   });
 
-  it('keys that cannot be had: what happened and who fixes it (the salt: the personal kit; the keyring: the administrator)', async () => {
+  it('keys that cannot be had: what happened and who fixes it (the salt and the keyring: the administrator, from a kit)', async () => {
     await server();
     S.keysError = 'salt_missing';
     let mount = mountPoint();
     let r = await startDrive(mount, deps());
     expect(r).toEqual({ state: 'unavailable', reason: 'salt_missing' });
-    expect(mount.querySelector('#drive-unavailable p.msg').textContent).toMatch(/user salt.*personal kit/);
-    expect(mount.querySelector('#drive-unavailable a[href="/dashboard/account/#drive-kit"]')).not.toBeNull();
+    expect(mount.querySelector('#drive-unavailable p.msg').textContent).toMatch(/user salt.*administrator puts it back from your personal kit/);
+    // A user cannot restore it: no way to a restore of their own (the Account page has none).
+    expect(mount.querySelector('#drive-unavailable a[href="/dashboard/account/#drive-kit"]')).toBeNull();
+    expect(mount.querySelector('#drive-unavailable').textContent).not.toMatch(/Account → Drive personal kit → Restore/);
     S.keysError = 'keys_missing';
     mount = mountPoint();
     r = await startDrive(mount, deps({ user: { ...S.user, role: 'owner' } }));

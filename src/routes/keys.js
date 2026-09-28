@@ -3,10 +3,11 @@
 // add, rotate, edit dates, set current, show, delete after a re-seal, change
 // the root), the re-seal jobs the owner's browser drives, the key kit
 // (download, verify, restore), the keys part of Import / export (export, a
-// read-only verify of an export file, import), and one user's keys (view).
-// The owner only, never while impersonating (the admin route checks both);
-// every change and every view needs the step-up and is in the admin audit by
-// fingerprint, never with a key.
+// read-only verify of an export file, import), and one user's keys (view,
+// and a restore from their personal kit: the only place a personal kit
+// restores anything). The owner only, never while impersonating (the admin
+// route checks both); every change and every view needs the step-up and is
+// in the admin audit by fingerprint, never with a key.
 //
 // The server can open everything it re-seals here: the DEKs and names of
 // every Drive item are unwrapped in this Worker, re-sealed and stored again,
@@ -16,7 +17,7 @@ import { json, err, readJsonBody, assertIntent, methodNotAllowed, HttpError } fr
 import { directory } from '../lib/guard.js';
 import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
-import { stepUp, saltCheck } from './drive.js';
+import { stepUp, saltCheck, parseAfter } from './drive.js';
 import { NODE_ID_RE, driveChunkKey } from '../drive-do.js';
 import { parseManualKey, isAtRest, openAtRest, keyCheckValue, sameCheck, KEY_RE, MEK_ID_RE, keyBytes, openDek, openLinkKey } from '../../public/js/drivekeys.js';
 import { b64urlFromBytes } from '../../public/js/bytes.js';
@@ -272,11 +273,14 @@ export async function handleKeys(request, env, url, a) {
     if (refused) return refused;
     return keysImport(env, dir, me, body, dryRun);
   }
-  const um = p.match(/^\/api\/private\/admin\/keys\/users\/([A-Za-z0-9_-]{16})\/view$/);
+  const um = p.match(/^\/api\/private\/admin\/keys\/users\/([A-Za-z0-9_-]{16})\/(view|kit-restore)$/);
   if (um) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
+    // A user's personal kit: its content must be that user's (checked before the step-up is spent).
+    const kit = um[2] === 'kit-restore' ? personalKitParts(body, um[1]) : null;
     const refused = await needStep(body);
     if (refused) return refused;
+    if (kit) return userKitRestore(env, dir, me, um[1], kit, body.resume);
     return userView(env, dir, me, um[1], body);
   }
   return err(404, 'not_found', 'Not found.');
@@ -509,13 +513,17 @@ async function jobFinish(env, dir, me, job) {
   return d.ok ? { ok: true, left: 0, removed: true, message: `Everything was re-sealed and ${job.from} was deleted.` } : { ok: false, left: 0, message: d.message };
 }
 
-/** One page of one Drive's items and link keys, re-sealed → the next cursor, or null when that Drive is done. */
-async function sealStep(env, uid, job) {
+/**
+ * One page of one Drive's items and link keys, re-sealed → the next cursor,
+ * or null when that Drive is done. `given`: the user's keys to use instead of
+ * the Directory's (a personal kit's KEK for a sub-MEK the server lost).
+ */
+async function sealStep(env, uid, job, given = null) {
   const drive = driveStub(env, uid);
   const page = await drive.sealedPage(uid, { meks: job.kind === 'reseal' ? [job.from] : null, after: cursor(job.after) });
   if (!page.items.length && !page.links.length) return null;
   const meks = [...new Set([...page.items.map((i) => i.mek), ...page.links.map((l) => l.mek)])];
-  const keys = await userKeys(env, uid, { meks });
+  const keys = given ?? await userKeys(env, uid, { meks });
   const cur = currentKek(keys);
   const items = [];
   const links = [];
@@ -920,4 +928,108 @@ async function userView(env, dir, me, uid, body) {
     userId: uid, username, salt: keys.salt, current: keys.current, items: s.items,
     keks: [...keys.keks].map(([mekId, v]) => ({ mekId, fp: v.fp, from: v.from, until: v.until, kek: b64urlFromBytes(v.kek), inUse: s.meks.includes(mekId) })),
   });
+}
+
+// ── a user's personal kit, restored by the owner (docs/DRIVE.md §3.1) ──────
+/**
+ * A personal kit's content, as the owner's browser opened it: `{ kit: { id,
+ * salt, keks: [{ mekId, kek }] } }`. Its id must be the chosen user's (the
+ * browser opened it for that account; the salt and every KEK are bound to it
+ * as well). → { salt, keks: Map(mekId → kek) }, or HttpError 400.
+ */
+function personalKitParts(body, uid) {
+  const k = body.kit;
+  if (!isObj(k) || typeof k.id !== 'string') throw new HttpError(400, 'invalid', 'Send { kit: { id, salt, keks: [{ mekId, kek }] } }.');
+  if (k.id !== uid) throw new HttpError(400, 'kit_mismatch', 'This personal kit belongs to another user.');
+  if (k.salt !== undefined && k.salt !== null && (typeof k.salt !== 'string' || !KEY_RE.test(k.salt))) throw new HttpError(400, 'invalid', 'salt must be the user salt (32 bytes, base64url).');
+  if (!Array.isArray(k.keks) || k.keks.length > 500) throw new HttpError(400, 'invalid', 'keks must be a list (at most 500).');
+  const keks = new Map();
+  for (const x of k.keks) {
+    if (!isObj(x) || !MEK_ID_RE.test(x.mekId ?? '') || !KEY_RE.test(x.kek ?? '')) throw new HttpError(400, 'invalid', 'Each KEK is { mekId, kek }.');
+    keks.set(x.mekId, x.kek);
+  }
+  return { salt: k.salt ?? null, keks };
+}
+
+/** Where a restore that ran out of time resumes: `{ mek, after: "n.<id>" | "r.<id>" | null }` → { mek, after } or null. */
+const resumeOf = (v) => (isObj(v) && MEK_ID_RE.test(v.mek ?? '') ? { mek: v.mek, after: typeof v.after === 'string' ? parseAfter(v.after) : null } : null);
+
+/**
+ * A user salt from a personal kit, only for an account that has none, and
+ * only if it opens something of that Drive's (saltCheck, the audit's salt
+ * proof) or nothing there is sealed under it → 'restored' | 'same' | 'kept'
+ * | 'wrong'. A salt is never replaced.
+ */
+async function restoreSalt(env, dir, me, uid, salt) {
+  const have = await dir.driveKeys(uid, {}).catch(() => null);
+  if (have && have.ok) return have.salt === salt ? 'same' : 'kept';
+  if (!have || have.error !== 'salt_missing') return 'kept';
+  const c = await saltCheck(env, dir, uid, salt);
+  if (c === 'wrong') return 'wrong';
+  if (c !== 'ok' && c !== 'empty') return 'kept';
+  const w = await dir.saltRestore(uid, salt, null, { write: true, ownerId: me });
+  return w.ok && w.written ? 'restored' : 'kept';
+}
+
+/**
+ * Admin → Security → Keys, "Restore a user's personal kit" (the owner only,
+ * the step-up for every call). Only what the server lost comes back, as with
+ * the key kit: the user salt when the account has none (restoreSalt), then
+ * the items and link keys sealed under a sub-MEK the server can no longer
+ * open (missing, or not opening under the root), opened here with the kit's
+ * KEK and sealed again under the current one — the re-seal step of the key
+ * jobs (sealStep, compare-and-set), with the kit's KEK for that sub-MEK only.
+ * What does not open with the kit stays as it is; a working key is never
+ * replaced and the kit's KEKs are never kept. A call works STEP_MS at most:
+ * `next` says where the next one resumes (`resume`). Admin audit
+ * (`drive.kit_restored`): ids and counts only.
+ * → { salt, unreadable, done, failed, left, next }.
+ */
+async function userKitRestore(env, dir, me, uid, kit, resumeRaw) {
+  if (!(await dir.userName(uid))) return err(404, 'not_found', 'User not found.');
+  const pol = await dir.driveAccess(uid, { forUpgrade: true });
+  if (!pol.ok) return fromDir(pol);
+  const salt = kit.salt ? await restoreSalt(env, dir, me, uid, kit.salt) : 'absent';
+  const s = await driveStub(env, uid).summary(uid);
+  let keys = null;
+  let lost;
+  try {
+    keys = await userKeys(env, uid, { meks: s.meks });
+    lost = [...keys.missing, ...keys.broken];
+  } catch (e) {
+    if (!(e instanceof HttpError)) throw e;
+    lost = s.meks; // no salt, or no root: nothing opens here
+  }
+  const todo = keys ? lost.filter((m) => kit.keks.has(m)).sort() : [];
+  const out = { salt, unreadable: lost, done: 0, failed: 0, left: lost.filter((m) => !todo.includes(m)), next: null };
+  if (todo.length) {
+    currentKek(keys); // 503 when the current sub-MEK itself is not available
+    const resume = resumeOf(resumeRaw);
+    const start = resume ? todo.findIndex((m) => m >= resume.mek) : 0;
+    const t0 = Date.now();
+    let pages = 0;
+    for (let i = start < 0 ? todo.length : start; i < todo.length && !out.next; i++) {
+      const mek = todo[i];
+      const kek = keyBytes(kit.keks.get(mek));
+      const given = { ...keys, keks: new Map(keys.keks).set(mek, { kek, kekOld: null, fp: null }) };
+      const job = { kind: 'reseal', from: mek, after: resume && resume.mek === mek ? resume.after : null, done: 0, skipped: 0, failed: 0, failedIds: [] };
+      try {
+        do {
+          if (Date.now() - t0 >= STEP_MS || pages >= STEP_PAGES) {
+            out.next = { mek, after: job.after ? `${job.after.kind}.${job.after.id}` : null };
+            break;
+          }
+          job.after = await sealStep(env, uid, job, given);
+          pages++;
+        } while (job.after);
+      } finally {
+        kek.fill(0);
+        out.done += job.done;
+        out.failed += job.failed;
+      }
+    }
+  }
+  const ids = (l) => (l.length ? ` (${l.slice(0, 20).join(', ')})` : '');
+  await dir.driveAdminAction(me, uid, 'drive.kit_restored', `personal kit: salt ${salt}; sub-MEKs the server cannot open: ${lost.length}${ids(lost)}; re-sealed with the kit: ${out.done}; not opened with it: ${out.failed}; not in the kit: ${out.left.length}${out.next ? '; continues' : ''}`);
+  return json(out);
 }

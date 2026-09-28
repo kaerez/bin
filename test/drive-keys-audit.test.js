@@ -260,12 +260,12 @@ describe('F5 / F6: what a restore or an import may add', () => {
     expect((await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: w.cookie, body: {} })).status).toBe(200);
   });
 
-  it('F5: the personal kit restore checks a salt against a link key too', async () => {
+  it('F5: a restore from a personal kit (the owner\'s, Admin → Security → Keys) checks a salt against a link key too', async () => {
     const v = await receiver('f5-kit');
     const link = await newReverse(v.cookie);
     const kit = (await (await post('/api/private/drive/kit', { current: proofFor(USER_PW) }, v.cookie)).json()).kit;
     await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec('DELETE FROM user_salts WHERE user_id = ?', v.id));
-    const restore = (salt) => post('/api/private/drive/kit/restore', { salt, current: proofFor(USER_PW) }, v.cookie);
+    const restore = (salt) => post(`${K}/users/${v.id}/kit-restore`, { kit: { id: v.id, salt, keks: [] }, ...STEP });
     expect((await (await restore(newSalt())).json()).salt).toBe('wrong');
     expect((await (await restore(kit.userSalt)).json()).salt).toBe('restored');
     await linkOpens(v, link.id);

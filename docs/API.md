@@ -163,6 +163,19 @@ SPEC.md §10). The ones specific to keys and shares:
 | 429 | `rate_limited` | too many CAPTCHA checks from your network (30 per 10 minutes) |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
 
+`429 quota_exceeded` names the quota it reached: `{ error: "quota_exceeded", message: "Quota
+reached: 10 notes per 1d via the API.", quota: { channel, kind, n, unit, max } }`. `channel` is
+`all` (GUI and API together) or `api` (API only); `kind` is what it counts — outgoing shares:
+`all` (every note, link, credential, file share and Drive share), `text` (notes, links and
+credentials), `note` (plain text, Markdown or code), `url`, `secret`, `files` (file and Drive
+shares), `file`, `drive`; the Drive: `drive-upload` (each file uploaded); Receive: `receive`
+(both below), `receive-link` (a new reverse share), `receive-upload` (an upload session that
+sends files through one of your links). A key only ever meets the outgoing kinds (the Drive and
+Receive are for browser sessions). The message's words for each kind: outgoing shares; notes,
+links and credentials; notes; links; credentials; file and Drive shares; file shares; Drive
+shares; files uploaded to the Drive; Receive links and uploads received; new Receive links;
+uploads received.
+
 ## Examples
 
 The same examples are on **Account → API keys → Using the API**, with your server's address
@@ -504,20 +517,20 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | --- | --- |
 | `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration }` (`current`: the current sub-MEK's id; `migration`: null, or what the upgrade of a Drive made before the key model v2 still has to do; `capacity` / `maxFile` null = no limit) |
 | `POST /api/private/drive/keys` | `{}` → `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — the session's KEKs, derived by the server (docs/DRIVE.md §3); the browser keeps them in the page's memory only. `503 keys_missing`, `409 salt_missing`; the owner acting as the user gets the user's (in the admin audit) |
-| `POST /api/private/drive/kit` · `…/kit/verify` · `…/kit/restore` | the personal kit: its content after `current` / `reauth`; a read-only check by check values; a restore of the user salt (`current` / `reauth`). Not while impersonating |
-| `GET`, `PUT /api/private/drive/kit/items` | items sealed under a sub-MEK the server can no longer open, re-sealed in the browser with the kit's KEK |
+| `POST /api/private/drive/kit` · `…/kit/verify` | the personal kit: its content after `current` / `reauth`; a read-only check by check values. Not while impersonating |
+| `POST /api/private/drive/kit/restore` · `GET`, `PUT …/kit/items` | `403 owner_only` for everyone: only the owner restores from a personal kit (`POST /api/private/admin/keys/users/<userId>/kit-restore`, [docs/DRIVE.md](./DRIVE.md) §3.1) |
 | `GET /api/private/drive/migrate` · `GET …/migrate/items` · `PUT …/migrate` · `POST …/migrate/finish` · `POST …/migrate/retire` | the one-time upgrade of the user's own Drive made before the key model v2 (docs/DRIVE.md §3.3): `409 already_upgraded` once it is done; `retire` (`{ ids, current \| reauth }`) ends the links of the release before that the old key does not open. Not while impersonating |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
 | `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta?, ks?, mek? }` — move / rename (a new name comes with the item's own `ks` and `mek`: `409 stale_keys`, `400 bad_seal`) |
 | `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
 | `GET /api/private/drive/nodes/:id/shares` | → `{ shares }` — the active shares of the item |
 | `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `201 { id }` |
-| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `201 { id, uploadToken, chunks }` |
+| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `201 { id, uploadToken, chunks }`; counted by the quotas of kind `drive-upload` (`429 quota_exceeded`), given back when the Drive refuses the file or the upload never completes (deleted unfinished, or purged) |
 | `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok, ch }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth?, captcha? }` → `201 { id, deletetoken, expires, captcha }` (`captcha` as above) |
-| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above) |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above); counted by the quotas of kind `receive-link` and `receive` (`429 quota_exceeded`; given back when the creation does not complete) |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
 | `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
 | `POST /api/private/drive/received/:id` | `{ parent, name, meta, dek, ks, mek }` → `{ ok }` — a received file re-sealed into the Drive under the user's current KEK |
