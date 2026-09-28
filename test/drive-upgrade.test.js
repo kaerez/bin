@@ -69,7 +69,7 @@ const nid = () => b64urlFromBytes(randomBytes(16));
  * Make `uid`'s Drive as the release before did: `items` folders (and one
  * file of real ciphertext when `file`), a reverse link, the wraps (a
  * recovery code; the escrow wrap for a user) and the key check value; the
- * Directory's escrow records and the upgrade's "pending" row (migration 15).
+ * Directory's escrow records and the upgrade's "pending" row (migration 16).
  * → { dk, folders, file: { id, fk, plain }, link: { id, pub } }.
  */
 async function legacyDrive(uid, dk, { owner: isOwner = false, items = 2, file = true, link = true, recovery = true } = {}) {

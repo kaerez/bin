@@ -5,12 +5,10 @@
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <meta name="robots" content="noindex, nofollow" />
         <meta name="referrer" content="no-referrer" />
-        <!-- Filled in by the Worker on a share page's strict navigation (a page key; src/index.js), else empty. -->
-        <meta name="secbin-page-key" content="" />
         <meta name="color-scheme" content="dark light" />
         <meta name="theme-color" content="#0d1117" />
-        <title>Send files · secbin</title>
-        <meta name="description" content="Send files, end-to-end encrypted, to the person who shared this link." />
+        <title>CAPTCHA · secbin</title>
+        <meta name="description" content="Complete the CAPTCHA to continue to the share." />
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="secbin" />
         <meta property="og:title" content="secbin · zero-knowledge sharing" />
@@ -28,9 +26,8 @@
         <link rel="stylesheet" href="/css/styles.css" />
         <!-- CSP is a response header (public/_headers + the Worker). First-party only. -->
         <script defer src="/js/theme.js"></script>
-        <script type="module" src="/js/reverse.js"></script>
-        <!-- Service worker + install banner (public/js/pwa.js). -->
-        <script type="module" src="/js/pwa.js"></script>
+        <script type="module" src="/js/check.js"></script>
+        <!-- No service worker or install banner here: the check page's CSP has worker-src 'none'. -->
         <script type="module" src="/js/a11y.js"></script>
     </head>
     <body>
@@ -94,10 +91,11 @@
         </header>
 
         <main class="wrap" id="main" tabindex="-1">
-            <!-- The uploader of a reverse share (docs/REVERSE.md): built by
-                 /js/reverse.js with DOM calls only. The key is in the #fragment. -->
-            <div id="reverse-app">
-                <p class="msg" id="reverse-fallback">This page needs JavaScript: your files are encrypted in your browser before they are sent.</p>
+            <!-- The CAPTCHA of a share that has one (served as /p/<id>?check or
+                 /r/<id>?check with the Turnstile CSP): built by /js/check.js
+                 with DOM calls only. The link's key is never on this page. -->
+            <div id="check-app">
+                <p class="msg" id="check-fallback">This page needs JavaScript to show the CAPTCHA.</p>
             </div>
 
             <footer class="foot reveal d4">

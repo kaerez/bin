@@ -100,3 +100,25 @@ server (no owner yet):
 ```sh
 BASE=http://localhost:8787 WT=$PWD node test-e2e/csrf.mjs
 ```
+
+## `captcha.mjs` — CAPTCHA on shares and reverse shares
+
+What it covers (SECURITY.md, *CAPTCHA on shares*), with the real Cloudflare Turnstile widget and
+Cloudflare's testing keys (they always pass): Admin → Roles' CAPTCHA radios (and "Default for new
+shares" under "Allow"); the composer's, the Drive Share dialog's and the Receive files dialog's
+boxes; a protected note, file share, Drive share and reverse link, each through its check page
+(the Turnstile CSP; the link's key not in its address, page or `sessionStorage`; Continue disabled
+until the CAPTCHA passes) and back on its strict page (the key back, no Turnstile script), a
+reload with the kept grant, another session asked again; an unprotected note and link with no
+check; an API recipient refused (`403 captcha_required`); the CAPTCHA badges in My shares and
+Admin → Shares; a user whose role requires it (the box ticked and disabled); axe (WCAG 2.2 A/AA)
+on the new states; no page errors or CSP / Trusted Types violations. It needs a fresh server
+with Turnstile's testing keys, on `http://localhost` (the widget needs a hostname):
+
+```sh
+rm -rf .wrangler/captcha-state
+npx wrangler dev --port 8787 --persist-to .wrangler/captcha-state \
+  --var TURNSTILE_SITEKEY:1x00000000000000000000AA --var TURNSTILE_SECRET:1x0000000000000000000000000000000AA
+WT=$PWD BASE=http://localhost:8787 node test-e2e/captcha.mjs
+# behind an HTTPS-intercepting proxy: PROXY_SPKI=<its CA's SPKI hash> (HTTPS_PROXY is used when set)
+```

@@ -26,6 +26,7 @@ import { utf8 } from '../../js/bytes.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
+import { captchaBox } from '../../js/captcha.js';
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
@@ -805,6 +806,8 @@ function mountApp(mount, client, deps) {
     const allowView = h('input', { type: 'checkbox', id: 'drive-share-view' });
     const label = h('input.input', { id: 'drive-share-label', maxlength: '100', placeholder: 'e.g. Contract for ACME' });
     const hint = unencryptedHint('drive-share-label-hint', label);
+    // The CAPTCHA, as the role says (public/js/captcha.js).
+    const cap = captchaBox({ id: 'drive-share-captcha', profile: deps.profile, which: 'share' });
     const form = h('div.drive-share-form', {},
       h('div.drive-share-opts', {},
         h('div.opt', { role: 'group', 'aria-labelledby': 'drive-share-views-l' }, h('label.opt-label', { id: 'drive-share-views-l', for: 'drive-share-views', text: 'Views' }), views, inf),
@@ -813,6 +816,7 @@ function mountApp(mount, client, deps) {
       pwBox,
       L.openerDelete ? h('label.viewer-opt', {}, del, 'Let the recipient delete it at once (“Delete now”)') : null,
       viewer && viewer.enabled ? h('label.viewer-opt', {}, allowView, 'Allow recipients to view files in the browser') : null,
+      cap.el,
       h('div.label-row', {}, h('label.field-label', { for: 'drive-share-label', text: 'Label (optional, for your own reference)' }), label, hint));
     const d = openDialog({
       title: `Share ${describe(items)}`,
@@ -838,7 +842,7 @@ function mountApp(mount, client, deps) {
         // `limits` applies the administrator's file-type and folder-depth policy (as the composer
         // does); `view` is the viewer snapshot the composer's "view in the browser" option sends.
         const view = viewer && viewer.enabled && allowView.checked ? { rules: viewer.rules, maxBytes: viewer.maxBytes } : null;
-        const r = await client.share(items.map((i) => i.id), { views: o.views, expire: o.expire, password, deletable: !!L.openerDelete && del.checked, label: label.value.trim(), limits: L, view });
+        const r = await client.share(items.map((i) => i.id), { views: o.views, expire: o.expire, password, deletable: !!L.openerDelete && del.checked, label: label.value.trim(), limits: L, view, captcha: cap.value() });
         pw1.value = pw2.value = '';
         shareResult(d, r, o, items);
       } catch (e) {
@@ -913,6 +917,7 @@ function mountApp(mount, client, deps) {
     if (!impersonating) (deps.canUsePasskey || canUsePasskey)().then((ok) => { withPasskey = !!ok; confirmText.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
     const confirm = impersonating ? async () => ({}) : deps.confirm || ((input) => confirmStep(input, deps.profile?.user?.username, withPasskey));
     const listBox = h('div.drive-reverse-list', { id: 'drive-rev-list' }, h('p.msg', { role: 'status', text: 'Loading this folder’s links…' }));
+    const cap = captchaBox({ id: 'drive-rev-captcha', profile: deps.profile, which: 'reverse' });
     const form = h('div.drive-reverse-form', { id: 'drive-rev-form' },
       h('div.label-row', {}, h('label.field-label', { for: 'drive-rev-label', text: 'Label (optional, for your own reference)' }), labelIn, hint),
       field('Note to the people who upload (optional; encrypted, only link holders can read it)', noteIn),
@@ -924,6 +929,7 @@ function mountApp(mount, client, deps) {
       field('File types', typeMode), typeRules,
       h('label.viewer-opt', {}, pwOn, 'Ask uploaders for a password (it only lets them in; you never need it, and it does not encrypt anything)'),
       pwBox,
+      cap.el,
       h('div.dfield', { hidden: impersonating }, confirmText, confirmIn));
     const d = openDialog({
       title: `Receive files into “${folder.name}”`,
@@ -958,7 +964,7 @@ function mountApp(mount, client, deps) {
         return;
       }
       try {
-        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, step });
+        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, step, captcha: cap.value() });
         pw1.value = pw2.value = '';
         reverseResult(d, r, o, folder);
       } catch (e) {
@@ -1034,7 +1040,7 @@ function mountApp(mount, client, deps) {
           h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),
           h('td.mono', { dataset: { label: 'Expires' }, text: s.expires ? (active && s.expires > now ? `in ${formatCoarse(s.expires - now)}` : formatDate(s.expires)) : '—' }),
           h('td.mono', { dataset: { label: 'Received' }, text: `${s.files} file${s.files === 1 ? '' : 's'}, ${formatBytes(s.bytes)}` }),
-          h('td.mono', { dataset: { label: 'Status' }, text: `${s.status}${s.password ? ' · password' : ''}` }),
+          h('td.mono', { dataset: { label: 'Status' }, text: `${s.status}${s.password ? ' · password' : ''}${s.captcha ? ' · CAPTCHA' : ''}` }),
           cell));
       }
       box.replaceChildren(h('h3.field-label', { id: 'drive-rev-list-h', text: 'Upload links of this folder' }),
@@ -1191,7 +1197,7 @@ function mountApp(mount, client, deps) {
           h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),
           h('td.mono', { dataset: { label: 'Expires' }, text: expires }),
           h('td.mono', { dataset: { label: 'Views' }, text: views }),
-          h('td.mono', { dataset: { label: 'Status' }, text: s.status || '—' }),
+          h('td.mono', { dataset: { label: 'Status' }, text: `${s.status || '—'}${s.captcha ? ' · CAPTCHA' : ''}` }),
           cell));
       }
       d.setBody(h('div.table-wrap', {}, h('table.table', { id: 'drive-shares-table' },

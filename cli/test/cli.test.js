@@ -66,8 +66,9 @@ describe('create → get round trip', () => {
     const a = makeIo({ stdin: 'json me', server });
     expect(await run(['create', '--json', '--views', '3', '--expire', '90m'], a.io)).toBe(0);
     const parsed = JSON.parse(a.text.out());
-    expect(Object.keys(parsed).sort()).toEqual(['deletetoken', 'expires', 'id', 'url', 'views']);
+    expect(Object.keys(parsed).sort()).toEqual(['captcha', 'deletetoken', 'expires', 'id', 'url', 'views']);
     expect(parsed.views).toBe(3);
+    expect(parsed.captcha).toBe(false); // the role's default here (captcha.test.js covers --captcha)
     expect(Number.isInteger(parsed.expires)).toBe(true);
     expect(a.text.err()).toBe('');
   });

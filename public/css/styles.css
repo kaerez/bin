@@ -633,6 +633,17 @@ button.back { cursor: pointer; }
 .ok-text { color: var(--ok, #2f7d4f); }
 .rules-in { min-width: 14rem; font-family: var(--mono, monospace); resize: vertical; }
 .viewer-opt { display: flex; align-items: center; gap: .5rem; padding: 0 1.1rem .9rem; font-size: .82rem; color: var(--ink-2); }
+/* The per-share CAPTCHA box (public/js/captcha.js) and its explanation. */
+.captcha-opt { display: flex; flex-direction: column; gap: .2rem; color: var(--ink-2); }
+.captcha-opt[hidden] { display: none; }
+.composer-captcha { padding: 0 1.1rem .9rem; }
+.captcha-opt .type-hint { padding-left: calc(max(1.125rem, 18px) + 6px + .4rem); }
+/* The CAPTCHA role options: a radio group, and its "default for new shares" group under "Allow". */
+.captcha-role { border: 1px solid var(--rule); border-radius: 4px; padding: .5rem .8rem; margin: 0; min-width: 0; }
+.captcha-role legend { padding: 0 .3rem; font-size: .82rem; color: var(--ink-2); }
+.captcha-role .captcha-default { margin: .3rem 0 .2rem calc(max(1.125rem, 18px) + 6px + .6rem); }
+.captcha-role .captcha-default[hidden] { display: none; }
+.captcha-badge { white-space: nowrap; }
 /* WCAG 2.2 target size (2.5.8): checkboxes and radios are at least 24px across. */
 /* max(): the widget's "Smaller" text size must not shrink a box below 18 px (+ 3 px margins = a 24 px target). */
 input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height: max(1.125rem, 18px); margin: 3px; flex: none; }

@@ -239,7 +239,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       const folder = u.searchParams.get('folder');
       const rows = S.reverse.filter((r) => !folder || r.folder === folder).map((r) => ({
         id: r.id, folder: r.folder, label: r.label || '', created: r.created, expires: r.expires, status: r.status, locked: false, priv: r.priv, mek: r.mek ?? null,
-        password: !!r.password, note: !!r.note, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
+        password: !!r.password, note: !!r.note, captcha: r.captcha === true, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
       }));
       return ok({ reverse: rows });
     }

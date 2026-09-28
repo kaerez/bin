@@ -1,9 +1,9 @@
 // reverse.test.js (DOM) — reverse shares in the browser (docs/REVERSE.md §8):
 // the uploader page (/r/<id>#<key>, public/js/reverse.js) against a stand-in
 // of the anonymous API — the note shown as text, the limits, the password
-// field, the human check keeping Send disabled until it passes, the file
-// list, drag and drop of files and folders, progress, errors, and a bad or
-// ended link — and the Drive's "Receive files…" action (create a link with
+// field, the file list, drag and drop of files and folders, progress,
+// errors, and a bad or ended link (the CAPTCHA of a link that has one is on
+// its check page: test-dom/captcha.test.js) — and the Drive's "Receive files…" action (create a link with
 // its options, the link with copy, the folder's links with revoke) plus the
 // received files being taken in when the Drive opens (sealed under the
 // user's KEK), and the owner acting as the user.
@@ -118,7 +118,7 @@ const fileOf = (name, text, type = 'text/plain') => new File([utf8(text)], name,
 const pick = (input, files) => { Object.defineProperty(input, 'files', { configurable: true, get: () => files }); input.dispatchEvent(new Event('change')); };
 
 describe('the uploader page', () => {
-  it('shows the note as text, the limits, and sends encrypted files after the human check passes', async () => {
+  it('shows the note as text, the limits, and sends encrypted files (no Turnstile script on this page, even with the server\'s keys)', async () => {
     const S = await reverseServer({ note: 'Send the <b>contract</b>, please.\nThanks!', limits: { filesLeft: 5, bytesLeft: 1 << 20, maxFileBytes: 1 << 19 }, turnstile: '0x4AAAAAAAsitekey' });
     const w = fakeTurnstile();
     const root = page();
@@ -134,19 +134,16 @@ describe('the uploader page', () => {
     pick($('#reverse-file-input'), [fileOf('a.txt', 'alpha'), fileOf('b.txt', 'bravo!')]);
     expect([...document.querySelectorAll('#reverse-list li')].map((li) => li.textContent)).toEqual(['a.txt — 5 B', 'b.txt — 6 B']);
     expect($('#reverse-total').textContent).toBe('2 files, 11 B');
-    // The widget is shown; Send stays disabled until the check passes.
-    await until(() => w.renders.length);
-    expect($('#reverse-human').hidden).toBe(false);
-    expect(w.renders[0].opts).toMatchObject({ action: 'reverse-upload', appearance: 'always' });
-    expect(send.disabled).toBe(true);
-    send.disabled = false; // the page cannot force it either
-    expect(send.disabled).toBe(true);
-    w.solve('tok-1');
+    // A link without the CAPTCHA: no widget, no Turnstile script, nothing asked for.
+    expect($('#reverse-human')).toBeNull();
+    expect([...document.querySelectorAll('script[src]')].filter((s) => new URL(s.src, location.href).origin !== location.origin)).toEqual([]);
     expect(send.disabled).toBe(false);
     send.click();
     await until(() => !$('#reverse-done').hidden);
     expect($('#reverse-done').textContent).toMatch(/Sent 2 files \(11 B\), encrypted/);
-    expect(S.begins[0]['x-secbin-turnstile']).toBe('tok-1');
+    expect(w.renders).toHaveLength(0);
+    expect(S.begins[0]['x-secbin-turnstile']).toBeUndefined();
+    expect(S.begins[0]['x-secbin-human']).toBeUndefined();
     expect(S.done).toBe(1);
     expect([...S.files.values()].every((f) => f.finalized)).toBe(true);
     // Nothing on the wire names or types a file.
@@ -156,11 +153,12 @@ describe('the uploader page', () => {
     const f = [...S.files.values()][0];
     const got = await openUpload(S.privateKey, S.id, { id: f.id, name: f.name, meta: f.meta, fk: { kind: 'rs', data: f.wrap } });
     expect(['a.txt', 'b.txt']).toContain(got.path);
-    // The limits shown are updated; the list is empty again; the next send needs a new check.
+    // The limits shown are updated; the list is empty again; the next send needs nothing more.
     expect($('#reverse-limits').textContent).toMatch(/3 more files at most/);
     expect(document.querySelectorAll('#reverse-list li')).toHaveLength(0);
+    expect($('#reverse-recheck').hidden).toBe(true);
     pick($('#reverse-file-input'), [fileOf('c.txt', 'c')]);
-    expect(send.disabled).toBe(true);
+    expect(send.disabled).toBe(false);
   });
 
   it('drops files and folders (paths kept, empty folders not sent), with progress', async () => {

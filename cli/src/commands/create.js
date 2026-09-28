@@ -18,7 +18,7 @@ import { buildSecret, parseShareUrl as parseLinkUrl, SECRET_FIELDS, ShareTypeErr
 import { refuseInlineApiKey, resolveApiKey } from '../apikey.js';
 import { ApiError, Client } from '../client.js';
 import { UsageError } from '../errors.js';
-import { lifecycleLine, parseExpire, parseLabel, parseViews } from '../lifecycle.js';
+import { CAPTCHA_LINE, lifecycleLine, parseCaptcha, parseExpire, parseLabel, parseViews } from '../lifecycle.js';
 import { renderQr } from '../qr.js';
 import { newPassword } from '../secret.js';
 import { buildShareUrl, isIdOfClass, requireServer } from '../url.js';
@@ -40,6 +40,8 @@ const OPTIONS = {
   json: { type: 'boolean', default: false, short: 'j' },
   qr: { type: 'boolean', default: false, short: 'q' },
   'recipient-can-delete': { type: 'boolean', default: false },
+  captcha: { type: 'boolean' },
+  'no-captcha': { type: 'boolean' },
 };
 
 // Hidden prompts for the secret fields that must not echo; the rest are one line each.
@@ -83,17 +85,18 @@ function typedPayload(fmt, text, urlRules) {
   return text;
 }
 
-/** Encrypt + upload a note. Shared with the wizard. Returns { url, id, deletetoken, expires }. */
-export async function createNote({ server, apiKey, text, password, fmt, views, expire, label, deletable = false, io }) {
+/** Encrypt + upload a note. Shared with the wizard. Returns { url, id, deletetoken, expires, captcha }. */
+export async function createNote({ server, apiKey, text, password, fmt, views, expire, label, deletable = false, captcha, io }) {
   const bar = views !== null;
   const { body, fragment } = await encryptPaste({
     text, password, fmt, bar, expire, views: bar ? views : undefined, deletable,
   });
   const client = new Client(server, io.fetch, { apiKey });
-  const { id, deletetoken, expires } = await client.createNote(body, label);
+  const r = await client.createNote(body, label, captcha);
+  const { id, deletetoken, expires } = r;
   // The id goes into the printed URL: accept only the storage class we asked for.
   if (!isIdOfClass(id, bar ? 'b' : 'k')) throw new ApiError('Malformed response from the server.', 502, 'malformed');
-  return { url: buildShareUrl(server, id, fragment), id, deletetoken, expires: Number.isSafeInteger(expires) ? expires : null };
+  return { url: buildShareUrl(server, id, fragment), id, deletetoken, expires: Number.isSafeInteger(expires) ? expires : null, captcha: r.captcha === true };
 }
 
 export async function cmdCreate(args, io) {
@@ -178,16 +181,17 @@ export async function cmdCreate(args, io) {
 
   const password = await newPassword({ envVar: values['password-env'], promptWanted: values.password, io });
 
-  const { url, id, deletetoken, expires } = await createNote({
-    server, apiKey, text, password, fmt: values.fmt, views, expire, label, deletable: values['recipient-can-delete'], io,
+  const { url, id, deletetoken, expires, captcha } = await createNote({
+    server, apiKey, text, password, fmt: values.fmt, views, expire, label, deletable: values['recipient-can-delete'], captcha: parseCaptcha(values), io,
   });
 
   if (values.json) {
-    io.stdout(JSON.stringify({ url, id, deletetoken, expires, views }) + '\n');
+    io.stdout(JSON.stringify({ url, id, deletetoken, expires, views, captcha }) + '\n');
   } else {
     io.stdout(url + '\n');
     io.stderr(`delete token: ${deletetoken}\n`);
     io.stderr(`${lifecycleLine({ what: 'the note', views, expire })}\n`);
+    if (captcha) io.stderr(`${CAPTCHA_LINE}\n`);
   }
   if (values.qr) {
     const qr = renderQr(url);

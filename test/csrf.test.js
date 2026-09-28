@@ -132,8 +132,12 @@ const REVERSE_SHARE_ROUTES = [
   dj('PATCH', `/api/private/shares/${REV_ID}`), da('POST', `/api/private/shares/${REV_ID}/revoke`),
   dj('PATCH', `/api/private/admin/shares/${REV_ID}`), da('POST', `/api/private/admin/shares/${REV_ID}/revoke`), dj('POST', `/api/private/admin/shares/${REV_ID}/lock`),
 ];
-/** The anonymous uploader's actions (the /api/reverse/<id>/… router): exempt, by design. */
-const REVERSE_ANON_ACTIONS = ['open', 'begin', 'files', 'done'];
+/**
+ * The anonymous uploader's actions (the /api/reverse/<id>/… router): exempt, by design. `human`
+ * is the link's CAPTCHA grant (no session: the cross-site check, the intent header, a Turnstile
+ * token and a per-network rate limit guard it; SECURITY.md, "CAPTCHA on shares").
+ */
+const REVERSE_ANON_ACTIONS = ['open', 'begin', 'files', 'done', 'human'];
 
 describe('the token and its cookie', () => {
   it('comes with every new session: a readable __Host- cookie next to the HttpOnly session cookie', async () => {

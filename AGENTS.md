@@ -55,6 +55,7 @@ described in [README.md](./README.md); the threat model and security design in
 npm run lint
 npm test                                  # four vitest projects: workerd, node, dom, cli
 node cli/scripts/sync-shared.mjs --check  # the CLI's copies of shared browser modules
+node tools/sw-manifest.mjs --check        # the service worker's integrity manifest (rerun without --check after changing public/ assets)
 ```
 
 Then the end-to-end suites (Playwright + Chromium against `wrangler dev`) for the areas you

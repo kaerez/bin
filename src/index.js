@@ -6,7 +6,9 @@
 //   /api/public/*    anonymous creation (the public account), when enabled
 //   /api/paste/*, /api/file/*, /api/config   capability-gated public reads
 //   /api/reverse/*   anonymous uploads to a user's reverse share (docs/REVERSE.md)
-//   /r/<id>          the reverse-share uploader page (Turnstile headers when on)
+//   /p/<id>          the recipient's page (the viewer; strict headers, a page key)
+//   /r/<id>          the reverse-share uploader page (strict headers, a page key)
+//   /p|r/<id>?check  the CAPTCHA page of a share that has one (Turnstile headers)
 //   /dashboard*      the signed-in app (login/setup pages are the exceptions)
 //   everything else  Workers Static Assets (landing page + viewer)
 //
@@ -18,8 +20,10 @@
 import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, appendCookies, SECURITY_HEADERS } from './lib/http.js';
 import { csrfCookieFor } from './lib/csrf.js';
 import { readSession, logoutCookie, SESSION_COOKIE } from './lib/auth.js';
-import { ipContext, cachedSettings } from './lib/guard.js';
+import { ipContext, cachedSettings, isBlocked, rateLimit, CAPTCHA_PAGE } from './lib/guard.js';
 import { turnstileKeys } from './lib/turnstile.js';
+import { newPageKey, pageKeysIn, pageKeyCookie, PAGE_KEYS_MAX } from './lib/human.js';
+import { parseId } from './lib/ids.js';
 import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
 import { handlePrivate } from './routes/private.js';
@@ -43,6 +47,8 @@ const TURNSTILE_DASH = /^\/dashboard\/(login|account)(\/|\/index\.html)?$/;
 const HOME = /^\/(index\.html)?$/;
 // The reverse-share uploader page: /r/<id> (the key is in the #fragment).
 const REVERSE_PAGE = /^\/r\/([^/]+)\/?$/;
+// The recipient's page: /p/<id> (the viewer, public/index.html; the key is in the #fragment).
+const SHARE_PAGE = /^\/p\/([^/]+)\/?$/;
 // The home page is public and browser-cached: look up a session only when a cookie is there.
 const hasSessionCookie = (request) => (request.headers.get('cookie') || '').includes(`${SESSION_COOKIE}=`);
 
@@ -103,24 +109,92 @@ async function handleDashboard(request, env, url) {
   return appendCookies(res, s.setCookie ?? await csrfCookieFor(env, s.claims, s.maxAgeSec));
 }
 
+const pageNotFound = () => withSecurityHeaders(new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } }));
+
 /**
- * /r/<id>: the uploader page (public/r/index.html), with the Turnstile CSP when
- * the human check is on (its widget is on the page) and the strict one
- * otherwise; never stored. Any other /r/ path is not found.
+ * The CAPTCHA of a share that has one, without the link's key ever being
+ * readable where Cloudflare's script runs (docs: SECURITY.md, "CAPTCHA on
+ * shares"):
+ *   • /p/<id> and /r/<id> — the recipient's page and the uploader's page —
+ *     always get the strict CSP (COOP same-origin, COEP, frame-ancestors
+ *     'none'). A strict navigation (Sec-Fetch-Dest: document, Sec-Fetch-Mode:
+ *     navigate, Sec-Fetch-Site: none or same-origin) gets a new random page
+ *     key: `n.key` in a meta tag and in an HttpOnly, Secure, SameSite=Strict
+ *     cookie of its own (`__Secure-secbin_pk_<n>`, so each tab's round trip
+ *     has one) scoped to the share's path, for 15 minutes, at most
+ *     PAGE_KEYS_MAX per path (the oldest are cleared). When the share needs
+ *     the CAPTCHA, the page seals the link's key (only that) with it in
+ *     sessionStorage, takes it out of the address bar and goes to the check
+ *     page.
+ *   • /p/<id>?n=<n> — the return from the check: the key is written into the
+ *     page again only when the navigation carries the cookie for that nonce,
+ *     and the cookie is cleared in the same response (single use). No new key
+ *     is issued there.
+ *   • /p/<id>?check and /r/<id>?check — the check page (public/check/), for
+ *     any well-formed id while the server has Turnstile keys (else a redirect
+ *     back), so it says nothing about the share; behind the Guard's block and
+ *     a per-network rate limit, with no share lookup. Its CSP adds Turnstile
+ *     and forbids workers; COOP same-origin-allow-popups. It never gets a key.
+ * Never stored. Any other /p/ or /r/ path is not found.
  */
-async function reversePage(request, env, url) {
-  const m = url.pathname.match(REVERSE_PAGE);
-  if (!m || !REVERSE_ID_RE.test(m[1]) || (request.method !== 'GET' && request.method !== 'HEAD')) {
-    return withSecurityHeaders(new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } }));
-  }
+async function sharePage(request, env, url, kind) {
+  const m = url.pathname.match(kind === 'r' ? REVERSE_PAGE : SHARE_PAGE);
+  let id = null;
+  if (m) { try { id = decodeURIComponent(m[1]); } catch { id = null; } }
+  const valid = id !== null && (kind === 'r' ? REVERSE_ID_RE.test(id) : !!parseId(id));
+  if (request.method !== 'GET' && request.method !== 'HEAD') return pageNotFound();
+  // The viewer shows a readable error for a malformed /p/ link, as before; /r/ answers 404.
+  if (!m || (kind === 'r' && !valid)) return pageNotFound();
   if (!env.ASSETS) return new Response('Not found', { status: 404 });
-  const page = await env.ASSETS.fetch(new Request(new URL('/r/', url), { method: request.method, headers: request.headers }));
-  return withSecurityHeaders(page, { turnstile: !!(await turnstileKeys(env)) });
+  const asset = (path) => env.ASSETS.fetch(new Request(new URL(path, url), { method: request.method, headers: request.headers }));
+  const home = `/${kind}/${m[1]}`;
+  if (url.searchParams.has('check')) {
+    if (!valid || !(await turnstileKeys(env))) return withSecurityHeaders(redirect(home, 302));
+    const g = await ipContext(env, request);
+    const b = await isBlocked(env, g, 'invalid');
+    const rl = b.blocked ? { ok: false } : await rateLimit(env, g, 'captcha-page', CAPTCHA_PAGE);
+    if (!rl.ok) {
+      return withSecurityHeaders(new Response('Too many requests from your network. Try again later.', { status: 429, headers: { 'content-type': 'text/plain; charset=utf-8', 'retry-after': '600' } }));
+    }
+    return withSecurityHeaders(await asset('/check/'), { check: true });
+  }
+  const page = withSecurityHeaders(await asset(kind === 'r' ? '/r/' : '/'));
+  const h = (k) => request.headers.get(k) || '';
+  const nav = h('sec-fetch-dest') === 'document' && h('sec-fetch-mode') === 'navigate'
+    && (h('sec-fetch-site') === 'none' || h('sec-fetch-site') === 'same-origin');
+  const Rewriter = globalThis.HTMLRewriter; // the Workers runtime's streaming HTML rewriter
+  // The cookie's path must be the path the browser asked for, character for character.
+  if (!valid || m[1] !== id || !nav || request.method !== 'GET' || !page.ok || typeof Rewriter !== 'function') return page;
+  const cookiePath = `/${kind}/${id}`;
+  const held = pageKeysIn(request); // this share path's page key cookies, one per round trip (tab)
+  let pk;
+  if (url.searchParams.has('n')) {
+    // The return from the check page: only the key this browser holds for that nonce, once.
+    const n = url.searchParams.get('n');
+    const hit = held.find((c) => c.n === n);
+    if (!hit) return page;
+    pk = { n, key: hit.key };
+    page.headers.append('set-cookie', pageKeyCookie(cookiePath, n, null));
+  } else {
+    pk = newPageKey();
+    page.headers.append('set-cookie', pageKeyCookie(cookiePath, pk.n, pk));
+    // At most PAGE_KEYS_MAX per share path: a new one clears the oldest beyond that.
+    for (const old of held.sort((a, b) => b.t - a.t).slice(PAGE_KEYS_MAX - 1)) {
+      page.headers.append('set-cookie', pageKeyCookie(cookiePath, old.n, null));
+    }
+  }
+  // Set as an attribute value by the rewriter (it escapes it), never written as markup.
+  return new Rewriter().on('meta[name="secbin-page-key"]', {
+    element(el) { el.setAttribute('content', `${pk.n}.${pk.key}`); },
+  }).transform(page);
 }
 
 async function route(request, env, url, ctx) {
   const { pathname } = url;
-  if (pathname === '/r' || pathname.startsWith('/r/')) return reversePage(request, env, url);
+  if (pathname === '/r' || pathname.startsWith('/r/')) return sharePage(request, env, url, 'r');
+  if (pathname.startsWith('/p/')) return sharePage(request, env, url, 'p');
+  // The check page is served only as /p|r/<id>?check.
+  if (pathname === '/check' || pathname.startsWith('/check/')) return pageNotFound();
   const isApi = pathname.startsWith('/api/');
   const isDash = pathname === '/dashboard' || pathname.startsWith('/dashboard/');
   if (!isApi && !isDash) {

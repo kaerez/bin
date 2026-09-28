@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS archive_nodes (gen INTEGER NOT NULL, id TEXT NOT NULL
   PRIMARY KEY (gen, id));
 CREATE TABLE IF NOT EXISTS archive_wraps (gen INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (gen, kind, ref));
 CREATE TABLE IF NOT EXISTS archive_meta (gen INTEGER NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY (gen, k));
+CREATE TABLE IF NOT EXISTS rhuman (j TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 `;
 // Columns added after the Drive first shipped (fresh objects get them from here too).
 // nodes.rs: the reverse share of a received file not yet re-wrapped; nodes.rsess:
@@ -63,7 +64,11 @@ CREATE TABLE IF NOT EXISTS archive_meta (gen INTEGER NOT NULL, k TEXT NOT NULL, 
 // reverse.agen: the owner's archive (after starting over) whose Drive key
 // seals this link's private key — the link is paused while that archive
 // exists (docs/DRIVE.md §3.2); archive_nodes.rs / rfail / rwhy: a received
-// item archived as it was, sealed to its link's key.
+// item archived as it was, sealed to its link's key. reverse.captcha: the
+// uploader passes the CAPTCHA before a session starts (links made before the
+// option existed always had it: default 1). rhuman: the CAPTCHA grants
+// (src/lib/human.js, their random id `j`) a session start has used, until
+// they lapse, so each grant starts one session.
 // The key model v2 (docs/DRIVE.md §3): nodes.ks — the item's random salt (the
 // per-DEK salt; folders have one for their names); nodes.mek / mfp — the
 // sub-MEK the item is sealed under and its fingerprint; nodes.dek — the
@@ -81,6 +86,7 @@ const COLUMNS = [
   ['archive_nodes', 'rs', 'TEXT'], ['archive_nodes', 'rfail', 'INTEGER'], ['archive_nodes', 'rwhy', 'TEXT'],
   ['nodes', 'ks', 'TEXT'], ['nodes', 'mek', 'TEXT'], ['nodes', 'mfp', 'TEXT'], ['nodes', 'dek', 'TEXT'], ['nodes', 'ch', 'TEXT'],
   ['upchunks', 'h', 'TEXT'], ['reverse', 'mek', 'TEXT'],
+  ['reverse', 'captcha', 'INTEGER NOT NULL DEFAULT 1'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
 const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify'];
@@ -957,7 +963,7 @@ export class Drive extends DurableObject {
     try { opts = JSON.parse(r.opts); } catch { /* none */ }
     const o = {
       id: r.id, folder: r.folder, created: r.created, expires: r.expires, status: this.#reverseState(r),
-      password: !!r.ph, note: !!r.note, maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null,
+      password: !!r.ph, note: !!r.note, captcha: r.captcha !== 0, maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null,
       maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, files: r.files, bytes: r.bytes,
       pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NULL", r.id).one().c,
       failed: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NOT NULL", r.id).one().c,
@@ -1030,8 +1036,8 @@ export class Drive extends DurableObject {
     this.#dropEndedReverse();
     if (this.sql.exec('SELECT COUNT(*) AS c FROM reverse').one().c >= MAX_REVERSE) return fail(409, 'too_many_reverse', `A Drive holds at most ${MAX_REVERSE} reverse shares.`);
     const t = nowSec();
-    this.sql.exec(`INSERT INTO reverse (id, folder, priv, mek, lh, ph, salt, t, note, opts, created, expires, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
-      rec.id, rec.folder, rec.priv, rec.mek, rec.lh, rec.ph ?? null, rec.salt ?? null, rec.t ?? null, rec.note ?? null, JSON.stringify(rec.opts), t, t + rec.ttl);
+    this.sql.exec(`INSERT INTO reverse (id, folder, priv, mek, lh, ph, salt, t, note, opts, created, expires, status, captcha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
+      rec.id, rec.folder, rec.priv, rec.mek, rec.lh, rec.ph ?? null, rec.salt ?? null, rec.t ?? null, rec.note ?? null, JSON.stringify(rec.opts), t, t + rec.ttl, rec.captcha === true ? 1 : 0);
     return { ok: true, id: rec.id, created: t, expires: t + rec.ttl };
   }
 
@@ -1122,7 +1128,7 @@ export class Drive extends DurableObject {
    * SESSION_IDLE_SEC; at most MAX_SESSIONS_PER_NET are open per uploader
    * network (`net`, the Guard's key) and MAX_SESSIONS per link.
    */
-  async reverseBegin(uid, id, hash, ttl, { net = null, proofHash = null } = {}) {
+  async reverseBegin(uid, id, hash, ttl, { net = null, proofHash = null, human = null } = {}) {
     this.#bind(uid);
     const tag = await this.#netTag(id, net); // before any check: nothing below awaits
     const r = this.#reverse(id);
@@ -1130,6 +1136,13 @@ export class Drive extends DurableObject {
     if (st === 'paused') return { status: 'paused' };
     if (st !== 'active') return { status: 'gone' };
     const t = nowSec();
+    // A CAPTCHA grant (checked by the Worker) starts one session, whatever
+    // follows (a wrong password included): each attempt costs a CAPTCHA.
+    if (human) {
+      this.sql.exec('DELETE FROM rhuman WHERE exp <= ?', t);
+      if (this.sql.exec('SELECT 1 FROM rhuman WHERE j = ?', human.j).toArray().length) return { status: 'captcha_used' };
+      this.sql.exec('INSERT INTO rhuman (j, exp) VALUES (?, ?)', human.j, human.exp);
+    }
     if (r.ph) {
       if (r.pwlock && r.pwlock > t) return { status: 'pw_locked', until: r.pwlock };
       if (typeof proofHash !== 'string' || !safeEq(proofHash, r.ph)) {

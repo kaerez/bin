@@ -9,6 +9,9 @@
 // manifest matching the authorized upload; chunks download under a grant;
 // errors are JSON { error, message } with real HTTP statuses. "Delete now"
 // (POST …/expire) needs both proofs and the sender's opt-in (meta.deletable).
+// A share with the CAPTCHA (policy.captcha: 'allow' | 'require' | 'off', as the
+// role options; `captcha` on create) serves nothing to the CLI: 403
+// captcha_required, as src/routes/public.js answers without a grant.
 import { refusedTypes } from '../vendor/filepolicy.js';
 import { b64urlFromBytes, randomBytes, sha256Hex, utf8 } from '../vendor/bytes.js';
 import { proofHash } from '../vendor/crypto.js';
@@ -64,6 +67,14 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
     const readBody = () => {
       try { return JSON.parse(init.body); } catch { return null; }
     };
+    // As src/lib/settings.js resolveCaptcha: → true / false, or an error response.
+    const captchaFor = (asked) => {
+      const mode = policy.captcha ?? 'allow';
+      if (asked !== undefined && typeof asked !== 'boolean') return err(400, 'invalid_captcha', 'captcha must be true or false.');
+      if (mode === 'require') return true;
+      if (mode === 'off') return asked === true ? err(403, 'captcha_disabled', 'CAPTCHA is disabled for shares of your role.') : false;
+      return asked ?? policy.captchaDefault === true;
+    };
 
     if (u.pathname === '/api/private/policy' && policy.urlRules !== undefined) {
       const denied = auth();
@@ -86,6 +97,8 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       const limited = limitCheck('text', views);
       if (limited) return limited;
       if (clean.meta.deletable === true && policy.openerDelete === false) return err(403, 'opener_delete_disabled', 'Recipient delete is not allowed.');
+      const captcha = captchaFor(body.captcha);
+      if (captcha instanceof Response) return captcha;
       const id = (bar ? 'b' : 'k') + b64urlFromBytes(randomBytes(16));
       const deletetoken = token();
       const created = now();
@@ -95,9 +108,9 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       if (clean.meta.deletable === true) meta.deletable = true;
       notes.set(id, {
         paste: { v: 2, ct: clean.ct, wk: clean.wk, adata: clean.adata, meta },
-        acc: clean.acc, dth: await sha256Hex(utf8(deletetoken)), views, left: views, label: body.label,
+        acc: clean.acc, dth: await sha256Hex(utf8(deletetoken)), views, left: views, label: body.label, captcha,
       });
-      return json(201, { id, deletetoken, expires });
+      return json(201, { id, deletetoken, expires, captcha });
     }
 
     if (u.pathname === '/api/private/file') {
@@ -121,15 +134,17 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       if (typed && refusedTypes(policy.fileTypeMode, policy.fileTypeRules, body.types).length) return err(403, 'file_type_not_allowed', 'refused');
       if (deep && !(body.depth <= policy.maxFolderDepth)) return err(403, 'folder_too_deep', 'too deep');
       if (body.deletable === true && policy.openerDelete === false) return err(403, 'opener_delete_disabled', 'Recipient delete is not allowed.');
+      const captcha = captchaFor(body.captcha);
+      if (captcha instanceof Response) return captcha;
       const id = 'f' + b64urlFromBytes(randomBytes(16));
       const uploadtoken = token();
       const deletetoken = token();
       const chunks = Math.ceil(padded / CHUNK);
       files.set(id, {
         state: 'pending', uth: uploadtoken, dth: deletetoken, padded, chunks, data: [], views, left: views,
-        expire, grants: new Set(), init: body,
+        expire, grants: new Set(), init: body, captcha,
       });
-      return json(201, { id, uploadtoken, deletetoken, chunks });
+      return json(201, { id, uploadtoken, deletetoken, chunks, captcha });
     }
 
     const up = /^\/api\/private\/file\/([^/]+)\/(chunk|finalize)(?:\/(\d+))?$/.exec(u.pathname);
@@ -247,6 +262,8 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
     const rec = isFile ? files.get(id) : notes.get(id);
     const missing = () => (id[0] === 'k' ? err(404, 'not_found', 'This share does not exist.') : err(410, 'gone', 'This share does not exist, has expired, or has no views left.'));
     const metaOut = (r) => (r.paste.adata.bar ? { ...r.paste.meta, views: r.views, left: r.left } : { ...r.paste.meta });
+    // The CLI holds no CAPTCHA grant: a protected share answers nothing (before anything is looked at or spent).
+    if (rec && rec.captcha === true && method !== 'DELETE') return err(403, 'captcha_required', 'This share requires a CAPTCHA; open it in a browser.');
 
     if (!action) {
       if (method === 'GET') {

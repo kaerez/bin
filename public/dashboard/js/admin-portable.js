@@ -31,7 +31,7 @@ const SYSTEM_PARTS = [
   ['settings', 'Settings', 'Server-wide settings (brute-force protection, lockout, logs, public access, accessibility statement…).'],
   ['roles', 'Roles', 'The Default role and every custom role (limits, quotas, viewer rules). On import, roles are created or replaced by name, never deleted.'],
   ['ipRules', 'IP rules', 'Manual allow / block rules. On import they are added, never removed.'],
-  ['turnstile', 'Turnstile keys', 'The site key and SECRET set in Security → Human check (not the deployment\'s own). The widget must allow the target hostname.'],
+  ['turnstile', 'Turnstile keys', 'The site key and SECRET set in Security → CAPTCHA (not the deployment\'s own). The widget must allow the target hostname.'],
   ['public', 'Public account', 'The anonymous account\'s limits, quotas and viewer rules.'],
 ];
 const USER_PARTS = [

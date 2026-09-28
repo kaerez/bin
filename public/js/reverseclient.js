@@ -111,16 +111,17 @@ export class ReverseUpload {
 
   /**
    * Start the session: the password proof (when the link has a password) and
-   * the human-check token (when the server asks for one). A wrong password
-   * rejects with ApiError code 'bad_password'.
+   * the CAPTCHA grant from the check page (`humanGrant`, when the link has the
+   * CAPTCHA; each grant starts one session) or a Turnstile token. A wrong
+   * password rejects with ApiError code 'bad_password'.
    */
-  async begin({ password = '', turnstile = null } = {}) {
+  async begin({ password = '', turnstile = null, humanGrant = null } = {}) {
     let keyProof = null;
     if (this.head.password) {
       if (!password) throw new ApiError('Enter the password for this link.', 401, 'password_required');
       keyProof = await passwordProof(password, this.head.password.salt, this.head.password.t, this.pub);
     }
-    const r = await this.api.begin(this.id, { linkProof: this.linkProof, keyProof, turnstile });
+    const r = await this.api.begin(this.id, { linkProof: this.linkProof, keyProof, turnstile, humanGrant });
     if (typeof r.grant !== 'string') throw new ApiError('Malformed response from the server.', 502, 'malformed');
     this.grant = r.grant;
     return r;

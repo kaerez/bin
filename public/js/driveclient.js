@@ -595,8 +595,9 @@ export class DriveClient {
    * The manifest (v3: paths, sizes, types and each file's DEK) is sealed with
    * a fresh link key and optional password exactly like a file share's: the
    * share stays end-to-end (its key is in the link).
+   * `captcha`: true / false (the role allows a choice), undefined (its default).
    */
-  async share(nodeIds, { views = null, expire, password = '', deletable = false, label = '', limits = null, view = null } = {}) {
+  async share(nodeIds, { views = null, expire, password = '', deletable = false, label = '', limits = null, view = null, captcha } = {}) {
     if (!Array.isArray(nodeIds) || !nodeIds.length) throw new Error('Choose what to share.');
     const { files, dirs } = await this.#collect(nodeIds);
     if (!files.length) throw new Error('There are no files to share.');
@@ -622,9 +623,10 @@ export class DriveClient {
     Object.assign(body, { paste, acc: paste.acc });
     if (deletable) body.deletable = true;
     if (label) body.label = label;
+    if (typeof captcha === 'boolean') body.captcha = captcha;
     const r = await api.share(body);
     if (typeof r.id !== 'string' || typeof r.deletetoken !== 'string') throw malformed();
-    return { url: `${location.origin}/p/${r.id}#${fragment}`, id: r.id, deletetoken: r.deletetoken };
+    return { url: `${location.origin}/p/${r.id}#${fragment}`, id: r.id, deletetoken: r.deletetoken, captcha: r.captcha === true };
   }
 
   /** The shares that reference a node. */
@@ -657,8 +659,10 @@ export class DriveClient {
    * nothing). opts: label, note, password, expire ("7d"), maxFiles, maxBytes,
    * maxFileBytes (null = none), types ({ mode, rules } or null), and `step`:
    * the "confirm it's you" part ({ current } or { reauth }, as for API keys).
+   * `captcha`: uploaders pass the CAPTCHA first (true / false where the role
+   * allows a choice; undefined: its default).
    */
-  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {} } = {}) {
+  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {}, captcha } = {}) {
     const id = newReverseId();
     const { pub, privateKey } = await createReverseKey();
     const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
@@ -666,13 +670,14 @@ export class DriveClient {
     if (note) extra.note = await sealNote(pub, id, note);
     if (password) extra.password = await passwordGate(password, pub);
     if (label) extra.label = label;
+    if (typeof captcha === 'boolean') extra.captcha = captcha;
     try {
       const r = await this.#fresh(async () => {
         const { mek, kek } = this.#cur();
         return api.createReverse({ id, folder: folderId, mek, priv: await sealLinkKey(kek, { userId: this.user.id, mekId: mek, linkId: id }, pkcs8), ...extra, ...step });
       });
       if (r.id !== id) throw malformed();
-      return { url: reverseUrl(id, pub), id, expires: r.expires };
+      return { url: reverseUrl(id, pub), id, expires: r.expires, captcha: r.captcha === true };
     } finally {
       pkcs8.fill(0);
     }

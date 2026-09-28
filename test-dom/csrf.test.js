@@ -361,6 +361,7 @@ describe('reverse shares', () => {
     finalize: () => m.reverseApi.finalize(RID, 'G'.repeat(43), NODE, 'U'.repeat(43)),
     cancel: () => m.reverseApi.cancel(RID, 'G'.repeat(43), NODE, 'U'.repeat(43)),
     done: () => m.reverseApi.done(RID, 'G'.repeat(43)),
+    human: () => m.reverseApi.human(RID, 'ts'), // the link's CAPTCHA grant (anonymous, like the rest)
   });
 
   it('the test names every uploader method', () => {
@@ -377,7 +378,7 @@ describe('reverse shares', () => {
       if (state === 'ended') fresh.forgetSession();
       calls = [];
       for (const call of Object.values(uploader(fresh))) await call(); // none is refused here (no "session changed")
-      expect(calls, state).toHaveLength(7); // one request each: no /api/private/me
+      expect(calls, state).toHaveLength(Object.keys(uploader(fresh)).length); // one request each: no /api/private/me
       for (const c of calls) {
         expect(c.path, state).toMatch(/^\/api\/reverse\//);
         expect(tokenOf(c), `${state} ${c.method} ${c.path}`).toBeUndefined();

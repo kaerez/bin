@@ -134,6 +134,10 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     key, an IPv4 address or an IPv6 prefix), for the per-network session cap; no key is involved
     and the address is not stored (about 256 IPv4 addresses share each value);
     `rsessions.started`: when the session began.
+  - `reverse.captcha`: uploaders pass the CAPTCHA first (links made before the option existed:
+    1); `rhuman(j, exp)`: the random ids of the CAPTCHA grants a session start has used, until
+    they lapse (each grant starts one session).
+- The share index row has `captcha` too (My shares and Admin → Shares show it).
 - Received files are ordinary `nodes` rows (kind `file`, parent = the target folder), R2 objects
   under `d/<userId>/<nodeId>/<i>`, counted in the Drive's capacity from the moment they are
   reserved. Until it is taken in, a received file also counts its sealed path, metadata and
@@ -167,7 +171,14 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   (maximum total bytes per reverse share, default 1 GiB, null = no limit; a share's `maxBytes`
   may not exceed it and defaults to it; lowering it applies to existing shares at once: each is
   held to the smaller of its own `maxBytes` and the role's current value, and `open` reports that
-  value). The owner: allowed, no limits. The public account: none.
+  value), `reverseCaptcha` (`allow` / `require` / `off`, default **`require`**: every link had
+  the check before this option existed) and `reverseCaptchaDefault` (`on` / `off`, default
+  `on`: the "Require CAPTCHA to send files" box's starting state under `allow`). The owner:
+  allowed, no limits (CAPTCHA `allow`, box on). The public account: none.
+- **The CAPTCHA** (Cloudflare Turnstile; SECURITY.md, *CAPTCHA on shares*): per link, when the
+  role allows a choice (`captcha: true|false` on create; `require` forces it on, `off` refuses
+  `true` with `403 captcha_disabled`). Fixed at creation; inactive (not asked for) while the
+  server has no Turnstile keys.
 - **Always:** the user's Drive capacity (`driveMaxBytes`) and largest file (`driveMaxFileBytes`),
   and the Drive's hard ceilings, apply to every upload.
 - File types are declared by the uploader's browser (`declare()`), checked by the server against
@@ -179,7 +190,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, current? \| reauth? }` → `201 { id, expires }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
 | `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv, mek }], more, next }` (an item whose field layer does not open comes with `unreadable: true` and no fields: the browser records it as failed); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
 | `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek }` (sealed under the current KEK, checked; `parent` a folder) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
@@ -188,7 +199,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares); `PATCH /api/private/shares/<id>` changes the label or extends the expiry |
 
 A row: `{ id, folder, label, created, expires, status, locked, priv, password: bool, note: bool,
-maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
+captcha: bool, maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
 has it: `active`, `revoked`, `expired`, `ended`; `pending` = received files waiting to be
 taken in, `failed` = those the browser could not take in). `GET /api/private/drive` adds
 `received` (waiting) and `receivedFailed`.
@@ -205,8 +216,9 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 
 | Method and path | Headers | Purpose |
 |---|---|---|
-| `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` |
-| `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Turnstile` (when configured) | a session: `{ grant, expires }`. The human check comes before the password: without a valid token no guess is answered. The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
+| `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires, captcha, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` (`captcha`: the link has the CAPTCHA and the server has Turnstile keys) |
+| `POST …/human` | `X-Secbin-Turnstile` (action `reverse-upload`) | a CAPTCHA grant for this link: `{ grant, expires }` (10 minutes, bound to the uploader's network; `{ grant: null }` when the link needs none). Needs no link proof and looks nothing else up |
+| `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Human` (a grant) or `X-Secbin-Turnstile` (a token), when the link has the CAPTCHA | a session: `{ grant, expires }`. The CAPTCHA comes before the password: without it no guess is answered (`403 captcha_required`). A grant starts one session, whatever the answer (a wrong password spends it too). The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
 | `POST …/files` | `X-Reverse-Grant`; JSON `{ id, name, meta, size, wrap, types? }` | reserve one file → `201 { id, uploadToken, chunks }` (limits, capacity) |
 | `PUT …/files/<nodeId>/chunk/<i>` | `X-Upload-Token`; `application/octet-stream` | chunk `i`, exact size |
 | `POST …/files/<nodeId>/finalize` | `X-Reverse-Grant`, `X-Upload-Token` | `{ ok }` (only the session that reserved the file: else `403 bad_grant`) |
@@ -219,10 +231,12 @@ counted by the Guard), `409 paused` (`open` / `begin` with the right link proof,
 in the previous release: §9), `423 share_locked` (the
 admin locked it),
 `403 bad_link`, `401 password_required` (the password is needed; `{ salt, t }` in the body),
-`403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 turnstile_*`, `413 file_too_large` /
+`403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 captcha_required`, `403 turnstile_*`, `413 file_too_large` /
 `share_full` / `drive_full`, `409 too_many_files` (none left: `open` shows `filesLeft: 0`),
 `400 declaration_required` / `403 file_type_not_allowed`, `429 busy` (too many open sessions from
-this network, or on the link), `429 password_locked`, `429 blocked`.
+this network, or on the link), `429 password_locked`, `429 rate_limited` (more than 30 CAPTCHA
+checks from this network within 10 minutes, on `human` or a `begin` with a token; a failed token
+counts as an invalid request), `429 blocked`.
 
 ### 6.3 The owner acting as the user ("Log in as")
 
@@ -257,22 +271,24 @@ many files arrive.
 ## 8. UI
 
 - **Drive → Receive files…** (toolbar; the selected folder, else the open one): a dialog with the
-  options of §5 and the account password (or, left empty, a passkey when the account has one;
+  options of §5, "Require CAPTCHA to send files" (as the role says: a choice, ticked and disabled,
+  or hidden) and the account password (or, left empty, a passkey when the account has one;
   hidden while the owner acts as the user), then the link with copy and a QR code, and the folder's reverse shares (label,
   created, expiry, files and bytes received, status) with Show link and Revoke.
 - When the Drive page opens, the browser takes the received files in (a status line: added,
   renamed, placed higher up, and the ones that could not be
   added with **Review them**, a dialog to delete them or try again; then the folder shows them).
 - **Uploader page** `/r/<id>#<key>` (`public/r/index.html`, `public/js/reverse.js`): the note,
-  the limits, a password field when needed, the human check (Turnstile, always visible when
-  configured; the upload button stays disabled until it passes: `humanCheck` of
-  `public/js/turnstile.js`), a file picker, a folder picker, drag and drop of files and folders,
-  and progress. DOM only through `h()`; the page gets the Turnstile CSP when Turnstile is on and
-  the strict one otherwise, and is never cached by the service worker. With Turnstile on,
-  Cloudflare's script runs on this page and could read `location.hash`, which holds the link key
-  (enough to read the note and to upload to the link, not to read anything received), and the
-  files being sent before they are encrypted — the same trade-off as on the other pages that load
-  it (SECURITY.md, *Cloudflare Turnstile*).
+  the limits, a password field when needed, a file picker, a folder picker, drag and drop of
+  files and folders, and progress. DOM only through `h()`; always the strict CSP (no third-party
+  script, whatever the server's Turnstile keys), never cached by the service worker.
+- **A link with the CAPTCHA:** the uploader page takes the key out of the address bar, removes
+  the tab's Drive keys, seals the link's key alone for this tab under a random page key held in
+  an HttpOnly cookie, and goes to the link's check page (`/r/<id>?check`, `public/js/check.js`,
+  "Complete the CAPTCHA to send files", the Turnstile CSP); Continue there stays disabled until
+  the CAPTCHA passes, gets a grant and returns to the uploader page, which opens the key again
+  (SECURITY.md, *CAPTCHA on shares*). Each send uses the grant; after it, or after a wrong
+  password, the page offers "Complete the CAPTCHA again" (the files are chosen again then).
 - My shares / Admin → Shares: kind "receive" (filter value `reverse`); the views column shows the
   files received; revoke, lock and extend (expiry only) as for other shares.
 - Empty folders in an upload are not sent (only files are received; their paths make the folders).

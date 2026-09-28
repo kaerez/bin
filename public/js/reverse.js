@@ -2,18 +2,26 @@
 // (docs/REVERSE.md §8): anyone with the link sends files and folders to the
 // person who shared it, without an account. The page shows that person's
 // note (decrypted here with the link's key), the link's limits, a password
-// field when the link has one, the human check when the server has one (the
-// Send button stays disabled until it passes), a file picker, a folder picker
-// and drag and drop, and progress. Files, their names, folders and types are
-// encrypted in this browser (public/js/reverseclient.js); the server stores
-// only ciphertext. DOM through h() only (strict CSP + Trusted Types).
+// field when the link has one, a file picker, a folder picker and drag and
+// drop, and progress. Files, their names, folders and types are encrypted in
+// this browser (public/js/reverseclient.js); the server stores only
+// ciphertext. DOM through h() only (strict CSP + Trusted Types).
+//
+// A link with the CAPTCHA (its user's role and choice): this page never loads
+// the Turnstile script. It seals the link's key for this tab and goes to the
+// check page first (public/js/pagekey.js), and comes back with a grant; each
+// grant starts one upload session (a wrong password or a second batch of
+// files needs the CAPTCHA again).
 
 import { h, clear, showMsg, formatBytes, formatDate, friendlyError, nameEl } from './common.js';
 import { ApiError } from './api.js';
 import { progressBar } from './progress.js';
 import { walkEntry } from './walk.js';
-import { humanCheck as realHumanCheck } from './turnstile.js';
 import { openLink as realOpenLink, checkFiles, LinkError } from './reverseclient.js';
+import { tabStorage, readPageKey, takeKey, goToCheck as realGoToCheck, loadGrant, saveGrant, CHECK_REFUSED } from './pagekey.js';
+
+// This document's page key (src/index.js, on a real navigation): read once.
+const docPageKey = typeof document !== 'undefined' ? readPageKey(document) : null;
 
 /** The limits as one sentence, e.g. "Up to 5 files · 1 GB in total · 100 MB per file · only .pdf files". */
 export function limitsText(l = {}) {
@@ -39,17 +47,29 @@ function errorCard(title, text) {
 }
 
 /**
- * Mount the uploader in `root`. deps (for tests): { location, openLink,
- * humanCheck }. Resolves to { state: 'ready' | 'error', app? }.
+ * Mount the uploader in `root`. deps (for tests): { location, history,
+ * openLink, storage, pageKey, goToCheck }. Resolves to
+ * { state: 'ready' | 'error' | 'check', app? }.
  */
 export async function mountUploader(root, deps = {}) {
   const loc = deps.location || globalThis.location;
+  const win = { location: loc, history: deps.history || globalThis.history };
   const openLink = deps.openLink || realOpenLink;
-  const humanCheck = deps.humanCheck || realHumanCheck;
+  const storage = 'storage' in deps ? deps.storage : tabStorage();
+  const pageKey = 'pageKey' in deps ? deps.pageKey : docPageKey;
+  const goToCheck = deps.goToCheck || realGoToCheck;
   clear(root).append(h('p.msg', { role: 'status', text: 'Opening the upload link…' }));
+  const id = (/^\/r\/([^/]+)\/?$/.exec(String(loc.pathname)) || [])[1] || '';
+  let hash = loc.hash;
+  // Back from the check page: the key sealed for this tab, back in the address bar.
+  if (new URLSearchParams(loc.search || '').has('n')) {
+    const f = storage && id ? await takeKey({ kind: 'r', id, pageKey, storage }) : null;
+    win.history.replaceState(null, '', f ? `${loc.pathname}#${f}` : loc.pathname);
+    hash = f ? `#${f}` : '';
+  }
   let up;
   try {
-    up = await openLink({ pathname: loc.pathname, hash: loc.hash });
+    up = await openLink({ pathname: loc.pathname, hash });
   } catch (e) {
     if (e instanceof LinkError) root.replaceChildren(errorCard('This link does not work', e.message));
     else if (e instanceof ApiError && e.code === 'paused') root.replaceChildren(errorCard(PAUSED_TITLE, PAUSED_TEXT));
@@ -58,10 +78,22 @@ export async function mountUploader(root, deps = {}) {
     else root.replaceChildren(errorCard('The link could not be opened', friendlyError(e)));
     return { state: 'error' };
   }
-  return { state: 'ready', app: buildApp(root, up, humanCheck) };
+  // The CAPTCHA (the link has it and the server has Turnstile keys): first the check page.
+  const toCheck = async () => {
+    saveGrant({ kind: 'r', id: up.id, storage, grant: null });
+    root.replaceChildren(h('p.msg', { role: 'status', text: 'This link requires a CAPTCHA. Taking you to it…' }));
+    const r = await goToCheck({ kind: 'r', id: up.id, fragment: hash.replace(/^#/, ''), pageKey, storage, win });
+    if (r !== 'leaving') root.replaceChildren(errorCard('The CAPTCHA cannot be shown', CHECK_REFUSED[r]));
+    return r;
+  };
+  if (up.head.captcha === true) {
+    up.humanGrant = storage ? loadGrant({ kind: 'r', id: up.id, storage }) : null;
+    if (!up.humanGrant) { await toCheck(); return { state: 'check' }; }
+  }
+  return { state: 'ready', app: buildApp(root, up, { storage, toCheck }) };
 }
 
-function buildApp(root, up, humanCheck) {
+function buildApp(root, up, { storage, toCheck }) {
   let entries = []; // { path, file }
   let busy = false;
 
@@ -83,8 +115,15 @@ function buildApp(root, up, humanCheck) {
     h('p.mono.muted', { id: 'reverse-password-hint', text: 'The person who shared the link gave it to you. It only lets you upload; it does not encrypt your files.' })) : null;
   if (pw) pw.setAttribute('aria-describedby', 'reverse-password-hint');
 
-  const human = h('div.turnstile', { id: 'reverse-human', hidden: true });
   const send = h('button.cta', { type: 'button', id: 'reverse-send', text: 'Send files', disabled: true });
+  // A link with the CAPTCHA: each session start spends the grant; the next needs the CAPTCHA again.
+  const captcha = up.head.captcha === true;
+  const recheck = h('button.btn', { type: 'button', id: 'reverse-recheck', text: 'Complete the CAPTCHA again', hidden: true, 'aria-describedby': 'reverse-msg' });
+  recheck.addEventListener('click', () => toCheck());
+  const spendGrant = () => {
+    up.humanGrant = null;
+    saveGrant({ kind: 'r', id: up.id, storage, grant: null });
+  };
   const bar = progressBar();
   const cancel = h('button.btn', { type: 'button', id: 'reverse-cancel', text: 'Cancel', hidden: true });
   const msg = h('p.msg.error', { id: 'reverse-msg', role: 'alert', hidden: true });
@@ -103,12 +142,14 @@ function buildApp(root, up, humanCheck) {
     h('p.mono.muted', { id: 'reverse-limits', text: `${limitsText(up.limits)} The link expires ${formatDate(up.head.expires)}.` }),
     drop, fileIn, folderIn, list, total, clearBtn,
     pwBox,
-    human,
     send,
     h('div.drive-transfer', {}, bar.el, cancel),
-    msg, done));
-
-  const check = humanCheck(human, 'reverse-upload', { gate: [send] });
+    msg, recheck, done));
+  const needCheck = (text) => {
+    showMsg(msg, `${text} Your chosen files are not kept: choose them again after the CAPTCHA.`);
+    recheck.hidden = false;
+    recheck.focus();
+  };
 
   const render = () => {
     clear(list).append(...entries.slice(0, 200).map((e) => h('li.mono', {}, nameEl(e.path), ` — ${formatBytes(e.file.size)}`)),
@@ -158,13 +199,16 @@ function buildApp(root, up, humanCheck) {
     const c = checkFiles(entries, up.limits);
     if (!c.ok) { showMsg(msg, c.error); return; }
     if (pw && !pw.value) { showMsg(msg, 'Enter the password for this link.'); pw.setAttribute('aria-invalid', 'true'); pw.focus(); return; }
+    if (captcha && !up.humanGrant) { needCheck('This link needs the CAPTCHA again before each sending.'); return; }
+    recheck.hidden = true;
     busy = true;
     render();
     ctl = new AbortController();
     try {
       bar.set('Checking…', null);
-      const token = await (await check).take();
-      await up.begin({ password: pw ? pw.value : '', turnstile: token });
+      const humanGrant = up.humanGrant;
+      if (captcha) spendGrant(); // used by this session start, whatever its answer
+      await up.begin({ password: pw ? pw.value : '', humanGrant });
       cancel.hidden = false;
       const label = c.count === 1 ? `Sending ${entries[0].path}` : `Sending ${c.count} files`;
       const r = await up.upload(entries, { signal: ctl.signal, onProgress: (d, t) => bar.set(`${label}…`, t > 0 ? d / t : 1) });
@@ -174,16 +218,19 @@ function buildApp(root, up, humanCheck) {
       if (up.limits.bytesLeft !== null && up.limits.bytesLeft !== undefined) up.limits.bytesLeft = Math.max(0, up.limits.bytesLeft - r.bytes);
       document.getElementById('reverse-limits').textContent = `${limitsText(up.limits)} The link expires ${formatDate(up.head.expires)}.`;
       entries = [];
-      showMsg(done, `Sent ${r.files} file${r.files === 1 ? '' : 's'} (${formatBytes(r.bytes)}), encrypted. The person who shared this link will find ${r.files === 1 ? 'it' : 'them'} in their Drive.`, false);
+      showMsg(done, `Sent ${r.files} file${r.files === 1 ? '' : 's'} (${formatBytes(r.bytes)}), encrypted. The person who shared this link will find ${r.files === 1 ? 'it' : 'them'} in their Drive.${captcha ? ' To send more, complete the CAPTCHA again.' : ''}`, false);
+      recheck.hidden = !captcha;
       if (pw) pw.value = '';
     } catch (e) {
       bar.hide();
       await up.done().catch(() => {});
       if (e && e.name === 'AbortError') showMsg(msg, 'Cancelled. Files not yet sent were not kept.');
       else if (e instanceof ApiError && e.code === 'bad_password') {
-        showMsg(msg, 'That password is not right. Check it and try again.');
-        if (pw) { pw.setAttribute('aria-invalid', 'true'); pw.setAttribute('aria-describedby', 'reverse-password-hint reverse-msg'); pw.focus(); pw.select?.(); }
-      } else if (e instanceof ApiError && e.code === 'password_locked') {
+        if (captcha) needCheck('That password is not right. Complete the CAPTCHA again, then try again with the right password.');
+        else showMsg(msg, 'That password is not right. Check it and try again.');
+        if (pw) { pw.setAttribute('aria-invalid', 'true'); pw.setAttribute('aria-describedby', 'reverse-password-hint reverse-msg'); if (!captcha) { pw.focus(); pw.select?.(); } }
+      } else if (e instanceof ApiError && e.code === 'captcha_required') needCheck('The CAPTCHA for this link has expired or was already used.');
+      else if (e instanceof ApiError && e.code === 'password_locked') {
         const until = Number.isSafeInteger(e.extra.until) ? ` after ${formatDate(e.extra.until)}` : ' later';
         showMsg(msg, `Too many wrong passwords were tried for this link. Try again${until}.`);
       } else if (e instanceof ApiError && e.code === 'paused') showMsg(msg, `${PAUSED_TITLE}. ${PAUSED_TEXT}`);
@@ -197,7 +244,7 @@ function buildApp(root, up, humanCheck) {
     }
   });
   render();
-  return { root, get entries() { return entries; }, add, send, check };
+  return { root, get entries() { return entries; }, add, send, recheck };
 }
 
 // The page itself.

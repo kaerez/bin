@@ -23,6 +23,7 @@ import {
 import { b64urlFromBytes, randomBytes, fromUtf8 } from '../public/js/bytes.js';
 import { importFileKey, decryptChunk } from '../public/js/files.js';
 import { openUpload } from '../public/js/reversekeys.js';
+import { API_CSP } from '../src/lib/http.js';
 
 const OWNER_PW = 'owner-password';
 const STEP = { current: proofFor(OWNER_PW) };
@@ -269,6 +270,36 @@ describe('the keyring (Admin → Security → Keys)', () => {
     const { privateKey } = await openLinkPriv(u.cookie, link.id, rec.keys[0].priv, rec.keys[0].mek);
     expect((await openUpload(privateKey, link.id, rec.items.find((i) => i.id === got.node))).path).toBe('from-outside.txt');
     expect((await adminAudit()).some((r) => r.action === 'keys.root_change_done' && r.detail.includes(oldRoot))).toBe(true);
+  });
+});
+
+describe('the key routes carry the isolation headers of every Worker response (src/lib/http.js withBaselineHeaders)', () => {
+  it('the session\'s keys, the keyring, the kits, Import / export and the upgrade: COOP/CORP same-origin, XFO DENY, nosniff, no referrer, the API CSP, never stored', async () => {
+    const u = await makeUser('keys-headers');
+    await enableDrive(u.id);
+    const cases = [
+      ['POST drive/keys (200, the KEKs)', await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {} })],
+      ['POST drive/kit (400, no step-up)', await post('/api/private/drive/kit', {}, u.cookie)],
+      ['POST drive/kit/verify (200)', await post('/api/private/drive/kit/verify', { keks: {} }, u.cookie)],
+      ['GET drive/migrate (200)', await fetchJson('/api/private/drive/migrate', { cookie: u.cookie })],
+      ['GET admin/keys (200)', await fetchJson(K, { cookie: oc })],
+      ['GET admin/keys/usage (200)', await fetchJson(`${K}/usage`, { cookie: oc })],
+      ['POST admin/keys/root/show (200, a key)', await post(`${K}/root/show`, STEP)],
+      ['POST admin/keys/kit (400, no step-up)', await post(`${K}/kit`)],
+      ['POST admin/keys/export (200)', await post(`${K}/export`, { root: true, ...STEP })],
+      ['GET admin/drive/migration (200)', await fetchJson('/api/private/admin/drive/migration', { cookie: oc })],
+      ['GET admin/keys (403, a user)', await fetchJson(K, { cookie: u.cookie })],
+    ];
+    for (const [what, res] of cases) {
+      expect(res.headers.get('cross-origin-opener-policy'), what).toBe('same-origin');
+      expect(res.headers.get('cross-origin-resource-policy'), what).toBe('same-origin');
+      expect(res.headers.get('x-frame-options'), what).toBe('DENY');
+      expect(res.headers.get('x-content-type-options'), what).toBe('nosniff');
+      expect(res.headers.get('referrer-policy'), what).toBe('no-referrer');
+      expect(res.headers.get('content-security-policy'), what).toBe(API_CSP);
+      expect(res.headers.get('cache-control'), what).toBe('no-store');
+      await res.arrayBuffer();
+    }
   });
 });
 

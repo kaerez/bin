@@ -21,6 +21,7 @@ import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES, MAX_REVERSE_ACTIVE,
+  CAPTCHA_KEYS, resolveCaptcha,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
@@ -62,7 +63,8 @@ CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts IN
 CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
   created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL,
-  locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER, opens_total INTEGER NOT NULL DEFAULT 0, lh TEXT);
+  locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER, opens_total INTEGER NOT NULL DEFAULT 0, lh TEXT,
+  captcha INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id, created);
 CREATE TABLE IF NOT EXISTS ip_rules (id TEXT PRIMARY KEY, cidr TEXT NOT NULL, action TEXT NOT NULL, expires INTEGER,
   note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
@@ -220,7 +222,16 @@ const MIGRATIONS = [
     m.sql.exec('CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY)');
     materializeDefaultRole(m.sql);
   },
-  // 15: the Drive key model v2 (docs/DRIVE.md §3): the MEK keyring (the root
+  // 15: CAPTCHA on shares (the shareCaptcha / reverseCaptcha role options):
+  // each share's flag (shares.captcha) and the options' values in the
+  // Default role. Reverse shares created before always had the check (when
+  // Turnstile was on), so they keep it.
+  (m) => {
+    m.addColumn('shares', 'captcha', 'INTEGER NOT NULL DEFAULT 0');
+    m.sql.exec("UPDATE shares SET captcha = 1 WHERE kind = 'reverse'");
+    materializeDefaultRole(m.sql);
+  },
+  // 16: the Drive key model v2 (docs/DRIVE.md §3): the MEK keyring (the root
   // MEK in meta "mek.root", the sub-MEKs sealed under it), a random salt per
   // user (every account gets one now), the owner's key candidates, and the
   // upgrade of the Drives made before it: every account that may have one
@@ -307,7 +318,7 @@ export const MAX_SHARE_FILTER_USERS = 500; // ~19 bytes per id in the URL: stays
 export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
   'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax',
   'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes',
-  'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes']);
+  'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes', ...CAPTCHA_KEYS]);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -556,6 +567,8 @@ export class Directory extends DurableObject {
     if (u.role === 'owner') return { all: { ...UNLIMITED }, api: { ...UNLIMITED } };
     const scope = this.#scopeOf(u);
     const all = resolveLimits(this.#limitRows('', 'all'), scope ? this.#limitRows(scope, 'all') : {});
+    // The public account has no CAPTCHA options (PUBLIC_NA_LIMITS): its shares never have one.
+    if (u.role === 'public') Object.assign(all, { shareCaptcha: 'off', shareCaptchaDefault: 'off', reverseCaptcha: 'off', reverseCaptchaDefault: 'off' });
     const api = restrictForApi(all, this.#limitRows('', 'api'), scope ? this.#limitRows(scope, 'api') : {});
     return { all, api };
   }
@@ -1480,7 +1493,10 @@ export class Directory extends DurableObject {
         return fail(403, 'folder_too_deep', `Folders may be nested at most ${L.maxFolderDepth} levels deep${via}.`, { max: L.maxFolderDepth });
       }
     }
-    if (u.role === 'owner') return { ok: true, refund: [], pendingSec: s['files.pendingSec'] };
+    // The CAPTCHA: the role decides, the client's choice counts only where it allows one.
+    const hc = resolveCaptcha(L, 'share', req.captcha);
+    if (!hc.ok) return fail(hc.error === 'invalid_captcha' ? 400 : 403, hc.error, hc.message);
+    if (u.role === 'owner') return { ok: true, refund: [], pendingSec: s['files.pendingSec'], captcha: hc.captcha };
 
     const ts = now();
     const applicable = this.#applicableQuotas(uid).filter((q) => (q.kind === 'all' || q.kind === req.kind) && (q.channel === 'all' || ch === 'api'));
@@ -1508,7 +1524,7 @@ export class Directory extends DurableObject {
           h.quota_id, h.key, h.bucket, ts);
       }
     });
-    return { ok: true, refund: hits, pendingSec: this.#caps(u, eff.all, s).pendingSec };
+    return { ok: true, refund: hits, pendingSec: this.#caps(u, eff.all, s).pendingSec, captcha: hc.captcha };
   }
 
   async refund(uid, hits) {
@@ -1730,15 +1746,16 @@ export class Directory extends DurableObject {
    * columns are never changed here (re-recording must not unlock it or point
    * it at another link) → { ok } or 409 `exists`.
    */
-  async recordShare({ id, uid, kind, label, created, expires, views, lh = null }, actorId = uid) {
+  async recordShare({ id, uid, kind, label, created, expires, views, lh = null, captcha = false }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
-    const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+    // The CAPTCHA flag is never cleared by re-recording (as the lock).
+    const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh, captcha) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
       ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, label = excluded.label, created = excluded.created,
-        expires = excluded.expires, views_total = excluded.views_total, status = 'active'
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active', captcha = MAX(shares.captcha, excluded.captcha)
       WHERE shares.user_id = excluded.user_id AND shares.kind != 'reverse'`,
-      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null).rowsWritten;
+      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null, captcha === true ? 1 : 0).rowsWritten;
     if (!w) return fail(409, 'exists', 'A share with this id already exists.');
-    this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
+    this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}${captcha === true ? ' captcha' : ''}`);
     return { ok: true };
   }
 
@@ -1750,7 +1767,7 @@ export class Directory extends DurableObject {
     const where = `WHERE user_id = ? AND status != 'pending' AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}`;
     const args = status ? [uid, like, String(status)] : [uid, like];
     const rows = this.sql.exec(
-      `SELECT id, kind, label, created, expires, views_total, status, locked,
+      `SELECT id, kind, label, created, expires, views_total, status, locked, captcha,
         MAX(shares.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id)) AS opens FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
       ...args, lim, off).toArray();
     // The total counts what the filters match, so pagination is correct.
@@ -1759,14 +1776,14 @@ export class Directory extends DurableObject {
   }
 
   async getShare(uid, id) {
-    return this.sql.exec(`SELECT id, user_id, kind, label, created, expires, views_total, status, locked,
+    return this.sql.exec(`SELECT id, user_id, kind, label, created, expires, views_total, status, locked, captcha,
       MAX(shares.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id)) AS opens FROM shares WHERE user_id = ? AND id = ?`, uid, id).toArray()[0] || null;
   }
 
   /** Any user's share, for the admin (no owner scoping). */
   async adminShare(id) {
     return this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status,
-      s.locked, s.locked_at, lu.username AS locked_by
+      s.locked, s.locked_at, lu.username AS locked_by, s.captcha
       FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by WHERE s.id = ?`, id).toArray()[0] || null;
   }
 
@@ -1937,7 +1954,7 @@ export class Directory extends DurableObject {
     range('s.expires', expiresFrom, expiresTo);
     const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = this.sql.exec(`SELECT s.id, s.user_id, u.username, s.kind, s.label, s.created, s.expires, s.views_total, s.status, MAX(s.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = s.id)) AS opens,
-      s.locked, s.locked_at, lu.username AS locked_by
+      s.locked, s.locked_at, lu.username AS locked_by, s.captcha
       FROM shares s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users lu ON lu.id = s.locked_by
       ${w} ORDER BY s.created DESC LIMIT ? OFFSET ?`, ...args, lim, off).toArray();
     const total = this.sql.exec(`SELECT COUNT(*) AS c FROM shares s ${w}`, ...args).one().c;
@@ -2802,7 +2819,7 @@ export class Directory extends DurableObject {
     const out = [];
     for (let k = 0; k < list.length; k += SQL_BATCH) {
       const part = list.slice(k, k + SQL_BATCH);
-      out.push(...this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND status != 'pending' AND id IN (${part.map(() => '?').join(', ')})`,
+      out.push(...this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked, captcha FROM shares WHERE user_id = ? AND status != 'pending' AND id IN (${part.map(() => '?').join(', ')})`,
         uid, ...part).toArray());
     }
     return out.sort((x, y) => y.created - x.created || (x.id < y.id ? -1 : 1));
@@ -2834,7 +2851,7 @@ export class Directory extends DurableObject {
    * share.
    * → { ok, maxBytes (the share's effective limit, null: none) }.
    */
-  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null }) {
+  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null, captcha }) {
     if (typeof id !== 'string' || !/^r[A-Za-z0-9_-]{22}$/.test(id)) return fail(400, 'invalid', 'Invalid reverse-share id.');
     const h = await reverseIdHash(id); // before any check: nothing below awaits
     const u = this.#user(uid);
@@ -2850,6 +2867,8 @@ export class Directory extends DurableObject {
     if (roleMax !== null && maxBytes !== null && maxBytes > roleMax) {
       return fail(403, 'reverse_too_large', `A reverse share may receive at most ${roleMax} bytes.`, { max: roleMax });
     }
+    const hc = resolveCaptcha(L, 'reverse', captcha);
+    if (!hc.ok) return fail(hc.error === 'invalid_captcha' ? 400 : 403, hc.error, hc.message);
     if (this.sql.exec('SELECT 1 FROM reverse_ids WHERE h = ?', h).toArray().length) return fail(409, 'exists', 'A share with this id already exists.');
     const ts = now();
     this.sql.exec("DELETE FROM shares WHERE status = 'pending' AND created < ?", ts - PENDING_REVERSE_SEC);
@@ -2857,11 +2876,11 @@ export class Directory extends DurableObject {
       AND ((status = 'active' AND expires > ?) OR status = 'pending')`, uid, ts).one().c;
     const cap = Math.min(MAX_REVERSE_ACTIVE, L.reverseMaxActive ?? MAX_REVERSE_ACTIVE);
     if (active >= cap) return fail(409, 'too_many_reverse', `At most ${cap} active reverse shares at once.`, { max: cap });
-    const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh)
-      VALUES (?, ?, 'reverse', ?, ?, ?, NULL, 'pending', ?) ON CONFLICT(id) DO NOTHING`,
-      id, uid, cleanLabel(label) ?? '', ts, ts + expireSec, typeof lh === 'string' && lh.length <= 64 ? lh : null).rowsWritten;
+    const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh, captcha)
+      VALUES (?, ?, 'reverse', ?, ?, ?, NULL, 'pending', ?, ?) ON CONFLICT(id) DO NOTHING`,
+      id, uid, cleanLabel(label) ?? '', ts, ts + expireSec, typeof lh === 'string' && lh.length <= 64 ? lh : null, hc.captcha ? 1 : 0).rowsWritten;
     if (!w) return fail(409, 'exists', 'A share with this id already exists.');
-    return { ok: true, maxBytes: maxBytes ?? roleMax };
+    return { ok: true, maxBytes: maxBytes ?? roleMax, captcha: hc.captcha };
   }
 
   /**
@@ -2874,7 +2893,8 @@ export class Directory extends DurableObject {
       created, expires, id, uid).rowsWritten;
     if (!w) return fail(409, 'exists', 'This reverse share is no longer being created.');
     this.sql.exec('INSERT OR IGNORE INTO reverse_ids (h) VALUES (?)', h);
-    this.#log(actorId, uid, 'share.created', `id=${id} kind=reverse`);
+    const flagged = this.sql.exec('SELECT captcha FROM shares WHERE id = ?', id).toArray()[0]?.captcha === 1;
+    this.#log(actorId, uid, 'share.created', `id=${id} kind=reverse${flagged ? ' captcha' : ''}`);
     return { ok: true };
   }
 
@@ -2891,7 +2911,7 @@ export class Directory extends DurableObject {
    * was one (in the index) but is gone: 'gone'; never one: 'unknown'.
    */
   async reverseTarget(id) {
-    const r = this.sql.exec("SELECT user_id, status, expires, locked, lh FROM shares WHERE id = ? AND kind = 'reverse'", id).toArray()[0];
+    const r = this.sql.exec("SELECT user_id, status, expires, locked, lh, captcha FROM shares WHERE id = ? AND kind = 'reverse'", id).toArray()[0];
     if (!r) return { ok: false, state: 'unknown' };
     const gone = { ok: false, state: 'gone', uid: r.user_id, lh: r.lh };
     if (r.status !== 'active' || r.expires <= now()) return gone;
@@ -2902,10 +2922,22 @@ export class Directory extends DurableObject {
     if (!L.driveEnabled || !L.reverseEnabled) return gone;
     const cap = (v) => (v === null || v === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, v));
     return {
-      ok: true, uid: r.user_id, lh: r.lh, expires: r.expires,
+      ok: true, uid: r.user_id, lh: r.lh, expires: r.expires, captcha: r.captcha === 1,
       capacity: cap(L.driveMaxBytes), maxFile: cap(L.driveMaxFileBytes), roleMaxBytes: cap(L.reverseMaxBytes),
       pendingSec: this.#caps(u, L, this.#settings()).pendingSec,
     };
+  }
+
+  /**
+   * The CAPTCHA standing of share `id` for a request without a grant:
+   * 'captcha' (active, with the CAPTCHA), 'open' (active, without it) or
+   * 'none' (unknown, or no longer active) — the Worker answers 'none' exactly
+   * as 'captcha', so the check says nothing about an id.
+   */
+  async shareCaptchaState(id) {
+    const r = typeof id === 'string' ? this.sql.exec("SELECT captcha FROM shares WHERE id = ? AND status = 'active'", id).toArray()[0] : null;
+    if (!r) return 'none';
+    return r.captcha === 1 ? 'captcha' : 'open';
   }
 
   /** The user a share belongs to (the Worker needs it to reach a reverse share's Drive). */

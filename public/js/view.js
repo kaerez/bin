@@ -3,12 +3,20 @@
 // browser: it is turned into two access proofs (SPEC §5.4) which the server
 // checks before releasing ciphertext or spending a view. All content is
 // rendered with DOM construction only.
+//
+// A share with the CAPTCHA: this page never loads the Turnstile script (the
+// strict CSP would refuse it anyway). On `captcha_required` it takes the key
+// out of the address bar, seals it for this tab and goes to the check page;
+// back from there (?n=…) it opens the sealed key and the share
+// (public/js/pagekey.js, SECURITY.md "CAPTCHA on shares").
 
 import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
 import { validateManifest, buildTree, basename, cleanName } from './files.js';
-import { fetchHead, openShare, expireShare, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck } from './api.js';
+import { fetchHead, openShare, expireShare, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck,
+  setHumanGrant, humanGrantOf, setHumanGrantListener, shareHuman } from './api.js';
+import { tabStorage, readPageKey, takeKey, goToCheck, loadGrant, saveGrant, CHECK_REFUSED } from './pagekey.js';
 import { humanCheck } from './turnstile.js';
 import { clearSessionKey } from './drivekeys.js';
 import { ensureTracker } from './tracker.js';
@@ -25,6 +33,9 @@ import { folderBrowser } from './tree.js';
 
 let timer = null;
 let totpTimer = null;
+let keepAlive = null;
+// This document's page key (src/index.js puts it in on a real navigation): read once, then gone from the DOM.
+const pageKey = typeof document !== 'undefined' ? readPageKey(document) : null;
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 const route = location.pathname.match(/^\/p\/([^/]+)\/?$/);
@@ -83,18 +94,61 @@ async function initPublicComposer() {
 }
 
 // ── viewer ───────────────────────────────────────────────────────────────────
+/**
+ * Back from the check page (?n=…): the key sealed for this tab, opened with
+ * this document's page key, back in the address bar → the fragment, or null.
+ */
+async function keyFromCheck(id, storage) {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('n')) return location.hash.slice(1);
+  const fragment = storage ? await takeKey({ kind: 'p', id, pageKey, storage }) : null;
+  history.replaceState(null, '', fragment ? `${location.pathname}#${fragment}` : location.pathname);
+  return fragment;
+}
+
+/** The share has the CAPTCHA and this tab has no valid grant: to the check page. */
+async function toCheck(id, fragment, storage) {
+  stopKeepAlive();
+  setHumanGrant(id, null);
+  if (storage) saveGrant({ kind: 'p', id, storage, grant: null });
+  status('This share requires a CAPTCHA. Taking you to it…');
+  const r = await goToCheck({ kind: 'p', id, fragment, pageKey, storage });
+  if (r !== 'leaving') status(CHECK_REFUSED[r], true);
+}
+
+function stopKeepAlive() { clearInterval(keepAlive); keepAlive = null; }
+/** Keep the CAPTCHA grant alive while the share is open (downloads may come later). */
+function startKeepAlive(kind, id) {
+  stopKeepAlive();
+  if (!humanGrantOf(id)) return;
+  keepAlive = setInterval(() => { shareHuman(kind, id).catch(() => {}); }, 4 * 60 * 1000);
+}
+
+const captchaNeeded = (e) => e instanceof ApiError && e.code === 'captcha_required';
+
 async function initView(id) {
   const newlink = $('#newlink');
   if (newlink) newlink.hidden = false;
-  const fragment = location.hash.slice(1);
-  if (!fragment) return status('This link is missing its decryption key.', true);
+  const storage = tabStorage();
+  const fragment = await keyFromCheck(id, storage);
+  if (!fragment) {
+    return status(new URLSearchParams(location.search).has('n')
+      ? 'This tab no longer holds the link\'s key. Open the whole link again (with the part after “#”).'
+      : 'This link is missing its decryption key.', true);
+  }
   const kind = id[0] === 'f' ? 'file' : 'paste';
+  // A CAPTCHA grant this tab got on the check page (kept, renewed as it is used).
+  if (storage) {
+    setHumanGrant(id, loadGrant({ kind: 'p', id, storage }));
+    setHumanGrantListener((sid, grant) => { if (sid === id) saveGrant({ kind: 'p', id, storage, grant }); });
+  }
 
   status('checking…');
   let head;
   try {
     head = validateHead(await fetchHead(kind, id));
   } catch (e) {
+    if (captchaNeeded(e)) return toCheck(id, fragment, storage);
     if (e instanceof ApiError || e.name === 'TypeError') return readError(e);
     return status('This link was made by an older or incompatible version and can no longer be opened.', true);
   }
@@ -102,7 +156,16 @@ async function initView(id) {
 
   const limited = head.adata.bar && head.meta.left !== null;
   const needsPassword = head.adata.kdf === 'argon2id-hkdf';
-  const open = (password) => doOpen({ id, kind, head, fragment, password });
+  const open = async (password) => {
+    try {
+      await doOpen({ id, kind, head, fragment, password });
+      startKeepAlive(kind, id);
+    } catch (e) {
+      // The grant lapsed before the open (nothing was spent): the CAPTCHA again.
+      if (captchaNeeded(e)) { await toCheck(id, fragment, storage); return; }
+      throw e;
+    }
+  };
 
   if (needsPassword) return passwordScreen(head, limited, open);
   if (limited) {
@@ -183,7 +246,8 @@ function wireDeleteNow(btn, meta, { kind, id, access }, msgEl) {
       status('Deleted. This link no longer works for anyone.');
     } catch (e) {
       btn.disabled = false;
-      showMsg(msgEl, e instanceof ApiError && e.status === 423 ? 'The administrator has locked this share; it cannot be deleted.' : friendlyError(e));
+      showMsg(msgEl, e instanceof ApiError && e.status === 423 ? 'The administrator has locked this share; it cannot be deleted.'
+        : captchaNeeded(e) ? 'The CAPTCHA for this share has expired. Reload the page to complete it again.' : friendlyError(e));
     }
   });
 }
@@ -453,7 +517,9 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires) {
     } catch (e) {
       bar.hide();
       if (e && e.name === 'AbortError') return;
-      showMsg(errMsg, e instanceof ApiError && e.code === 'bad_grant' ? 'The download window has expired — open the link again.' : friendlyError(e));
+      showMsg(errMsg, e instanceof ApiError && e.code === 'bad_grant' ? 'The download window has expired — open the link again.'
+        : e instanceof ApiError && e.code === 'captcha_required' ? 'The CAPTCHA for this share has expired. Reload the page to complete it again (a share with limited views uses another view).'
+          : friendlyError(e));
     } finally {
       busy = false;
     }

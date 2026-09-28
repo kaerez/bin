@@ -7,6 +7,11 @@
 // spend: a wrong link or wrong password never consumes a view. The stored
 // record never leaves the object except as the released paste, and the proof
 // hashes, the delete-token hash and the owner id never leave it at all.
+//
+// A note with the CAPTCHA (`hc`, set at creation from the sender's role) is
+// never released — not even its head — unless the Worker has verified a
+// CAPTCHA grant for it (`human`); without one the answer is 'captcha' and
+// nothing is spent (src/lib/human.js).
 
 import { DurableObject } from 'cloudflare:workers';
 import { verifyToken } from './lib/ids.js';
@@ -45,20 +50,22 @@ export class BurnPaste extends DurableObject {
   }
 
   /** Non-secret head: { v, adata, meta } — never wk/ct. */
-  async head() {
+  async head(human = false) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#get();
       if (!rec) return { status: 'gone' };
+      if (rec.hc && human !== true) return { status: 'captcha' };
       const p = rec.paste;
       return { status: 'ok', head: { v: p.v, adata: p.adata, meta: metaOut(rec) } };
     });
   }
 
   /** Verify both proof hashes, then atomically spend one view and release. */
-  async open(lh, kh) {
+  async open(lh, kh, human = false) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#get();
       if (!rec) return { status: 'gone' };
+      if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
       if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
       let left = rec.left;
@@ -108,10 +115,11 @@ export class BurnPaste extends DurableObject {
    * "Delete now" by someone who can open the share (both proofs): only when
    * the sender allowed it (meta.deletable). Spends no view.
    */
-  async expireByOpener(lh, kh) {
+  async expireByOpener(lh, kh, human = false) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#get();
       if (!rec) return { status: 'gone' };
+      if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
       if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
       if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };

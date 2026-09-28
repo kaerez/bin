@@ -52,6 +52,74 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     before is re-sealed once, in the user's browser at sign-in or in the owner's through the
     escrow of that release, resumably, and the old wraps and escrow keys are removed only after
     the server verified that every item opens under the new keys.
+- **CAPTCHA on shares and reverse shares** (role options; SECURITY.md "CAPTCHA on shares",
+  docs/API.md, docs/REVERSE.md §5–§8, docs/DRIVE.md §5, §7): Admin → Roles has, for every
+  non-public role, "CAPTCHA on shares" (notes, file shares, Drive shares) and — while the role
+  has the Drive and reverse shares — "CAPTCHA on reverse shares": radio buttons "Allow CAPTCHA
+  (user chooses per share)", "Require CAPTCHA for all shares" ("…for all reverse shares") and
+  "Disable CAPTCHA", and under "Allow" a "Default for new shares: CAPTCHA on / off". Options
+  `shareCaptcha` / `shareCaptchaDefault` and `reverseCaptcha` / `reverseCaptchaDefault`
+  (Directory migration 15): the Owner role is locked at "allow" (the box starts off for shares,
+  on for reverse shares); the Default role holds allow / off for shares and require / on for
+  reverse shares (every reverse link had the human check before); custom roles inherit; the
+  Public role has none. They travel in an export's roles part.
+  - **Per share:** "Require CAPTCHA to open" in the composer and the Drive's Share dialog,
+    "Require CAPTCHA to send files" in Receive files, `captcha: true|false` on every create
+    route, `--captcha` / `--no-captcha` in the CLI's `create` and `send` — pre-set from the
+    role's default under "allow", ticked and disabled under "require", hidden under "off". The
+    server applies the role: "require" is on whatever is asked; "off" refuses `captcha: true`
+    (`403 captcha_disabled`). The flag is stored in the share's record and index row; My shares
+    and Admin → Shares show a CAPTCHA badge, and `share.created` logs it.
+  - **Recipients:** a protected share's head, open, "delete now" and every chunk answer
+    `403 captcha_required` ("This share requires a CAPTCHA; open it in a browser") until a
+    CAPTCHA grant is presented: `POST /api/(paste|file)/<id>/human` with a Turnstile token for
+    the new action `share-open` issues one (HMAC-signed, bound to the share and the caller's
+    network, 10 minutes, sliding while used, at most 12 hours). Nothing is spent and nothing is
+    counted as an invalid fetch without it; views are spent only by the open that follows. The
+    CLI's `get` prints that message.
+  - **Reverse shares:** starting an upload session needs a grant (`POST /api/reverse/<id>/human`,
+    action `reverse-upload`) or a token only when the link has the flag, still before the
+    password; each grant starts one session (a wrong password spends it). Links without it have
+    no check (before, every link had it while Turnstile was on).
+  - **The key never meets Cloudflare's script:** `/p/<id>` and `/r/<id>` now always have the
+    strict CSP (the uploader page had the Turnstile CSP whenever Turnstile was on) and are
+    served by the Worker with a per-navigation page key; a protected share's page takes the key
+    out of the address bar, seals it (with the tab's Drive keys) in `sessionStorage` and goes to
+    its check page (`/p/<id>?check`, `/r/<id>?check`, the Turnstile CSP), which never holds a key
+    that opens it; back on the strict page the key is opened, put back and the share opened.
+    Without `sessionStorage` or a page key a protected share is not opened.
+  - **Inactive without Turnstile keys:** the flag is saved but not asked for; the role editor,
+    the composer and the dialogs say so.
+  - **The page key is random and bound to the browser** (security audit F1): it is 32 random
+    bytes made on each strict navigation (`Sec-Fetch-Site` none or same-origin), written into
+    the page and into an HttpOnly, Secure, SameSite=Strict cookie for the share's path (15
+    minutes); the return from the check gets it again only with that cookie, which the same
+    response clears (one use). It was derived from the id and a nonce the check page could read,
+    so a script there could have had it fetched from outside the browser. The sealed record holds
+    the link's key alone: the tab's Drive keys are removed before the check and never carried
+    through it (the Drive asks to be unlocked again). The check page has `worker-src 'none'` and
+    COOP `same-origin-allow-popups` and registers no service worker; a page opened from another
+    site reloads itself once for a key.
+  - **Metering and uniform answers** (audit F2–F4): at most 30 CAPTCHA checks per network per 10
+    minutes reach siteverify (`429 rate_limited`), a failed token counts as an invalid request,
+    the check page is behind the Guard's block and a rate limit and looks nothing up, and a
+    missing or ended share answers `403 captcha_required` without a grant, like a protected one.
+  - **Re-audit fixes (N1–N3, N6):**
+    - a Drive key read from the tab's `sessionStorage` is used only once proven against the
+      server's key check value, and a planted key is removed (with the Drive key model v2, above,
+      the KEKs are never stored: this now applies to the old Drive key of a Drive waiting for its
+      upgrade, proven against `GET …/drive/migrate`'s `kcv`); the return from a CAPTCHA page also
+      removes any Drive key slot found in the tab;
+    - every Worker response carries COOP and CORP `same-origin`, `X-Frame-Options: DENY`,
+      `nosniff` and `no-referrer`, and anything that is not HTML
+      `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`;
+    - the service worker serves a cached copy only when its SHA-256 is in the build's integrity
+      manifest (generated into `sw.js` by `tools/sw-manifest.mjs`), rebuilt with the build's own
+      headers; a copy that does not match is deleted and the request fails;
+    - the page-key cookie is named by its nonce (`__Secure-secbin_pk_<n>`), so two tabs of one
+      share keep their own; at most 4 per share path.
+  - **Wording:** the UI calls the Turnstile check "CAPTCHA" everywhere (Admin → Security →
+    CAPTCHA, the waiting and load-failure notes on login, Account and the home page).
 - **CSRF tokens (defence in depth)**, on top of the SameSite=Strict session cookie, the
   `Sec-Fetch-Site` check, the JSON / `X-Secbin-Intent` requirement and the absence of CORS
   (all kept as they were).

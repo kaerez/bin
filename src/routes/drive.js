@@ -769,7 +769,7 @@ async function nodeShares(env, dir, uid, id) {
     ended.delete(row.id);
     const views = s.views === undefined ? row.views_total : s.views;
     // My-shares rows (so the same revoke flow works), plus `state` / `maxViews` aliases.
-    live.push({ ...row, views_total: views, left: s.left ?? null, expires: s.expires ?? row.expires, state: row.status, maxViews: views });
+    live.push({ ...row, captcha: !!row.captcha, views_total: views, left: s.left ?? null, expires: s.expires ?? row.expires, state: row.status, maxViews: views });
   }
   // Ended shares no longer reference anything.
   if (ended.size) await driveStub(env, uid).dropRefs(uid, [...ended]);
@@ -807,7 +807,7 @@ async function createShare(request, env, dir, a) {
   if (!refsR.ok) return fromDir(refsR);
   const auth = await dir.authorizeCreate(uid, a.channel, {
     kind: 'files', drive: true, views, expireSec: ttl, files: refsR.refs.length,
-    types: body.types, depth: body.depth, deletable,
+    types: body.types, depth: body.depth, deletable, captcha: body.captcha,
   });
   if (!auth.ok) return fromDir(auth);
   const deleteToken = genDeleteToken();
@@ -818,6 +818,7 @@ async function createShare(request, env, dir, a) {
       id = genId('f');
       r = await fileStub(env, id).initRefs({
         id, dth: await hashToken(deleteToken), refs: refsR.refs, views, expire, ttl, deletable, paste: clean, acc: clean.acc,
+        hc: auth.captcha === true,
       });
       if (r.status !== 'exists') break;
       if (attempt >= 4) throw new Error('id allocation failed');
@@ -830,7 +831,7 @@ async function createShare(request, env, dir, a) {
     await dir.refund(uid, auth.refund);
     return err(400, 'invalid_format', 'The manifest’s view limit, expiry and recipient-delete setting must match the request.');
   }
-  const rec = await dir.recordShare({ id, uid, kind: 'drive', label: body.label, created: r.created, expires: r.expires, views, lh: clean.acc.lh }, actorId(a));
+  const rec = await dir.recordShare({ id, uid, kind: 'drive', label: body.label, created: r.created, expires: r.expires, views, lh: clean.acc.lh, captcha: auth.captcha === true }, actorId(a));
   if (rec && rec.ok === false) {
     // The (server-chosen) id is someone else's: never take it over.
     await fileStub(env, id).revoke();
@@ -844,7 +845,7 @@ async function createShare(request, env, dir, a) {
     await dir.refund(uid, auth.refund);
     return fromDir(added);
   }
-  return json({ id, deletetoken: deleteToken, expires: r.expires }, 201);
+  return json({ id, deletetoken: deleteToken, expires: r.expires, captcha: auth.captcha === true }, 201);
 }
 
 

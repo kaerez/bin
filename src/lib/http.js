@@ -42,6 +42,10 @@ export const TURNSTILE_CSP = CSP_DIRECTIVES.map((d) => {
   if (d.startsWith('frame-src ')) return `frame-src ${TURNSTILE_ORIGIN}`;
   return d;
 }).join('; ');
+// A share's CAPTCHA page (/p|r/<id>?check): the Turnstile policy, and no
+// worker of any kind (no service worker registration, no Worker), so a script
+// there cannot leave code behind that outlives the page.
+export const CHECK_CSP = TURNSTILE_CSP.split('; ').map((d) => (d.startsWith('worker-src ') ? "worker-src 'none'" : d)).join('; ');
 
 // Every powerful browser feature is off; the few the app itself uses (copy
 // buttons, media preview fullscreen / picture-in-picture) are same-origin only.
@@ -98,13 +102,17 @@ export const notFound = () => err(404, 'not_found', 'Not found.');
 export const methodNotAllowed = (allow) => json({ error: 'method_not_allowed', message: 'Method not allowed' }, 405, { allow });
 
 /** Re-emit an asset response with the security headers and no-store (`turnstile`: see TURNSTILE_CSP). */
-export function withSecurityHeaders(res, { noStore = true, turnstile = false } = {}) {
+export function withSecurityHeaders(res, { noStore = true, turnstile = false, check = false } = {}) {
   const out = new Response(res.body, res);
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
-  if (turnstile) {
-    out.headers.set('content-security-policy', TURNSTILE_CSP);
+  if (turnstile || check) {
+    out.headers.set('content-security-policy', check ? CHECK_CSP : TURNSTILE_CSP);
     out.headers.delete('cross-origin-embedder-policy');
   }
+  // The check page may open popups (Cloudflare's links), but a popup it opens
+  // to a strict page (COOP same-origin with COEP) lands in another browsing
+  // context group: the check page gets no handle to read it.
+  if (check) out.headers.set('cross-origin-opener-policy', 'same-origin-allow-popups');
   if (noStore) out.headers.set('cache-control', 'no-store');
   return out;
 }
@@ -134,7 +142,42 @@ export function withCachePolicy(res) {
     out.headers.set(EDGE_CACHE_CONTROL, 'no-store');
   }
   if (!out.headers.has('cache-control')) out.headers.set('cache-control', 'no-store');
+  withBaselineHeaders(out);
   return out;
+}
+
+/**
+ * The policy of a Worker response that is not a page: nothing loads, nothing
+ * frames it, and opened as a document it is sandboxed (an opaque origin, no
+ * script), so a window opened to it — by a script on the check page, say —
+ * is no same-origin realm outside the page CSP.
+ */
+export const API_CSP = "default-src 'none'; frame-ancestors 'none'; sandbox";
+
+/**
+ * The isolation headers on every response the Worker returns (API answers,
+ * chunks, errors, redirects and pages alike), where the route set none of its
+ * own: COOP same-origin (a window opened to it lands in its own browsing
+ * context group), CORP same-origin, X-Frame-Options DENY, nosniff and no
+ * referrer. The CSP: anything that is not HTML (JSON, chunks, plain-text
+ * errors, redirects) always gets API_CSP, which is stricter than any page
+ * policy (a page policy there was only copied along with the page headers);
+ * an HTML page keeps its own (the strict one, the Turnstile pages', the check
+ * page's), or gets the strict page CSP when it has none. A page's own COOP
+ * (the check page's) is kept too.
+ */
+export function withBaselineHeaders(res) {
+  const h = res.headers;
+  const setIfAbsent = (k, v) => { if (!h.has(k)) h.set(k, v); };
+  setIfAbsent('cross-origin-opener-policy', 'same-origin');
+  setIfAbsent('cross-origin-resource-policy', 'same-origin');
+  setIfAbsent('x-frame-options', 'DENY');
+  setIfAbsent('x-content-type-options', 'nosniff');
+  setIfAbsent('referrer-policy', 'no-referrer');
+  const html = /^\s*text\/html\b/i.test(h.get('content-type') || '');
+  if (!html) h.set('content-security-policy', API_CSP);
+  else if (!h.has('content-security-policy')) h.set('content-security-policy', CSP);
+  return res;
 }
 
 export function redirect(location, status = 302) {
