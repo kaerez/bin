@@ -3,13 +3,13 @@
 // and the anonymous uploader's requests (open, begin, reserve, chunks,
 // finalize) with the real client crypto.
 import { env, SELF, runInDurableObject } from 'cloudflare:test';
-import { makeUser, fetchJson, intent, ORIGIN, proofFor, USER_PW, salt16 } from './helpers.js';
-import { enableDrive, escrowWrap, enc, KCV } from './drive-helpers.js';
+import { makeUser, fetchJson, intent, ORIGIN, proofFor, USER_PW } from './helpers.js';
+import { enableDrive, driveKeys, sealed } from './drive-helpers.js';
 import {
-  setReverseStretcher, createReverseKey, sealReversePriv, linkProof, linkHash, passwordGate, passwordProof,
-  sealNote, sealUpload, newReverseId, newNodeId,
+  setReverseStretcher, createReverseKey, linkProof, linkHash, passwordGate, passwordProof,
+  sealNote, sealUpload, newReverseId, newNodeId, pubOfPrivate,
 } from '../public/js/reversekeys.js';
-import { createDriveKey } from '../public/js/drivekeys.js';
+import { sealLinkKey, openLinkKey } from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
 import { randomBytes, utf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, encryptChunk, importFileKey } from '../public/js/files.js';
@@ -17,30 +17,32 @@ import { CHUNK, encryptChunk, importFileKey } from '../public/js/files.js';
 // Argon2id stand-in (workerd cannot compile WebAssembly; the server never runs it).
 setReverseStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('test-stretch')));
 
-
-export const DK = createDriveKey();
 export const dirStub = () => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
 export const driveOf = (uid) => env.DRIVE.get(env.DRIVE.idFromName(`drive:${uid}`));
 export const errorOf = async (r) => (await r.json()).error;
 
-export async function receiver(name, limits = {}, { keys = true } = {}) {
+export async function receiver(name, limits = {}) {
   const u = await makeUser(name);
   await enableDrive(u.id, { reverseEnabled: true, ...limits });
-  // A Drive that is set up (a link's private key is sealed with its key).
-  if (keys) await setUpDrive(u.cookie);
   return u;
 }
 
 /**
- * Set up the Drive as the user's browser does at sign-in (docs/DRIVE.md §3):
- * the salt, a password wrap, the escrow wrap for the owner's current key, the
- * sealed escrow pin and the key check value (a first set-up needs both;
- * opaque stand-ins: the server only checks their form).
+ * A link's private key sealed as the user's browser does (docs/DRIVE.md §3):
+ * under HKDF(KEK of the current sub-MEK, "reverse-link"), bound to the link
+ * id → { priv, mek }.
  */
-export async function setUpDrive(cookie) {
-  const pw = { kind: 'pw', ref: 'pw', data: `1.${b64urlFromBytes(randomBytes(12))}.${b64urlFromBytes(randomBytes(60))}` };
-  const r = await fetchJson('/api/private/drive/keys', { method: 'PUT', cookie, headers: intent, body: { driveSalt: salt16(), set: [pw, await escrowWrap()], escrowPin: enc(40), kcv: KCV } });
-  if (r.status !== 200) throw new Error(`drive set-up: ${r.status} ${await r.text()}`);
+export async function sealLinkPriv(cookie, id, privateKey) {
+  const k = await driveKeys(cookie);
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
+  return { priv: await sealLinkKey(k.keks.get(k.current), { userId: k.userId, mekId: k.current, linkId: id }, pkcs8), mek: k.current };
+}
+/** A link's private key opened with the session's KEK of `mek` → { privateKey, pub }. Throws when it does not open. */
+export async function openLinkPriv(cookie, id, priv, mek) {
+  const k = await driveKeys(cookie, { fresh: true });
+  const kek = k.keks.get(mek);
+  if (!kek) throw new Error(`no KEK for ${mek}`);
+  return pubOfPrivate(await openLinkKey(kek, { userId: k.userId, mekId: mek, linkId: id }, priv));
 }
 
 /**
@@ -50,7 +52,7 @@ export async function setUpDrive(cookie) {
  */
 export async function newReverse(cookie, { folder = 'root', password, note, id = newReverseId(), confirm = true, ...opts } = {}) {
   const { pub, privateKey } = await createReverseKey();
-  const body = { id, folder, priv: await sealReversePriv(DK, id, privateKey), lh: await linkHash(pub), expire: '7d', ...opts };
+  const body = { id, folder, ...(await sealLinkPriv(cookie, id, privateKey)), lh: await linkHash(pub), expire: '7d', ...opts };
   if (confirm) body.current = proofFor(USER_PW);
   if (typeof password === 'string') body.password = await passwordGate(password, pub);
   else if (password !== undefined) body.password = password; // as sent (validation tests)
@@ -109,9 +111,15 @@ export async function send(r, grant, opts = {}) {
   return f;
 }
 export const received = async (cookie, query = '') => (await fetchJson(`/api/private/drive/received${query}`, { cookie })).json();
-/** What the received files not yet re-wrapped add to the Drive's use: their sealed path, metadata and wrap. */
+/** What the received files not yet taken in add to the Drive's use: their sealed path, metadata and wrap (as stored, at rest). */
 export const overhead = (uid) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(
   'SELECT COALESCE(SUM(LENGTH(name) + LENGTH(meta) + LENGTH(fk)), 0) AS s FROM nodes WHERE rs IS NOT NULL').one().s);
 // The sealed fields of the Drive's own items (every item counts, docs/DRIVE.md §10).
 export const ownSealed = (uid) => runInDurableObject(driveOf(uid), (inst, state) => state.storage.sql.exec(
-  "SELECT COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0) AS s FROM nodes WHERE rs IS NULL AND id != 'root'").one().s);
+  "SELECT COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0) + COALESCE(LENGTH(dek), 0) + COALESCE(LENGTH(ks), 0)), 0) AS s FROM nodes WHERE rs IS NULL AND id != 'root'").one().s);
+
+/** A take-in (docs/REVERSE.md §6.1) with a well-formed body sealed under the session's KEK (its content is not checked: the server cannot). */
+export async function takeInAny(cookie, id, parent = 'root', headers = intent) {
+  const f = await sealed(cookie, 'file');
+  return fetchJson(`/api/private/drive/received/${id}`, { method: 'POST', cookie, headers, body: { parent, name: f.name, meta: f.meta, dek: f.dek, ks: f.ks, mek: f.mek } });
+}

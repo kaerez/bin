@@ -69,12 +69,12 @@ export async function handleKeys(request, env, url, a) {
   const me = a.user.id;
   const sid = a.claims?.sid || 'none';
   const needStep = async (body) => stepUp(request, env, url, dir, me, body);
-  const done = (r) => (r.ok ? json(r, 200, { 'cache-control': 'no-store' }) : fromDir(r));
+  const done = (r) => (r.ok ? json(r) : fromDir(r));
 
   if (p === '/api/private/admin/keys') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     await dir.ensureKeys();
-    return json(await dir.mekStatus(), 200, { 'cache-control': 'no-store' });
+    return json(await dir.mekStatus());
   }
   if (p === '/api/private/admin/keys/usage') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -154,7 +154,7 @@ export async function handleKeys(request, env, url, a) {
   }
   if (p === '/api/private/admin/keys/jobs/step') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    return json(await jobStep(env, dir, me), 200, { 'cache-control': 'no-store' });
+    return json(await jobStep(env, dir, me));
   }
 
   if (p === '/api/private/admin/keys/kit') {
@@ -434,7 +434,7 @@ async function keysExport(env, dir, me, body, url) {
     await dir.driveAdminAction(me, x.id, 'drive.keys_viewed', `exported:${entry.keks ? ` KEKs ${entry.keks.length}` : ''}${entry.deks ? ` DEKs ${entry.deks.length}` : ''}`);
   }
   await dir.adminLog({ action: 'keys.exported', detail: `root MEK ${doc.root ? 'yes' : 'no'}; sub-MEKs ${doc.subs?.length ?? 0}; user salts ${Object.keys(doc.salts ?? {}).length}; users ${doc.users.length}; DEKs ${deks}` }, { id: me, adm: true });
-  return json({ document: doc }, 200, { 'cache-control': 'no-store' });
+  return json({ document: doc });
 }
 
 async function openDek0(uid, keys, it) {
@@ -569,12 +569,12 @@ async function userView(env, dir, me, uid, body) {
       }
     }
     await dir.driveAdminAction(me, uid, 'drive.keys_viewed', `DEKs: ${files.length}`);
-    return json({ userId: uid, username, files, next: page.next && page.next.kind === 'n' ? page.next.id : null }, 200, { 'cache-control': 'no-store' });
+    return json({ userId: uid, username, files, next: page.next && page.next.kind === 'n' ? page.next.id : null });
   }
   const s = await driveStub(env, uid).summary(uid);
   await dir.driveAdminAction(me, uid, 'drive.keys_viewed', `KEKs: ${keys.keks.size}`);
   return json({
     userId: uid, username, salt: keys.salt, current: keys.current, items: s.items,
     keks: [...keys.keks].map(([mekId, v]) => ({ mekId, fp: v.fp, from: v.from, until: v.until, kek: b64urlFromBytes(v.kek), inUse: s.meks.includes(mekId) })),
-  }, 200, { 'cache-control': 'no-store' });
+  });
 }

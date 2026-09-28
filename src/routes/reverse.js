@@ -126,9 +126,14 @@ export async function handleReverseOwner(request, env, url, a) {
       // The field layer comes off here: the browser gets the uploader's sealed fields and the link keys.
       const fk = await fieldKeys(env, uid);
       for (const it of r.items) {
-        it.name = parsed(await fromRest(fk, uid, 'received', `name:${it.id}`, it.name));
-        it.meta = it.meta ? parsed(await fromRest(fk, uid, 'received', `meta:${it.id}`, it.meta)) : null;
-        it.fk = parsed(await fromRest(fk, uid, 'received', `wrap:${it.id}`, it.fk));
+        try {
+          it.name = parsed(await fromRest(fk, uid, 'received', `name:${it.id}`, it.name));
+          it.meta = it.meta ? parsed(await fromRest(fk, uid, 'received', `meta:${it.id}`, it.meta)) : null;
+          it.fk = parsed(await fromRest(fk, uid, 'received', `wrap:${it.id}`, it.fk));
+        } catch {
+          // One item that does not open never holds up the rest: the browser records it as failed.
+          Object.assign(it, { name: null, meta: null, fk: null, unreadable: true });
+        }
       }
       for (const k of r.keys) k.priv = await linkPriv(fk, uid, k.id, k.priv);
     }

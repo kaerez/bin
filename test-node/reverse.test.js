@@ -1,28 +1,32 @@
 // reverse.test.js — the crypto of reverse shares (docs/REVERSE.md §3) on
 // Node's Web Crypto and the real Argon2id: the link key pair and its private
-// key sealed with the Drive key, the link proof, the password gate (bound to
-// the link's public key), the note, and the full round trip — the uploader's
-// client (public/js/reverseclient.js) encrypts files against a stand-in API,
-// the user's side unwraps each one and re-wraps it into the Drive's own
-// format, and the content decrypts with the re-wrapped key.
+// key sealed under HKDF(KEK, "reverse-link") (docs/DRIVE.md §3), the link
+// proof, the password gate (bound to the link's public key), the note, and the
+// full round trip — the uploader's client (public/js/reverseclient.js)
+// encrypts files against a stand-in API, the user's side unwraps each one and
+// takes it into the Drive (its name, metadata and DEK sealed under the KEK),
+// and the content decrypts with the DEK opened again.
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
-  createReverseKey, sealReversePriv, openReversePriv, linkProof, linkHash, passwordGate, passwordProof, sealNote, openNote,
+  createReverseKey, pubOfPrivate, linkProof, linkHash, passwordGate, passwordProof, sealNote, openNote,
   sealUpload, openUpload, pubFromFragment, fragmentOf, newReverseId, newNodeId, REVERSE_ID_RE,
 } from '../public/js/reversekeys.js';
 import { openLink, parseLink, checkFiles, cleanPath, LinkError } from '../public/js/reverseclient.js';
-import { createDriveKey, deriveSubkeys, sealField, openField } from '../public/js/drivekeys.js';
+import { newKey, newSalt, sealLinkKey, openLinkKey, sealName, openName, sealDek, openDek } from '../public/js/drivekeys.js';
 import { DecryptError } from '../public/js/crypto.js';
 import { ApiError } from '../public/js/api.js';
 import { randomBytes, fromUtf8, utf8, bytesFromB64url, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, decryptChunk, importFileKey } from '../public/js/files.js';
 
 const sha = (b64) => createHash('sha256').update(bytesFromB64url(b64)).digest('base64url');
+const UID = 'AAAAAAAAAAAAAAAA';
+const MEK = 'mAAAAAAAAAAA';
+const pkcs8Of = async (privateKey) => new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
 
 describe('the link key pair', () => {
-  it('the public key is the fragment; the private key is sealed with DK and bound to the share', async () => {
-    const dk = createDriveKey();
+  it('the public key is the fragment; the private key is sealed under the KEK and bound to the user, the sub-MEK and the share', async () => {
+    const kek = newKey();
     const id = newReverseId();
     expect(id).toMatch(REVERSE_ID_RE);
     const { pub, privateKey } = await createReverseKey();
@@ -32,16 +36,18 @@ describe('the link key pair', () => {
     expect(Buffer.from(pubFromFragment(`#${frag}`)).equals(Buffer.from(pub))).toBe(true);
     expect(pubFromFragment('abc')).toBeNull();
     expect(pubFromFragment(`${frag.slice(0, -1)}!`)).toBeNull();
-    const sealed = await sealReversePriv(dk, id, privateKey);
+    const at = { userId: UID, mekId: MEK, linkId: id };
+    const sealed = await sealLinkKey(kek, at, await pkcs8Of(privateKey));
     expect(Object.keys(sealed).sort()).toEqual(['ct', 'iv']);
-    const back = await openReversePriv(dk, id, sealed);
+    const back = await pubOfPrivate(await openLinkKey(kek, at, sealed));
     expect(Buffer.from(back.pub).equals(Buffer.from(pub))).toBe(true); // the link can be shown again
     expect(back.privateKey.extractable).toBe(false);
-    await expect(openReversePriv(createDriveKey(), id, sealed)).rejects.toThrow(DecryptError);
-    await expect(openReversePriv(dk, newReverseId(), sealed)).rejects.toThrow(DecryptError);
-    // The files sub-key seals it: the names key does not open it.
-    const { names } = await deriveSubkeys(dk);
-    await expect(openField(names, 'reversePriv', id, sealed)).rejects.toThrow(DecryptError);
+    await expect(openLinkKey(newKey(), at, sealed)).rejects.toThrow(DecryptError);
+    await expect(openLinkKey(kek, { ...at, linkId: newReverseId() }, sealed)).rejects.toThrow(DecryptError);
+    await expect(openLinkKey(kek, { ...at, userId: 'BBBBBBBBBBBBBBBB' }, sealed)).rejects.toThrow(DecryptError);
+    await expect(openLinkKey(kek, { ...at, mekId: 'mBBBBBBBBBBB' }, sealed)).rejects.toThrow(DecryptError);
+    // Its own sub-key of the KEK: it does not open as a name.
+    await expect(openName(kek, { userId: UID, mekId: MEK, salt: newSalt() }, 'name', sealed)).rejects.toThrow(DecryptError);
   });
 
   it('the link proof is derived from the public key; the server keeps its SHA-256', async () => {
@@ -134,8 +140,8 @@ function fakeApi({ pub, id, password = null, limits = {} }) {
 }
 
 describe('the round trip', () => {
-  it('the uploader encrypts files and folders; the user unwraps, re-wraps into the Drive format and reads them', async () => {
-    const dk = createDriveKey();
+  it('the uploader encrypts files and folders; the user unwraps, takes them into the Drive (sealed under the KEK) and reads them', async () => {
+    const kek = newKey();
     const id = newReverseId();
     const { pub, privateKey } = await createReverseKey();
     const gate = await passwordGate('pw-123', pub, 1);
@@ -159,25 +165,26 @@ describe('the round trip', () => {
     // Nothing on the wire names a file.
     const wire = JSON.stringify([...S.files.values()]);
     for (const w of ['report', 'photos', 'big.bin', 'quarterly', 'text/plain']) expect(wire).not.toContain(w);
-    // The user's side: the sealed private key (from the server) opens with DK.
-    const sealedPriv = await sealReversePriv(dk, id, privateKey);
-    const { privateKey: priv } = await openReversePriv(dk, id, sealedPriv);
-    const keys = await deriveSubkeys(dk);
+    // The user's side: the sealed private key (from the server) opens with the KEK.
+    const lat = { userId: UID, mekId: MEK, linkId: id };
+    const sealedPriv = await sealLinkKey(kek, lat, await pkcs8Of(privateKey));
+    const { privateKey: priv } = await pubOfPrivate(await openLinkKey(kek, lat, sealedPriv));
     const out = new Map();
     for (const f of S.files.values()) {
       const item = { id: f.id, name: f.name, meta: f.meta, fk: { kind: 'rs', data: f.wrap } };
       const got = await openUpload(priv, id, item);
-      // Re-wrap into the Drive's own format (what driveclient.receivePending sends).
+      // Taken in (what driveclient.receivePending sends): the uploader's file key becomes the DEK, sealed under the KEK.
       const leaf = got.path.slice(got.path.lastIndexOf('/') + 1);
-      const name = await sealField(keys.names, 'name', f.id, leaf);
-      const fkField = await sealField(keys.files, 'fk', f.id, got.fk);
+      const at = { userId: UID, mekId: MEK, salt: newSalt() };
+      const name = await sealName(kek, at, 'name', utf8(leaf));
+      const dekField = await sealDek(kek, at, got.fk);
       // …and read the file back as the Drive does: the chunks were never re-encrypted.
-      const fk = await openField(keys.files, 'fk', f.id, fkField);
-      const key = await importFileKey(b64urlFromBytes(fk));
+      const dek = await openDek(kek, at, dekField);
+      const key = await importFileKey(b64urlFromBytes(dek));
       const n = Math.ceil(f.size / CHUNK);
       const parts = [];
       for (let i = 0; i < n; i++) parts.push(await decryptChunk(key, i, n, S.chunks.get(`${f.id}/${i}`)));
-      out.set(got.path, { name: fromUtf8(await openField(keys.names, 'name', f.id, name)), bytes: Buffer.concat(parts), type: got.type });
+      out.set(got.path, { name: fromUtf8(await openName(kek, at, 'name', name)), bytes: Buffer.concat(parts), type: got.type });
     }
     expect([...out.keys()].sort()).toEqual(['empty.txt', 'photos/2026/big.bin', 'report.txt']);
     expect(out.get('report.txt')).toMatchObject({ name: 'report.txt', type: 'text/plain' });

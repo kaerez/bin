@@ -150,7 +150,7 @@ export async function handleDrive(request, env, url) {
     const s = await drive().summary(uid);
     const k = await userKeys(env, uid, { meks: s.meks, createSalt: s.items === 0 });
     if (a.actor) await dir.driveKeysUsed(a.actor.id, uid, 'opened while acting as the user');
-    return withAuth(a, json(keysOut(k), 200, { 'cache-control': 'no-store' }));
+    return withAuth(a, json(keysOut(k)));
   }
 
   // Reverse shares and the files they received (docs/REVERSE.md §6.1).
@@ -356,7 +356,7 @@ async function kitRoute(request, env, url, dir, a, driveLog) {
     const k = await userKeys(env, uid, { meks: s.meks, createSalt: s.items === 0 });
     await driveLog('drive.kit_exported', `sub-MEKs: ${k.keks.size}`);
     const o = keysOut(k);
-    return json({ kit: { id: uid, username: a.user.username, userSalt: k.salt, current: k.current, keks: o.keys.map(({ kekOld, ...x }) => x) }, missing: k.missing, broken: k.broken }, 200, { 'cache-control': 'no-store' }); // eslint-disable-line no-unused-vars
+    return json({ kit: { id: uid, username: a.user.username, userSalt: k.salt, current: k.current, keks: o.keys.map(({ kekOld, ...x }) => x) }, missing: k.missing, broken: k.broken }); // eslint-disable-line no-unused-vars
   }
   if (p === '/api/private/drive/kit/verify') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -527,7 +527,7 @@ async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner }
       Object.assign(out, { driveSalt: L.driveSalt, wraps: L.wraps.filter((w) => w.kind !== 'escrow') });
       if (owner) Object.assign(out, { escrowPriv: L.escrowPriv, escrowPrivOld: L.escrowPrivOld, escrowPub: parseJson((await dir.legacyEscrow()).escrowPub) });
     }
-    return json(out, 200, { 'cache-control': 'no-store' });
+    return json(out);
   }
   if (sub === '/items') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -535,7 +535,7 @@ async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner }
     const after = url.searchParams.get('after') || '';
     if (after && !NODE_ID_RE.test(after)) return invalid('after must be an item id.');
     const r = await drive.legacyPage(uid, { after });
-    return json(r, 200, { 'cache-control': 'no-store' });
+    return json(r);
   }
   if (sub === '') {
     if (request.method !== 'PUT') return methodNotAllowed('GET, PUT');
@@ -675,7 +675,7 @@ export async function adminDriveRoute(request, env, url, ownerId) {
       out.push({ id: r.id, username: r.username, role: r.role, state: r.state, ...st, updated: r.updated });
     }
     const { escrowPub } = await dir.legacyEscrow();
-    return json({ drives: out, left: out.filter((d) => d.state !== 'done').length, legacyEscrow: !!escrowPub }, 200, { 'cache-control': 'no-store' });
+    return json({ drives: out, left: out.filter((d) => d.state !== 'done').length, legacyEscrow: !!escrowPub });
   }
   const m = p.match(/^\/api\/private\/admin\/drive\/migrate\/([A-Za-z0-9_-]{16})(\/escrow|\/items|\/finish)?$/);
   if (!m) return err(404, 'not_found', 'Not found.');
@@ -693,7 +693,7 @@ export async function adminDriveRoute(request, env, url, ownerId) {
     if (!logged.ok) return fromDir(logged);
     const k = await userKeys(env, uid, { createSalt: L.v1Items === 0 });
     const cur = k.keks.get(k.current);
-    return json({ wrap, wraps: L.wraps.length, kcv: L.kcv, v1Items: L.v1Items, v1Links: L.v1Links, current: k.current, kek: cur ? b64urlFromBytes(cur.kek) : null, fp: cur ? cur.fp : null }, 200, { 'cache-control': 'no-store' });
+    return json({ wrap, wraps: L.wraps.length, kcv: L.kcv, v1Items: L.v1Items, v1Links: L.v1Links, current: k.current, kek: cur ? b64urlFromBytes(cur.kek) : null, fp: cur ? cur.fp : null });
   }
   return upgradeRoute(request, env, url, dir, uid, sub, { owner: false, byOwner: ownerId });
 }

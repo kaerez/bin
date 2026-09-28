@@ -403,6 +403,7 @@ export class Drive extends DurableObject {
   async legacyKeys(uid) {
     this.#bind(uid);
     const old = this.#json('escrowPrivOld') || {};
+    const { v1Items, v1Links, archived } = this.#migrationState();
     return {
       ok: true,
       wraps: this.sql.exec('SELECT kind, ref, data FROM wraps ORDER BY kind, ref').toArray().map((w) => ({ kind: w.kind, ref: w.ref, data: w.data })),
@@ -410,7 +411,7 @@ export class Drive extends DurableObject {
       kcv: this.#meta('kcv'),
       escrowPriv: this.#meta('escrowPriv'),
       escrowPrivOld: old,
-      ...this.#migrationState(),
+      v1Items, v1Links, archived,
     };
   }
 
