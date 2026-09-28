@@ -40,6 +40,7 @@ vi.mock('../public/js/api.js', () => {
   const share = (id, extra) => ({ id, label: `label ${id}`, kind: 'text', created: fx.now - 60, expires: fx.now + 3600, views_total: 3, left: 2, status: 'active', ...extra });
   return {
     ApiError,
+    SESSION_CHANGED_EVENT: 'secbin:session-changed', // as api.js exports it (Admin → Keys listens for it)
     listShares: vi.fn(async () => ({ rows: [share('a'), share('b', { kind: 'files', status: 'revoked', views_total: null })] })),
     updateShare: vi.fn(async () => ({})),
     revokeShare: vi.fn(async () => ({})),

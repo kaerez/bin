@@ -86,8 +86,12 @@ function keyFields(body) {
  * sign-in can still open the old Drive key for the upgrade).
  */
 export async function syncCredentialWraps(env, uid) {
-  const c = await directory(env).credentialRefs(uid);
+  const dir = directory(env);
+  const c = await dir.credentialRefs(uid);
   if (!c || !c.drive) return [];
+  // The owner's old wraps stay while any Drive waits, as after an AUTHN owner recovery (driveOwnerRecovered):
+  // the owner's old DK opens every waiting user's escrow wrap (audit v2r, the M4 leftover).
+  if (c.owner && (await dir.migrationList()).some((r) => r.state !== 'done')) return [];
   return (await driveStub(env, uid).pruneWraps(uid, { passkey: c.passkeys, recovery: c.recovery })).wraps;
 }
 
@@ -586,6 +590,14 @@ const LINK_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
  */
 async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner, state = null, actor }) {
   const drive = driveStub(env, uid);
+  // A Drive holding something of the release before with no upgrade row (audit v2r N5): it waits from now on.
+  if (state === null) {
+    const L0 = await drive.legacyKeys(uid);
+    if (L0.v1Items + L0.v1Links > 0) {
+      await dir.migrationSet(uid, { state: 'pending', v1Items: L0.v1Items, v1Links: L0.v1Links });
+      state = 'pending';
+    }
+  }
   if (sub === '' && request.method === 'GET') {
     assertNotCrossSite(request);
     const L = await drive.legacyKeys(uid);

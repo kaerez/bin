@@ -6,9 +6,12 @@ and revoke** them. A key never signs in and never reaches the account itself (pr
 password, passkeys, API keys, activity) or the admin panel. The CLI
 ([`cli/`](../cli/README.md)) uses exactly this API.
 
-> The content of every share is **encrypted by the client before it is sent** (SPEC.md §2–§5).
-> The server stores ciphertext and never sees the key, which travels only in the link's
-> `#fragment`. So creating a note or a file share needs a client that encrypts — the
+> The content of every note and file share is **encrypted by the client before it is sent**
+> (SPEC.md §2–§5). The server stores ciphertext and never sees the key, which travels only in
+> the link's `#fragment`. Drive shares and "Receive files" links (made in the Drive page, not
+> with an API key) are different: the server holds the keys of Drive files, so it can decrypt
+> them and what those links receive ([DRIVE.md](DRIVE.md) §2). So creating a note or a file
+> share needs a client that encrypts — the
 > [`secbin` CLI](../cli/README.md) or the examples in [`examples/api/`](../examples/api/) —
 > while listing, receipts, labels, extensions, revocation and deletion work with plain `curl`.
 

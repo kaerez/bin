@@ -3,8 +3,10 @@
 // deep folders may nest. Shared by the Worker (validates declarations), the
 // browser composer and the CLI (enforce before encrypting; vendored copy).
 //
-// File names and types are end-to-end encrypted, so the server cannot see
-// them. When — and only when — a type or depth policy applies to the sender,
+// The file names and types of a file share are end-to-end encrypted, so the
+// server cannot see them (a Drive share's are sealed under Drive keys the
+// server holds: docs/DRIVE.md §2). When — and only when — a type or depth
+// policy applies to the sender,
 // the client declares the de-duplicated set of { ext, mime } pairs and the
 // maximum folder depth at upload init; the server checks them against the
 // policy and does not store them. A modified client could lie; the declaration

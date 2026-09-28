@@ -71,6 +71,17 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     key is used only for its purpose and deleted when unused. A download checks the file's
     ciphertext hash. An open Drive drops its keys when the session ends or the browser is now
     signed in as someone else.
+  - **After the re-audit:** a key kit's previous root MEK is put back only when it opens
+    something here (else it is reported `unused`), and "Go back to the previous root" leads only
+    to a root this server worked with or one that opens items here (`409 unproven_root`);
+    removing the previous root takes its count of unreadable items from the root change's own
+    check, kept with the root change (a cleared job no longer resets it to 0), says it on the
+    button, in the answer and in the admin audit, and waits for a re-seal when there is no check
+    yet (`409 not_checked`); Admin → Security → Keys and Import / export drop the key values they
+    show when the session ends or changes; a Drive holding something of the release before with
+    no upgrade record waits for its upgrade; the owner's own old wraps stay while a Drive waits
+    after removed passkeys or regenerated codes too; My shares, the page descriptions, API.md
+    and the architecture notes say which shares are end-to-end and which are not.
 - **CAPTCHA on shares and reverse shares** (role options; SECURITY.md "CAPTCHA on shares",
   docs/API.md, docs/REVERSE.md §5–§8, docs/DRIVE.md §5, §7): Admin → Roles has, for every
   non-public role, "CAPTCHA on shares" (notes, file shares, Drive shares) and — while the role

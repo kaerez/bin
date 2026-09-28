@@ -352,7 +352,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
   const status = async () => {
     const t = now();
     return {
-      ok: true, ready: true, lost: false, root: { fp: await keyFingerprint(S.root), created: 1700000000, changing: !!S.rootOld, oldFp: S.rootOld ? await keyFingerprint(S.rootOld) : null },
+      ok: true, ready: true, lost: false, root: { fp: await keyFingerprint(S.root), created: 1700000000, changing: !!S.rootOld, oldFp: S.rootOld ? await keyFingerprint(S.rootOld) : null, oldOrigin: S.rootOld ? (S.rootOldOrigin || 'changed') : null, check: S.rootOld ? (S.rootCheck || null) : null },
       subs: S.subs.map((s) => ({ id: s.id, fp: s.fp, from: s.from, until: s.until, created: s.created, note: s.note, status: mekStatus(S.subs, s, t), opens: true })),
       current: S.current()?.id ?? null, job: S.job, kit: S.kitRecord, kitFresh: !!S.kitRecord && S.kitRecord.subs === S.subs.length, users: 2, now: t,
     };
@@ -447,12 +447,17 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (!S.rootOld) return fail(409, 'not_changing');
       S.rootJobs = (S.rootJobs || 0) + 1;
       S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'verify', done: 0, failed: S.stuckIds?.length || 0, failedIds: S.stuckIds || [], pass: 1, verifying: true, finished: true, result: S.stuckIds?.length ? { ok: false, message: 'Still does not open.' } : { ok: true, message: 'Every item is re-sealed.' } };
+      // The root change's check, kept with it (as the Directory's mek.rootCheck).
+      S.rootCheck = S.stuckIds?.length ? { failed: S.stuckIds.length, ids: S.stuckIds } : null;
       if (!S.stuckIds?.length) S.rootOld = null;
       return ok({ ok: true, job: S.job });
     }
     if (p === '/api/private/admin/keys/root/undo') {
       if (!S.rootOld) return fail(409, 'not_changing');
+      if (S.rootOldOrigin === 'restored' && !S.rootOldProven) return fail(409, 'unproven_root');
       [S.root, S.rootOld] = [S.rootOld, S.root];
+      S.rootOldOrigin = 'changed';
+      S.rootCheck = null;
       S.audit.push({ action: 'keys.root_changed', detail: 'undone' });
       S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'items', done: 0, failed: 0, failedIds: [], pass: 1, finished: false, result: null };
       return ok({ ok: true, job: S.job });
@@ -461,9 +466,12 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (!S.rootOld) return fail(409, 'not_changing');
       const fp = await keyFingerprint(S.rootOld);
       if (![fp, `${fp.slice(0, 4)}-${fp.slice(4, 8)}-${fp.slice(8)}`].includes(String(body.confirm || '').trim())) return fail(400, 'confirm');
+      if (!S.rootCheck) return fail(409, 'not_checked');
+      const lost = S.rootCheck.failed;
       S.rootOld = null;
-      S.audit.push({ action: 'keys.root_old_dropped', detail: '' });
-      return ok({ ok: true, lost: S.job?.failed ?? 0 });
+      S.rootCheck = null;
+      S.audit.push({ action: 'keys.root_old_dropped', detail: `items left unreadable: ${lost}` });
+      return ok({ ok: true, lost, ids: [] });
     }
     if (p === '/api/private/admin/keys/jobs' && method === 'POST') {
       S.job = { kind: 'reseal', from: body.from, remove: !!body.remove, drives: 1, drive: 1, phase: 'items', done: 0, failed: 0, failedIds: [], pass: 1, finished: false, result: null };

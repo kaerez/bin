@@ -136,13 +136,18 @@ stored or logged in the clear — for:
   release before in it (`409 migration_pending`, with those Drives; §3.3): link keys of the
   release before are the upgrade's, and a root change leaves them as they are.
 - **a root change that cannot finish** (the check found items under neither root, or only under
-  the previous one): the previous root is kept for them and the items are listed. The owner runs
-  the re-seal again (`POST …/keys/jobs { kind: 'root' }`, after putting them right: a kit, an
-  import), goes back to the previous root (`POST …/keys/root/undo`: the roots swap, the sub-MEKs
-  are sealed under the previous one again and every item is re-sealed under it; then the root
-  that was new goes), or removes the previous root and leaves those items unreadable
-  (`POST …/keys/root/drop-old`, its fingerprint typed; `keys.root_old_dropped` with the count).
-  Each needs the step-up. The key kit, a restore and an import work during a root change.
+  the previous one): the previous root is kept for them and the items are listed; the check's
+  count is kept with the root change (`mek.rootCheck`), not only with the job, which can be
+  cleared. The owner runs the re-seal again (`POST …/keys/jobs { kind: 'root' }`, after putting
+  them right: a kit, an import), goes back to the previous root (`POST …/keys/root/undo`: the
+  roots swap, the sub-MEKs are sealed under the previous one again and every item is re-sealed
+  under it; then the root that was new goes), or removes the previous root and leaves those
+  items unreadable (`POST …/keys/root/drop-old`, its fingerprint typed; the page and the answer
+  say how many; `keys.root_old_dropped` with that count). "Go back" returns only to a root this
+  server worked with (`origin: 'changed'`), or to one put back from a key kit that opens items
+  here when it is asked (else `409 unproven_root`). "Remove" needs the root change's check of
+  those two roots (else `409 not_checked`: run the re-seal again first). Each needs the step-up.
+  The key kit, a restore and an import work during a root change.
 
 These run as a **job** the owner's browser drives (`POST …/keys/jobs/step`, a few seconds of work
 per call, with its progress) over every Drive that can hold anything sealed under a KEK or a
@@ -199,7 +204,9 @@ with no minimum; the page warns when it is empty or short.
   the key kit: the root MEK when there is none (or none of the sub-MEKs opens under the one
   there), or — with "Use the kit's root MEK" — on an instance with no Drive item or link key yet
   (never during a root change); the previous root MEK of a kit made during a root change, when
-  this server has none (then the root change's re-seal runs again); sub-MEKs that do not open
+  this server has none and an item, a link key or a link key's field layer here opens under it
+  (else it is reported `unused` and not written; then the root change's re-seal runs again);
+  sub-MEKs that do not open
   here (with the recorded fingerprint), and a sub-MEK id this server does not have only when it
   opens an item or a link key sealed under that id here (else it is reported `unused` or
   `wrong`); user salts of accounts that have none, only when the salt opens one of that
@@ -303,9 +310,10 @@ row or an escrow wrap) as `pending` (`drive_migration`).
 - **While a Drive waits,** the old wraps are kept current as before: a spent recovery code's wrap
   goes (handed once to that sign-in, `driveSpent`), the wraps of removed passkeys and replaced
   codes go, and an admin reset removes the old password wrap when another wrap of the user's own
-  remains (else it is marked stale). An AUTHN owner recovery keeps the owner's old wraps while
-  any Drive waits (the owner's old DK opens every user's escrow wrap, and the paper recovery codes
-  still open their wraps); they go with the escrow clean-up.
+  remains (else it is marked stale). The owner's own old wraps stay while any Drive waits (after
+  an AUTHN owner recovery, regenerated codes or a removed passkey alike: the owner's old DK opens
+  every user's escrow wrap, and the paper recovery codes still open their wraps); they go with
+  the escrow clean-up.
 - **The owner's archive** of the release before (a Drive started over, with the uploads its
   paused links had received) is kept as it was, is not counted in the capacity, and opens with
   nothing here. The owner deletes it in Admin → Security → Keys (`DELETE
@@ -330,7 +338,8 @@ row or an escrow wrap) as `pending` (`drive_migration`).
     sealed escrow keys); `wraps(kind, ref, data)`: the old wraps, likewise.
 - R2 objects: `d/<userId>/<nodeId>/<i>` (never under `f/`). Only the Drive DO deletes them.
 - The keyring lives in the Directory: meta `mek.root` (`{ key, fp, created }`), `mek.rootOld`
-  while a root change runs, `mek.ever`, `mek.kit` (what the latest key kit covers) and `mek.job`;
+  while a root change runs (`{ key, fp, created, origin: 'changed' | 'restored' }`),
+  `mek.rootCheck` (the root change's last check: `{ oldFp, root, failed, ids, at }`), `mek.ever`, `mek.kit` (what the latest key kit covers) and `mek.job`;
   tables `meks(id, sealed, fp, from_ts, until_ts, created, note)`, `user_salts(user_id, salt,
   created)`, `mek_candidates(id, sid, key, exp, purpose)` and `drive_migration(user_id, state, v1_items,
   v1_links, updated)`.
@@ -376,7 +385,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `GET /api/private/admin/keys` · `…/usage` | the owner: the keyring's status (fingerprints and dates, never a key: `{ ready, lost, root, subs: [{ id, fp, from, until, status, opens, note }], current, job, kit, kitFresh, users, now }`); the items per sub-MEK over every Drive |
 | `POST /api/private/admin/keys/candidate` · `…/subs` · `PATCH`/`DELETE …/subs/<id>` · `POST …/subs/<id>/current` · `…/subs/<id>/show` · `…/root` · `…/root/show` | the owner, each with the step-up (§3.2): a generated candidate (`{ purpose: 'root' \| 'sub' }` → `{ id, key, fp, expires }`); add (`{ candidate \| key, from?, note?, rotate? }`); edit dates; delete (`409 in_use`, `409 current_key`); set current; Show; change the root (`{ candidate \| key }` → `{ fp, job }`; `409 migration_pending` with `drives` while a Drive waits with something of the release before; `409 candidate_purpose` for a sub-MEK's candidate) |
 | `POST /api/private/admin/keys/jobs` · `POST …/jobs/step` · `DELETE …/jobs` | a re-seal job (`{ from, remove?, current \| reauth }`), or the root change's again (`{ kind: 'root', current \| reauth }`, while the previous root is kept); its next step → `{ job: { kind, from, drives, drive, phase, done, failed, failedIds, pass, verifying, finished, result } }` (`phase` `items`, `atrest`, then for a root change `verify` and `verifyrest`); cancel, with the step-up (not a root change that runs) |
-| `POST /api/private/admin/keys/root/undo` · `…/root/drop-old` | a root change that could not finish (§3), each with the step-up: go back to the previous root (→ `{ fp, job }`); remove the previous root (`{ confirm: <its fingerprint> }` → `{ lost }`) |
+| `POST /api/private/admin/keys/root/undo` · `…/root/drop-old` | a root change that could not finish (§3), each with the step-up: go back to the previous root (→ `{ fp, job }`; `409 unproven_root` for a previous root put back from a kit that opens nothing here); remove the previous root (`{ confirm: <its fingerprint> }` → `{ lost, ids }`, the count from the root change's check; `409 not_checked` before one) |
 | `POST /api/private/admin/keys/kit` · `…/verify` · `…/restore` | the key kit's content after the step-up (`{ kit, material: { made, current, root, rootOld?, subs, salts } }`); a read-only check by check values (at most 30 per session per 10 minutes); a restore (`{ root?, rootOld?, subs?, salts?, useRoot?, dryRun }`, with the step-up, the preview too → `{ root, rootOld, subs: [{ id, result }], salts: { restored, same, kept, wrong, unknown } }`; `409 in_use` for `useRoot` on an instance with items or link keys) |
 | `POST /api/private/admin/keys/export` · `…/import` | the keys parts of Import / export (§3.2): `{ root?, subs?: 'all' \| [ids], salts?: [userIds], users?: [{ id, keks, deks: 'all' \| [nodeIds] \| false }] }` → `{ document }` (at most 10 000 DEKs per user); `{ document, take, useRoot?, dryRun }` (with the step-up, the preview too) → `{ keys, users: [{ keks: { match, mismatch, unknown }, deks: { restored, working, failed, missing } }] }` |
 | `POST /api/private/admin/keys/users/<userId>/view` | the owner, with the step-up: `{ what: 'keks' }` → the user's salt and KEKs; `{ what: 'deks', after? }` → a page of their files (id, name, DEK) (`drive.keys_viewed`) |
@@ -602,7 +611,8 @@ leave open:
   server drops the wraps of passkeys and codes the account no longer has (a passkey removed,
   codes regenerated, a code spent at sign-in, the owner's "remove all passkeys"); a password
   change marks the `pw` wrap stale; an admin reset drops it when a passkey or recovery wrap
-  remains; an AUTHN owner recovery keeps the owner's while any Drive waits. Nothing writes a new
+  remains; the owner's own stay while any Drive waits (an AUTHN owner recovery, regenerated codes
+  or a removed passkey alike). Nothing writes a new
   wrap.
 - **Shares.** A folder id in `nodes` is refused (`400 not_a_file`); files must be finalized
   (`409 not_ready`). `acc`, when sent both inside `paste` and next to it, must be the same. The

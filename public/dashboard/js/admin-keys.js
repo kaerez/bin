@@ -7,7 +7,7 @@
 // step-up) and is in the admin audit by fingerprint only. Plain-language
 // help sits next to every action. DOM through h() only (strict CSP).
 
-import { keysApi, drive as driveApi, admin } from '../../js/api.js';
+import { keysApi, drive as driveApi, admin, SESSION_CHANGED_EVENT } from '../../js/api.js';
 import { h, clear, showMsg, formatDate, formatBytes, friendlyError, armConfirm } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { progressBar } from '../../js/progress.js';
@@ -43,6 +43,20 @@ async function stepFrom(input, profile) {
   return confirmStep(input, profile.user.username, !input.value && await canUsePasskey());
 }
 
+// Key values this page holds (one user's keys, a key shown): dropped when the session ends (the
+// idle lock: 'secbin:session-ended') or the browser is now signed in as someone else (api.js
+// SESSION_CHANGED_EVENT), as the Drive page drops its KEKs; seeing them again takes a new step-up
+// (audit v2r N4). JavaScript strings cannot be overwritten: the references go.
+const held = new Set();
+function dropHeld() {
+  for (const f of [...held]) f();
+  held.clear();
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('secbin:session-ended', dropHeld);
+  window.addEventListener(SESSION_CHANGED_EVENT, dropHeld);
+}
+
 /** Show a key's value for SHOW_SEC seconds in `slot`, with a copy button; then it is hidden again. */
 function reveal(slot, key, label) {
   const val = h('code.mono.key-value', { text: key });
@@ -50,8 +64,10 @@ function reveal(slot, key, label) {
   copy.addEventListener('click', async () => flashCopied(copy, (await copyText(key)) ? 'copied' : 'failed'));
   const hide = h('button.btn.mini', { type: 'button', text: 'Hide' });
   const box = h('div.key-reveal', { role: 'status' }, h('span.field-label', { text: `${label} (hidden again in ${SHOW_SEC} seconds): ` }), val, copy, hide);
-  const t = setTimeout(() => box.remove(), SHOW_SEC * 1000);
-  hide.addEventListener('click', () => { clearTimeout(t); box.remove(); });
+  const gone = () => { clearTimeout(t); box.remove(); held.delete(gone); };
+  const t = setTimeout(gone, SHOW_SEC * 1000);
+  hide.addEventListener('click', gone);
+  held.add(gone);
   slot.replaceChildren(box);
   hide.focus();
 }
@@ -291,20 +307,24 @@ function keyringCard(st, profile, { loud, changed }) {
  * and leave those items unreadable (its fingerprint typed to confirm).
  */
 function stuckRoot(st, { act, work, changed }) {
-  const job = st.job;
-  const ids = job?.failedIds || [];
+  // The count comes from the root change's own check, kept with it (the job can be cleared).
+  const check = st.root.check;
+  const ids = check?.ids || [];
   const retry = h('button.btn', { type: 'button', id: 'keys-root-retry', text: 'Run the re-seal again' });
   retry.addEventListener('click', async () => { if (await act((step) => keysApi.startJob({ kind: 'root', ...step }))) { await runJob(work); changed(); } });
   const undo = h('button.btn', { type: 'button', id: 'keys-root-undo', text: 'Go back to the previous root' });
+  if (st.root.oldOrigin !== 'changed') undo.title = 'The previous root was put back from a key kit: going back first checks that it opens items here.';
   armConfirm(undo, 'Re-seal every item under the previous root?', async () => { if (await act((step) => keysApi.undoRoot(step), 'Going back to the previous root: every item is being re-sealed under it.')) { await runJob(work); changed(); } });
   const typed = h('input.input', { id: 'keys-root-drop-confirm', autocomplete: 'off', spellcheck: 'false', maxlength: '40' });
-  const drop = h('button.btn.danger', { type: 'button', id: 'keys-root-drop', text: 'Remove the previous root' });
+  const n = check ? check.failed : null;
+  const drop = h('button.btn.danger', { type: 'button', id: 'keys-root-drop', text: n === null ? 'Remove the previous root' : `Remove the previous root (${n} item${n === 1 ? '' : 's'} stay${n === 1 ? 's' : ''} unreadable)`, disabled: n === null });
   drop.addEventListener('click', async () => {
-    if (await act((step) => keysApi.dropOldRoot({ confirm: typed.value.trim(), ...step }), 'The previous root MEK was removed.')) changed();
+    const x = await act((step) => keysApi.dropOldRoot({ confirm: typed.value.trim(), ...step }));
+    if (x) { toast(`The previous root MEK was removed; ${x.lost} item${x.lost === 1 ? '' : 's'} stay${x.lost === 1 ? 's' : ''} unreadable.`); changed(); }
   });
   return h('div.card.stack.drive-notice', { id: 'keys-root-stuck', role: 'alert' },
     h('h4.field-label', { text: 'The root change could not finish' }),
-    h('p', { text: job ? `${job.failed} item(s) do not open under the new root MEK${ids.length ? ` (${ids.join(', ')}${job.failed > ids.length ? ', …' : ''})` : ''}. The previous root MEK is kept for them, and every session still gets both keys.` : 'The previous root MEK is still here, with no re-seal running: run it again to finish the change.' }),
+    h('p', { id: 'keys-root-stuck-count', text: check ? `${check.failed} item(s) do not open under the new root MEK${ids.length ? ` (${ids.join(', ')}${check.failed > ids.length ? ', …' : ''})` : ''}. The previous root MEK is kept for them, and every session still gets both keys.` : 'The previous root MEK is still here, and no re-seal has checked the items under these two roots yet: run it again to finish the change (it checks every item).' }),
     h('p.type-hint', { text: 'Run the re-seal again once those items are put right (a key kit or an import brings back what is missing). Or go back to the previous root: every item is re-sealed under it again, then the new one goes. Or remove the previous root: the items that open only under it, or under neither, stay unreadable for good.' }),
     h('div.btn-row', {}, retry, undo),
     field(`To remove the previous root, type its fingerprint (${fpText(st.root.oldFp)})`, typed), h('div.btn-row', {}, drop));
@@ -617,16 +637,28 @@ function userKeysCard(profile) {
   admin.users().then((r) => {
     pick.replaceChildren(...r.users.filter((u) => u.role !== 'public').map((u) => h('option', { value: u.id, text: u.role === 'owner' ? `${u.username} (you)` : u.username })));
   }).catch((e) => showMsg(msg, friendlyError(e)));
+  // The values fetched stay in this card only until the session ends or changes (dropHeld).
+  const ref = { values: [] };
+  const drop = () => {
+    ref.values = [];
+    if (out.childNodes.length) {
+      out.replaceChildren(h('p.type-hint', { text: 'The keys shown here were cleared when your session ended or changed. Confirm again to see them.' }));
+    }
+  };
+  held.add(drop);
   const masked = (label, value) => {
     const slot = h('span');
+    const i = ref.values.push(value) - 1;
     const b = h('button.btn.mini', { type: 'button', text: 'Show', 'aria-label': `Show ${label}` });
-    b.addEventListener('click', () => reveal(slot, value, label));
+    b.addEventListener('click', () => { const v = ref.values[i]; if (v) reveal(slot, v, label); });
     return h('span', {}, h('span.mono', { text: '••••••••' }), ' ', b, slot);
   };
   go.addEventListener('click', async () => {
     msg.hidden = true;
     try {
       const r = await keysApi.userView(pick.value, { what: 'keks', ...(await stepFrom(mine, profile)) });
+      held.add(drop);
+      ref.values = [];
       out.replaceChildren(h('ul.plan-list', {},
         h('li', {}, 'User salt: ', masked(`the salt of ${r.username}`, r.salt)),
         ...r.keks.map((k) => h('li', {}, `KEK for ${k.mekId} (${fpText(k.fp)})${k.inUse ? ', used by their items' : ''}${k.mekId === r.current ? ', current' : ''}: `, masked(`the KEK of ${r.username} for ${k.mekId}`, k.kek)))));
@@ -639,6 +671,8 @@ function userKeysCard(profile) {
     try {
       const step = await stepFrom(mine, profile);
       const r = await keysApi.userView(pick.value, { what: 'deks', ...step });
+      held.add(drop);
+      ref.values = [];
       out.replaceChildren(...[r.files.length ? h('ul.plan-list', {}, ...r.files.map((f) => h('li', {}, h('span.mono', { text: f.id }), ` ${f.name ?? '(name does not open)'}: `, f.dek ? masked(`the DEK of ${f.id}`, f.dek) : 'does not open')))
         : h('p.mono', { text: 'No files.' }), r.next ? h('p.type-hint', { text: 'More files: the first 100 are shown.' }) : null].filter(Boolean));
     } catch (e) {

@@ -17,7 +17,7 @@ import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
 import { stepUp, saltCheck } from './drive.js';
 import { NODE_ID_RE, driveChunkKey } from '../drive-do.js';
-import { parseManualKey, isAtRest, keyCheckValue, sameCheck, KEY_RE, MEK_ID_RE, keyBytes, openDek, openLinkKey } from '../../public/js/drivekeys.js';
+import { parseManualKey, isAtRest, openAtRest, keyCheckValue, sameCheck, KEY_RE, MEK_ID_RE, keyBytes, openDek, openLinkKey } from '../../public/js/drivekeys.js';
 import { b64urlFromBytes } from '../../public/js/bytes.js';
 import { importFileKey, decryptChunk } from '../../public/js/files.js';
 import { userKeys, keksOf, currentKek, openItem, sealItem, openLink, resealLink, fieldKeys, toRest, fromRest } from '../lib/mek.js';
@@ -163,7 +163,11 @@ export async function handleKeys(request, env, url, a) {
     if (refused) return refused;
     const cur = await dir.mekJob();
     if (cur && !cur.finished && cur.kind !== 'root') return err(409, 'job_running', 'A re-seal is running: let it finish (or cancel it) first.');
-    const r = await dir.mekRootSwap(me);
+    // Back only to a root this server worked with, or one that opens items here now (audit v2r N1).
+    const st = await dir.mekStatus();
+    if (!st.root || !st.root.changing) return err(409, 'not_changing', 'No root change is running.');
+    const proven = st.root.oldOrigin === 'changed' ? false : await rootOpens(env, dir, me, { stored: true });
+    const r = await dir.mekRootSwap(me, { proven });
     if (!r.ok) return fromDir(r);
     return json({ ok: true, fp: r.fp, job: await newJob(dir, me, { kind: 'root', from: null }) });
   }
@@ -179,11 +183,11 @@ export async function handleKeys(request, env, url, a) {
     const typed = typeof body.confirm === 'string' ? body.confirm.trim() : '';
     const fp = status.root.oldFp;
     if (typed !== fp && typed !== `${fp.slice(0, 4)}-${fp.slice(4, 8)}-${fp.slice(8)}`) return err(400, 'confirm', 'Type the previous root MEK’s fingerprint to confirm.');
-    const lost = cur && cur.kind === 'root' ? cur.failed : 0;
-    const r = await dir.mekRootDropOld(me, { items: lost });
+    // How many stay unreadable: the root change's own check, kept in the Directory (a cleared job does not lose it).
+    const r = await dir.mekRootDropOld(me);
     if (!r.ok) return fromDir(r);
-    if (cur && cur.kind === 'root') await dir.mekJobSet(me, { ...cur, result: { ok: true, dropped: true, message: `The previous root MEK was removed; ${lost} item(s) that opened only under it, or under neither, stay unreadable.` } });
-    return json({ ok: true, lost });
+    if (cur && cur.kind === 'root') await dir.mekJobSet(me, { ...cur, result: { ok: true, dropped: true, message: `The previous root MEK was removed; ${r.lost} item(s) that opened only under it, or under neither, stay unreadable.` } });
+    return json({ ok: true, lost: r.lost, ids: r.ids });
   }
 
   if (p === '/api/private/admin/keys/jobs') {
@@ -295,6 +299,10 @@ async function restoreChecks(env, dir, me, parts) {
   }
   // Keys lost together are checked together: the file's root and sub-MEKs stand in for those this server lacks.
   const extra = { root: parts.root?.key ?? null, subs: Object.fromEntries(parts.subs.filter((x) => typeof x.id === 'string' && typeof x.key === 'string').map((x) => [x.id, x.key])) };
+  // A previous root MEK (a kit made during a root change): only one that opens something here (audit v2r N1).
+  if (parts.rootOld && !(status.root && status.root.changing)) {
+    checks.rootOld = (await rootOpens(env, dir, me, { key: parts.rootOld.key, extra, salts: parts.salts })) ? 'ok' : 'unused';
+  }
   for (const [uid, v] of Object.entries(parts.salts).slice(0, 5000)) {
     const salt = saltOf(v);
     if (!UID_RE.test(uid) || !salt) continue;
@@ -302,6 +310,62 @@ async function restoreChecks(env, dir, me, parts) {
   }
   return checks;
 }
+/** Items and link keys a probe of a root MEK tries at most, over every Drive. */
+const ROOT_PROBE_MAX = 2000;
+
+/**
+ * Does a root MEK that is not the root here open something sealed here (an
+ * item, a link key, a link key's field layer)? `key`: from a kit; `stored`:
+ * the previous root the Directory keeps. The first that opens proves it.
+ * (A key that never was a root of this server opens nothing: an AES-GCM seal
+ * bound to the user, sub-MEK and field does not open under another KEK.)
+ */
+async function rootOpens(env, dir, me, { key = null, stored = false, extra = null, salts = {} } = {}) {
+  let budget = ROOT_PROBE_MAX;
+  for (const uid of await dir.driveUsers()) {
+    const r = await dir.probeRoot(me, uid, { key, stored, extra, salt: saltOf(salts?.[uid]) });
+    if (!r.ok) continue;
+    const keks = new Map(Object.entries(r.keks).map(([id, k]) => [id, keyBytes(k)]));
+    const lk = keyBytes(r.fields.linkKey);
+    try {
+      let after = null;
+      do {
+        const page = await driveStub(env, uid).sealedPage(uid, { after });
+        for (const it of page.items) {
+          if (budget-- <= 0) return false;
+          const k = keks.get(it.mek);
+          if (!k) continue;
+          try {
+            const got = await openItem(uid, [k], it);
+            got.name.fill(0);
+            if (got.meta) got.meta.fill(0);
+            if (got.dek) got.dek.fill(0);
+            return true;
+          } catch { /* not under that root */ }
+        }
+        for (const l of page.links) {
+          if (budget-- <= 0) return false;
+          if (isAtRest(l.priv)) {
+            try { await openAtRest(lk, { userId: uid, field: 'linkKey', ref: l.id }, l.priv); return true; } catch { /* the field layer is under the root here */ }
+          }
+          const k = keks.get(l.mek);
+          if (!k) continue;
+          try {
+            const sealed = JSON.parse(await fromRest(await fieldKeys(env, uid), uid, 'linkKey', l.id, l.priv));
+            (await openLinkKey(k, { userId: uid, mekId: l.mek, linkId: l.id }, sealed)).fill(0);
+            return true;
+          } catch { /* not under that root */ }
+        }
+        after = page.next;
+      } while (after);
+    } finally {
+      for (const k of keks.values()) k.fill(0);
+      lk.fill(0);
+    }
+  }
+  return false;
+}
+
 /** A salt as a kit or an export holds it (the text, or { salt, username }). */
 const saltOf = (v) => {
   const x = isObj(v) ? v.salt : v;
@@ -423,6 +487,7 @@ async function jobStep(env, dir, me) {
 
 async function jobFinish(env, dir, me, job) {
   if (job.kind === 'root') {
+    if (job.failed) await dir.mekRootChecked(me, { failed: job.failed, ids: job.failedIds });
     if (job.failed) return { ok: false, message: `${job.failed} item(s) do not open under the new root MEK: the old root MEK is kept for them. Run the re-seal again, go back to the previous root, or remove it and leave those items unreadable.` };
     await dir.mekRootDone(me);
     return { ok: true, message: 'Every item is re-sealed under the new root MEK and was checked; the old one was removed.' };

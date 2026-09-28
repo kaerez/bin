@@ -971,8 +971,10 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   previous root only after a final check that everything opens under the new one, and waits
   while a Drive still has something of the release before. One that cannot finish keeps the
   previous root; the owner runs it again, goes back, or drops the previous root with its
-  fingerprint typed (the items listed stay unreadable), each with the step-up; the key kit made
-  meanwhile holds both roots.
+  fingerprint typed (the items listed stay unreadable, and their count, kept with the root
+  change, is in the admin audit), each with the step-up; the key kit made meanwhile holds both
+  roots. A previous root from a key kit is put back only when it opens something here, and "go
+  back" leads only to a root this server worked with or one that opens items here.
 - **The keyring.** Created on first need, and only if there never was one: a lost keyring is
   never replaced silently (the Drive says the keys are missing and the key kit restores them).
   Restores and imports never replace a working key, and add only what proved to belong: a
@@ -1025,8 +1027,8 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   deleted). A link whose old key does not open is retired by its user (the step-up): it ends and
   its key goes. A finished upgrade stays finished. While a Drive waits, its old key wraps are
   kept current as before (spent recovery codes, removed passkeys and replaced codes lose theirs;
-  an admin reset drops the old password's wrap when another remains; an AUTHN owner recovery
-  keeps the owner's until nothing waits). The owner's archive of that release (a start over) is
+  an admin reset drops the old password's wrap when another remains; the owner's own stay until
+  nothing waits, after an AUTHN owner recovery, regenerated codes or a removed passkey alike). The owner's archive of that release (a start over) is
   deleted from Admin → Security → Keys (the step-up, the username typed; audited).
 
 ### Read receipts

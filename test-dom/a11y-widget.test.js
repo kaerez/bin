@@ -120,16 +120,18 @@ describe('every page', () => {
     }
   });
 
-  it('shows "Private · End-to-end encrypted · Notes & files" once, in the footer (the Drive page and the uploader\'s page: "Encrypted in your browser", as Drive files and uploads are not end-to-end, docs/DRIVE.md §2)', () => {
+  it('shows "Private · End-to-end encrypted · Notes & files" once, in the footer (the Drive page, the uploader\'s page and My shares, which lists Drive shares and receive links: "Encrypted in your browser", as Drive files and uploads are not end-to-end, docs/DRIVE.md §2)', () => {
     const DRIVE = 'public/dashboard/drive/index.html';
     const UPLOAD = 'public/r/index.html';
+    const SHARES = 'public/dashboard/shares/index.html';
     expect(pages()).toContain(DRIVE);
     expect(pages()).toContain(UPLOAD);
+    expect(pages()).toContain(SHARES);
     for (const p of pages()) {
       const s = read(p);
       expect(s.match(/class="features\b/g) || [], p).toHaveLength(1);
       const foot = s.slice(s.indexOf('<footer'), s.indexOf('</footer>'));
-      if (p === DRIVE || p === UPLOAD) {
+      if (p === DRIVE || p === UPLOAD || p === SHARES) {
         expect(foot, p).toMatch(/class="features foot-feats"[\s\S]*Private[\s\S]*Encrypted in your browser[\s\S]*Notes &amp; files/);
         expect(foot, p).not.toMatch(/End-to-end encrypted/);
       } else {

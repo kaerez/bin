@@ -12,7 +12,7 @@
 // broken seal after it opened the file's first chunk, a salt only comes back
 // for an account that has none. DOM through h() only (strict CSP).
 
-import { keysApi, admin } from '../../js/api.js';
+import { keysApi, admin, SESSION_CHANGED_EVENT } from '../../js/api.js';
 import { h, showMsg, formatDate, friendlyError } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { exportKeys, openKeysExport, importKeys, fpText } from '../../js/keysclient.js';
@@ -24,6 +24,14 @@ const UID_RE = /^[A-Za-z0-9_-]{16}$/;
 const NODE_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHOW_SEC = 60;
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+// The keys this page holds (an export built, an import opened) go when the session ends or the
+// browser is now signed in as someone else, as on Security → Keys (audit v2r N4).
+const onSessionGone = (fn) => {
+  if (typeof window === 'undefined') return;
+  window.addEventListener('secbin:session-ended', fn);
+  window.addEventListener(SESSION_CHANGED_EVENT, fn);
+};
 
 async function stepFrom(input, profile) {
   return confirmStep(input, profile.user.username, !input.value && await canUsePasskey());
@@ -145,6 +153,7 @@ function exportPart(profile, accounts, subs) {
   const view = h('div', { id: 'kx-view' });
   let doc = null;
   const drop = () => { doc = null; view.replaceChildren(); save.disabled = discard.disabled = true; };
+  onSessionGone(drop);
   build.addEventListener('click', async () => {
     const users = picker.chosen();
     const subsPick = subsMode.value === 'all' ? 'all' : subsMode.value === 'some' ? subBoxes.filter((x) => x.box.checked).map((x) => x.s.id) : [];
@@ -217,6 +226,7 @@ function importPart(profile) {
   const open = h('button.btn', { type: 'button', id: 'ki-open', text: 'Decrypt' });
   const { msg, live } = liveMsg('ki-msg');
   const review = h('div.stack', { id: 'ki-review' });
+  onSessionGone(() => review.replaceChildren());
   open.addEventListener('click', async () => {
     const f = file.files && file.files[0];
     if (!f) return showMsg(msg, 'Choose a Drive keys export file.');

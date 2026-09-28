@@ -244,6 +244,36 @@ describe('Admin → Security → Keys', () => {
     expect(stray).toEqual([]);
   });
 
+  // Re-audit v2r N4: a user's KEKs shown here go when the session locks or changes, as the Drive's do.
+  it('a user’s keys and a shown key are dropped when the session ends or changes; seeing them again takes the step-up', async () => {
+    const { SESSION_CHANGED_EVENT } = await import('../public/js/api.js');
+    for (const ev of ['secbin:session-ended', SESSION_CHANGED_EVENT]) {
+      document.body.replaceChildren();
+      await open();
+      await until(() => $('#keys-user option'));
+      $('#keys-user-confirm').value = 'pw';
+      $('#keys-user-view').click();
+      await until(() => /KEK for/.test($('#keys-user-out').textContent));
+      button($('#keys-user-out'), 'Show').click();
+      await until(() => $('#keys-user-out .key-reveal'));
+      expect($('#keys-user-out .key-value').textContent.length).toBeGreaterThan(20);
+      // A key of the keyring shown too.
+      $('#keys-confirm').value = 'pw';
+      button($('#keys-root'), 'Show').click();
+      await until(() => $('#keys-shown .key-reveal'));
+      window.dispatchEvent(new Event(ev));
+      expect($('#keys-user-out').textContent).toMatch(/cleared when your session ended or changed/);
+      expect(document.querySelector('.key-reveal'), ev).toBeNull();
+      expect(document.querySelector('.key-value'), ev).toBeNull();
+      // Again: a new request, with the step-up.
+      const n0 = S.requests.length;
+      $('#keys-user-view').click();
+      await until(() => !$('#keys-user-msg').hidden);
+      expect($('#keys-user-msg').textContent).toMatch(/password/);
+      expect(S.requests.slice(n0).some((r) => /\/admin\/keys\/users\//.test(r.path))).toBe(false);
+    }
+  }, 60000);
+
   // Audit A F2: a root change that could not finish shows its failed items and the three ways on.
   it('a stuck root change: the items listed; run it again, go back to the previous root, or drop it with its fingerprint typed (each with the step-up)', async () => {
     S = fakeServer({ role: 'owner' });
@@ -251,11 +281,13 @@ describe('Admin → Security → Keys', () => {
     await S.ready;
     S.rootOld = new Uint8Array(32).fill(9);
     S.stuckIds = ['AAAAAAAAAAAAAAAAAAAAAA'];
+    S.rootCheck = { failed: 1, ids: S.stuckIds };
     S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'verifyrest', done: 3, failed: 1, failedIds: S.stuckIds, pass: 1, verifying: true, finished: true, result: { ok: false, message: '1 item(s) do not open under the new root MEK.' } };
     const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
     mount(keysSection({ profile: profile() }));
     await until(() => $('#keys-root-stuck'));
     expect($('#keys-root-stuck').textContent).toMatch(/1 item\(s\) do not open under the new root MEK \(AAAAAAAAAAAAAAAAAAAAAA\)/);
+    expect($('#keys-root-drop').textContent).toBe('Remove the previous root (1 item stays unreadable)');
     // Run it again: the step-up first.
     $('#keys-root-retry').click();
     await until(() => !$('#keys-msg').hidden);
@@ -273,10 +305,45 @@ describe('Admin → Security → Keys', () => {
     expect(S.rootOld).not.toBeNull();
     $('#keys-root-drop-confirm').value = fp;
     $('#keys-confirm').value = 'pw';
+    const t = document.createElement('div');
+    t.id = 'toast';
+    document.body.append(t);
     $('#keys-root-drop').click();
     await until(() => S.rootOld === null);
     await until(() => !$('#keys-root-stuck'));
-    expect(S.audit.some((a) => a.action === 'keys.root_old_dropped')).toBe(true);
+    expect(S.audit.find((a) => a.action === 'keys.root_old_dropped').detail).toBe('items left unreadable: 1');
+    await until(() => /1 item stays unreadable/.test(t.textContent));
+  }, 60000);
+
+  // Re-audit v2r N2: the count comes from the root change's check, kept with it; without one, no drop.
+  it('a stuck root change with its job cleared still says how many items stay unreadable; with no check yet, "Remove" waits for the re-seal', async () => {
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    S.rootOld = new Uint8Array(32).fill(7);
+    S.rootCheck = { failed: 2, ids: ['CCCCCCCCCCCCCCCCCCCCCC', 'DDDDDDDDDDDDDDDDDDDDDD'] };
+    S.job = null; // the finished job was cleared
+    const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
+    mount(keysSection({ profile: profile() }));
+    await until(() => $('#keys-root-stuck'));
+    expect($('#keys-root-stuck-count').textContent).toMatch(/^2 item\(s\) do not open under the new root MEK \(CCCCCCCCCCCCCCCCCCCCCC, DDDDDDDDDDDDDDDDDDDDDD\)/);
+    expect($('#keys-root-drop').textContent).toBe('Remove the previous root (2 items stay unreadable)');
+    expect($('#keys-root-drop').disabled).toBe(false);
+    document.body.replaceChildren();
+    // A previous root put back from a key kit, not checked yet: the count is unknown, the drop waits.
+    S.rootCheck = null;
+    S.rootOldOrigin = 'restored';
+    mount(keysSection({ profile: profile() }));
+    await until(() => $('#keys-root-stuck'));
+    expect($('#keys-root-stuck-count').textContent).toMatch(/no re-seal has checked the items under these two roots yet/);
+    expect($('#keys-root-drop').disabled).toBe(true);
+    expect($('#keys-root-undo').title).toMatch(/put back from a key kit/);
+    // "Go back" to it is refused while it opens nothing here (the server checks).
+    $('#keys-confirm').value = 'pw';
+    $('#keys-root-undo').click();
+    $('#keys-root-undo').click();
+    await until(() => !$('#keys-msg').hidden);
+    expect(S.rootOld).not.toBeNull();
   }, 60000);
 
   it('a stuck root change: "Go back to the previous root" swaps the roots and re-seals everything under it', async () => {
@@ -285,6 +352,7 @@ describe('Admin → Security → Keys', () => {
     await S.ready;
     const before = S.root;
     S.rootOld = new Uint8Array(32).fill(5);
+    S.rootCheck = { failed: 1, ids: ['BBBBBBBBBBBBBBBBBBBBBB'] };
     S.job = { kind: 'root', from: null, drives: 1, drive: 1, phase: 'verify', done: 0, failed: 1, failedIds: ['BBBBBBBBBBBBBBBBBBBBBB'], pass: 1, verifying: true, finished: true, result: { ok: false, message: 'x' } };
     const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
     mount(keysSection({ profile: profile() }));

@@ -2,7 +2,7 @@
   "id": "/",
   "name": "secbin",
   "short_name": "secbin",
-  "description": "Encrypted, zero-knowledge notes and file sharing. Everything is encrypted in your browser; the server never sees it.",
+  "description": "Encrypted notes and file sharing. Notes and file shares are encrypted in your browser, end to end: the server never sees their keys.",
   "lang": "en",
   "dir": "ltr",
   "start_url": "/",
