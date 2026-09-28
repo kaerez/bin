@@ -552,7 +552,7 @@ function upgradeCard(profile) {
         }
       });
       return h('div.card.stack', { role: 'group', 'aria-label': `${d.username}’s links that do not open` },
-        h('p', { text: `${d.username}’s Drive has ${ids.length} “Receive files” link${ids.length === 1 ? '' : 's'} whose key the old Drive key does not open. Retiring ends ${ids.length === 1 ? 'it' : 'them'} and removes ${ids.length === 1 ? 'its key' : 'their keys'}; files received but not taken in are listed as failed in that Drive. Then the upgrade finishes.` }),
+        h('p', { text: `${d.username}’s Drive has ${ids.length} “Receive” link${ids.length === 1 ? '' : 's'} whose key the old Drive key does not open. Retiring ends ${ids.length === 1 ? 'it' : 'them'} and removes ${ids.length === 1 ? 'its key' : 'their keys'}; files received but not taken in are listed as failed in that Drive. Then the upgrade finishes.` }),
         h('ul.plan-list.mono', {}, ...ids.map((id) => h('li', { text: id }))),
         field('Your password (or leave it empty to confirm with a passkey)', pw), h('div.btn-row', {}, go));
     };
@@ -620,7 +620,7 @@ function archiveBox(a, profile, redraw) {
   });
   return h('div.card.stack', { id: 'keys-archive', role: 'group', 'aria-labelledby': 'keys-archive-title' },
     h('h4.field-label', { id: 'keys-archive-title', text: 'Your Drive archive of the previous release' }),
-    h('p', { text: `When you started your Drive over in the previous release, its items were kept as an archive: ${a.items} item${a.items === 1 ? '' : 's'} (${formatBytes(a.bytes)}${a.received ? `, of which ${a.received} received through “Receive files” links` : ''}), sealed under that release’s key, and ${a.links.length} link${a.links.length === 1 ? '' : 's'} paused with it. Nothing here opens it any more, and it does not count towards your Drive’s storage.` }),
+    h('p', { text: `When you started your Drive over in the previous release, its items were kept as an archive: ${a.items} item${a.items === 1 ? '' : 's'} (${formatBytes(a.bytes)}${a.received ? `, of which ${a.received} received through “Receive” links` : ''}), sealed under that release’s key, and ${a.links.length} link${a.links.length === 1 ? '' : 's'} paused with it. Nothing here opens it any more, and it does not count towards your Drive’s storage.` }),
     h('p.type-hint', { text: 'Deleting it removes its content from storage for good and ends the paused links; files received through them and not yet taken in are listed as failed. A recovery kit of that release can open the archive offline only as long as its content exists.' }),
     field(`Type your username (${profile.user.username}) to confirm`, typed), field('Your password (or leave it empty to confirm with a passkey)', pw),
     h('div.btn-row', {}, go), live);

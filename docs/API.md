@@ -8,7 +8,7 @@ password, passkeys, API keys, activity) or the admin panel. The CLI
 
 > The content of every note and file share is **encrypted by the client before it is sent**
 > (SPEC.md §2–§5). The server stores ciphertext and never sees the key, which travels only in
-> the link's `#fragment`. Drive shares and "Receive files" links (made in the Drive page, not
+> the link's `#fragment`. Drive shares and "Receive" links (made in the Drive page, not
 > with an API key) are different: the server holds the keys of Drive files, so it can decrypt
 > them and what those links receive ([DRIVE.md](DRIVE.md) §2). So creating a note or a file
 > share needs a client that encrypts — the
@@ -34,7 +34,7 @@ Each key has **scopes** — give it only what it needs:
 | `files` | `POST /api/private/file`, `PUT …/chunk/:i`, `POST …/finalize` — file shares |
 | `policy` | `GET /api/private/policy` — what your client must check before creating (link rules) |
 | `read` | `GET /api/private/shares`, `GET /api/private/shares/:id`, `GET /api/private/shares/:id/opens` — your shares and their read receipts |
-| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry), `POST /api/private/shares/:id/revoke` |
+| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry; a Receive link's other details too), `POST /api/private/shares/:id/revoke` |
 
 A key created without a choice of scopes gets `notes`, `files` and `policy` (creation only):
 `read` and `manage` must be chosen explicitly. Scopes can be changed later (Account → API keys →
@@ -93,10 +93,10 @@ shares).
 | `POST /api/private/file` | `files` | `{ views, expire, padded, files?, maxFile?, types?, depth?, deletable?, captcha? }` → `201 { id, uploadtoken, deletetoken, chunks, captcha }` (SPEC.md §12) |
 | `PUT /api/private/file/:id/chunk/:i` | `files` | encrypted chunk bytes (`application/octet-stream`), header `X-Upload-Token` → `{ ok }` |
 | `POST /api/private/file/:id/finalize` | `files` | `{ paste, label? }` with `X-Upload-Token` — the encrypted manifest → `{ ok, id, expires, captcha }` |
-| `GET /api/private/shares?q=&status=&offset=` | `read` | → `{ rows, total }`: 50 per page, newest first; `q` matches the label, `status` is one of `active`, `revoked`, `expired`, `consumed`, `deleted`, `ended` |
+| `GET /api/private/shares?q=&status=&expiry=&offset=` | `read` | → `{ rows, total }`: 50 per page, newest first; `q` matches the label, `status` is one of `active`, `revoked`, `expired`, `consumed`, `deleted`, `ended`; `expiry=none`: only the Receive links with no expiry, `expiry=set`: only shares that expire. A row's `expires` is `null` for a Receive link with no expiry |
 | `GET /api/private/shares/:id` | `read` | → `{ share }` (one row, as below) |
 | `GET /api/private/shares/:id/opens` | `read` | → `{ total, fields, rows: [{ ts, …}] }` — read receipts, newest first (at most 200); `fields` lists the details the administrator lets your account see (`receiptIp`, `receiptLocation`, `receiptBrowser`, `receiptOs`, `receiptLanguages`); times are always there |
-| `PATCH /api/private/shares/:id` | `manage` | `{ label?, views?, expires? }` → `{ ok }` — `views`: a larger view limit (view-limited shares only; `null` = unlimited, if allowed); `expires`: a later expiry (unix seconds, at most 365 days ahead) |
+| `PATCH /api/private/shares/:id` | `manage` | `{ label?, views?, expires? }` → `{ ok }` — `views`: a larger view limit (view-limited shares only; `null` = unlimited, if allowed); `expires`: a later expiry (unix seconds, at most 365 days ahead). A Receive link (kind `reverse`) takes more, below |
 | `POST /api/private/shares/:id/revoke` | `manage` | header `X-Secbin-Intent: 1`, no body → `{ ok }` — destroys the content at once; the row stays as `revoked` |
 | `DELETE /api/paste/:id`, `DELETE /api/file/:id` | none | header `X-Delete-Token` → `{ status: "deleted", id }` — the delete token is the capability, no API key; `423 share_locked` for a locked share |
 
@@ -517,7 +517,7 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok, ch }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth?, captcha? }` → `201 { id, deletetoken, expires, captcha }` (`captcha` as above) |
-| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }` — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above) |
+| `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, views?, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; below) — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above) |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
 | `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
 | `POST /api/private/drive/received/:id` | `{ parent, name, meta, dek, ks, mek }` → `{ ok }` — a received file re-sealed into the Drive under the user's current KEK |
@@ -531,10 +531,34 @@ Drive is not end-to-end encrypted: the server derives every KEK, so it can open 
 then also returns `refs: [{ chunks, size }]`), and its chunks are read with
 `GET /api/file/:id/chunk/:ref/:i` and the download grant.
 
-Reverse shares are listed, extended (a later `expires`) and revoked with the share routes above
-(kind `reverse`; an API key with `read` / `manage` can do that, not create one). The anonymous
-uploader's routes (`/api/reverse/:id/open`, `begin`, `human`, `files`, chunks, `finalize`, `done`) take no
-account at all: see [`REVERSE.md`](./REVERSE.md) §6.2.
+Reverse shares ("Receive" links) are listed, changed and revoked with the share routes above
+(kind `reverse`; an API key with `read` / `manage` can do that, not create one). On create,
+`expire: "never"` makes a link with no expiry (only where the role's `reverseNoExpiry` allows it)
+and `views` (1–100 000, or `null` / absent: unlimited, where `reverseAllowUnlimitedViews`
+allows it; at most `reverseMaxViews`) limits the upload sessions; `expire` is held to
+`reverseMaxExpireSec` (not the regular `maxExpireSec`), and a password is required or refused as
+`reversePassword` says (`403 password_required_by_role` / `password_disabled`). The response's
+`expires` is `null` for a link with no expiry.
+
+`PATCH /api/private/shares/:id` of a Receive link takes, besides `label`, and only where the
+role's `reverseEdit` allows it (`403 reverse_edit_disabled`; for an API key, the API limits of
+Admin → Roles apply on top):
+
+| Field | Meaning |
+|---|---|
+| `expires` | a time (unix seconds, within 365 days and `reverseMaxExpireSec`), or `null`: no expiry (`reverseNoExpiry`, else `403 no_expiry_disabled`). As for other shares an expiry can only be extended (`400`); a link with none can be given one |
+| `views` | the new total of views (a view: one upload session granted), or `null`: unlimited. It may be raised or lowered, never below the views already used (`400`, with `used`) |
+| `maxFiles`, `maxBytes`, `maxFileBytes`, `types` | the limits, as on create (`maxBytes` at most `reverseMaxBytes`; `null` is that limit, or none) |
+| `captcha` | `true` / `false`, within `reverseCaptcha` (`403 captcha_required_by_role` / `captcha_disabled`) |
+| `password` | `{ salt, t, ph }` made in the browser from the link's key (docs/REVERSE.md §3), or `null`: none — within `reversePassword`. The server never sees the password |
+| `note` | `{ iv, ct }` sealed in the browser with the link's key, or `null`: none |
+
+→ `{ ok, expires, views, left, used }` (`expires` `null`: none). A revoked or ended link can only
+be relabelled (`409 not_active`); a locked one not at all (`423`). The owner changing another
+user's link directly (Admin → Shares) may change its label, expiry and views only (`403
+user_only` otherwise), and a link with no expiry only where that user's role allows it. The
+anonymous uploader's routes (`/api/reverse/:id/open`, `begin`, `human`, `files`, chunks,
+`finalize`, `done`) take no account at all: see [`REVERSE.md`](./REVERSE.md) §6.2.
 
 ## Security notes
 

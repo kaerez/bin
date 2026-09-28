@@ -108,15 +108,28 @@ export function shareLifetimeNote({ what, views, expiryText, files = false }) {
 export const KIND_NAMES = Object.freeze({ text: 'note', files: 'files', url: 'link', secret: 'credential', drive: 'drive', reverse: 'receive' });
 
 /**
- * The "Views" column of a share row: views left of the total, "unlimited",
- * or — for a reverse share, which has no views — the files it has received.
+ * The "Views" column of a share row: views left of the total, or
+ * "unlimited"; a reverse share adds the files it has received (a view of an
+ * upload link is one visit that started sending files).
  */
 export function viewsText(r) {
+  const views = r.views_total === null || r.views_total === undefined ? 'unlimited' : `${r.left ?? '—'} left of ${r.views_total}`;
   if (r && r.kind === 'reverse') {
     const f = r.received && Number.isSafeInteger(r.received.files) ? r.received.files : 0;
-    return `${f} file${f === 1 ? '' : 's'} received`;
+    return `${f} file${f === 1 ? '' : 's'} received · ${views === 'unlimited' ? 'unlimited views' : `${views} views`}`;
   }
-  return r.views_total === null || r.views_total === undefined ? 'unlimited' : `${r.left ?? '—'} left of ${r.views_total}`;
+  return views;
+}
+
+/**
+ * The "Expires" column of a share row: "No expiry" (a reverse share with
+ * none: the API sends `expires: null`), "in 3d 4h" while active, else the
+ * date; "—" when there is no time at all.
+ */
+export function expiresText(r, now = Math.floor(Date.now() / 1000)) {
+  if (r.expires === null) return 'No expiry';
+  if (!r.expires) return '—';
+  return r.status === 'active' && r.expires > now ? `in ${formatCoarse(r.expires - now)}` : formatDate(r.expires);
 }
 
 export const UNENCRYPTED_HINT_TEXT = 'Not encrypted — visible to the server and admins. Don’t put secrets here.';

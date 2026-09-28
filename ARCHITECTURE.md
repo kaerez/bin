@@ -101,7 +101,7 @@ The browser (or CLI) derives everything secret from the fragment and the optiona
 sends the server only ciphertext, proof hashes, and non-secret settings. See `SECURITY.md` §3
 for the exact list of what the server can observe. The Drive is outside this boundary: its files
 are encrypted in the browser, but the server derives the keys that open them, so it can decrypt
-Drive files, Drive shares and what "Receive files" links receive (`docs/DRIVE.md` §2).
+Drive files, Drive shares and what "Receive" links receive (`docs/DRIVE.md` §2).
 
 ## Testing
 

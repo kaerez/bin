@@ -2,7 +2,7 @@
 // role options; SECURITY.md "CAPTCHA on shares") against the REAL server,
 // client and Cloudflare Turnstile widget (Cloudflare's testing keys, which
 // always pass): the role editor's radios; the per-share boxes of the
-// composer, the Drive's Share and Receive files dialogs; a protected note, a
+// composer, the Drive's Share and Receive dialogs; a protected note, a
 // protected file share, a protected Drive share and a protected reverse link,
 // each through its check page (the Turnstile CSP, no key there) and back on
 // its strict page (the key back, no Turnstile script); an unprotected note and
@@ -394,7 +394,7 @@ try {
   await op.locator('#drive-rows tr', { hasText: 'plans.txt' }).locator('input[type="checkbox"]').uncheck(); // for the open folder
   await op.click('#drive-receive');
   await op.waitForSelector('#drive-rev-captcha');
-  check('Receive files: "Require CAPTCHA to send files", on by default for the owner', await op.isChecked('#drive-rev-captcha') && (await op.textContent('label:has(#drive-rev-captcha)')).trim() === 'Require CAPTCHA to send files');
+  check('Receive: "Require CAPTCHA to send files", on by default for the owner', await op.isChecked('#drive-rev-captcha') && (await op.textContent('label:has(#drive-rev-captcha)')).trim() === 'Require CAPTCHA to send files');
   await op.fill('#drive-rev-label', 'with CAPTCHA');
   await op.fill('#drive-rev-confirm', PW);
   await dialogButton(op, 'Create link').click();

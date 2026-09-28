@@ -6,7 +6,7 @@ import { json, err, readJsonBody, assertIntent, methodNotAllowed, appendCookies 
 import { authenticate, issueSession, logoutCookie } from '../lib/auth.js';
 import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSettings, ipContext, recordFailure, RATE_LIMIT_SCOPES } from '../lib/guard.js';
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
-import { GUARD_SCOPES } from '../lib/settings.js';
+import { GUARD_SCOPES, apiExpiry } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
 import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
@@ -40,8 +40,10 @@ export function shareFilters(sp) {
   const status = SHARE_STATUSES.includes(sp.get('status')) ? sp.get('status') : '';
   const lockedRaw = sp.get('locked');
   const locked = lockedRaw === 'true' ? true : lockedRaw === 'false' ? false : null;
+  // expiry=none: reverse shares with no expiry; expiry=set: shares that expire.
+  const expiry = ['none', 'set'].includes(sp.get('expiry')) ? sp.get('expiry') : '';
   return {
-    users, kind, status, locked,
+    users, kind, status, locked, expiry,
     q: (sp.get('q') || '').slice(0, 100),
     createdFrom: int('createdFrom'), createdTo: int('createdTo'),
     expiresFrom: int('expiresFrom'), expiresTo: int('expiresTo'),
@@ -96,7 +98,7 @@ export async function handleAdmin(request, env, url) {
     const row = await dir.adminShare(id);
     if (!row) return err(404, 'not_found', 'Share not found.');
     if (!sm[2]) {
-      if (request.method === 'GET') return json({ share: row });
+      if (request.method === 'GET') return json({ share: { ...row, expires: apiExpiry(row.expires) } });
       if (request.method !== 'PATCH') return methodNotAllowed('GET, PATCH');
       const body = await readJsonBody(request);
       // Direct admin edits: bounded by the protocol maxima only, allowed on

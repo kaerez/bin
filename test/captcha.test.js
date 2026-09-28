@@ -143,7 +143,7 @@ async function apiKeyFor(u) {
 // ── the role options ───────────────────────────────────────────────────────
 describe('role options', () => {
   it('resolve for the owner (locked: allow), the Default role (holds values), a custom role (inherits) and the public account (none)', async () => {
-    expect(SCHEMA_VERSION).toBe(16); // 15: CAPTCHA on shares; 16: the Drive key model v2
+    expect(SCHEMA_VERSION).toBe(17); // 15: CAPTCHA on shares; 16: the Drive key model v2; 17: reverse-share options
     const rows = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key LIKE '%Captcha%' ORDER BY key").toArray());
     expect(rows).toEqual([
       { key: 'reverseCaptcha', value: '"require"' }, { key: 'reverseCaptchaDefault', value: '"on"' },

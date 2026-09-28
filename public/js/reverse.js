@@ -28,6 +28,9 @@ import { tabStorage, readPageKey, takeKey, goToCheck as realGoToCheck, loadGrant
 // This document's page key (src/index.js, on a real navigation): read once.
 const docPageKey = typeof document !== 'undefined' ? readPageKey(document) : null;
 
+/** When the link stops taking files: its expiry, or none (the user revokes it). */
+const expiryLine = (head) => (head.expires === null ? 'The link has no expiry: it takes files until it is revoked.' : `The link expires ${formatDate(head.expires)}.`);
+
 /** The limits as one sentence, e.g. "Up to 5 files · 1 GB in total · 100 MB per file · only .pdf files". */
 export function limitsText(l = {}) {
   const parts = [];
@@ -79,7 +82,7 @@ export async function mountUploader(root, deps = {}) {
   } catch (e) {
     if (e instanceof LinkError) root.replaceChildren(errorCard('This link does not work', e.message));
     else if (e instanceof ApiError && e.code === 'paused') root.replaceChildren(errorCard(PAUSED_TITLE, PAUSED_TEXT));
-    else if (e instanceof ApiError && e.status === 410) root.replaceChildren(errorCard('This link no longer accepts files', 'It has expired or was revoked by the person who shared it. Ask them for a new link.'));
+    else if (e instanceof ApiError && e.status === 410) root.replaceChildren(errorCard('This link no longer accepts files', 'It has expired, was revoked, or has taken all the uploads the person who shared it allowed. Ask them for a new link.'));
     else if (e instanceof ApiError && e.status === 423) root.replaceChildren(errorCard('This link is paused', 'The administrator has locked it. Try again later or ask the person who shared it.'));
     else root.replaceChildren(errorCard('The link could not be opened', friendlyError(e)));
     return { state: 'error' };
@@ -147,7 +150,7 @@ function buildApp(root, up, { storage, toCheck }) {
       h('h1.title', { text: 'Send files' }),
       h('p.subtitle', { text: 'What you send here — the files, their names and their types — is encrypted in your browser before it is sent, to a key of the person who shared this link. The server keeps that key under their Drive keys, which it holds: the server can decrypt what you send, as it can their other Drive files. No account is needed.' })),
     note,
-    h('p.mono.muted', { id: 'reverse-limits', text: `${limitsText(up.limits)} The link expires ${formatDate(up.head.expires)}.` }),
+    h('p.mono.muted', { id: 'reverse-limits', text: `${limitsText(up.limits)} ${expiryLine(up.head)}` }),
     drop, fileIn, folderIn, list, total, clearBtn,
     pwBox,
     send,
@@ -226,7 +229,7 @@ function buildApp(root, up, { storage, toCheck }) {
       bar.done(`${label}: done`);
       if (up.limits.filesLeft !== null && up.limits.filesLeft !== undefined) up.limits.filesLeft = Math.max(0, up.limits.filesLeft - r.files);
       if (up.limits.bytesLeft !== null && up.limits.bytesLeft !== undefined) up.limits.bytesLeft = Math.max(0, up.limits.bytesLeft - r.bytes);
-      document.getElementById('reverse-limits').textContent = `${limitsText(up.limits)} The link expires ${formatDate(up.head.expires)}.`;
+      document.getElementById('reverse-limits').textContent = `${limitsText(up.limits)} ${expiryLine(up.head)}`;
       entries = [];
       showMsg(done, `Sent ${r.files} file${r.files === 1 ? '' : 's'} (${formatBytes(r.bytes)}), encrypted. The person who shared this link will find ${r.files === 1 ? 'it' : 'them'} in their Drive.${captcha ? ' To send more, complete the CAPTCHA again.' : ''}`, false);
       recheck.hidden = !captcha;
@@ -245,7 +248,7 @@ function buildApp(root, up, { storage, toCheck }) {
         const until = Number.isSafeInteger(e.extra.until) ? ` after ${formatDate(e.extra.until)}` : ' later';
         showMsg(msg, `Too many wrong passwords were tried for this link. Try again${until}.`);
       } else if (e instanceof ApiError && e.code === 'paused') showMsg(msg, `${PAUSED_TITLE}. ${PAUSED_TEXT}`);
-      else if (e instanceof ApiError && e.status === 410) showMsg(msg, 'This link no longer accepts files: it has expired or was revoked.');
+      else if (e instanceof ApiError && e.status === 410) showMsg(msg, 'This link no longer accepts files: it has expired, was revoked, or has taken all the uploads it allows.');
       else showMsg(msg, friendlyError(e));
     } finally {
       busy = false;

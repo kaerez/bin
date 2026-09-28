@@ -796,7 +796,7 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 /* The whole link, wrapped (a scroller would need to be focusable). */
 .modal-body .linkrow .url { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .drive-qr { margin: 1rem auto 0; width: max-content; }
-/* Reverse shares ("Receive files", docs/REVERSE.md): the Drive dialog and the uploader page /r/. */
+/* Reverse shares ("Receive", docs/REVERSE.md): the Drive dialog and the uploader page /r/. */
 .drive-reverse-form { display: flex; flex-direction: column; gap: .75rem; margin-top: 1rem; }
 .drive-reverse-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: .75rem 1rem; }
 /* "Accept files for" (a label, a number and a unit in one box) takes a whole row: in a 12rem cell it

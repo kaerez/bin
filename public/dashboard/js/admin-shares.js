@@ -1,13 +1,14 @@
 // admin-shares.js — the admin "Shares" tab: every user's shares with filters
-// (users, type, status, label, lock, created and expiry date/time ranges or a
-// single day), and the same controls a sender has (label, more views, longer
-// expiry, revoke) plus lock/unlock. A locked share is frozen for its sender:
+// (users, type, status, label, lock, "no expiry" — Receive links without one
+// —, created and expiry date/time ranges or a single day), and the same
+// controls a sender has (label, more views, longer expiry, revoke; a Receive
+// link's views and expiry, or none) plus lock/unlock. A locked share is frozen for its sender:
 // they cannot edit, revoke or delete it with its token — only the admin can.
 // Direct admin changes are recorded in the audit log, not in the user's own
 // activity (unlike impersonation, which acts as the user).
 
 import { admin } from '../../js/api.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, labelled, viewsText } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, labelled, viewsText, expiresText } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import { opensButton } from './receipts.js';
 
@@ -34,7 +35,7 @@ export function dayRange(value) {
 export function filterQuery(f, offset = 0) {
   const qs = new URLSearchParams();
   if (f.users.length) qs.set('users', f.users.join(','));
-  for (const k of ['kind', 'status', 'q']) if (f[k]) qs.set(k, f[k]);
+  for (const k of ['kind', 'status', 'q', 'expiry']) if (f[k]) qs.set(k, f[k]);
   if (f.locked === 'true' || f.locked === 'false') qs.set('locked', f.locked);
   const range = (name, day, from, to) => {
     let [a, b] = day ? dayRange(day) : [null, null];
@@ -52,7 +53,7 @@ export function filterQuery(f, offset = 0) {
 export async function renderShares(p) {
   clear(p);
   const users = (await admin.users().catch(() => ({ users: [] }))).users || [];
-  const f = { users: [], kind: '', status: '', q: '', locked: '', createdDay: '', createdFrom: '', createdTo: '', expiresDay: '', expiresFrom: '', expiresTo: '' };
+  const f = { users: [], kind: '', status: '', q: '', locked: '', expiry: '', createdDay: '', createdFrom: '', createdTo: '', expiresDay: '', expiresFrom: '', expiresTo: '' };
   let offset = 0;
   let rows = [];
   let total = 0;
@@ -63,6 +64,8 @@ export async function renderShares(p) {
   const status = h('select.input', { 'aria-label': 'Status' }, h('option', { value: '', text: 'any status' }),
     ...['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'].map((s) => h('option', { value: s, text: s })));
   const locked = h('select.input', { 'aria-label': 'Lock' }, h('option', { value: '', text: 'locked or not' }), h('option', { value: 'true', text: 'locked only' }), h('option', { value: 'false', text: 'unlocked only' }));
+  // Receive links with no expiry (they take files until revoked): easy to find.
+  const expiry = h('select.input', { 'aria-label': 'Expiry' }, h('option', { value: '', text: 'any expiry' }), h('option', { value: 'none', text: 'no expiry' }), h('option', { value: 'set', text: 'with an expiry' }));
   const q = h('input.input', { type: 'search', 'aria-label': 'Search labels', maxlength: '100' });
   const dt = (label) => h('input.input', { type: 'datetime-local', 'aria-label': label });
   const day = (label) => h('input.input', { type: 'date', 'aria-label': label });
@@ -81,7 +84,7 @@ export async function renderShares(p) {
     h('div.filters', {},
       h('label.field', {}, h('span.field-label', { text: 'Users' }), userSel),
       h('div.stack', {},
-        h('div.toolbar', {}, labelled(kind), labelled(status), labelled(locked), labelled(q)),
+        h('div.toolbar', {}, labelled(kind), labelled(status), labelled(locked), labelled(expiry), labelled(q)),
         h('fieldset.range', {}, h('legend', { text: 'Created' }), h('div.toolbar', {}, h('span.field-label', { text: 'on' }), cDay, h('span.field-label', { text: 'or from' }), cFrom, h('span.field-label', { text: 'to' }), cTo)),
         h('fieldset.range', {}, h('legend', { text: 'Expires' }), h('div.toolbar', {}, h('span.field-label', { text: 'on' }), eDay, h('span.field-label', { text: 'or from' }), eFrom, h('span.field-label', { text: 'to' }), eTo)),
         h('div.btn-row', {}, apply, reset))),
@@ -94,7 +97,7 @@ export async function renderShares(p) {
   const read = () => {
     f.users = [...userSel.selectedOptions].map((o) => o.value);
     Object.assign(f, {
-      kind: kind.value, status: status.value, locked: locked.value, q: q.value.trim(),
+      kind: kind.value, status: status.value, locked: locked.value, expiry: expiry.value, q: q.value.trim(),
       createdDay: cDay.value, createdFrom: cFrom.value, createdTo: cTo.value,
       expiresDay: eDay.value, expiresFrom: eFrom.value, expiresTo: eTo.value,
     });
@@ -124,7 +127,7 @@ export async function renderShares(p) {
   function rowFor(r) {
     const active = r.status === 'active';
     const views = viewsText(r);
-    const expires = r.expires ? (active && r.expires > now() ? `in ${formatCoarse(r.expires - now())}` : formatDate(r.expires)) : '—';
+    const expires = expiresText(r, now());
     const hintId = `adm-label-hint-${r.id}`;
     const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': `Label of ${r.id}`, placeholder: '(no label)', 'aria-describedby': hintId });
     labelIn.addEventListener('change', async () => {
@@ -166,27 +169,34 @@ export async function renderShares(p) {
   function openExtend(r, tr) {
     const existing = tr.nextElementSibling;
     if (existing && existing.classList.contains('extend-row')) { existing.remove(); return; }
-    const views = h('input.input.opt-num', { type: 'number', min: String((r.views_total ?? 0) + 1), max: '100000', placeholder: 'total views', 'aria-label': 'New total views' });
+    // A Receive link's views may also be lowered (never below those used); its expiry can be none.
+    const rev = r.kind === 'reverse';
+    const minViews = rev ? Math.max(1, r.used ?? 0) : (r.views_total ?? 0) + 1;
+    const views = h('input.input.opt-num', { type: 'number', min: String(minViews), max: '100000', placeholder: 'total views', 'aria-label': 'New total views' });
     const unlimited = h('label.inline', {}, h('input', { type: 'checkbox', disabled: r.views_total === null }), ' unlimited');
-    const n = h('input.input.opt-num', { type: 'number', min: '1', value: '1', 'aria-label': 'Extend by' });
+    const n = h('input.input.opt-num', { type: 'number', min: '1', value: '1', 'aria-label': r.expires === null ? 'Expire in' : 'Extend by' });
     const unit = h('select.input', { 'aria-label': 'Unit' }, ...DURATION_UNITS.filter(([u]) => u !== 's').map(([u, w]) => h('option', { value: u, text: w, selected: u === 'd' })));
-    const emsg = h('p.msg.error', { hidden: true });
+    const noExp = h('label.inline', {}, h('input', { type: 'checkbox' }), ' no expiry');
+    const emsg = h('p.msg.error', { role: 'alert', hidden: true });
     const save = h('button.btn', { type: 'button', text: 'Apply' });
     save.onclick = async () => {
       const patch = {};
       if (unlimited.querySelector('input').checked) patch.views = null;
       else if (views.value) patch.views = Number(views.value);
       const add = Number(n.value) * unitSeconds(unit.value);
-      if (add > 0) patch.expires = Math.max(r.expires || now(), now()) + add;
+      if (rev && r.expires !== null && noExp.querySelector('input').checked) patch.expires = null;
+      else if (add > 0) patch.expires = Math.max(r.expires || now(), now()) + add;
       if (!Object.keys(patch).length) return showMsg(emsg, 'Nothing to change.');
       save.disabled = true;
       try { await admin.updateShare(r.id, patch); toast('Share updated.'); load(true); } catch (e) { save.disabled = false; showMsg(emsg, friendlyError(e)); toast(friendlyError(e), { error: true }); }
     };
     const row = h('tr.extend-row', {}, h('td', { colspan: '9' },
       h('div.extend-box', {},
-        r.kind !== 'files' && r.kind !== 'drive' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
-        h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),
-        h('p.mono.muted', { text: 'Admin changes are not bound by the user\'s limits (up to 100000 views and 365 days). Views and expiry can only increase.' }),
+        !rev && r.kind !== 'files' && r.kind !== 'drive' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
+        h('div.toolbar', {}, h('span.field-label', { text: r.expires === null ? 'Give it an expiry in' : 'Extend expiry by' }), n, unit, rev && r.expires !== null ? noExp : null),
+        h('p.mono.muted', { text: rev
+          ? 'Admin changes are not bound by the user\'s limits (up to 100000 views and 365 days), except that “no expiry” needs the user\'s role to allow it. A Receive link\'s views can be lowered, never below the views used; its expiry can only be extended, or made none; one with none can be given an expiry. Its password, note, limits and CAPTCHA are the user\'s to change.'
+          : 'Admin changes are not bound by the user\'s limits (up to 100000 views and 365 days). Views and expiry can only increase.' }),
         h('div.btn-row', {}, save), emsg)));
     tr.after(row);
   }
@@ -194,7 +204,7 @@ export async function renderShares(p) {
   apply.onclick = () => { read(); load(true); };
   reset.onclick = () => {
     for (const o of userSel.options) o.selected = false;
-    for (const el of [kind, status, locked]) el.value = '';
+    for (const el of [kind, status, locked, expiry]) el.value = '';
     for (const el of [q, cDay, cFrom, cTo, eDay, eFrom, eTo]) el.value = '';
     read();
     load(true);

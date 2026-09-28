@@ -227,7 +227,7 @@ describe('the Drive API: every call goes through the same token path', () => {
     // The owner's archive of the release before: what it holds; deleted.
     archive: () => api.drive.archive(),
     deleteArchive: () => api.drive.deleteArchive({ confirm: 'owner', current: 'P'.repeat(43) }),
-    // Reverse shares (the Drive's "Receive files"): create a link, list, and the received files.
+    // Reverse shares (the Drive's "Receive"): create a link, list, and the received files.
     createReverse: () => api.drive.createReverse({ id: 'rAAAAAAAAAAAAAAAAAAAAAA', folder: 'root' }),
     reverse: () => api.drive.reverse('root'),
     received: () => api.drive.received(),

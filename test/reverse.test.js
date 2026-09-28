@@ -1,4 +1,4 @@
-// reverse.test.js — reverse shares ("Receive files", docs/REVERSE.md) in
+// reverse.test.js — reverse shares ("Receive", docs/REVERSE.md) in
 // workerd: the role options and migration 14, creating one (validation, the
 // role's limits), every uploader route (link proof, password gate and its
 // Guard accounting and log, the human check, sessions, files, chunks,
@@ -45,16 +45,24 @@ const audit = async (subject) => (await (await fetchJson(`/api/private/admin/aud
 
 describe('role options and migration 14', () => {
   it('reverse shares are off by default, need the Drive too, and join the Default role', async () => {
-    expect(SCHEMA_VERSION).toBe(16); // 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2 (drive-keys.test.js)
-    expect(await dirStub().schemaVersion()).toBe(16);
+    expect(SCHEMA_VERSION).toBe(17); // 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2 (drive-keys.test.js); 17: reverse-share options (reverse-parity.test.js)
+    expect(await dirStub().schemaVersion()).toBe(17);
     const rows = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key LIKE 'reverse%' ORDER BY key").toArray());
     expect(rows).toEqual([
+      // Migration 17: views, expiry, the password and editing (reverse-parity.test.js).
+      { key: 'reverseAllowUnlimitedViews', value: 'true' },
       // Migration 15: the reverse-share CAPTCHA (required, as every link had it before).
       { key: 'reverseCaptcha', value: '"require"' },
       { key: 'reverseCaptchaDefault', value: '"on"' },
+      { key: 'reverseEdit', value: 'true' },
       { key: 'reverseEnabled', value: 'false' },
       { key: 'reverseMaxActive', value: '10' },
       { key: 'reverseMaxBytes', value: String(1024 ** 3) },
+      { key: 'reverseMaxExpireSec', value: 'null' },
+      { key: 'reverseMaxViews', value: 'null' },
+      { key: 'reverseNoExpiry', value: 'false' },
+      { key: 'reversePassword', value: '"allow"' },
+      { key: 'reversePasswordDefault', value: '"off"' },
     ]);
     const u = await makeUser('rev-off');
     const me = async () => (await (await fetchJson('/api/private/me', { cookie: u.cookie })).json()).caps.reverseEnabled;
@@ -128,7 +136,8 @@ describe('creating a reverse share', () => {
   });
 
   it('obeys the role: expiry, bytes per share, active shares at once; session only, CSRF guards', async () => {
-    const u = await receiver('rev-role', { reverseMaxActive: 2, reverseMaxBytes: 1000, maxExpireSec: 3600, apiEnabled: true });
+    // A reverse link's expiry has its own role option (reverseMaxExpireSec, not the regular maxExpireSec).
+    const u = await receiver('rev-role', { reverseMaxActive: 2, reverseMaxBytes: 1000, reverseMaxExpireSec: 3600, apiEnabled: true });
     let r = await newReverse(u.cookie, { expire: '2h' });
     expect(r.res.status).toBe(403);
     expect(await errorOf(r.res)).toBe('expiry_too_long');
@@ -480,11 +489,11 @@ describe('ending: revoke, expiry, the admin lock, the folder deleted, the purge'
     invalidateGuardCaches();
   });
 
-  it('expiry stops uploads; My shares can extend it (views cannot be set)', async () => {
+  it('expiry stops uploads; My shares can extend it (and set views: reverse-parity.test.js)', async () => {
     const u = await receiver('rev-exp');
     const r = await newReverse(u.cookie, { expire: '1h' });
     const ip = freshIp();
-    expect((await fetchJson(`/api/private/shares/${r.id}`, { method: 'PATCH', cookie: u.cookie, body: { views: 5 } })).status).toBe(400);
+    expect((await fetchJson(`/api/private/shares/${r.id}`, { method: 'PATCH', cookie: u.cookie, body: { views: 5 } })).status).toBe(200);
     const later = Math.floor(Date.now() / 1000) + 7200;
     expect((await fetchJson(`/api/private/shares/${r.id}`, { method: 'PATCH', cookie: u.cookie, body: { expires: later } })).status).toBe(200);
     expect((await (await openLink(r, ip)).json()).expires).toBe(later);

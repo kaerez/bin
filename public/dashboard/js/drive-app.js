@@ -16,7 +16,7 @@
 // entry point (public/dashboard/js/drive.js passes the client module); it is
 // separate from the boot so it can be tested.
 
-import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, viewsText, nameEl, shareLifetimeNote } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatBytes, formatDate, formatCoarse, friendlyError, unencryptedHint, KIND_NAMES, viewsText, nameEl, shareLifetimeNote, expiresText } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { createTree, crumbTrail } from '../../js/tree.js';
 import { progressBar } from '../../js/progress.js';
@@ -28,6 +28,9 @@ import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { captchaBox } from '../../js/captcha.js';
 import { SESSION_CHANGED_EVENT } from '../../js/api.js';
+import { reverseViews, reversePasswordChoice } from './reverse-edit.js';
+
+export { reverseViews, reversePasswordChoice };
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
@@ -92,16 +95,29 @@ function mbToBytes(raw) {
 }
 
 /**
- * The "Receive files…" options → { expire, maxFiles, maxBytes, maxFileBytes,
- * types } or { error, field }. `L` is the profile's limits (maxExpireSec,
- * reverseMaxBytes); the server checks them again.
+ * The "Receive…" options → { expire, views, maxFiles, maxBytes, maxFileBytes,
+ * types, expiryText } or { error, field }. `noExpiry`: no expiry (expire
+ * "never", where the role allows it). `L` is the profile's limits
+ * (reverseMaxExpireSec, reverseNoExpiry, reverseMaxViews,
+ * reverseAllowUnlimitedViews, reverseMaxBytes); the server checks them again.
  */
-export function reverseOptions({ n, unit, maxFiles, maxMb, fileMb, typeMode, typeRules }, L = {}) {
+export function reverseOptions({ n, unit, noExpiry = false, views, unlimited = true, maxFiles, maxMb, fileMb, typeMode, typeRules }, L = {}) {
   const nRaw = String(n ?? '').trim();
-  const expire = nRaw + unit;
-  const sec = /^[1-9][0-9]{0,6}$/.test(nRaw) && Object.prototype.hasOwnProperty.call(UNIT_WORDS, unit) ? expireSeconds(expire) : null;
-  if (sec === null) return { error: 'Expiry must be a whole number between 1 minute and 365 days.', field: 'expire' };
-  if (L.maxExpireSec !== null && L.maxExpireSec !== undefined && sec > L.maxExpireSec) return { error: `Your account allows an expiry of at most ${Math.floor(L.maxExpireSec / 60)} minutes.`, field: 'expire' };
+  let expire = 'never';
+  let expiryText = 'as long as the link is not revoked';
+  if (noExpiry) {
+    if (!L.reverseNoExpiry) return { error: 'Your account does not allow upload links without an expiry.', field: 'expire' };
+  } else {
+    expire = nRaw + unit;
+    const sec = /^[1-9][0-9]{0,6}$/.test(nRaw) && Object.prototype.hasOwnProperty.call(UNIT_WORDS, unit) ? expireSeconds(expire) : null;
+    if (sec === null) return { error: 'Expiry must be a whole number between 1 minute and 365 days.', field: 'expire' };
+    const maxSec = L.reverseMaxExpireSec;
+    if (maxSec !== null && maxSec !== undefined && sec > maxSec) return { error: `Your account allows upload links to accept files for at most ${formatCoarse(maxSec)}.`, field: 'expire' };
+    const k = Number(nRaw);
+    expiryText = `${k} ${UNIT_WORDS[unit][k === 1 ? 0 : 1]}`;
+  }
+  const v = reverseViews({ views, unlimited }, L);
+  if (v.error) return v;
   const fRaw = String(maxFiles ?? '').trim();
   let files = null;
   if (fRaw) {
@@ -121,8 +137,7 @@ export function reverseOptions({ n, unit, maxFiles, maxMb, fileMb, typeMode, typ
     if (!rules.length) return { error: 'List at least one file type (for example ext:pdf), or accept any type.', field: 'types' };
     types = { mode: typeMode, rules };
   }
-  const k = Number(nRaw);
-  return { expire, maxFiles: files, maxBytes: maxBytes ?? roleMax, maxFileBytes, types, expiryText: `${k} ${UNIT_WORDS[unit][k === 1 ? 0 : 1]}` };
+  return { expire, views: v.views, maxFiles: files, maxBytes: maxBytes ?? roleMax, maxFileBytes, types, expiryText };
 }
 
 /** The client's progress, onProgress(bytesDone, total) → a fraction in [0, 1]. */
@@ -413,7 +428,7 @@ function upgradeBox(client, deps) {
     const confirm = deps.confirm || ((input) => confirmStep(input, deps.profile?.user?.username, !input.value && withPasskey));
     const go = h('button.btn.danger', { type: 'submit', id: 'drive-retire-btn', text: `Retire ${n === 1 ? 'this link' : 'these links'}` });
     const form = h('form.form.drive-unlock-form', { id: 'drive-retire-form', novalidate: true },
-      h('p', { text: `${n} “Receive files” link${n === 1 ? '' : 's'} of the previous release could not be opened with your Drive’s old key (${n === 1 ? 'its' : 'their'} key is damaged, or was sealed under a Drive you started over). The upgrade finishes once ${n === 1 ? 'it is' : 'they are'} retired: ${n === 1 ? 'the link ends, its key is removed' : 'the links end, their keys are removed'}, and files received but not taken in are listed as failed, to be deleted. Files already in your Drive are not affected.` }),
+      h('p', { text: `${n} “Receive” link${n === 1 ? '' : 's'} of the previous release could not be opened with your Drive’s old key (${n === 1 ? 'its' : 'their'} key is damaged, or was sealed under a Drive you started over). The upgrade finishes once ${n === 1 ? 'it is' : 'they are'} retired: ${n === 1 ? 'the link ends, its key is removed' : 'the links end, their keys are removed'}, and files received but not taken in are listed as failed, to be deleted. Files already in your Drive are not affected.` }),
       h('ul.plan-list.mono', {}, ...r.unopened.map((id) => h('li', { text: id }))),
       h('div.dfield', {}, label, pw), go);
     form.addEventListener('submit', async (e) => {
@@ -565,7 +580,7 @@ function mountApp(mount, client, deps) {
     move: btn('Move…', moveSel),
     download: btn('Download', downloadSel),
     share: btn('Share…', shareSel),
-    receive: btn('Receive files…', receiveSel),
+    receive: btn('Receive…', receiveSel),
     del: btn('Delete', deleteSel, 'danger'),
   };
   const canReceive = !!(deps.profile && deps.profile.caps && deps.profile.caps.reverseEnabled === true);
@@ -1024,7 +1039,7 @@ function mountApp(mount, client, deps) {
   }
 
   // ── receive files (reverse shares, docs/REVERSE.md) ────────────────────
-  /** The folder "Receive files…" acts on: the selected folder, else the open one. */
+  /** The folder "Receive…" acts on: the selected folder, else the open one. */
   function receiveTarget() {
     const [it] = selectedItems();
     if (it && it.kind === 'dir') return { id: it.id, name: it.name || '(unnamed)' };
@@ -1041,6 +1056,17 @@ function mountApp(mount, client, deps) {
     const expU = h('select.input.opt-sel', { id: 'drive-rev-unit', 'aria-label': 'Accept files for: unit' },
       h('option', { value: 'm', text: 'minutes' }), h('option', { value: 'h', text: 'hours' }), h('option', { value: 'd', text: 'days', selected: true }));
     expU.value = 'd';
+    // No expiry: only where the role allows it (reverseNoExpiry); the link then takes files until it is revoked.
+    const noExp = h('input', { type: 'checkbox', id: 'drive-rev-noexpire', 'aria-describedby': 'drive-rev-noexpire-hint' });
+    noExp.addEventListener('change', () => { expN.disabled = expU.disabled = noExp.checked; });
+    const noExpBox = L.reverseNoExpiry ? h('div', {},
+      h('label.viewer-opt', {}, noExp, 'No expiry'),
+      h('p.type-hint', { id: 'drive-rev-noexpire-hint', text: 'The link accepts files until you revoke it (or until its views run out).' })) : null;
+    // Views: one view is one visit that starts sending files (after the password and the CAPTCHA).
+    const unlimitedOk = L.reverseAllowUnlimitedViews !== false;
+    const viewsIn = h('input.input.opt-num', { id: 'drive-rev-views', type: 'number', min: '1', max: String(L.reverseMaxViews ?? MAX_VIEWS), step: '1', value: '1', inputmode: 'numeric', disabled: unlimitedOk, 'aria-describedby': 'drive-rev-views-hint' });
+    const viewsInf = h('button.opt-toggle', { type: 'button', id: 'drive-rev-unlimited', 'aria-pressed': String(unlimitedOk), 'aria-label': 'Unlimited views', title: 'Unlimited views', text: '∞', disabled: !unlimitedOk });
+    viewsInf.addEventListener('click', () => { const on = viewsInf.getAttribute('aria-pressed') !== 'true'; viewsInf.setAttribute('aria-pressed', String(on)); viewsIn.disabled = on; if (!on) viewsIn.focus(); });
     const files = h('input.input', { id: 'drive-rev-files', type: 'number', min: '1', max: '10000', step: '1', inputmode: 'numeric', placeholder: 'no limit' });
     const roleMax = L.reverseMaxBytes ?? null;
     const maxMb = h('input.input', { id: 'drive-rev-bytes', inputmode: 'decimal', placeholder: roleMax ? `up to ${formatBytes(roleMax)}` : 'no limit' });
@@ -1052,10 +1078,12 @@ function mountApp(mount, client, deps) {
     const typeBox = field('The file types (one per line: ext:pdf, mime:image/*)', typeRules);
     typeBox.hidden = true;
     typeMode.addEventListener('change', () => { typeBox.hidden = typeMode.value === 'any'; if (!typeBox.hidden) typeRules.focus(); });
-    const pwOn = h('input', { type: 'checkbox', id: 'drive-rev-pw-on' });
+    // The uploader password, as the role says (reversePassword: a choice, required, or none).
+    const pwChoice = reversePasswordChoice(L);
+    const pwOn = h('input', { type: 'checkbox', id: 'drive-rev-pw-on', checked: pwChoice.checked, disabled: pwChoice.disabled });
     const pw1 = h('input.input', { id: 'drive-rev-pw', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
     const pw2 = h('input.input', { id: 'drive-rev-pw2', type: 'password', autocomplete: 'new-password', maxlength: '128', 'data-lpignore': 'true', 'data-1p-ignore': true });
-    const pwBox = h('div.drive-share-pw', { hidden: true }, field('Password', pw1), field('Repeat the password', pw2));
+    const pwBox = h('div.drive-share-pw', { hidden: !pwChoice.checked }, field('Password', pw1), field('Repeat the password', pw2));
     pwOn.addEventListener('change', () => { pwBox.hidden = !pwOn.checked; if (pwOn.checked) pw1.focus(); });
     // A link adds key material to the Drive: the user confirms it like an API
     // key (password, or a passkey). The owner acting as the user confirms nothing.
@@ -1072,16 +1100,21 @@ function mountApp(mount, client, deps) {
       field('Note to the people who upload (optional; encrypted, only link holders can read it)', noteIn),
       h('div.drive-reverse-grid', {},
         h('div.opt', { role: 'group', 'aria-labelledby': 'drive-rev-expire-l' }, h('label.opt-label', { id: 'drive-rev-expire-l', for: 'drive-rev-expire', text: 'Accept files for' }), expN, expU),
+        h('div.opt', { role: 'group', 'aria-labelledby': 'drive-rev-views-l' }, h('label.opt-label', { id: 'drive-rev-views-l', for: 'drive-rev-views', text: 'Views' }), viewsIn, viewsInf),
         field('Most files (empty: no limit)', files),
         field('Most in total, MB (empty: no limit)', maxMb),
         field('Largest file, MB (empty: no limit)', fileMb)),
+      noExpBox,
+      h('p.type-hint', { id: 'drive-rev-views-hint', text: 'A view is one visit that starts sending files (after the password and the CAPTCHA, if the link has them). When the views run out, the link takes no new uploads; you can add views later under “my shares”.' }),
       field('File types', typeMode), typeBox,
-      h('label.viewer-opt', {}, pwOn, 'Ask uploaders for a password (it only lets them in; you never need it, and it does not encrypt anything)'),
+      pwChoice.show ? h('label.viewer-opt', {}, pwOn, pwChoice.mode === 'require'
+        ? 'Ask uploaders for a password (your role requires one; it only lets them in, you never need it, and it does not encrypt anything)'
+        : 'Ask uploaders for a password (it only lets them in; you never need it, and it does not encrypt anything)') : null,
       pwBox,
       cap.el,
       h('div.dfield', { hidden: impersonating }, confirmText, confirmIn));
     const d = openDialog({
-      title: `Receive files into “${folder.name}”`,
+      title: `Receive into “${folder.name}”`,
       sub: 'Anyone with the link can upload files and folders into this folder, without an account. They are encrypted in the uploader’s browser to this link’s key, which the server keeps under your Drive keys (so the server can open them, as it can your other Drive files); the next time your Drive opens they are taken in and sealed like your other files. Uploads count towards your Drive’s storage.',
       body: [form, listBox],
       wide: true,
@@ -1089,8 +1122,9 @@ function mountApp(mount, client, deps) {
     });
     const create = primary('Create link', async () => {
       d.clearError();
-      const o = reverseOptions({ n: expN.value, unit: expU.value, maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value }, L);
-      if (o.error) { d.error(o.error, { expire: expN, files, bytes: maxMb, file: fileMb, types: typeRules }[o.field] || null); return; }
+      const o = reverseOptions({ n: expN.value, unit: expU.value, noExpiry: noExp.checked, views: viewsIn.value, unlimited: viewsInf.getAttribute('aria-pressed') === 'true',
+        maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value }, L);
+      if (o.error) { d.error(o.error, { expire: noExp.checked ? noExp : expN, views: viewsIn.disabled ? viewsInf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules }[o.field] || null); return; }
       let password = '';
       if (pwOn.checked) {
         if (!pw1.value) { d.error('Enter a password, or turn the password off.', pw1); return; }
@@ -1113,7 +1147,7 @@ function mountApp(mount, client, deps) {
         return;
       }
       try {
-        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, step, captcha: cap.value() });
+        const r = await client.createReverse(folder.id, { label: labelIn.value.trim(), note: noteIn.value.trim(), password, expire: o.expire, views: o.views, maxFiles: o.maxFiles, maxBytes: o.maxBytes, maxFileBytes: o.maxFileBytes, types: o.types, step, captcha: cap.value() });
         pw1.value = pw2.value = '';
         reverseResult(d, r, o, folder);
       } catch (e) {
@@ -1144,7 +1178,8 @@ function mountApp(mount, client, deps) {
 
   function reverseResult(d, r, o, folder) {
     d.setTitle('Your upload link');
-    d.subEl.textContent = `Anyone with this link can send files into “${folder.name}” for ${o.expiryText}, within the limits you chose. Keep it to the people you want files from — the key that encrypts their uploads for you is inside the link. Revoke it any time here or under “my shares”; files already received stay.`;
+    const views = o.views === null ? '' : ` (${o.views} view${o.views === 1 ? '' : 's'})`;
+    d.subEl.textContent = `Anyone with this link can send files into “${folder.name}” ${o.expire === 'never' ? o.expiryText : `for ${o.expiryText}`}${views}, within the limits you chose. Keep it to the people you want files from — the key that encrypts their uploads for you is inside the link. Revoke it any time here or under “my shares”; files already received stay.`;
     d.subEl.hidden = false;
     const { nodes, copy } = linkBlock(r.url, 'drive-rev');
     d.setBody(...nodes);
@@ -1187,14 +1222,15 @@ function mountApp(mount, client, deps) {
         tb.appendChild(h('tr', { dataset: { status: s.status || '' } },
           h('td', { dataset: { label: 'Label' }, text: s.label || '(no label)' }),
           h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),
-          h('td.mono', { dataset: { label: 'Expires' }, text: s.expires ? (active && s.expires > now ? `in ${formatCoarse(s.expires - now)}` : formatDate(s.expires)) : '—' }),
+          h('td.mono', { dataset: { label: 'Expires' }, text: expiresText(s, now) }),
           h('td.mono', { dataset: { label: 'Received' }, text: `${s.files} file${s.files === 1 ? '' : 's'}, ${formatBytes(s.bytes)}` }),
+          h('td.mono', { dataset: { label: 'Views' }, text: s.views === null || s.views === undefined ? 'unlimited' : `${s.left ?? 0} left of ${s.views}` }),
           h('td.mono', { dataset: { label: 'Status' }, text: `${s.status}${s.password ? ' · password' : ''}${s.captcha ? ' · CAPTCHA' : ''}` }),
           cell));
       }
       box.replaceChildren(h('h3.field-label', { id: 'drive-rev-list-h', text: 'Upload links of this folder' }),
         h('div.table-wrap', {}, h('table.table', { id: 'drive-rev-table', 'aria-labelledby': 'drive-rev-list-h' },
-          h('thead', {}, h('tr', {}, ...['Label', 'Created', 'Expires', 'Received', 'Status'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
+          h('thead', {}, h('tr', {}, ...['Label', 'Created', 'Expires', 'Received', 'Views', 'Status'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
           tb)));
     };
     draw();

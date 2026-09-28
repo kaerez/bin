@@ -191,7 +191,7 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
       if (denied) return denied;
       if (policy.noRead) return err(403, 'scope_denied', 'This API key does not have the "read" scope.');
       const all = [...notes.entries(), ...[...files.entries()].filter(([, f]) => f.state === 'active' || f.state === 'revoked')]
-        .map(([id, r]) => ({ id, kind: id[0] === 'f' ? 'files' : 'text', label: r.label ?? '', created: 0, expires: r.paste?.meta.expires ?? 0,
+        .map(([id, r]) => ({ id, kind: id[0] === 'f' ? 'files' : 'text', label: r.label ?? '', created: 0, expires: r.noExpiry ? null : r.paste?.meta.expires ?? 0,
           views_total: r.views ?? null, left: r.revoked ? null : r.left ?? null, opens: 0, status: r.revoked ? 'revoked' : 'active', locked: r.locked ? 1 : 0 }))
         .filter((r) => !u.searchParams.get('status') || r.status === u.searchParams.get('status'));
       const off = Number(u.searchParams.get('offset')) || 0;
@@ -212,7 +212,7 @@ export function makeServer({ keys = [KEY], policy = {} } = {}) {
         return json(200, { total: rows.length, fields: policy.receiptFields ?? [], rows });
       }
       const row = () => ({ id: so[1], kind: so[1][0] === 'f' ? 'files' : 'text', label: rec.label ?? '', created: rec.paste?.meta.created ?? 0,
-        expires: rec.paste?.meta.expires ?? 0, views_total: rec.views ?? null, left: rec.left ?? null, opens: (rec.receipts ?? []).length,
+        expires: rec.noExpiry ? null : rec.paste?.meta.expires ?? 0, views_total: rec.views ?? null, left: rec.left ?? null, opens: (rec.receipts ?? []).length,
         status: rec.revoked ? 'revoked' : 'active', locked: rec.locked ? 1 : 0 });
       if (method === 'GET') return json(200, { share: row() });
       if (method !== 'PATCH') return err(405, 'method_not_allowed');

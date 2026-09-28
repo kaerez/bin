@@ -11,7 +11,7 @@
 // with a random 32-byte salt per item (drivekeys.js). The server stores that
 // ciphertext; it holds the keys that open it (SECURITY.md, "Drive").
 
-import { drive as api, session, ApiError } from './api.js';
+import { drive as api, session, ApiError, updateShare } from './api.js';
 import {
   keyBytes, newKey, newSalt, sealDek, openDek, sealName, openName, sealLinkKey, openLinkKey, keyCheckValue, saltCheckValue,
   purgeStaleSlots, effectiveAt, chunkHash, ciphertextHash,
@@ -714,13 +714,15 @@ export class DriveClient {
    * maxFileBytes (null = none), types ({ mode, rules } or null), and `step`:
    * the "confirm it's you" part ({ current } or { reauth }, as for API keys).
    * `captcha`: uploaders pass the CAPTCHA first (true / false where the role
-   * allows a choice; undefined: its default).
+   * allows a choice; undefined: its default). `expire` "never": no expiry
+   * (where the role allows it); `views`: upload sessions allowed (null:
+   * unlimited, where the role allows it).
    */
-  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {}, captcha } = {}) {
+  async createReverse(folderId, { label = '', note = '', password = '', expire = '7d', views = null, maxFiles = null, maxBytes = null, maxFileBytes = null, types = null, step = {}, captcha } = {}) {
     const id = newReverseId();
     const { pub, privateKey } = await createReverseKey();
     const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
-    const extra = { lh: await linkHash(pub), expire, maxFiles, maxBytes, maxFileBytes, types };
+    const extra = { lh: await linkHash(pub), expire, views, maxFiles, maxBytes, maxFileBytes, types };
     if (note) extra.note = await sealNote(pub, id, note);
     if (password) extra.password = await passwordGate(password, pub);
     if (label) extra.label = label;
@@ -731,7 +733,7 @@ export class DriveClient {
         return api.createReverse({ id, folder: folderId, mek, priv: await sealLinkKey(kek, { userId: this.user.id, mekId: mek, linkId: id }, pkcs8), ...extra, ...step });
       });
       if (r.id !== id) throw malformed();
-      return { url: reverseUrl(id, pub), id, expires: r.expires, captcha: r.captcha === true };
+      return { url: reverseUrl(id, pub), id, expires: r.expires ?? null, views: r.views ?? null, captcha: r.captcha === true };
     } finally {
       pkcs8.fill(0);
     }
@@ -749,6 +751,29 @@ export class DriveClient {
       const { priv, mek, ...rest } = x; // eslint-disable-line no-unused-vars
       return { ...rest, url: k ? reverseUrl(x.id, k.pub) : null };
     }));
+  }
+
+  /**
+   * Change reverse share `id` (PATCH /api/private/shares/<id>, docs/REVERSE.md
+   * §6.1): the plain values as given (label, expires — a time or null for
+   * none —, views, maxFiles, maxBytes, maxFileBytes, types, captcha) and,
+   * sealed here with the link's key (which this session's KEK opens), the
+   * note (`note`: its text, '' to remove it) and the uploader password
+   * (`password`: the new one; `removePassword: true` to remove it). The server
+   * never sees the password or the note. → the server's answer.
+   */
+  async updateReverse(id, { note, password = '', removePassword = false, ...plain } = {}) {
+    const body = { ...plain };
+    if (note !== undefined || password) {
+      const r = await api.reverse();
+      const x = (Array.isArray(r.reverse) ? r.reverse : []).find((y) => y.id === id);
+      const k = x ? await this.#linkKey(x.id, x.mek, x.priv) : null;
+      if (!k) throw new Error('This link’s key does not open here, so its note and password cannot be changed now.');
+      if (note !== undefined) body.note = note ? await sealNote(k.pub, id, note) : null;
+      if (password) body.password = await passwordGate(password, k.pub);
+    }
+    if (removePassword && !password) body.password = null;
+    return updateShare(id, body);
   }
 
   /**

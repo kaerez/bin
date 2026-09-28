@@ -15,7 +15,7 @@ import {
 export const USER_KIT_ANCHOR = 'drive-kit';
 const userOf = (profile) => ({ id: profile.user.id, role: profile.user.role, impersonating: !!profile.impersonatedBy });
 
-const INTRO = 'A file you keep offline with what opens your Drive: your account id and username, your user salt, and the key (KEK) the server makes for your account from each of its Drive keys that your files use. It is sealed with a passphrase in this browser and never sent back. With a copy of your stored files, it opens your Drive files and your upload links (Receive files) without the server; on this server, it puts back your salt and your files if the server lost one of its keys. Anyone with the kit, its passphrase and a copy of your stored files can read your Drive: store it offline.';
+const INTRO = 'A file you keep offline with what opens your Drive: your account id and username, your user salt, and the key (KEK) the server makes for your account from each of its Drive keys that your files use. It is sealed with a passphrase in this browser and never sent back. With a copy of your stored files, it opens your Drive files and your upload links (Receive) without the server; on this server, it puts back your salt and your files if the server lost one of its keys. Anyone with the kit, its passphrase and a copy of your stored files can read your Drive: store it offline.';
 
 /** Download: a new kit each time (the server records it); `confirm(input)` → the step-up. */
 function download({ profile, drive, confirm }) {

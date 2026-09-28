@@ -440,6 +440,29 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Added
 
+- **"Receive" links (reverse shares) get the options of regular shares** (docs/REVERSE.md §5,
+  §6.1; SECURITY.md "Reverse shares"), each a role option (Admin → Roles, Drive; the server
+  checks every one on create and on every change, API keys included):
+  - **No expiry** (`reverseNoExpiry`, off in the Default role, allowed for the owner): the link
+    takes files until it is revoked. Stored as a far-future time in the share index and the
+    Drive, shown as `expires: null` by the API and as "No expiry" in the Drive, My shares and
+    Admin → Shares, which filter by it (`expiry=none`). An ended one leaves the index 30 days
+    after it ended (the index's new `ended` column).
+  - **Views** (`reverseMaxViews`, `reverseAllowUnlimitedViews`): a view is one upload session
+    granted (after the link proof, the CAPTCHA and the password); once they are used up the link
+    takes no new sessions (`410`), sessions already started finish. Counted atomically in the
+    user's Drive; failed starts spend none.
+  - **Their own longest expiry** (`reverseMaxExpireSec`, instead of the regular `maxExpireSec`;
+    migration 17 copies each role's `maxExpireSec` into it, so no link can live longer than
+    before), the **uploader password** as a mode (`reversePassword` allow / require / off, with
+    `reversePasswordDefault`), and **editing** (`reverseEdit`).
+  - **Edit in My shares** (`PATCH /api/private/shares/:id`): the expiry (extended, made none, or
+    given one), the views (raised, or lowered never below those used), the limits and file
+    types, the CAPTCHA, and the password and the note (both sealed in the browser with the
+    link's key: the server never sees them). The owner can change a link's views and expiry in
+    Admin → Shares. The Drive's Receive… dialog offers "No expiry", views and the role's password
+    mode. Links made before keep working: no views limit, their expiry and their password.
+
 - **WCAG 2.2 conformance audit** ([docs/WCAG22.md](docs/WCAG22.md)): every success criterion at
   A, AA and AAA with a verdict, evidence and the pages it concerns. On that evidence (Chromium,
   automated and manual checks; screen-reader testing by people still to come) the pages meet
@@ -882,6 +905,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   included).
 
 ### Changed
+
+- **"Receive files" is now "Receive"** wherever it is shown: the Drive's **Receive…** button and
+  its "Receive into “…”" dialog, the role options, the glossary and the docs (the entries below
+  keep the name each release had).
 
 - **My activity shows only the user's own actions:** admin actions on the account (created,
   disabled, enabled, role or limits changed, password reset) are in the owner-only admin audit and

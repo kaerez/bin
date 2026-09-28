@@ -8,11 +8,11 @@
         <meta name="color-scheme" content="dark light" />
         <meta name="theme-color" content="#0d1117" />
         <title>My shares · secbin</title>
-        <meta name="description" content="Your secbin shares. Notes and file shares are end-to-end encrypted: the server never sees their keys. Drive shares and “Receive files” links are encrypted in the browser with keys the server holds, so the server can decrypt them." />
+        <meta name="description" content="Your secbin shares. Notes and file shares are end-to-end encrypted: the server never sees their keys. Drive shares and “Receive” links are encrypted in the browser with keys the server holds, so the server can decrypt them." />
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="secbin" />
         <meta property="og:title" content="secbin · My shares" />
-        <meta property="og:description" content="Your secbin shares. Notes and file shares are end-to-end encrypted: the server never sees their keys. Drive shares and “Receive files” links are encrypted in the browser with keys the server holds, so the server can decrypt them." />
+        <meta property="og:description" content="Your secbin shares. Notes and file shares are end-to-end encrypted: the server never sees their keys. Drive shares and “Receive” links are encrypted in the browser with keys the server holds, so the server can decrypt them." />
         <meta name="twitter:card" content="summary" />
         <link rel="icon" type="image/svg+xml" href="/img/favicon.svg" />
         <link rel="icon" type="image/png" sizes="16x16" href="/img/favicon-16.png" />
@@ -121,6 +121,12 @@
                         <option value="revoked">revoked</option>
                         <option value="deleted">deleted</option>
                         <option value="consumed">consumed</option>
+                    </select></label>
+                    <label class="field-inline" for="shares-expiry"><span class="field-label">Expiry</span>
+                    <select class="input" id="shares-expiry">
+                        <option value="">any</option>
+                        <option value="none">no expiry</option>
+                        <option value="set">expires</option>
                     </select></label>
                 </div>
                 <div class="table-wrap reveal d2"><table class="table" id="shares-table">

@@ -1,4 +1,4 @@
-// reversekeys.js — the keys of reverse shares ("Receive files", docs/REVERSE.md
+// reversekeys.js — the keys of reverse shares ("Receive", docs/REVERSE.md
 // §3), shared by the anonymous uploader's page and the user's Drive client.
 //
 // Each reverse share has its own ECDH P-256 key pair, made in the user's
