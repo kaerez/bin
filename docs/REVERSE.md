@@ -225,7 +225,7 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 | `PUT …/files/<nodeId>/chunk/<i>` | `X-Upload-Token`; `application/octet-stream` | chunk `i`, exact size |
 | `POST …/files/<nodeId>/finalize` | `X-Reverse-Grant`, `X-Upload-Token` | `{ ok }` (only the session that reserved the file: else `403 bad_grant`) |
 | `DELETE …/files/<nodeId>` | `X-Reverse-Grant`, `X-Upload-Token` | cancel an unfinished upload (its reservation is given back; only the session that reserved it) |
-| `POST …/done` | `X-Reverse-Grant` | end the session: `{ files, bytes }` (logged) |
+| `POST …/done` | `X-Reverse-Grant` | end the session: `{ files, bytes }` (logged; one that sent nothing gives its quota back) |
 
 Errors: `404 not_found` (never a reverse share), `410 gone` (revoked, expired, its folder
 deleted, or the user's role no longer allows it; a late visitor with the right link proof is not
@@ -236,9 +236,18 @@ admin locked it),
 `403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 captcha_required`, `403 turnstile_*`, `413 file_too_large` /
 `share_full` / `drive_full`, `409 too_many_files` (none left: `open` shows `filesLeft: 0`),
 `400 declaration_required` / `403 file_type_not_allowed`, `429 busy` (too many open sessions from
-this network, or on the link), `429 password_locked`, `429 rate_limited` (more than 30 CAPTCHA
+this network, or on the link), `429 not_accepting` (`begin`: the user's quota of upload sessions
+received, kind `receive-upload` or `receive`, is reached; the answer is only "This link can’t
+accept more uploads right now. Try again later.", with nothing of the quota), `429 password_locked`, `429 rate_limited` (more than 30 CAPTCHA
 checks from this network within 10 minutes, on `human` or a `begin` with a token; a failed token
 counts as an invalid request), `429 blocked`.
+
+**Quotas.** The user's role quotas of kind `receive-upload` and `receive` count each upload
+session through the user's links, for the user (never the uploader): at `begin`, before the
+password is checked. A session that does not start (wrong password, busy, paused) or that ends
+having sent no file — `done`, or lapsing — is given back; one that sent a file stays counted. A
+new link counts under `receive-link` and `receive` (given back when its creation does not
+complete). Files taken in from a link are not Drive uploads (`drive-upload`).
 
 ### 6.3 The owner acting as the user ("Log in as")
 
