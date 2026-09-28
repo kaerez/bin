@@ -150,8 +150,10 @@ working.
 ## Accounts & administration
 
 - **Owner setup & recovery.** `/dashboard/setup` accepts the `AUTHN` token once. If an owner
-  already exists, it *recovers* it: new username/password, all owner sessions revoked. To recover
-  later, set a **new** `AUTHN` value and visit the page again.
+  already exists, it *recovers* it: new username/password, all owner sessions revoked, the owner's
+  passkeys and recovery codes removed. To recover later, set a **new** `AUTHN` value and visit the
+  page again. The owner's Drive (and the escrow access to users' Drives) then comes back with the
+  owner recovery kit; keep a fresh kit offline, next to the `AUTHN` secret.
 - **Sessions** are an HttpOnly, `SameSite=Strict`, `__Host-` cookie holding a JWT that is signed
   (HS256, `SIG`) and then encrypted (A256GCM, `ENC`). Idle and absolute timeouts are set by the
   owner. Rotating `SIG`/`ENC` signs everyone out.
@@ -193,7 +195,15 @@ working.
   the escrow use is recorded in the owner-only admin audit (`drive.escrow_used`) and never in the
   user's own activity (see [SECURITY.md](./SECURITY.md) and [docs/DRIVE.md](./docs/DRIVE.md) §9).
   A user's Drive sets itself up at their first sign-in once the owner's escrow key exists, always
-  with an escrow wrap; the server never holds a key that opens a Drive.
+  with an escrow wrap (or at once, when the owner creates the account with their own Drive
+  unlocked); the server never holds a key that opens a Drive. **Owner recovery kit** (Admin →
+  Import / export, or the owner's Drive page): a passphrase-sealed file with the owner's Drive key
+  and every escrow key, made in the browser. After a recovery with `AUTHN` (which removes the
+  owner's passkeys and recovery codes) it gives the owner back their Drive and the access to every
+  user's Drive. **Store it offline, like the `AUTHN` secret**: it opens every user's Drive, and
+  losing both the owner's credentials and every kit loses the escrow. Without a kit, the owner can
+  start the Drive over (the old one is kept, sealed, as an archive); users' Drives then move to
+  the new escrow key by themselves (see SECURITY.md, "Drive keys").
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
   *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).

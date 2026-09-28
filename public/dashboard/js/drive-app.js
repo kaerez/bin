@@ -26,6 +26,7 @@ import { expireSeconds, MAX_VIEWS } from '../../js/format.js';
 import { passkeysSupported } from '../../js/passkeys.js';
 import { utf8 } from '../../js/bytes.js';
 import { cleanName } from '../../js/files.js';
+import { kitCard, kitRestore, KIT_HREF } from './drivekit-ui.js';
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
@@ -232,7 +233,8 @@ export async function startDrive(mount, deps) {
   // appears together with its text is often not read) says "Opening…", then,
   // when the page shows a notice instead of the Drive, that notice's title
   // (WCAG 4.1.3); the notice itself is content, with its heading.
-  const status = mount.querySelector(':scope > p.msg[role="status"]') || h('p.msg', { role: 'status' });
+  const status = pageStatus(mount) || mount.querySelector(':scope > p.msg[role="status"]') || h('p.msg', { role: 'status' });
+  status.dataset.driveStatus = '';
   status.textContent = 'Opening your Drive…';
   if (status.parentNode !== mount || mount.children.length !== 1) mount.replaceChildren(status);
   const notice = (card) => {
@@ -333,7 +335,7 @@ function unlockView(mount, deps, lockedErr) {
           : await deps.drive.unlockDrive(creds, { user: deps.user });
         pw.value = '';
         code.value = '';
-        resolve(mountApp(mount, client, deps));
+        resolve(mountApp(mount, client, { ...deps, focusTitle: true }));
       } catch (e) {
         inFlight = false;
         for (const b of all) b.disabled = false;
@@ -358,7 +360,11 @@ function unlockView(mount, deps, lockedErr) {
       codeToggle.setAttribute('aria-expanded', String(show));
       if (show) code.focus();
     });
-    mount.replaceChildren(h('div.card.drive-unlock', { id: 'drive-unlock' },
+    // The owner can always restore from the recovery kit here; starting over
+    // is offered only when nothing the owner signs in with opens the Drive.
+    const recovery = !setup && deps.user && deps.user.role === 'owner' && !deps.user.impersonating
+      ? (lockedErr && lockedErr.ownerRecovery ? ownerRecoveryView(mount, deps, resolve) : ownerKitRestoreView(mount, deps, resolve)) : null;
+    const said = swap(mount, h('div.card.drive-unlock', { id: 'drive-unlock' },
       h('h2.section-title', { text: setup ? 'Set up your Drive' : 'Unlock your Drive' }),
       h('p.modal-sub', {
         text: setup
@@ -368,9 +374,92 @@ function unlockView(mount, deps, lockedErr) {
       pwForm,
       h('div.login-alt', {}, pkBtn, codeToggle),
       codeForm,
-      msg));
+      msg), recovery);
+    if (said) said.textContent = setup ? 'Set up your Drive' : 'Unlock your Drive';
     pw.focus();
   });
+}
+
+/** The page's status line (startDrive), when there is one. */
+const pageStatus = (mount) => mount.querySelector(':scope > [data-drive-status]');
+
+/**
+ * Show `nodes` in the mount instead of what is there, keeping the page's
+ * status line in place (never removed and put back: it must be in the page
+ * before what it says changes, WCAG 4.1.3); it is then visually hidden.
+ */
+function swap(mount, ...nodes) {
+  const s = pageStatus(mount);
+  if (!s) { mount.replaceChildren(...nodes); return null; }
+  for (const c of [...mount.childNodes]) if (c !== s) c.remove();
+  s.className = 'sr-only';
+  mount.append(...nodes.filter(Boolean));
+  return s;
+}
+
+/** The owner's Drive is locked in this tab: it can also be restored from the owner recovery kit. */
+function ownerKitRestoreView(mount, deps, resolve) {
+  return h('details.card.drive-notice', { id: 'drive-kit-unlock' },
+    h('summary', { text: 'Restore from your owner recovery kit' }),
+    kitRestore({ profile: deps.profile, drive: deps.drive, onRestored: (r) => resolve(mountApp(mount, r.client, { ...deps, focusTitle: true })) }));
+}
+
+/**
+ * The owner whose Drive nothing they sign in with can open (e.g. after AUTHN
+ * recovery, docs/DRIVE.md §3): restore it from the owner recovery kit (on the
+ * export screen), or start over without one — a typed confirmation (the
+ * username) and the password, and the notice of what is lost.
+ */
+function ownerRecoveryView(mount, deps, resolve) {
+  const username = deps.profile && deps.profile.user ? deps.profile.user.username : '';
+  const who = h('input.input', { id: 'drive-reset-user', autocomplete: 'off', spellcheck: 'false', maxlength: '64' });
+  const pw = h('input.input', { id: 'drive-reset-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024' });
+  const go = h('button.btn.danger', { type: 'submit', id: 'drive-reset-btn', text: 'Start over without a kit' });
+  const msg = h('p.msg.error', { id: 'drive-reset-msg', role: 'alert', hidden: true });
+  const form = h('form.form.drive-unlock-form', { id: 'drive-reset-form', novalidate: true },
+    field(`Type your username (${username}) to confirm`, who), field('Your account password', pw), go);
+  let busy = false;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    msg.hidden = true;
+    for (const f of [who, pw]) { f.removeAttribute('aria-invalid'); f.removeAttribute('aria-describedby'); }
+    // The field at fault is marked invalid and described by the error (WCAG 3.3.1).
+    const bad = (f, text) => { showMsg(msg, text); f.setAttribute('aria-invalid', 'true'); f.setAttribute('aria-describedby', 'drive-reset-msg'); f.focus(); };
+    if (who.value.trim() !== username) return bad(who, 'Type your username exactly to confirm.');
+    if (!pw.value) return bad(pw, 'Enter your account password.');
+    busy = true;
+    go.disabled = true;
+    const password = pw.value;
+    pw.value = '';
+    try {
+      const [{ prelogin }, { stretch }] = await Promise.all([import('../../js/api.js'), import('../../js/pwauth.js')]);
+      const { salt, t } = await prelogin(username);
+      const r = await deps.drive.startOverOwnerDrive({ user: deps.user, confirm: who.value.trim(), password, step: { current: await stretch(password, salt, t) } });
+      who.value = '';
+      toast('Your Drive was started over with new keys. Download a fresh owner recovery kit.');
+      resolve(mountApp(mount, r.client, { ...deps, kitAlert: true, focusTitle: true }));
+    } catch (err) {
+      busy = false;
+      go.disabled = false;
+      showMsg(msg, friendlyError(err));
+    }
+  });
+  const restore = kitRestore({ profile: deps.profile, drive: deps.drive, onRestored: (r) => resolve(mountApp(mount, r.client, { ...deps, focusTitle: true })) });
+  return h('div.card.drive-notice', { id: 'drive-owner-recovery' },
+    h('h2.section-title', { text: 'Can’t unlock your Drive?' }),
+    h('p', { text: 'Nothing you can sign in with now opens your Drive (for example after recovery with the AUTHN secret, which removes your passkeys and recovery codes). Your owner recovery kit, if you saved one, brings back everything: your Drive and the escrow access to every user’s Drive.' }),
+    restore,
+    h('p.type-hint', {}, 'You can also restore on ', h('a', { id: 'drive-kit-restore-link', href: KIT_HREF, text: 'Admin → Import / export' }), '.'),
+    h('details', { id: 'drive-reset' },
+      h('summary', { text: 'Start over without a kit' }),
+      h('div.stack', {},
+        h('p.msg.warn', { text: 'Starting over creates a new Drive key, a new escrow key and a new signing key, and an empty Drive. What changes:' }),
+        h('ul.plan-list', {},
+          h('li', { text: 'Your Drive as it is now (its files, folders and keys) is kept as an archive, sealed under the old Drive key: you cannot open it, it still counts towards your storage, and it comes back if a recovery kit for it is ever found.' }),
+          h('li', { text: 'Users’ Drives are not touched. Each user’s browser moves their Drive to your new escrow key by itself at their next sign-in; until then you cannot open their Drive through the escrow.' })),
+        h('p.muted', { text: 'If you still know your previous password, unlock with it above instead.' }),
+        form, msg)));
 }
 
 // ── notices above the Drive ─────────────────────────────────────────────────
@@ -387,14 +476,22 @@ function banners(client, deps) {
       h('p', { text: `You are in ${who}’s Drive, opened with your escrow key: browse, upload, download, move, rename, delete and share as they would.` }),
       h('p.muted', { text: `Their own keys (password, recovery codes, passkeys) cannot be removed or replaced while you act as ${who}: those unlock their Drive for them, and only they can confirm such a change. What you do here is recorded in the admin audit, not in their activity.` })));
   }
+  if (deps.user && deps.user.role === 'owner' && !deps.user.impersonating && client.kit) out.push(ownerKitBox(client, deps, !!deps.kitAlert));
+  if (deps.user && deps.user.role === 'owner' && !deps.user.impersonating && client.archives && client.archives.length) out.push(archiveBox(client, deps));
   if (deps.user && deps.user.role === 'owner' && !deps.user.impersonating && !client.notice) out.push(rotateTool(client, deps));
   const n = client.notice;
   if (!n) return out;
+  if (n.kind === 'escrow_rotated') {
+    // The Drive moved to the owner's new escrow key by itself (after an owner reset): said once.
+    // Content: the page's status line says it (mountApp; a live region drawn with its text is often not read).
+    out.push(h('div.card.drive-notice', { id: 'drive-escrow-rotated', dataset: { say: n.text } }, h('p', { text: n.text })));
+    return out;
+  }
   const msg = h('p.msg.error', { id: 'drive-notice-msg', role: 'alert', hidden: true });
   if (n.kind === 'escrow_changed') {
     const accept = h('button.btn', { type: 'button', id: 'drive-escrow-accept', text: 'Trust the new key' });
     const box = h('div.card.drive-notice', { id: 'drive-escrow-notice', role: 'status' },
-      h('h2.section-title', { text: 'The administrator’s escrow key changed' }),
+      h('h2.section-title', { text: n.tampered ? 'Your Drive’s escrow record does not match' : 'The administrator’s escrow key changed' }),
       h('p', { text: n.text }),
       h('p.muted', { text: `Only trust it if your administrator told you they replaced it; otherwise, tell them. New key fingerprint: ${n.kid}.` }),
       h('div.btn-row', {}, accept), msg);
@@ -425,6 +522,7 @@ function banners(client, deps) {
         ? 'Restoring puts back (and signs) the public key that belongs to your escrow private key, so users’ Drives are wrapped to your key again.'
         : 'A new escrow key replaces the old one: escrow wraps made for the old key no longer open, and each user is asked to trust the new key before their Drive is wrapped to it.',
     }),
+    n.kind === 'escrow_mismatch' ? null : h('p', {}, 'If you saved an owner recovery kit, it can put the lost key back: ', h('a', { href: KIT_HREF, id: 'drive-escrow-kit-link', text: 'restore from kit' }), '.'),
     form, msg);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -446,6 +544,64 @@ function banners(client, deps) {
 }
 
 /**
+ * The owner's recovery-kit status (version, fingerprint, dates) and, after a
+ * rotation or when no kit was ever downloaded, the notice to download a fresh
+ * one (a link to the export screen). `alert`: it was just caused here.
+ */
+function ownerKitBox(client, deps, alert = false) {
+  return kitCard({
+    profile: deps.profile, drive: deps.drive, status: client.kit, alert, place: 'drive',
+    onRestored: (r) => { if (deps.remount) deps.remount(r.client); },
+  });
+}
+
+/**
+ * The owner's Drive from before a start over, kept sealed under its old DK
+ * (docs/DRIVE.md §3): what it holds, that a kit for it brings it back, and
+ * "Delete the old Drive archive" (the typed username and the step-up; no kit
+ * can restore it afterwards).
+ */
+function archiveBox(client, deps) {
+  const username = deps.profile && deps.profile.user ? deps.profile.user.username : '';
+  const heading = h('h2.section-title', { id: 'drive-archive-title', tabindex: '-1', text: 'Your Drive from before you started over' });
+  const box = h('section.card.drive-notice', { id: 'drive-archive', 'aria-labelledby': 'drive-archive-title' }, heading);
+  for (const a of client.archives) {
+    const who = h('input.input', { id: `drive-archive-user-${a.gen}`, autocomplete: 'off', spellcheck: 'false', maxlength: '64' });
+    const pw = h('input.input', { id: `drive-archive-pw-${a.gen}`, type: 'password', autocomplete: 'current-password', maxlength: '1024' });
+    // Several archives: each button is described by what its archive holds.
+    const go = h('button.btn.danger', { type: 'submit', id: `drive-archive-delete-${a.gen}`, text: 'Delete the old Drive archive', 'aria-describedby': `drive-archive-info-${a.gen}` });
+    const msg = h('p.msg.error', { id: `drive-archive-msg-${a.gen}`, role: 'alert', hidden: true });
+    const form = h('form.form.drive-unlock-form', { novalidate: true }, field(`Type your username (${username}) to confirm`, who), field('Your password (or leave it empty to confirm with a passkey)', pw), go);
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      msg.hidden = true;
+      who.removeAttribute('aria-invalid'); who.removeAttribute('aria-describedby');
+      if (who.value.trim() !== username) { showMsg(msg, 'Type your username exactly to confirm.'); who.setAttribute('aria-invalid', 'true'); who.setAttribute('aria-describedby', msg.id); who.focus(); return; }
+      go.disabled = true;
+      try {
+        const { confirmStep, canUsePasskey } = await import('./confirm.js');
+        const step = await confirmStep(pw, username, !pw.value && await canUsePasskey());
+        await deps.drive.deleteOwnerArchive({ user: deps.user, gen: a.gen, confirm: who.value.trim(), step });
+        client.archives = client.archives.filter((x) => x.gen !== a.gen);
+        toast('The old Drive archive was deleted.');
+        // Focus does not fall to the page (WCAG 2.4.3): to the box's heading, or with no archive left, to the folder's heading.
+        if (client.archives.length) { section.remove(); heading.focus(); } else { box.remove(); document.getElementById('drive-pane-title')?.focus(); }
+      } catch (err) {
+        go.disabled = false;
+        showMsg(msg, friendlyError(err));
+      }
+    });
+    const section = h('div.stack', { dataset: { gen: String(a.gen) } },
+      h('p', { id: `drive-archive-info-${a.gen}`, text: `Archived ${formatDate(a.at)}: ${a.items} item${a.items === 1 ? '' : 's'}, ${formatBytes(a.bytes)}. It is kept exactly as it was, sealed under your old Drive key, and counts towards your storage. It comes back if you restore from a recovery kit made for it (Restore from kit).` }),
+      h('details', {}, h('summary', { text: 'Delete the old Drive archive' }),
+        h('p.msg.warn', { text: 'Deleting it removes its files for good: a recovery kit found later could no longer bring them back.' }),
+        form, msg));
+    box.appendChild(section);
+  }
+  return box;
+}
+
+/**
  * The owner's "replace the escrow key" (a rotation, docs/DRIVE.md §3): needs
  * the owner's password or a passkey; users' browsers re-wrap to the new key
  * at their next unlock (it is signed), and the old key is kept until then.
@@ -464,6 +620,8 @@ function rotateTool(client, deps) {
       const step = await confirmStep(pw, deps.profile.user.username, !pw.value && await canUsePasskey());
       await client.rotateEscrowKey(step);
       toast('A new escrow key is in place: each user’s Drive moves to it at its next unlock.');
+      // The kit is stale now: the notice appears (announced once).
+      document.getElementById('drive-kit')?.replaceWith(ownerKitBox(client, deps, true));
     } catch (err) {
       showMsg(msg, friendlyError(err));
     } finally {
@@ -586,7 +744,16 @@ function mountApp(mount, client, deps) {
     if (on) tree.focus();
   });
 
-  mount.replaceChildren(h('div.drive', { id: 'drive-app' }, ...banners(client, deps), cap, toolbar, fileIn, folderIn, transferBox, msg, layout));
+  // A restore from the kit card (on this page) mounts the Drive again with its client.
+  const withRemount = { ...deps, remount: (c) => mountApp(mount, c, { ...deps, kitAlert: false, focusTitle: true }) };
+  // After an unlock, a restore or a start over (`focusTitle`; its button was disabled while it ran,
+  // so focus may already have fallen to the page) or when focus is in what this replaces, focus
+  // goes to the folder's heading, not the page (WCAG 2.4.3), unless the person moved it meanwhile.
+  const hadFocus = !!deps.focusTitle || (mount.contains(document.activeElement) && document.activeElement !== mount);
+  const app = h('div.drive', { id: 'drive-app' }, ...banners(client, withRemount), cap, toolbar, fileIn, folderIn, transferBox, msg, layout);
+  const said = swap(mount, app);
+  // A notice above the Drive is said by the page's status line (its title), once.
+  if (said) said.textContent = app.querySelector('[data-say]')?.dataset.say || '';
 
   // drag and drop onto the right pane
   pane.addEventListener('dragover', (e) => { if (!busy) { e.preventDefault(); pane.classList.add('over'); } });
@@ -1016,9 +1183,9 @@ function mountApp(mount, client, deps) {
 
   // ── start ──────────────────────────────────────────────────────────────
   refreshUsage();
-  const ready = tree.ready.then(() => open(ROOT));
+  const ready = tree.ready.then(() => open(ROOT, { focus: hadFocus && (!document.activeElement || document.activeElement === document.body) }));
   return {
-    el: mount.firstChild,
+    el: app,
     ready,
     tree,
     open,

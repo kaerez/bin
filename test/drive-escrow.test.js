@@ -15,7 +15,7 @@ import { enableDrive, drive } from './drive-helpers.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import {
   createDriveKey, createEscrowKeyPair, sealEscrowPriv, openEscrowKeyPair, createSigningKeyPair, sealSigningKey,
-  endorseEscrowKey, wrapEscrow, unlockWithEscrow, escrowKeyId, sealEscrowPin,
+  endorseEscrowKey, wrapEscrow, unlockWithEscrow, escrowKeyId, sealEscrowPin, keyCheckValue,
 } from '../public/js/drivekeys.js';
 
 const OWNER_PW = 'owner-password';
@@ -63,7 +63,7 @@ describe('the owner’s escrow key and every Drive’s escrow wrap', () => {
     o.s = await createSigningKeyPair();
     o.sealed1 = await sealEscrowPriv(o.dk, o.e1.privateKey);
     const r = await keys(oc, {
-      driveSalt: salt16(), set: [pwWrap()],
+      driveSalt: salt16(), set: [pwWrap()], kcv: await keyCheckValue(o.dk),
       escrowPub: o.e1.publicJwk, escrowPriv: o.sealed1,
       escrowSignPub: o.s.publicJwk, escrowSignPriv: await sealSigningKey(o.dk, o.s.privateKey), escrowSig: await endorseEscrowKey(o.s.privateKey, o.e1.publicJwk),
     });
@@ -86,7 +86,7 @@ describe('the owner’s escrow key and every Drive’s escrow wrap', () => {
       expect(r.status, JSON.stringify(body.set.map((w) => w.kind))).toBe(400);
     }
     expect((await drive(a.u.cookie)).wraps).toEqual([]);
-    const ok = await keys(a.u.cookie, { driveSalt: salt16(), set: [pwWrap(), esc], escrowPin: await sealEscrowPin(a.dk, { escrow: o.kid1, sign: null }) });
+    const ok = await keys(a.u.cookie, { driveSalt: salt16(), set: [pwWrap(), esc], escrowPin: await sealEscrowPin(a.dk, { escrow: o.kid1, sign: null }), kcv: await keyCheckValue(a.dk) });
     expect(ok.status).toBe(200);
     expect((await drive(a.u.cookie)).wraps.map((w) => w.kind).sort()).toEqual(['escrow', 'pw']);
     // The owner's escrow private key opens it (and nothing the server has does).
@@ -137,8 +137,8 @@ describe('the owner’s escrow key and every Drive’s escrow wrap', () => {
     const mine = await drive(a.u.cookie);
     for (const k of ['escrowPriv', 'escrowSignPriv', 'escrowPrivOld']) expect(mine[k], k).toBeUndefined();
     // A wrap for the old key is no longer accepted; one for the new key is.
-    expect((await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e1.publicJwk)] })).status).toBe(400);
-    expect((await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e2.publicJwk)] })).status).toBe(200);
+    expect((await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e1.publicJwk)], kcv: await keyCheckValue(a.dk) })).status).toBe(400);
+    expect((await keys(a.u.cookie, { set: [await wrapEscrow(a.dk, o.e2.publicJwk)], kcv: await keyCheckValue(a.dk) })).status).toBe(200);
     expect((await drive(oc)).escrowPrivOld).toEqual({});
   });
 
@@ -146,11 +146,17 @@ describe('the owner’s escrow key and every Drive’s escrow wrap', () => {
     const oid = await ownerId();
     const b = await makeUser('esc-b');
     await enableDrive(b.id); // enabled, never set up
-    const allowedMeta = ['uid', 'driveSalt', 'pendingSec', 'escrowPin', 'pwStale', 'escrowPriv', 'escrowSignPriv', 'escrowPrivOld'];
+    // escrowVer, kit and archiveGen (the owner's only): the escrow key's version,
+    // the latest recovery kit's, the last archive's number — public numbers, kids and times.
+    // kcv: the key check value (an HMAC under DK, stored with the first wraps); rl: rate-limit counters.
+    const allowedMeta = ['uid', 'driveSalt', 'pendingSec', 'escrowPin', 'pwStale', 'escrowPriv', 'escrowSignPriv', 'escrowPrivOld', 'escrowVer', 'kit', 'archiveGen', 'kcv', 'rl'];
     for (const uid of [oid, a.u.id, b.id]) {
       for (const k of await driveMeta(uid)) expect(allowedMeta, `${uid}: meta ${k}`).toContain(k);
       for (const k of await driveWrapKinds(uid)) expect(['pw', 'recovery', 'passkey', 'escrow'], `${uid}: wrap ${k}`).toContain(k);
     }
+    const ver = await runInDurableObject(driveOf(oid), (inst, state) => state.storage.sql.exec("SELECT v FROM meta WHERE k = 'escrowVer'").toArray()[0]?.v);
+    expect(Object.keys(JSON.parse(ver)).sort()).toEqual(['created', 'kid', 'version']);
+    for (const uid of [a.u.id, b.id]) for (const k of await driveMeta(uid)) expect(['escrowVer', 'kit', 'archiveGen']).not.toContain(k);
     // Only the owner's Drive holds (sealed) escrow keys.
     for (const k of await driveMeta(a.u.id)) expect(['escrowPriv', 'escrowSignPriv', 'escrowPrivOld']).not.toContain(k);
     // No other kind of wrap, and no hand-over key, is accepted or handed out.
@@ -166,7 +172,7 @@ describe('the owner’s escrow key and every Drive’s escrow wrap', () => {
     }
     // The Directory keeps only public escrow data for the Drive.
     const dirMeta = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT k FROM meta WHERE k LIKE 'drive.%'").toArray().map((r) => r.k));
-    for (const k of dirMeta) expect(k, k).toMatch(/^drive\.(escrowPub|escrowSignPub|escrowSig|escrowKid:.+)$/);
+    for (const k of dirMeta) expect(k, k).toMatch(/^drive\.(escrowPub|escrowSignPub|escrowSig|escrowKid:.+|ownerReset|resetApplied:.+)$/);
     // And the Worker has no secret for the Drive.
     expect(Object.keys(env).filter((k) => /drive|handoff|escrow/i.test(k) && k !== 'DRIVE')).toEqual([]);
   });

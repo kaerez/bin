@@ -193,6 +193,26 @@ describe('unobscure', () => {
     unobscure(b);
     expect(toast.classList.contains('toast-top')).toBe(true);
   });
+  it('moves a toast at the top back to the bottom when focus goes under it, and puts it away when it covers focus at both edges', () => {
+    Object.defineProperty(window, 'innerHeight', { value: 256, configurable: true });
+    const toast = Object.assign(document.createElement('div'), { id: 'toast', className: 'show toast-top' });
+    const b = document.createElement('button');
+    document.body.append(toast, b);
+    // Where the toast is depends on its class, as the CSS places it.
+    toast.getBoundingClientRect = () => (toast.classList.contains('toast-top')
+      ? { left: 20, right: 300, top: 16, bottom: 59, width: 280, height: 43 }
+      : { left: 20, right: 300, top: 181, bottom: 224, width: 280, height: 43 });
+    box(b, { left: 130, right: 240, top: 30, bottom: 74 }); // under the top toast
+    const spy = vi.spyOn(window, 'scrollBy').mockImplementation(() => {});
+    unobscure(b);
+    expect(toast.classList.contains('toast-top')).toBe(false);
+    expect(toast.classList.contains('show')).toBe(true);
+    // A control that the toast covers at the bottom and at the top (a very short screen): it goes.
+    box(b, { left: 130, right: 240, top: 20, bottom: 230 });
+    unobscure(b);
+    expect(toast.classList.contains('show')).toBe(false);
+    spy.mockRestore();
+  });
 });
 
 // ── 2.4.2 / 2.4.3: showView keeps the person's focus and names the view ──────

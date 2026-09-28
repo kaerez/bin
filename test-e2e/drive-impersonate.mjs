@@ -95,8 +95,18 @@ try {
   // Every account gets a Drive (the Default role).
   const lim = await api(p, '/api/private/admin/limits', { method: 'PATCH', body: JSON.stringify({ scope: 'global', channel: 'all', patch: { driveEnabled: true } }) });
   check('Default role: Drive on', lim.status === 200, JSON.stringify(lim.body));
+  // alice: created with the owner's Drive unlocked in the tab, so her Drive is set up now (the owner knows her password).
+  const createNote = async (name) => {
+    await p.waitForFunction((n) => (document.querySelector('#user-create-drive')?.textContent || '').startsWith(`${n}:`), name, { timeout: 60000 });
+    return p.textContent('#user-create-drive');
+  };
   await createUser(p, 'alice', ALICE_PW);
+  check('create alice: the form says her Drive is set up now', /alice: their Drive is set up now/.test(await createNote('alice')));
+  // bob: created with the owner's Drive locked in the tab: his Drive waits for his first sign-in.
+  const held = await p.evaluate(() => { const v = { dk: sessionStorage.getItem('secbin_dk'), uid: sessionStorage.getItem('secbin_dk_uid') }; sessionStorage.removeItem('secbin_dk'); sessionStorage.removeItem('secbin_dk_uid'); return v; });
   await createUser(p, 'bob', BOB_PW);
+  check('create bob (the owner\'s Drive locked): the form says his Drive is set up at his first sign-in', /bob: their Drive is set up at their first sign-in \(your own Drive is not unlocked/.test(await createNote('bob')));
+  await p.evaluate((v) => { sessionStorage.setItem('secbin_dk', v.dk); sessionStorage.setItem('secbin_dk_uid', v.uid); }, held);
   const users = (await api(p, '/api/private/admin/users')).body.users;
   const aliceId = users.find((x) => x.username === 'alice').id;
   const bobId = users.find((x) => x.username === 'bob').id;
@@ -239,7 +249,8 @@ try {
   const want = ['impersonate.start', 'impersonate.end', 'drive.escrow_used', 'drive.file_read', 'drive.file_uploaded', 'share.created'];
   check('admin audit: the owner as the real actor of each', want.every((x) => acts.has(x)), [...acts].join(','));
   check('admin audit: Drive rows marked as done acting as alice (the escrow use as the owner\'s own)',
-    mine.filter((x) => /^drive\.|^share\./.test(x.action)).every((x) => x.imp === 1 && x.adm === (x.action === 'drive.escrow_used' ? 1 : 0)));
+    mine.filter((x) => /^drive\.|^share\./.test(x.action) && x.action !== 'drive.created_by_owner').every((x) => x.imp === 1 && x.adm === (x.action === 'drive.escrow_used' ? 1 : 0)));
+  check('admin audit: alice\'s Drive set up by the owner at her creation (an admin action)', audit.some((x) => x.action === 'drive.created_by_owner' && x.adm === 1));
   const bobAudit = (await api(p, `/api/private/admin/audit?user=${bobId}`)).body.rows;
   check('admin audit: nothing was created in bob\'s Drive by the owner', !bobAudit.some((x) => x.actor === 'owner' && /^drive\./.test(x.action) && x.action !== 'drive.escrow_used'), bobAudit.map((x) => x.action).join(','));
   await ac.close();

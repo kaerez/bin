@@ -194,7 +194,8 @@ const GAP = 8;
 /**
  * Focus not obscured (WCAG 2.4.11 / 2.4.12): when `el` (just focused) lies
  * under one of the fixed elements, even in part, scroll the page until it is
- * clear. The toast moves to the top instead (it is only a message). An element
+ * clear. The toast moves to the other edge instead (it is only a message), or is
+ * put away when it would cover `el` at either edge. An element
  * inside a modal dialog, or too tall to fit between them, is left alone.
  * Returns the distance scrolled (0 when nothing was in the way).
  */
@@ -212,7 +213,13 @@ export function unobscure(el) {
     const b = c.getBoundingClientRect();
     if (!b.width || !b.height || !(r.left < b.right && r.right > b.left) || getComputedStyle(c).visibility === 'hidden') continue;
     if (c.id === 'toast') {
-      if (r.top < b.bottom + GAP && r.bottom > b.top - GAP) c.classList.add('toast-top');
+      // The toast moves to the other edge (top ↔ bottom); where it would cover `el` there too, it is
+      // put away (it has been said, and it would otherwise hide what Tab reaches on a short screen).
+      const covers = (x) => r.top < x.bottom + GAP && r.bottom > x.top - GAP;
+      if (covers(b)) {
+        c.classList.toggle('toast-top');
+        if (covers(c.getBoundingClientRect())) c.classList.remove('show');
+      }
       continue;
     }
     // Bottom-anchored (the accessibility button, the install banner on phones) or top-anchored.

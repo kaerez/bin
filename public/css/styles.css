@@ -712,6 +712,18 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 .drive { display: flex; flex-direction: column; gap: .9rem; }
 .drive-notice, .drive-unlock { max-width: 560px; display: flex; flex-direction: column; gap: .9rem; }
 .drive-unlock-form { display: flex; flex-direction: column; gap: .6rem; }
+/* the owner recovery kit (dashboard/js/drivekit-ui.js): its status, notice and check results */
+.kit-status { display: flex; flex-direction: column; gap: .45rem; }
+.kit-status p { margin: 0; }
+.kit-notice { display: flex; flex-direction: column; gap: .45rem; align-items: flex-start; }
+.kit-notice .msg, .kit-results .msg, .drive-notice .msg.warn { padding: 0; text-align: left; }
+.msg.warn { color: var(--warn); }
+.kit-results { display: flex; flex-direction: column; gap: .6rem; }
+.kit-checks { margin: 0; padding-left: 1.1rem; display: grid; gap: .35rem; font-size: .85rem; word-break: break-word; }
+.kit-pass { color: var(--ok); }
+.kit-warn { color: var(--warn); }
+.kit-fail { color: var(--seal); }
+.kit-skip { color: var(--ink-2); }
 .dfield { display: flex; flex-direction: column; gap: .35rem; }
 .dfield .input { width: 100%; }
 .drive-cap { display: grid; grid-template-columns: auto minmax(8rem, 1fr); align-items: center; gap: .3rem .9rem; }

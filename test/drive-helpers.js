@@ -10,6 +10,8 @@ import { escrowKid } from '../src/routes/drive.js';
 /** An opaque {iv, ct} field as the browser would send it (random bytes: the server cannot tell). */
 export const enc = (n = 32) => ({ iv: b64urlFromBytes(randomBytes(12)), ct: b64urlFromBytes(randomBytes(n + 16)) });
 export const newNodeId = () => b64urlFromBytes(randomBytes(16));
+/** A stand-in for the Drive key's check value (drivekeys.js keyCheckValue): the server only compares it. */
+export const KCV = b64urlFromBytes(randomBytes(32));
 /**
  * What one item's sealed fields add to the Drive's `used` (docs/DRIVE.md §10):
  * a folder's name, or a file's name, metadata and key, as the fixtures send them.

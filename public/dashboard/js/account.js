@@ -64,8 +64,8 @@ function labelConfirmFields() {
 }
 
 /** The confirmation for one change (see confirm.js); none while impersonating. */
-const confirmStep = async (input) => {
-  if (!acting()) return confirmWith(input, profile.user.username, hasPasskey);
+const confirmStep = async (input, opts) => {
+  if (!acting()) return confirmWith(input, profile.user.username, hasPasskey, opts);
   input.value = '';
   return {};
 };
@@ -199,13 +199,15 @@ function wirePassword() {
     try {
       const oldPassword = $('#pw-current').value;
       const newPassword = $('#pw-new').value;
-      const step = await confirmStep($('#pw-current'));
+      // A passkey confirmation also opens the Drive key (PRF), so the Drive keeps its key.
+      const prf = {};
+      const step = await confirmStep($('#pw-current'), { prfSalt: DRIVE_PRF_SALT, onPrf: (x) => Object.assign(prf, x) });
       const token = await (await check).take();
       const cred = await newCredential(newPassword);
       const r = await changePassword({ ...step, ...cred }, token);
       form.reset();
       // The Drive opens with the new password from now on.
-      const drive = await driveUpkeep(() => updatePasswordWrap({ userId: profile.user.id, newPassword, oldPassword, impersonating: acting() }));
+      const drive = await driveUpkeep(() => updatePasswordWrap({ userId: profile.user.id, newPassword, oldPassword, prfOutput: prf.prf, credentialId: prf.credentialId, impersonating: acting() }));
       if (drive === 'locked' || drive === 'kept') {
         toast(acting()
           ? `${profile.user.username}’s Drive was not re-keyed for the new password (${drive === 'kept' ? 'it has no other key, so its old password wrap stays' : 'unlock your own Drive in this tab first'}): they open it with a recovery code or a passkey.`

@@ -439,8 +439,8 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 | Method & path | Body → result |
 | --- | --- |
-| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, escrowPriv?, escrowSignPriv?, escrowPrivOld? }` (the last three for the owner only; `capacity` / `maxFile` null = no limit) |
-| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, current? \| reauth? }` — key wraps (kinds `pw`, `recovery`, `passkey`, `escrow`); removing a wrap, replacing the password wrap or the salt, and changing the escrow or signing keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); a user's first set-up needs the owner's escrow key (`409 escrow_not_ready`), an escrow wrap for the current key and a wrap of the user's own; the escrow wrap cannot be removed (`403 escrow_required`); while impersonating, only added wraps (never a first set-up) |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, driveSalt, wraps, escrowPub, escrowSignPub, escrowSig, escrowPin, pwStale, ownerReset, escrowPriv?, escrowSignPriv?, escrowPrivOld?, escrowKids?, escrowVersion?, kit?, archives? }` (the `?` ones for the owner only; `capacity` / `maxFile` null = no limit) |
+| `PUT /api/private/drive/keys` | `{ driveSalt?, set?, remove?, escrowPin?, escrowPriv?, escrowPub?, escrowSignPriv?, escrowSignPub?, escrowSig?, kcv?, escrowReset?, current? \| reauth? }` — key wraps (a later `pw` wrap only with the Drive key's check value `kcv`) (kinds `pw`, `recovery`, `passkey`, `escrow`); removing a wrap, replacing the password wrap or the salt, and changing the escrow or signing keys (owner only) need `current` / `reauth` as on Account (docs/DRIVE.md §3); a user's first set-up needs the owner's escrow key (`409 escrow_not_ready`), an escrow wrap for the current key and a wrap of the user's own; the escrow wrap cannot be removed (`403 escrow_required`); while impersonating, only added wraps (never a first set-up) |
 | `POST /api/private/drive/escrow` | the owner impersonating the user: `{}` → `{ ownerId, escrowPub, escrowPriv, escrowPrivOld, wrap, wraps }` (in the admin audit) |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
 | `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta? }` — move / rename |
@@ -452,8 +452,13 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
 | `POST /api/private/drive/shares` | `{ nodes (file ids), views, expire, deletable?, label?, paste, acc?, types?, depth? }` → `201 { id, deletetoken, expires }` |
+| `POST /api/private/drive/kit` | the owner: `{ event: "exported" \| "used", current \| reauth }` or `{ event: "verified", verdict, issues?, version? }` — the owner recovery kit's download, use and check, recorded (the kit itself is never sent) |
+| `GET /api/private/drive/kit/probe` | the owner: one user's escrow wrap per kid in use (each in the admin audit), for "Verify kit" |
+| `PUT /api/private/drive/kit/keys` | the owner, with `current` / `reauth`: sealed escrow keys put back from a kit (only the server's own public keys and kids in use) |
+| `POST /api/private/drive/start-over` | the owner, when nothing they sign in with opens their Drive: `{ confirm, driveSalt, set, escrowPub, escrowPriv, escrowSignPub, escrowSignPriv, escrowSig, kcv, current \| reauth }` — new keys; the old Drive archived |
+| `GET`, `DELETE /api/private/drive/archive/:gen`; `PUT …/nodes`; `POST …/finish` | the owner: an archived Drive — read (for a kit restore), items back, finish, or delete (`confirm` + `current` / `reauth`) |
 | `POST /api/private/admin/drive/escrow/:userId` | owner only: `{ reason }` → `{ wrap, wraps }` (in the admin audit) |
-| `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }] }` (in the admin audit) |
+| `PUT /api/private/admin/drive/keys/:userId` | owner only, after a password reset: `{ driveSalt, set: [{ kind: 'pw', ref: 'pw', data }], kcv }` (the same Drive key); for a user with no Drive yet: `{ first: true, driveSalt, set: [pw, escrow], escrowPin, kcv }` (in the admin audit) |
 
 `name`, `meta` and `fk` are `{ iv, ct }` values encrypted in the browser; the server never sees
 names, types or keys. A Drive share is opened like a file share (`POST /api/file/:id/open`, which

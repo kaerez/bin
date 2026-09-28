@@ -32,7 +32,16 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS refs (share_id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY (share_id, node_id));
 CREATE INDEX IF NOT EXISTS refs_node ON refs(node_id);
 CREATE TABLE IF NOT EXISTS upchunks (node_id TEXT NOT NULL, i INTEGER NOT NULL, PRIMARY KEY (node_id, i));
+CREATE TABLE IF NOT EXISTS archive_nodes (gen INTEGER NOT NULL, id TEXT NOT NULL, parent TEXT, kind TEXT NOT NULL,
+  name TEXT NOT NULL, meta TEXT, size INTEGER NOT NULL DEFAULT 0, chunks INTEGER NOT NULL DEFAULT 0, fk TEXT,
+  state TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, upload_hash TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL,
+  PRIMARY KEY (gen, id));
+CREATE TABLE IF NOT EXISTS archive_wraps (gen INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (gen, kind, ref));
+CREATE TABLE IF NOT EXISTS archive_meta (gen INTEGER NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY (gen, k));
 `;
+const NODE_COLS = 'id, parent, kind, name, meta, size, chunks, fk, state, done, upload_hash, created, updated';
+/** What an archive keeps of the Drive's meta (everything sealed under the old DK, and its records). */
+const ARCHIVED_META = ['driveSalt', 'escrowPriv', 'escrowSignPriv', 'escrowPrivOld', 'escrowPin', 'pwStale', 'kit', 'kcv'];
 
 export const ROOT = 'root';
 /** Node ids: 16 random bytes, base64url (chosen by the browser so it can bind encrypted fields to them). */
@@ -104,8 +113,10 @@ export class Drive extends DurableObject {
    * encrypted fields cannot store data outside the capacity.
    */
   #used() {
-    return this.sql.exec(`SELECT COALESCE(SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END), 0)
-      + COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0) AS s FROM nodes WHERE id != ?`, ROOT).one().s;
+    const bytes = `COALESCE(SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END), 0)
+      + COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0)`;
+    // An archived Drive (the owner's, after starting over) still takes its space.
+    return this.sql.exec(`SELECT ${bytes} AS s FROM nodes WHERE id != ?`, ROOT).one().s + this.sql.exec(`SELECT ${bytes} AS s FROM archive_nodes`).one().s;
   }
   /** Refused when `extra` more bytes would not fit in `capacity` (null: no check). */
   #fits(extra, capacity) {
@@ -208,7 +219,24 @@ export class Drive extends DurableObject {
       escrowPrivOld: this.#oldEscrow(),
       pwStale: this.#meta('pwStale') === '1',
       content: this.#hasContent(),
+      escrowVer: this.#json('escrowVer'),
+      kit: this.#json('kit'),
+      archives: this.#archives(),
+      kcv: this.#meta('kcv'),
     };
+  }
+
+  /** The owner's archived Drives (after starting over): [{ gen, at, items, bytes }]. */
+  #archives() {
+    return this.sql.exec(`SELECT m.gen AS gen, CAST(m.v AS INTEGER) AS at,
+        (SELECT COUNT(*) FROM archive_nodes n WHERE n.gen = m.gen) AS items,
+        (SELECT COALESCE(SUM(CASE WHEN n.kind = 'file' THEN n.size ELSE 0 END), 0) FROM archive_nodes n WHERE n.gen = m.gen) AS bytes
+      FROM archive_meta m WHERE m.k = 'at' ORDER BY m.gen`).toArray().map((r) => ({ gen: r.gen, at: r.at, items: r.items, bytes: r.bytes }));
+  }
+
+  /** A meta value stored as JSON, or null. */
+  #json(k) {
+    try { return JSON.parse(this.#meta(k) || 'null'); } catch { return null; }
   }
 
   /** The owner's earlier escrow private keys (sealed, by kid), kept while a user's wrap may still need one. */
@@ -234,6 +262,17 @@ export class Drive extends DurableObject {
   }
 
   /**
+   * No wrap, but something that only an earlier DK made: content, the key
+   * check value, or (the owner's) sealed escrow or signing keys. Such a Drive
+   * is broken, not new: it never takes a first set-up (a new DK), only the
+   * same DK back (a recovery kit) or, for the owner, starting over.
+   */
+  #keyless() {
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c) return false;
+    return this.#hasContent() || this.#meta('kcv') !== null || this.#meta('escrowPriv') !== null || this.#meta('escrowSignPriv') !== null;
+  }
+
+  /**
    * Change the key material: `set` / `remove` wraps, the Drive salt, the
    * sealed escrow pin (the escrow key this Drive trusts) and (the owner's
    * Drive only — the Worker checks) the sealed escrow and signing private
@@ -244,9 +283,41 @@ export class Drive extends DurableObject {
    * would leave a Drive with wraps but none of the user's own (pw, recovery,
    * passkey) is refused, and so is one that leaves a Drive with content and
    * no wrap at all: nothing could open it again.
+   *
+   * Every check below and the write run with no await in between, so each
+   * call is atomic against any other call of this object (R5-L2):
+   * - `onlyIfEmpty` (every first set-up: the user's own, the owner's, one the
+   *   owner makes for a user) is a compare-and-set on "a new Drive": no wrap,
+   *   no content, no key check value, no sealed owner key (`409 drive_exists`,
+   *   or `409 drive_keyless` for a Drive that has content or keys of an
+   *   earlier DK); it needs `kcv`, which is stored with the first wraps and
+   *   never replaced (only starting over, below, sets a new one);
+   * - `expectKcv` (every later change of wraps or the pin): the stored key
+   *   check value must exist and be this value (`409 kcv_missing`,
+   *   `409 kcv_mismatch`), compared in constant time;
+   * - `noEscrowYet` (the owner's very first escrow key, exempt from the
+   *   step-up): refused once a sealed escrow or signing key exists
+   *   (`409 escrow_exists`).
+   * `newEscrowKid` (the owner's Drive, a new escrow key pair) moves the escrow
+   * key's version (docs/DRIVE.md §3, owner recovery kit): 1 at the first
+   * creation (`firstEscrow`), one more at each rotation, with its kid and the
+   * time it was created. Not secret.
    */
-  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv, escrowSignPriv, escrowPin, oldKid } = {}) {
+  async setKeys(uid, { driveSalt, set = [], remove = [], escrowPriv, escrowSignPriv, escrowPin, oldKid, newEscrowKid, firstEscrow = false, kcv, expectKcv, noEscrowYet = false, onlyIfEmpty = false } = {}) {
     this.#bind(uid);
+    // A first set-up never lands on a Drive that has keys (or had them: content, a check value, sealed keys).
+    if (onlyIfEmpty) {
+      if (this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c) return fail(409, 'drive_exists', 'This Drive already has keys: they are never replaced.');
+      if (this.#keyless()) return fail(409, 'drive_keyless', 'This Drive has content or keys but no key wrap: restore it from a recovery kit (or, the owner, start over).');
+      if (typeof kcv !== 'string' || !kcv) return fail(400, 'kcv_required', 'A new Drive needs its key check value.');
+    } else if (expectKcv !== undefined) {
+      const have = this.#meta('kcv');
+      if (have === null) return fail(409, 'kcv_missing', 'This Drive has no key check value: no key can be added to it.');
+      if (!safeEq(expectKcv, have)) return fail(409, 'kcv_mismatch', 'That key is not this Drive’s key.');
+    }
+    if (noEscrowYet && escrowPriv !== undefined && (this.#meta('escrowPriv') !== null || this.#meta('escrowSignPriv') !== null)) {
+      return fail(409, 'escrow_exists', 'An escrow key exists already: replacing it needs your confirmation.');
+    }
     const has = (k, r) => this.sql.exec('SELECT 1 FROM wraps WHERE kind = ? AND ref = ?', k, r).toArray().length > 0;
     const newPw = set.some((w) => w.kind === 'pw');
     const total = this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c;
@@ -273,7 +344,56 @@ export class Drive extends DurableObject {
       }
       if (escrowSignPriv !== undefined) this.#setMeta('escrowSignPriv', escrowSignPriv);
       if (escrowPin !== undefined) this.#setMeta('escrowPin', escrowPin);
+      if (onlyIfEmpty) this.#setMeta('kcv', kcv); // with the first wraps; never replaced
       if (newPw) this.#setMeta('pwStale', null);
+      if (newEscrowKid) {
+        const ver = this.#json('escrowVer');
+        // A key made before versions were recorded counts as version 1.
+        const next = ver && Number.isSafeInteger(ver.version) ? ver.version + 1 : firstEscrow ? 1 : 2;
+        if (!ver || ver.kid !== newEscrowKid) this.#setMeta('escrowVer', JSON.stringify({ version: next, kid: newEscrowKid, created: nowSec() }));
+      }
+    });
+    return { ok: true };
+  }
+
+  /**
+   * The owner downloaded a recovery kit for escrow key `version` / `kid`
+   * (the Worker checked the step-up): recorded, with the time, for the kit
+   * status and the "download a fresh kit" notice. Not secret.
+   */
+  async recordKit(uid, { version, kid }) {
+    this.#bind(uid);
+    const kit = { version, kid, at: nowSec() };
+    this.#setMeta('kit', JSON.stringify(kit));
+    return { ok: true, kit };
+  }
+
+  /**
+   * AUTHN owner recovery replaced the owner's password: the `pw` wrap (if
+   * any) opens only with the old one, so it is marked stale and the owner's
+   * browser writes the new one, once the recovery kit has opened the Drive,
+   * without a second confirmation (docs/DRIVE.md §3).
+   */
+  async markPwStale(uid) {
+    this.#bind(uid);
+    this.#setMeta('pwStale', '1');
+    return { ok: true };
+  }
+
+  /**
+   * The owner's recovery kit puts back sealed escrow keys (the Worker checks
+   * each against the escrow public key, the signing key or a kid in use, and
+   * the step-up for replacing one that is there): `escrowPriv`,
+   * `escrowSignPriv`, and earlier keys `old` { kid: sealed }. Values are
+   * opaque (sealed under the owner's DK).
+   */
+  async restoreEscrowKeys(uid, { escrowPriv, escrowSignPriv, old = {} } = {}) {
+    this.#bind(uid);
+    const cur = this.#oldEscrow();
+    this.ctx.storage.transactionSync(() => {
+      if (escrowPriv !== undefined) this.#setMeta('escrowPriv', escrowPriv);
+      if (escrowSignPriv !== undefined) this.#setMeta('escrowSignPriv', escrowSignPriv);
+      if (Object.keys(old).length) this.#setMeta('escrowPrivOld', JSON.stringify({ ...cur, ...old }));
     });
     return { ok: true };
   }
@@ -319,6 +439,26 @@ export class Drive extends DurableObject {
       if (!keep[w.kind].has(w.ref)) { this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref); gone.push({ kind: w.kind, ref: w.ref, data: w.data }); }
     }
     return { ok: true, removed: gone.length, wraps: gone };
+  }
+
+  /**
+   * A fixed-window counter for `key` (a route of this Drive's user, or of one
+   * of their sessions): one more hit → { ok } (false once `max` hits fall in
+   * the current `windowSec`). Kept in the Drive's meta; windows that are over
+   * are dropped, and at most 64 keys are kept (the oldest go first).
+   */
+  async hit(uid, key, max, windowSec) {
+    this.#bind(uid);
+    const t = nowSec();
+    const all = this.#json('rl') || {};
+    for (const [k, v] of Object.entries(all)) if (!v || !Number.isSafeInteger(v.start) || t - v.start >= (v.win || 0)) delete all[k];
+    const cur = all[key] || { start: t, n: 0, win: windowSec };
+    cur.n += 1;
+    all[key] = cur;
+    const keys = Object.keys(all).sort((a, b) => all[a].start - all[b].start);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 64))) delete all[k];
+    this.#setMeta('rl', JSON.stringify(all));
+    return { ok: cur.n <= max, retryAfter: cur.start + cur.win - t };
   }
 
   /** The escrow wrap and the list of wraps, for the owner's escrow route. */
@@ -570,13 +710,183 @@ export class Drive extends DurableObject {
   async destroy(uid) {
     this.#bind(uid);
     return this.ctx.blockConcurrencyWhile(async () => {
-      await this.#deleteObjects(uid, this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file'").toArray());
+      await this.#deleteObjects(uid, this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file' UNION ALL SELECT id, chunks FROM archive_nodes WHERE kind = 'file'").toArray());
       const shares = this.sql.exec('SELECT DISTINCT share_id FROM refs').toArray().map((r) => r.share_id);
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
       this.destroyed = true;
       this.inflight.clear();
       return { ok: true, shares };
+    });
+  }
+
+  // ── the owner's archived Drive (starting over without a kit) ─────────────
+  /**
+   * The owner starts over without a recovery kit (docs/DRIVE.md §3): the
+   * Drive as it is — items, R2 objects (untouched), wraps, the salt and the
+   * sealed escrow keys, all still sealed under the old DK — becomes archive
+   * `gen`, which nothing here can open; the Drive is empty again (only the
+   * escrow key's version record and the account binding stay) and set up
+   * with the new keys (`keys`: the `pw` wrap, the salt, the sealed escrow and
+   * signing keys, the new escrow kid and the key check value) in the same
+   * transaction. Unfinished uploads go, as the alarm would drop them. Shares
+   * of archived items keep working (their keys are in their links).
+   *
+   * Atomic (R5-L2): it runs inside blockConcurrencyWhile, and first re-checks
+   * that nothing the owner signs in with opens the Drive (no passkey or
+   * recovery-code wrap, no `pw` wrap or only a stale one). A second start
+   * over at the same moment finds the first one's fresh `pw` wrap and gets
+   * `409 drive_unlockable`: one archive, one key check value, one set of keys.
+   * → { gen }.
+   */
+  async startOver(uid, { driveSalt, set = [], escrowPriv, escrowSignPriv, newEscrowKid, kcv } = {}) {
+    this.#bind(uid);
+    if (typeof driveSalt !== 'string' || set.length !== 1 || set[0].kind !== 'pw' || typeof escrowPriv !== 'string' || typeof escrowSignPriv !== 'string' || typeof kcv !== 'string' || typeof newEscrowKid !== 'string') {
+      throw new Error('drive: startOver needs the new keys');
+    }
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const stale = this.#meta('pwStale') === '1';
+      const usable = this.sql.exec('SELECT kind FROM wraps').toArray().some((w) => w.kind === 'passkey' || w.kind === 'recovery' || (w.kind === 'pw' && !stale));
+      if (usable) return fail(409, 'drive_unlockable', 'Your Drive can still be unlocked (a password, passkey or recovery-code key of yours opens it): unlock it instead.');
+      const pending = this.sql.exec("SELECT id, chunks FROM nodes WHERE kind = 'file' AND state = 'pending'").toArray();
+      await this.#deleteObjects(uid, pending);
+      // Archive numbers never repeat (one restored or deleted keeps its number).
+      const gen = Math.max(Number(this.#meta('archiveGen')) || 0, this.sql.exec('SELECT MAX(gen) AS g FROM archive_meta').one().g ?? 0) + 1;
+      this.ctx.storage.transactionSync(() => {
+        for (const f of pending) {
+          this.sql.exec('DELETE FROM upchunks WHERE node_id = ?', f.id);
+          this.sql.exec('DELETE FROM nodes WHERE id = ?', f.id);
+        }
+        this.sql.exec(`INSERT INTO archive_nodes (gen, ${NODE_COLS}) SELECT ?, ${NODE_COLS} FROM nodes WHERE id != ?`, gen, ROOT);
+        this.sql.exec('DELETE FROM nodes WHERE id != ?', ROOT);
+        this.sql.exec('INSERT INTO archive_wraps (gen, kind, ref, data) SELECT ?, kind, ref, data FROM wraps', gen);
+        this.sql.exec('DELETE FROM wraps');
+        for (const k of ARCHIVED_META) {
+          const v = this.#meta(k);
+          if (v === null) continue;
+          this.sql.exec('INSERT INTO archive_meta (gen, k, v) VALUES (?, ?, ?)', gen, k, v);
+          this.#setMeta(k, null);
+        }
+        this.sql.exec("INSERT INTO archive_meta (gen, k, v) VALUES (?, 'at', ?)", gen, String(nowSec()));
+        this.#setMeta('archiveGen', String(gen));
+        // The new keys, in the same step.
+        this.sql.exec('INSERT INTO wraps (kind, ref, data) VALUES (?, ?, ?)', set[0].kind, set[0].ref, set[0].data);
+        this.#setMeta('driveSalt', driveSalt);
+        this.#setMeta('escrowPriv', escrowPriv);
+        this.#setMeta('escrowSignPriv', escrowSignPriv);
+        this.#setMeta('kcv', kcv);
+        const ver = this.#json('escrowVer');
+        const next = ver && Number.isSafeInteger(ver.version) ? ver.version + 1 : 2;
+        if (!ver || ver.kid !== newEscrowKid) this.#setMeta('escrowVer', JSON.stringify({ version: next, kid: newEscrowKid, created: nowSec() }));
+      });
+      await this.ctx.storage.deleteAlarm();
+      return { ok: true, gen };
+    });
+  }
+
+  #archiveMeta(gen) {
+    const rows = this.sql.exec('SELECT k, v FROM archive_meta WHERE gen = ?', gen).toArray();
+    return rows.length ? Object.fromEntries(rows.map((r) => [r.k, r.v])) : null;
+  }
+
+  /**
+   * Archive `gen` for the owner's browser to restore it with a recovery kit:
+   * its sealed escrow keys and a page of its items (sealed fields as stored),
+   * by id after `after`. → { gen, at, escrowPriv, escrowSignPriv,
+   * escrowPrivOld, items, nodes, next }.
+   */
+  async archiveView(uid, gen, { after = '', limit = 500 } = {}) {
+    this.#bind(uid);
+    const m = this.#archiveMeta(gen);
+    if (!m) return fail(404, 'not_found', 'No such archive.');
+    const parse = (v) => { try { return JSON.parse(v); } catch { return null; } };
+    const lim = Math.max(1, Math.min(1000, limit | 0));
+    const rows = this.sql.exec('SELECT * FROM archive_nodes WHERE gen = ? AND id > ? ORDER BY id LIMIT ?', gen, after, lim).toArray();
+    return {
+      ok: true, gen, at: Number(m.at) || null,
+      escrowPriv: m.escrowPriv ?? null, escrowSignPriv: m.escrowSignPriv ?? null, escrowPrivOld: parse(m.escrowPrivOld || '{}') || {},
+      items: this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes WHERE gen = ?', gen).one().c,
+      nodes: rows.map((r) => ({
+        id: r.id, parent: r.parent, kind: r.kind, name: parse(r.name), meta: r.meta ? parse(r.meta) : null, fk: r.fk ? parse(r.fk) : null,
+        size: r.size, chunks: r.chunks, state: r.state, created: r.created, updated: r.updated,
+      })),
+      next: rows.length === lim ? rows[rows.length - 1].id : null,
+    };
+  }
+
+  /**
+   * Bring archived items back into the Drive, their sealed fields re-sealed
+   * by the owner's browser under the Drive's DK now (`nodes`: [{ id, name,
+   * meta?, fk? }], stored JSON text; a field left out keeps its archived
+   * value). Parents first: an item whose folder is still archived is refused.
+   * The archive's top-level items land in the Drive's top level. Content (R2)
+   * is not touched: each file's chunks are under its own key.
+   */
+  async restoreArchiveNodes(uid, gen, list) {
+    this.#bind(uid);
+    if (!this.#archiveMeta(gen)) return fail(404, 'not_found', 'No such archive.');
+    const rows = [];
+    for (const x of list) {
+      const r = this.sql.exec('SELECT * FROM archive_nodes WHERE gen = ? AND id = ?', gen, x.id).toArray()[0];
+      if (!r) return fail(404, 'not_found', 'An item is not in the archive.');
+      if (this.#node(r.id)) return fail(409, 'exists', 'An item with this id already exists.');
+      rows.push({ r, x });
+    }
+    const moving = new Set(rows.map(({ r }) => r.id));
+    for (const { r } of rows) {
+      if (r.parent !== ROOT && !moving.has(r.parent) && !this.#node(r.parent)) return fail(409, 'parent_first', 'Restore an item’s folder before the item.');
+    }
+    if (this.#count() + rows.length > MAX_NODES) return fail(409, 'drive_full', `A Drive holds at most ${MAX_NODES} items.`);
+    const top = rows.filter(({ r }) => r.parent === ROOT).length;
+    if (top && this.sql.exec('SELECT COUNT(*) AS c FROM nodes WHERE parent = ?', ROOT).one().c + top > MAX_CHILDREN) return fail(409, 'folder_full', `A folder holds at most ${MAX_CHILDREN} items.`);
+    this.ctx.storage.transactionSync(() => {
+      for (const { r, x } of rows) {
+        this.sql.exec(`INSERT INTO nodes (${NODE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          r.id, r.parent, r.kind, x.name ?? r.name, x.meta === undefined ? r.meta : x.meta, r.size, r.chunks, x.fk === undefined ? r.fk : x.fk,
+          r.state, r.done, r.upload_hash, r.created, nowSec());
+        this.sql.exec('DELETE FROM archive_nodes WHERE gen = ? AND id = ?', gen, r.id);
+      }
+    });
+    return { ok: true, restored: rows.length, left: this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes WHERE gen = ?', gen).one().c, used: this.#used() };
+  }
+
+  /**
+   * The archive's items are all back: its earlier escrow keys, re-sealed by
+   * the owner's browser under the Drive's DK (`old` { kid: sealed }, checked
+   * by the Worker), join escrowPrivOld, and the archive (its old wraps and
+   * sealed keys) goes.
+   */
+  async finishArchive(uid, gen, { old = {} } = {}) {
+    this.#bind(uid);
+    if (!this.#archiveMeta(gen)) return fail(404, 'not_found', 'No such archive.');
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes WHERE gen = ?', gen).one().c) return fail(409, 'archive_not_empty', 'Restore every archived item first.');
+    const cur = this.#oldEscrow();
+    this.ctx.storage.transactionSync(() => {
+      if (Object.keys(old).length) this.#setMeta('escrowPrivOld', JSON.stringify({ ...cur, ...old }));
+      this.sql.exec('DELETE FROM archive_wraps WHERE gen = ?', gen);
+      this.sql.exec('DELETE FROM archive_meta WHERE gen = ?', gen);
+    });
+    return { ok: true };
+  }
+
+  /**
+   * The owner deletes archive `gen` (no kit could restore it afterwards): its
+   * R2 objects, items, wraps and sealed keys. → the shares that referenced its
+   * items (the Worker ends them).
+   */
+  async deleteArchive(uid, gen) {
+    this.#bind(uid);
+    if (!this.#archiveMeta(gen)) return fail(404, 'not_found', 'No such archive.');
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.#deleteObjects(uid, this.sql.exec("SELECT id, chunks FROM archive_nodes WHERE gen = ? AND kind = 'file'", gen).toArray());
+      const shares = this.sql.exec('SELECT DISTINCT share_id FROM refs WHERE node_id IN (SELECT id FROM archive_nodes WHERE gen = ?)', gen).toArray().map((r) => r.share_id);
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec('DELETE FROM refs WHERE node_id IN (SELECT id FROM archive_nodes WHERE gen = ?)', gen);
+        this.sql.exec('DELETE FROM archive_nodes WHERE gen = ?', gen);
+        this.sql.exec('DELETE FROM archive_wraps WHERE gen = ?', gen);
+        this.sql.exec('DELETE FROM archive_meta WHERE gen = ?', gen);
+      });
+      return { ok: true, shares, used: this.#used() };
     });
   }
 

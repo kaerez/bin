@@ -7,7 +7,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { owner, makeUser, fetchJson, intent, cookieOf, proofFor, salt16, USER_PW } from './helpers.js';
-import { someBytes, enc, newNodeId, driveLimits, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, node, drive, DIR_BYTES, FILE_BYTES, escrowWrap, ensureEscrow } from './drive-helpers.js';
+import { someBytes, enc, newNodeId, driveLimits, enableDrive, mkdir, createFile, putChunk, finalize, getChunk, uploadFile, del, node, drive, DIR_BYTES, FILE_BYTES, escrowWrap, ensureEscrow, KCV } from './drive-helpers.js';
 import { driveChunkSize, driveChunks } from '../src/drive-do.js';
 import { SCHEMA_VERSION, PUBLIC_ID } from '../src/directory-do.js';
 import { CHUNK } from '../public/js/files.js';
@@ -252,7 +252,10 @@ describe('Drive keys', () => {
     await enableDrive(u.id);
     ESC = (await escrowWrap()).data;
     const salt = salt16();
-    expect((await keys(u.cookie, { driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }], remove: [] })).status).toBe(200);
+    // A first set-up without the key check value (or the pin) is refused (R5-L3).
+    expect((await keys(u.cookie, { driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }], remove: [], escrowPin: enc(40) })).status).toBe(400);
+    expect((await keys(u.cookie, { driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }], remove: [], kcv: KCV })).status).toBe(400);
+    expect((await keys(u.cookie, { driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }], remove: [], escrowPin: enc(40), kcv: KCV })).status).toBe(200);
     let s = await drive(u.cookie);
     expect(s.driveSalt).toBe(salt);
     expect(s.wraps).toEqual([{ kind: 'escrow', ref: 'escrow', data: ESC }, { kind: 'pw', ref: 'pw', data: W() }]);
@@ -261,7 +264,8 @@ describe('Drive keys', () => {
     const noStep = await keys(u.cookie, { set: [{ kind: 'pw', ref: 'pw', data: W(2) }] });
     expect(noStep.status).toBe(400);
     expect((await noStep.json()).error).toBe('reauth_required');
-    expect((await keys(u.cookie, { set: [{ kind: 'pw', ref: 'pw', data: W(2) }], current: proofFor(USER_PW) })).status).toBe(200); // replaced
+    expect((await keys(u.cookie, { set: [{ kind: 'pw', ref: 'pw', data: W(2) }], current: proofFor(USER_PW) })).status).toBe(400); // kcv_required
+    expect((await keys(u.cookie, { set: [{ kind: 'pw', ref: 'pw', data: W(2) }], current: proofFor(USER_PW), kcv: KCV })).status).toBe(200); // replaced
     expect((await drive(u.cookie)).wraps.find((w) => w.kind === 'pw').data).toBe(W(2));
     expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }] })).status).toBe(400);
     expect((await keys(u.cookie, { remove: [{ kind: 'pw', ref: 'pw' }], current: proofFor('not-the-password') })).status).toBe(403);
@@ -332,7 +336,7 @@ describe('Drive keys', () => {
     const u = await makeUser('drv-escuse');
     await enableDrive(u.id);
     ESC = (await escrowWrap()).data;
-    await keys(u.cookie, { set: [{ kind: 'escrow', ref: 'escrow', data: ESC }, { kind: 'pw', ref: 'pw', data: W() }] });
+    await keys(u.cookie, { set: [{ kind: 'escrow', ref: 'escrow', data: ESC }, { kind: 'pw', ref: 'pw', data: W() }], escrowPin: enc(40), kcv: KCV });
     const path = `/api/private/admin/drive/escrow/${u.id}`;
     expect((await fetchJson(path, { method: 'POST', cookie: u.cookie, body: { reason: 'curious' } })).status).toBe(403);
     expect((await fetchJson(path, { method: 'POST', cookie: oc, body: {} })).status).toBe(400);
@@ -340,8 +344,8 @@ describe('Drive keys', () => {
     const r = await fetchJson(path, { method: 'POST', cookie: oc, headers: intent, body: { reason: 'password reset requested by the user' } });
     expect(r.status).toBe(200);
     const body = await r.json();
-    expect(body).toEqual({ wrap: { kind: 'escrow', ref: 'escrow', data: ESC }, wraps: expect.any(Array) });
-    expect(body.wraps).toHaveLength(2);
+    // Only the escrow wrap, and the number of wraps (R5-I3): never the user's own wraps.
+    expect(body).toEqual({ wrap: { kind: 'escrow', ref: 'escrow', data: ESC }, wraps: 2 });
     const audit = (await (await fetchJson(`/api/private/admin/audit?user=${u.id}`, { cookie: oc })).json()).rows;
     const row = audit.find((x) => x.action === 'drive.escrow_used');
     expect(row.detail).toContain('password reset requested by the user');
@@ -360,7 +364,7 @@ describe('Drive keys', () => {
     const u = await makeUser('drv-reset');
     await enableDrive(u.id);
     ESC = (await escrowWrap()).data;
-    await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }] });
+    expect((await keys(u.cookie, { driveSalt: salt16(), set: [{ kind: 'pw', ref: 'pw', data: W() }, { kind: 'escrow', ref: 'escrow', data: ESC }], escrowPin: enc(40), kcv: KCV })).status).toBe(200);
     const put = (body, cookie = oc, id = u.id) => fetchJson(`/api/private/admin/drive/keys/${id}`, { method: 'PUT', cookie, headers: intent, body });
     const salt = salt16();
     expect((await put({ driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W(9) }] }, u.cookie)).status).toBe(403); // owner only
@@ -370,7 +374,9 @@ describe('Drive keys', () => {
     expect((await put({ driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W(9) }], remove: [{ kind: 'escrow', ref: 'escrow' }] })).status).toBe(400); // nothing removed
     expect((await put({ set: [{ kind: 'pw', ref: 'pw', data: W(9) }] })).status).toBe(400); // the salt goes with it
     expect((await put({ driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W(9) }] }, oc, PUBLIC_ID)).status).toBe(404);
-    expect((await put({ driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W(9) }] })).status).toBe(200);
+    expect((await (await put({ driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W(9) }] })).json()).error).toBe('kcv_required'); // only as a wrap of the Drive's key
+    expect((await put({ driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W(9) }], kcv: KCV })).status).toBe(200);
+    expect((await (await put({ driveSalt: salt, set: [{ kind: 'pw', ref: 'pw', data: W(9) }], kcv: KCV.replace(/^./, KCV[0] === 'A' ? 'B' : 'A') })).json()).error).toBe('kcv_mismatch');
     const s = await driveOf(u.id).summary(u.id);
     expect(s.driveSalt).toBe(salt);
     expect(s.wraps).toEqual([{ kind: 'escrow', ref: 'escrow', data: ESC }, { kind: 'pw', ref: 'pw', data: W(9) }]);
