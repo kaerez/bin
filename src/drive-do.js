@@ -94,7 +94,7 @@ const COLUMNS = [
   ['reverse', 'retired', 'INTEGER'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
-const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify'];
+const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify', 'wrapsHeld'];
 /** The owner's sealed escrow keys of the release before: dropped once every Drive is upgraded. */
 const LEGACY_OWNER_META = ['escrowPriv', 'escrowSignPriv', 'escrowPrivOld'];
 /** Items per page of the upgrade and of a re-seal. */
@@ -617,12 +617,30 @@ export class Drive extends DurableObject {
     return { ok: true, pw: 'stale' };
   }
 
+  /**
+   * An AUTHN owner recovery while a Drive waits: the owner's passkey and
+   * recovery wraps there are now (their credentials are gone) are kept until
+   * the escrow clean-up; a later passkey or code change prunes only the others.
+   */
+  async holdWraps(uid) {
+    this.#bind(uid);
+    const refs = this.sql.exec("SELECT kind, ref FROM wraps WHERE kind IN ('passkey', 'recovery')").toArray().map((w) => `${w.kind}:${w.ref}`);
+    this.#setMeta('wrapsHeld', JSON.stringify([...new Set([...this.#heldWraps(), ...refs])]));
+    return { ok: true, held: refs.length };
+  }
+  #heldWraps() {
+    try { const v = JSON.parse(this.#meta('wrapsHeld') || '[]'); return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []; } catch { return []; }
+  }
+
   /** Keep only the passkey / recovery wraps (of the release before) whose credential the account still has; → the wraps removed. */
-  async pruneWraps(uid, { passkey = [], recovery = [] } = {}) {
+  async pruneWraps(uid, { passkey = [], recovery = [], held = false } = {}) {
     this.#bind(uid);
     const keep = { passkey: new Set(passkey), recovery: new Set(recovery) };
+    // The wraps an AUTHN owner recovery kept (holdWraps): they stay while `held` (a Drive still waits).
+    const kept = held ? new Set(this.#heldWraps()) : new Set();
     const gone = [];
     for (const w of this.sql.exec("SELECT kind, ref, data FROM wraps WHERE kind IN ('passkey', 'recovery')").toArray()) {
+      if (kept.has(`${w.kind}:${w.ref}`)) continue;
       if (!keep[w.kind].has(w.ref)) { this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref); gone.push({ kind: w.kind, ref: w.ref, data: w.data }); }
     }
     return { ok: true, removed: gone.length, wraps: gone };

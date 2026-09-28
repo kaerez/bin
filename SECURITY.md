@@ -1027,8 +1027,8 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   deleted). A link whose old key does not open is retired by its user (the step-up): it ends and
   its key goes. A finished upgrade stays finished. While a Drive waits, its old key wraps are
   kept current as before (spent recovery codes, removed passkeys and replaced codes lose theirs;
-  an admin reset drops the old password's wrap when another remains; the owner's own stay until
-  nothing waits, after an AUTHN owner recovery, regenerated codes or a removed passkey alike). The owner's archive of that release (a start over) is
+  an admin reset drops the old password's wrap when another remains; the owner's are pruned the
+  same way, except that those an AUTHN owner recovery kept stay until nothing waits). The owner's archive of that release (a start over) is
   deleted from Admin → Security → Keys (the step-up, the username typed; audited).
 
 ### Read receipts

@@ -419,6 +419,9 @@ async function renderPasskeys() {
     ? `${st.recoveryLeft} of 20 recovery codes left.${st.required ? ' You sign in with your password and a passkey (or a code).' : ''}`
     : 'Adding your first passkey gives you 20 one-time recovery codes.';
   $('#recovery-regen').hidden = !has;
+  // The owner, while Drives wait for their upgrade: removing a credential drops its old Drive wrap (docs/DRIVE.md §3.3).
+  const driveNote = $('#passkeys-drive-note');
+  if (driveNote) driveNote.hidden = !(st.drivesWaiting > 0);
   $('#passkey-add').disabled = st.passkeys.length >= st.max;
   refocus();
 }

@@ -79,8 +79,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     button, in the answer and in the admin audit, and waits for a re-seal when there is no check
     yet (`409 not_checked`); Admin → Security → Keys and Import / export drop the key values they
     show when the session ends or changes; a Drive holding something of the release before with
-    no upgrade record waits for its upgrade; the owner's own old wraps stay while a Drive waits
-    after removed passkeys or regenerated codes too; My shares, the page descriptions, API.md
+    no upgrade record waits for its upgrade; a passkey the owner removes, or codes the owner
+    replaces, lose their old wrap at once even while Drives wait (Account says those Drives can
+    still be upgraded with the owner's other sign-in methods and the escrow), while the wraps an
+    AUTHN owner recovery kept stay until nothing waits; My shares, the page descriptions, API.md
     and the architecture notes say which shares are end-to-end and which are not.
 - **CAPTCHA on shares and reverse shares** (role options; SECURITY.md "CAPTCHA on shares",
   docs/API.md, docs/REVERSE.md §5–§8, docs/DRIVE.md §5, §7): Admin → Roles has, for every

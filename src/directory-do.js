@@ -1202,6 +1202,8 @@ export class Directory extends DurableObject {
       required: this.#needsSecondFactor(u),
       max: this.#passkeyMax(u),
       recoveryLeft: this.#recoveryLeft(uid),
+      // The owner's: Drives still waiting for their upgrade (Account notes that they stay upgradable).
+      drivesWaiting: u.role === 'owner' ? this.sql.exec("SELECT COUNT(*) AS c FROM drive_migration WHERE state != 'done'").one().c : 0,
       passkeys: this.sql.exec('SELECT id, name, created, last_used, backed_up FROM passkeys WHERE user_id = ? ORDER BY created', uid).toArray()
         .map((p) => ({ id: p.id, name: p.name, created: p.created, lastUsed: p.last_used, synced: !!p.backed_up })),
     };

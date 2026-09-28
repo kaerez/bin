@@ -9,8 +9,8 @@
 //       cleared; with no check yet it waits for the re-seal;
 //   N5  a Drive holding something of the release before with no upgrade row
 //       waits for its upgrade (and can finish it);
-//   M4  the owner's own old wraps stay while a Drive waits, after regenerated
-//       recovery codes or a removed passkey too.
+//   the owner's old wraps: a credential the owner removes loses its wrap at
+//       once, even while a Drive waits; only those an AUTHN recovery held stay.
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { owner, makeUser, fetchJson, intent, proofFor } from './helpers.js';
@@ -156,7 +156,7 @@ describe('the previous root MEK (re-audit N1, N2)', () => {
   });
 });
 
-describe('the upgrade (re-audit N5 and the M4 leftover)', () => {
+describe('the upgrade (re-audit N5; the owner\'s old wraps)', () => {
   it('N5: a Drive holding an item of the release before with no upgrade row waits for its upgrade', async () => {
     const u = await makeUser('n5-user');
     await enableDrive(u.id);
@@ -179,21 +179,22 @@ describe('the upgrade (re-audit N5 and the M4 leftover)', () => {
     await runInDurableObject(driveOf(u.id), (i, s) => s.storage.sql.exec('DELETE FROM nodes WHERE mek IS NULL AND id != ?', 'root'));
   });
 
-  it('M4: the owner\'s own old wraps stay while a Drive waits, after the owner removes their passkeys and codes too; then they go', async () => {
+  it('owner wrap pruning: the owner\'s "remove all passkeys" drops the old wraps of those credentials at once while a Drive waits; the wraps an AUTHN recovery held stay', async () => {
     const waiting = await makeUser('m4-waiting');
     await enableDrive(waiting.id);
     await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec("INSERT OR REPLACE INTO drive_migration (user_id, state, v1_items, v1_links, updated) VALUES (?, 'pending', 1, 0, 1)", waiting.id));
     await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: oc, body: {} }); // the owner's Drive exists
-    const wraps = () => runInDurableObject(driveOf(ownerId), (i, s) => s.storage.sql.exec('SELECT kind FROM wraps ORDER BY kind').toArray().map((r) => r.kind));
+    const wraps = () => runInDurableObject(driveOf(ownerId), (i, s) => s.storage.sql.exec('SELECT ref FROM wraps ORDER BY ref').toArray().map((r) => r.ref));
     await runInDurableObject(driveOf(ownerId), (i, s) => {
+      // Held by an AUTHN owner recovery (as holdWraps marks them), and one of a credential removed later.
+      s.storage.sql.exec("INSERT INTO wraps (kind, ref, data) VALUES ('recovery', 'heldOwnerCodeRef', 'x')");
+      s.storage.sql.exec("INSERT INTO meta (k, v) VALUES ('wrapsHeld', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", JSON.stringify(['recovery:heldOwnerCodeRef']));
       s.storage.sql.exec("INSERT INTO wraps (kind, ref, data) VALUES ('passkey', 'goneOwnerPasskey', 'x')");
-      s.storage.sql.exec("INSERT INTO wraps (kind, ref, data) VALUES ('recovery', 'goneOwnerCodeRef', 'x')");
     });
-    // The owner's "remove all passkeys" on their own account (the same pruning as regenerated codes or a removed passkey).
-    const regen = await post(`/api/private/admin/users/${ownerId}/passkeys`, STEP);
-    expect(regen.status, await regen.clone().text()).toBe(200);
-    expect(await wraps()).toEqual(['passkey', 'recovery']);
-    // Nothing waits any more: the next change prunes them as before.
+    const rm = await post(`/api/private/admin/users/${ownerId}/passkeys`, STEP);
+    expect(rm.status, await rm.clone().text()).toBe(200);
+    expect(await wraps()).toEqual(['heldOwnerCodeRef']);
+    // Nothing waits any more: the held ones go too with the next change.
     await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec("UPDATE drive_migration SET state = 'done' WHERE user_id = ?", waiting.id));
     const again = await post(`/api/private/admin/users/${ownerId}/passkeys`, STEP);
     expect(again.status, await again.clone().text()).toBe(200);
