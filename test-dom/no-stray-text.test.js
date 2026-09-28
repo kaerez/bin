@@ -20,7 +20,8 @@ const fx = vi.hoisted(() => {
     profile: {
       user: { id: 'o'.repeat(16), username: 'owner', role: 'owner' },
       impersonatedBy: null,
-      limits: { text: true, files: true, maxViews: null, allowUnlimitedViews: true, maxExpireSec: null, maxFileBytes: null, maxFilesPerShare: null },
+      limits: { text: true, files: true, maxViews: null, allowUnlimitedViews: true, maxExpireSec: null, maxFileBytes: null, maxFilesPerShare: null,
+        reverseEdit: true, reverseNoExpiry: true, reverseMaxViews: null, reverseAllowUnlimitedViews: true, reversePassword: 'allow', reverseCaptcha: 'allow' },
       caps: { maxShareBytes: 1 << 20 },
       viewer: { enabled: false },
       apiKeys: { enabled: true, max: 5 },
@@ -60,7 +61,12 @@ vi.mock('../public/js/api.js', async () => {
   return {
     ApiError,
     SESSION_CHANGED_EVENT: 'secbin:session-changed', // as api.js exports it (Admin → Keys listens for it)
-    listShares: vi.fn(async () => ({ rows: [share('a'), share('b', { kind: 'files', status: 'revoked', views_total: null })] })),
+    listShares: vi.fn(async () => ({ rows: [share('a'), share('b', { kind: 'files', status: 'revoked', views_total: null }),
+      // A Receive link with no expiry (expires: null) and views.
+      share('r', { kind: 'reverse', expires: null, views_total: 2, left: 1, used: 1, received: { files: 1, bytes: 5 }, captcha: true })] })),
+    // The Drive's reverse shares (My shares' Edit reads a link's options here).
+    drive: { reverse: vi.fn(async () => ({ reverse: [{ id: 'r', folder: 'root', label: 'label r', created: fx.now - 60, expires: null, status: 'active', views: 2, used: 1, left: 1,
+      maxFiles: null, maxBytes: null, maxFileBytes: null, types: null, captcha: true, password: false, note: false, files: 1, bytes: 5 }] })) },
     updateShare: vi.fn(async () => ({})),
     revokeShare: vi.fn(async () => ({})),
     listKeys: vi.fn(async () => ({ keys: [{ id: 'k1', name: 'laptop', created: fx.now, last_used: null, expires: null }] })),
@@ -129,6 +135,14 @@ describe('no dashboard page shows a stray "null" or "undefined"', () => {
     await import('../public/dashboard/js/shares.js');
     await settle();
     expect(document.querySelectorAll('#shares-table tbody tr').length).toBeGreaterThan(0);
+    expect(strayText()).toEqual([]);
+    // A Receive link: "No expiry", its views, and its Edit row.
+    const row = [...document.querySelectorAll('#shares-table tbody tr')].find((tr) => tr.querySelector('td[data-label="Type"]')?.textContent === 'receive');
+    expect(row.querySelector('td[data-label="Expires"]').textContent).toBe('No expiry');
+    expect(row.querySelector('td[data-label="Views"]').textContent).toBe('1 file received · 1 left of 2 views');
+    [...row.querySelectorAll('button')].find((b) => b.textContent === 'Edit').click();
+    await settle();
+    expect(document.querySelector('.extend-row .rev-edit')).not.toBeNull();
     expect(strayText()).toEqual([]);
   });
 

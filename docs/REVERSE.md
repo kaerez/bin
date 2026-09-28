@@ -1,4 +1,4 @@
-# Reverse shares ("Receive files"): design and interface contract
+# Reverse shares ("Receive"): design and interface contract
 
 Status: the contract reverse shares are built against (task #24). It builds on the Drive
 ([`DRIVE.md`](./DRIVE.md)); a change to anything here is a coordinated change: update it first.
@@ -17,9 +17,11 @@ Status: the contract reverse shares are built against (task #24). It builds on t
   the user's KEK, which the server derives (docs/DRIVE.md §2), so the server can open an upload
   before it is taken in too. A copy of R2 or of the Drive object alone cannot.
 - Revoking, expiring or using up a reverse share stops uploads; files already received stay in the
-  Drive. Deleting the folder ends its reverse shares.
+  Drive. Deleting the folder ends its reverse shares. Where the role allows it, a link can have
+  **no expiry** (it takes files until it is revoked, its views run out or its folder is deleted)
+  and a **views** limit (§5); the user can change a link after making it (§6.1).
 - Reverse shares are listed in My shares and Admin → Shares with `kind = 'reverse'`, and in the
-  Drive's "Receive files…" dialog of the folder.
+  Drive's "Receive…" dialog of the folder.
 - Terminology: the person who owns the Drive is the **user**; "owner" means the admin.
 
 ## 2. What the server sees
@@ -27,9 +29,11 @@ Status: the contract reverse shares are built against (task #24). It builds on t
 - Visible: the reverse share's id, folder id, label, limits, times, status, counters (files and
   bytes received), each received file's ciphertext size and chunk count, the uploader's network
   address (as for every request, for the Guard), and whether a password is set.
-- Never visible: file contents, names, types, folder structure of an upload, the note to the
-  uploader, the link key (the public key, only in the URL fragment), the password, the reverse
-  share's private key, any file key.
+- Never sent in plain text: file contents, names, types, folder structure of an upload, the note
+  to the uploader, the link key (the public key, only in the URL fragment), the password, the
+  reverse share's private key, any file key. The server can still open them (all but the
+  password itself, which it can only test guesses against): the link's private key is sealed
+  under the user's KEK, which the server derives (§1, §3).
 
 ## 3. Keys (client side only)
 
@@ -61,8 +65,10 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   does not help to find ids.
 - **Note to the uploader** (optional, ≤ 1000 characters): AES-256-GCM under
   `HKDF(pub, "", "secbin-reverse/v1 note")`, AAD `secbin-reverse/v1\nnote\n<id>\n`, stored as
-  `{ iv, ct }`. Only link holders can read it.
-- **Password** (optional): the user's browser picks a 16-byte `salt` and Argon2id cost `t`
+  `{ iv, ct }`. Link holders can read it, and so can the server (it can unseal the link's key):
+  like the Drive, it is not end-to-end.
+- **Password** (optional; added, changed or removed later from the user's browser, which
+  rebuilds `pub` from the link's private key): the user's browser picks a 16-byte `salt` and Argon2id cost `t`
   (default 3, 64 MiB, p = 1, as notes). `proof = HKDF(ikm = Argon2id(NFC(password), salt, t),
   salt = pub, info = "secbin-reverse/v1 pw-proof")`; the server stores `salt`, `t` and
   `ph = b64url(SHA-256(proof))`. Because `pub` is only in the link, a copy of the server's data
@@ -139,6 +145,14 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   - `reverse.captcha`: uploaders pass the CAPTCHA first (links made before the option existed:
     1); `rhuman(j, exp)`: the random ids of the CAPTCHA grants a session start has used, until
     they lapse (each grant starts one session).
+  - `reverse.views` / `reverse.used`: the link's views (null: unlimited — every link made before
+    this option) and the views used (counted for every link from then on, unlimited ones too).
+  - `reverse.expires` of a link with **no expiry** is `NO_EXPIRY` (253402300799, the last second
+    of 9999: `src/lib/settings.js`), in the Drive and in the share index alike, so every
+    "expired?" check reads it as not expired and nothing treats it as 0; the API always shows
+    `expires: null` instead. The share index's `ended` column says when a share stopped being
+    active: an ended link with no expiry leaves the index 30 days after it ended (every other
+    share, 30 days after its expiry, as before).
 - The share index row has `captcha` too (My shares and Admin → Shares show it).
 - Received files are ordinary `nodes` rows (kind `file`, parent = the target folder), R2 objects
   under `d/<userId>/<nodeId>/<i>`, counted in the Drive's capacity from the moment they are
@@ -161,12 +175,23 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 ## 5. Options and role options
 
-- **Per reverse share** (chosen by the user): expiry (the role's `maxExpireSec` applies, at most
-  365 days); maximum number of files (`maxFiles`, 1–10 000 or none); maximum total bytes
+- **Per reverse share** (chosen by the user): expiry (the role's `reverseMaxExpireSec` applies, at
+  most 365 days), or **none** where the role's `reverseNoExpiry` allows it; **views** (1–100 000,
+  at most `reverseMaxViews`, or unlimited where `reverseAllowUnlimitedViews` allows it); maximum number of files (`maxFiles`, 1–10 000 or none); maximum total bytes
   (`maxBytes`: each file's content plus its sealed path, metadata and wrap, about 2.5 KB, so empty
   files count too); maximum file size (`maxFileBytes`); allowed file types (`types: { mode: 'allow' |
   'block', rules }`, the file-policy rules of `public/js/filepolicy.js`); a label (plain text, for
-  the user's own lists); an optional note to the uploader (encrypted, §3); an optional password.
+  the user's own lists); an optional note to the uploader (encrypted, §3); an optional password
+  (as the role's `reversePassword` says).
+- **A view** of a reverse share is one upload session granted: the link proof, the CAPTCHA (when
+  the link has it) and the password (when it has one) all passed, and `begin` answered with a
+  grant. Opening the page (`open`) is not a view, and a start that fails (no or a wrong link
+  proof, no or a wrong password, a CAPTCHA missing or spent, a busy link) spends none. When the
+  views run out, `open` and `begin` answer `410 gone` (as a used-up share); sessions already
+  started keep going and may finish their uploads. The count is taken in the user's Drive
+  object in one step with the session it grants, so concurrent starts never get more sessions
+  than the views. A used-up link stays active (My shares: "0 left of N"): the user can raise its
+  views and it takes uploads again.
 - **Role options** (Admin → Roles, Drive section; `LIMITS` in `src/lib/settings.js`):
   `reverseEnabled` (bool, default **false**; also needs `driveEnabled`), `reverseMaxActive`
   (active reverse shares at once, default 10, null = no limit up to 1 000), `reverseMaxBytes`
@@ -175,12 +200,26 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   held to the smaller of its own `maxBytes` and the role's current value, and `open` reports that
   value), `reverseCaptcha` (`allow` / `require` / `off`, default **`require`**: every link had
   the check before this option existed) and `reverseCaptchaDefault` (`on` / `off`, default
-  `on`: the "Require CAPTCHA to send files" box's starting state under `allow`). The owner:
-  allowed, no limits (CAPTCHA `allow`, box on). The public account: none.
+  `on`: the "Require CAPTCHA to send files" box's starting state under `allow`),
+  `reverseMaxExpireSec` (the longest expiry of a link, null = up to 365 days; migration 17 gave
+  every role that had a regular `maxExpireSec` the same value here, since that one held reverse
+  links until then), `reverseNoExpiry` (links with no expiry, default **false**),
+  `reverseMaxViews` (null = up to 100 000), `reverseAllowUnlimitedViews` (default true: every
+  link was unlimited before), `reversePassword` (`allow` / `require` / `off`, default `allow`)
+  with `reversePasswordDefault` (`on` / `off`, default `off`: the password box's starting state
+  under `allow`), and `reverseEdit` (default true: the user may change a link after making it —
+  its expiry, views, limits, CAPTCHA, password and note; the label and revoking are always
+  allowed. Regular shares have no separate "extend" option, so changing expiry or views is part
+  of `reverseEdit`). The expiry, views and `reverseEdit` options can be restricted further for
+  API keys (Admin → Roles, API limits), which reach reverse shares through
+  `/api/private/shares`. The owner: allowed, no limits (CAPTCHA `allow`, box on; password
+  `allow`, box off; no expiry and unlimited views allowed; editing allowed). The public account:
+  none.
 - **The CAPTCHA** (Cloudflare Turnstile; SECURITY.md, *CAPTCHA on shares*): per link, when the
   role allows a choice (`captcha: true|false` on create; `require` forces it on, `off` refuses
-  `true` with `403 captcha_disabled`). Fixed at creation; inactive (not asked for) while the
-  server has no Turnstile keys.
+  `true` with `403 captcha_disabled`). Changed later (where `reverseEdit` allows) within the same
+  mode: `require` refuses turning it off, `off` refuses turning it on. Inactive (not asked for)
+  while the server has no Turnstile keys.
 - **Always:** the user's Drive capacity (`driveMaxBytes`) and largest file (`driveMaxFileBytes`),
   and the Drive's hard ceilings, apply to every upload.
 - File types are declared by the uploader's browser (`declare()`), checked by the server against
@@ -192,22 +231,24 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, captcha }`. The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, views?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; `views` absent or null: unlimited; the role's options of §5 apply: `403 no_expiry_disabled`, `expiry_too_long`, `too_many_views`, `unlimited_views_disabled`, `password_required_by_role`, `password_disabled`). The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
 | `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv, mek }], more, next }` (an item whose field layer does not open comes with `unreadable: true` and no fields: the browser records it as failed); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
 | `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek }` (sealed under the current KEK, checked; `parent` a folder) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
 | `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
 | `DELETE /api/private/drive/nodes/<nodeId>` | discard a received file (as any Drive item) |
-| `POST /api/private/shares/<id>/revoke` | revoke (My shares); `PATCH /api/private/shares/<id>` changes the label or extends the expiry |
+| `POST /api/private/shares/<id>/revoke` | revoke (My shares) |
+| `PATCH /api/private/shares/<id>` | change it (My shares' Edit; a session, or an API key with `manage`): `{ label?, expires? (a time, or null: none), views? (null: unlimited), maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, password? ({ salt, t, ph } or null), note? ({ iv, ct } or null) }` → `{ ok, expires, views, left, used }`. Everything but the label needs `reverseEdit` (`403 reverse_edit_disabled`) and an active link (`409 not_active`), and each value its own option (§5). **Expiry** follows the rule of regular shares — it can only be extended (`400`) — except that any link may be made indefinite (`reverseNoExpiry`) and one with no expiry may be given one. **Views** may be raised or lowered, never below the views already used (`400`, with `used`). The password and the note are made in the user's browser from the link's key (§3), which the session's KEK opens: neither is sent in plain text, but the server, which holds the keys that open the link's key, can read the note and test guesses at the password (not end-to-end, like the uploads). A change that **weakens** the link — its password removed or changed (not added where it had none), its CAPTCHA turned off, no expiry, unlimited views — needs the password proof (`current`) or a passkey (`reauth`), as creating a link does (`400 reauth_required`, `403 wrong_password` / `reauth_failed`), and is refused for API keys (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing. Tightening needs no confirmation. The lock is checked before anything is written; the Drive is changed first and put back if the index then refuses (a lock in between), so the two never differ. The index and the Drive change together; the index holds the CAPTCHA the uploader's `begin` checks. The owner changing a user's link directly (Admin → Shares) may change its label, expiry and views only (`403 user_only`), and a link with no expiry only where the user's role allows it. The target folder of a link does not change |
 
-A row: `{ id, folder, label, created, expires, status, locked, priv, password: bool, note: bool,
-captcha: bool, maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
+A row: `{ id, folder, label, created, expires (null: none), status, locked, priv, password: bool, note: bool,
+captcha: bool, views (null: unlimited), used, left, maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
 has it: `active`, `revoked`, `expired`, `ended`; `pending` = received files waiting to be
 taken in, `failed` = those the browser could not take in). `GET /api/private/drive` adds
 `received` (waiting) and `receivedFailed`.
 `GET /api/private/me` has `caps.reverseEnabled`. My shares and Admin → Shares rows of kind
-`reverse` carry `received: { files, bytes }`; `PATCH /api/private/shares/<id>` accepts `label`
-and a later `expires` (not `views`).
+`reverse` carry `received: { files, bytes }`, `views_total` / `left` / `used` (their views) and
+`expires: null` for a link with no expiry; both lists filter with `expiry=none` (only those) or
+`expiry=set`.
 
 ### 6.2 The uploader (anonymous; `/api/reverse/<id>/…`)
 
@@ -218,17 +259,17 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 
 | Method and path | Headers | Purpose |
 |---|---|---|
-| `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires, captcha, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` (`captcha`: the link has the CAPTCHA and the server has Turnstile keys) |
-| `POST …/human` | `X-Secbin-Turnstile` (action `reverse-upload`) | a CAPTCHA grant for this link: `{ grant, expires }` (10 minutes, bound to the uploader's network; `{ grant: null }` when the link needs none). Needs no link proof and looks nothing else up |
-| `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Human` (a grant) or `X-Secbin-Turnstile` (a token), when the link has the CAPTCHA | a session: `{ grant, expires }`. The CAPTCHA comes before the password: without it no guess is answered (`403 captcha_required`). A grant starts one session, whatever the answer (a wrong password spends it too). The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
+| `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires (null: none), captcha, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` (`captcha`: the link has the CAPTCHA and the server has Turnstile keys). Not a view; `410` once the views are used up. The views are not shown to the uploader |
+| `POST …/human` | `X-Secbin-Turnstile` (action `reverse-upload`) | a CAPTCHA grant for this link: `{ grant, expires }` (10 minutes, bound to the uploader's network; `{ grant: null }` when the link needs none). Needs no link proof. A link whose views are used up (or that ended) answers `410` before any CAPTCHA check, and gets no grant |
+| `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Human` (a grant) or `X-Secbin-Turnstile` (a token), when the link has the CAPTCHA | a session: `{ grant, expires }` — one view (§5): with its views used up, `410` before the CAPTCHA and the password are looked at. The CAPTCHA comes before the password: without it no guess is answered (`403 captcha_required`). A grant starts one session, whatever the answer (a wrong password spends it too). The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
 | `POST …/files` | `X-Reverse-Grant`; JSON `{ id, name, meta, size, wrap, types? }` | reserve one file → `201 { id, uploadToken, chunks }` (limits, capacity) |
 | `PUT …/files/<nodeId>/chunk/<i>` | `X-Upload-Token`; `application/octet-stream` | chunk `i`, exact size |
 | `POST …/files/<nodeId>/finalize` | `X-Reverse-Grant`, `X-Upload-Token` | `{ ok }` (only the session that reserved the file: else `403 bad_grant`) |
 | `DELETE …/files/<nodeId>` | `X-Reverse-Grant`, `X-Upload-Token` | cancel an unfinished upload (its reservation is given back; only the session that reserved it) |
 | `POST …/done` | `X-Reverse-Grant` | end the session: `{ files, bytes }` (logged; one that sent nothing gives its quota back) |
 
-Errors: `404 not_found` (never a reverse share), `410 gone` (revoked, expired, its folder
-deleted, or the user's role no longer allows it; a late visitor with the right link proof is not
+Errors: `404 not_found` (never a reverse share), `410 gone` (revoked, expired, its views used up,
+its folder deleted, or the user's role no longer allows it; a late visitor with the right link proof is not
 counted by the Guard), `409 paused` (`open` / `begin` with the right link proof, for a link an owner's start over paused
 in the previous release: §9), `423 share_locked` (the
 admin locked it),
@@ -281,8 +322,10 @@ many files arrive.
 
 ## 8. UI
 
-- **Drive → Receive files…** (toolbar; the selected folder, else the open one): a dialog with the
-  options of §5, "Require CAPTCHA to send files" (as the role says: a choice, ticked and disabled,
+- **Drive → Receive…** (toolbar; the selected folder, else the open one): a dialog with the
+  options of §5 — "Accept files for", "No expiry" (shown where the role allows it), "Views" with
+  ∞ (unlimited, pre-set where the role allows it), the password box (as `reversePassword` says:
+  a choice pre-set from its default, ticked and disabled, or hidden) —, "Require CAPTCHA to send files" (as the role says: a choice, ticked and disabled,
   or hidden) and the account password (or, left empty, a passkey when the account has one;
   hidden while the owner acts as the user), then the link with copy and a QR code, and the folder's reverse shares (label,
   created, expiry, files and bytes received, status) with Show link and Revoke.
@@ -300,8 +343,21 @@ many files arrive.
   the CAPTCHA passes, gets a grant and returns to the uploader page, which opens the key again
   (SECURITY.md, *CAPTCHA on shares*). Each send uses the grant; after it, or after a wrong
   password, the page offers "Complete the CAPTCHA again" (the files are chosen again then).
-- My shares / Admin → Shares: kind "receive" (filter value `reverse`); the views column shows the
-  files received; revoke, lock and extend (expiry only) as for other shares.
+- My shares / Admin → Shares: kind "receive" (filter value `reverse`); "No expiry" in the Expires
+  column and an Expiry filter (any / no expiry / with an expiry); the views column shows the files
+  received and the views left; revoke and lock as for other shares. My shares has **Edit** for a
+  Receive link (where `reverseEdit` allows it; `public/dashboard/js/reverse-edit.js`), an inline
+  row like the regular shares' Extend: the expiry (keep, extend — or give one to a link with
+  none —, or none), the views (raise, lower to the views used, or unlimited), the limits and
+  file types, the CAPTCHA, the password (keep, change or add, remove) and the note (keep,
+  replace or add, remove), each as the role allows. The password and the note are sealed in the
+  browser, which opens the Drive's keys for it only when one of them changes. While the changes
+  weaken the link (the password removed or changed, the CAPTCHA off, no expiry, unlimited views)
+  the form shows "Your account password (to confirm it is you)" (or a passkey), as the Receive…
+  dialog does; never while the owner acts as the user. The same **Edit**
+  is in the Drive, on each link of the Receive… dialog's list and of a folder's Shares dialog (the
+  dialog shows the form; saving closes it). Admin → Shares changes a Receive link's views and
+  expiry (or none) only.
 - Empty folders in an upload are not sent (only files are received; their paths make the folders).
 
 ## 9. Links of the previous release

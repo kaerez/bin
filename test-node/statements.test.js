@@ -28,6 +28,12 @@ const OVERCLAIMS = [
   /Everything is encrypted in your browser; the server never sees it/i,
   /content of every share is \W*encrypted by the client/i,
   /(?:^|[^a-z] )File names and types are end-to-end encrypted, so/,
+  // Audit of #74, L4: a Receive link's note and password are sealed with the link's key, which
+  // the server can unseal — "never sees" / "only link holders" say more than that.
+  /\bnote\b[^.]{0,160}server never sees/i,
+  /server never sees the note\b/i,
+  /link['’]s key.{0,200}?The server never sees the password/i,
+  /only (?:the )?link holders? can read/i,
 ];
 
 /**
@@ -50,7 +56,7 @@ const FILES = [
 /** Text as read: tags out (a page's words), white space folded. */
 const words = (f) => read(f).replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
 /** A sentence about the Drive, a Drive share or a reverse share (its links, uploads, uploader). */
-const DRIVE_CTX = /\bDrive\b|\breverse[- ]shares?\b|Receive files|upload links?\b|\buploader\b|\buploads?\b/i;
+const DRIVE_CTX = /\bDrive\b|\breverse[- ]shares?\b|[“"]Receive[”"]|Receive…|Receive \(link\)|\bReceive links?\b|\blink['’]s (?:private )?key\b|upload links?\b|\buploader\b|\buploads?\b/i;
 /** …that claims end-to-end or zero-knowledge protection, or that the server cannot see it… */
 const CLAIM = /end-to-end|zero-knowledge|server (?:never|cannot|can['’]t|does not) (?:sees?|reads?|opens?|decrypts?)/i;
 /** …must say where it stops (or that the server holds the keys). */
@@ -67,8 +73,12 @@ describe('the security statements about the Drive and reverse shares (audit B M3
   it('no sentence about the Drive or reverse shares claims end-to-end or zero-knowledge protection without its limit', () => {
     const found = [];
     for (const f of FILES) {
-      for (const sentence of words(f).split(/(?<=[.;!?])\s+|\s[—–]\s|\s\|\s/)) {
-        if (DRIVE_CTX.test(sentence) && CLAIM.test(sentence) && !LIMIT.test(sentence)) found.push(`${f}: "${sentence.trim().slice(0, 200)}"`);
+      const parts = words(f).split(/(?<=[.;!?])\s+|\s[—–]\s|\s\|\s/);
+      for (const [i, sentence] of parts.entries()) {
+        // A part that goes on from the one before (after ";" or ":", lower case) takes its context too
+        // ("…with the link's key; the server never sees them.").
+        const ctx = /^\s*[a-z]/.test(sentence) ? `${parts[i - 1] ?? ''} ${sentence}` : sentence;
+        if (DRIVE_CTX.test(ctx) && CLAIM.test(sentence) && !LIMIT.test(sentence)) found.push(`${f}: "${sentence.trim().slice(0, 200)}"`);
       }
     }
     expect(found).toEqual([]);
@@ -83,7 +93,7 @@ describe('the security statements about the Drive and reverse shares (audit B M3
       expect(s.match(/<meta name="description" content="([^"]*)"/)[1], f).toMatch(/Drive|send files|can decrypt/i);
     }
     // My shares says which of its kinds are end-to-end and which are not.
-    expect(read('public/dashboard/shares/index.html')).toMatch(/Drive shares and “Receive files” links are encrypted in the browser with keys the server holds, so the server can decrypt them/);
+    expect(read('public/dashboard/shares/index.html')).toMatch(/Drive shares and “Receive” links are encrypted in the browser with keys the server holds, so the server can decrypt them/);
     // Every other page's description is about notes and file shares only, and says so.
     for (const f of FILES.filter((x) => x.endsWith('.html') && !DRIVE_PAGES.includes(x))) {
       const d = read(f).match(/<meta name="description" content="([^"]*)"/);
@@ -109,10 +119,10 @@ describe('the security statements about the Drive and reverse shares (audit B M3
     }
     expect(read('public/js/reverse.js')).toMatch(/the server can decrypt what you send/);
     expect(d).toMatch(/A share of Drive files is not/);
-    expect(d).toMatch(/“Receive files” link are encrypted in their browser to a key the server keeps under your Drive keys/);
+    expect(d).toMatch(/“Receive” link are encrypted in their browser to a key the server keeps under your Drive keys/);
     // The glossary says the same.
     const g = read('public/accessibility/index.html');
-    expect(g).toMatch(/<dt>Receive files \(link\)<\/dt>\s*<dd>[^<]*not end-to-end encrypted/);
+    expect(g).toMatch(/<dt>Receive \(link\)<\/dt>\s*<dd>[^<]*not end-to-end encrypted/);
     expect(g).toMatch(/<dt>Drive<\/dt>\s*<dd>[^<]*not end-to-end encrypted/);
   });
 });

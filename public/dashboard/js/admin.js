@@ -96,15 +96,23 @@ const LIMIT_SECTIONS = [
     ['driveEnabled', 'Drive allowed', 'bool'],
     ['driveMaxBytes', 'Drive capacity', 'bytes'],
     ['driveMaxFileBytes', 'Drive: largest file', 'bytes'],
-    ['reverseEnabled', 'Receive files (reverse shares: anyone with the link uploads to a Drive folder)', 'bool'],
-    ['reverseMaxActive', 'Receive files: active links at once', 'int'],
-    ['reverseMaxBytes', 'Receive files: most bytes one link may receive', 'bytes'],
+    ['reverseEnabled', 'Receive (reverse shares: anyone with the link uploads to a Drive folder)', 'bool'],
+    ['reverseMaxActive', 'Receive: active links at once', 'int'],
+    ['reverseMaxBytes', 'Receive: most bytes one link may receive', 'bytes'],
+    ['reverseMaxExpireSec', 'Receive: longest expiry of a link', 'dur'],
+    ['reverseNoExpiry', 'Receive: links with no expiry allowed (they take files until revoked)', 'bool'],
+    ['reverseMaxViews', 'Receive: most views per link (a view: one visit that starts sending files)', 'int'],
+    ['reverseAllowUnlimitedViews', 'Receive: unlimited views allowed', 'bool'],
+    ['reverseEdit', 'Receive: users may change a link after making it (expiry, views, limits, CAPTCHA, password, note)', 'bool'],
     // Shown while the role can use the Drive and reverse shares.
-    ['reverseCaptcha', 'CAPTCHA on reverse shares (Receive files)', 'captcha', { which: 'reverse', defKey: 'reverseCaptchaDefault', needs: ['driveEnabled', 'reverseEnabled'] }],
+    ['reversePassword', 'Uploader password on Receive links', 'captcha', { which: 'password', defKey: 'reversePasswordDefault', needs: ['driveEnabled', 'reverseEnabled'] }],
+    ['reverseCaptcha', 'CAPTCHA on reverse shares (Receive)', 'captcha', { which: 'reverse', defKey: 'reverseCaptchaDefault', needs: ['driveEnabled', 'reverseEnabled'] }],
   ]],
 ];
 const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
-const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
+// As API_LIMIT_KEYS (src/lib/settings.js): an API key with "manage" reaches reverse shares too.
+const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth',
+  'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reverseEdit'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
   'Any file as plain text': [{ match: 'any', value: '', renderer: 'text' }],
@@ -316,17 +324,24 @@ function defaultText(key, type, opt) {
   const v = SETTING_DEFAULT[key] ? d.settings?.[SETTING_DEFAULT[key]] : d.limits?.[key];
   if (v === undefined) return '';
   if (type === 'enum') return `default: ${opt.values.find(([k]) => k === v)?.[1] ?? v}`;
-  if (type === 'captcha') return `default: ${captchaModeText(v, opt.which)}${v === 'allow' ? `, ${CAPTCHA_DEFAULTS.find(([k]) => k === d.limits?.[opt.defKey])?.[1] ?? ''}` : ''}`;
+  if (type === 'captcha') return `default: ${captchaModeText(v, opt.which)}${v === 'allow' ? `, ${modeDefaults(opt.which).find(([k]) => k === d.limits?.[opt.defKey])?.[1] ?? ''}` : ''}`;
   return `default: ${optText(type, v, opt)}`;
 }
 
-// The CAPTCHA role options (shareCaptcha / reverseCaptcha and their per-share defaults).
-const captchaModes = (which) => [
+// The CAPTCHA role options (shareCaptcha / reverseCaptcha and their per-share
+// defaults), and the uploader password of Receive links (reversePassword and
+// its per-link default), which work the same way (which: 'password').
+const captchaModes = (which) => (which === 'password' ? [
+  ['allow', 'Allow a password (user chooses per link)'],
+  ['require', 'Require a password on every link'],
+  ['off', 'Disable passwords'],
+] : [
   ['allow', 'Allow CAPTCHA (user chooses per share)'],
   ['require', `Require CAPTCHA for all ${which === 'reverse' ? 'reverse shares' : 'shares'}`],
   ['off', 'Disable CAPTCHA'],
-];
+]);
 const CAPTCHA_DEFAULTS = [['on', 'CAPTCHA on'], ['off', 'CAPTCHA off']];
+const modeDefaults = (which) => (which === 'password' ? [['on', 'password on'], ['off', 'password off']] : CAPTCHA_DEFAULTS);
 const captchaModeText = (v, which) => captchaModes(which).find(([k]) => k === v)?.[1] ?? String(v);
 let radioSeq = 0;
 
@@ -350,15 +365,17 @@ function captchaInput({ key, label, opt, rows, inherited, explicit, active }) {
     return `Same as Default (${texts.find(([x]) => x === v)?.[1] ?? v ?? '—'})`;
   };
   const modeChoices = [...(explicit ? [] : [['inherit', inh(key, captchaModes(opt.which))]]), ...captchaModes(opt.which)];
-  const defChoices = [...(explicit ? [] : [['inherit', inh(opt.defKey, CAPTCHA_DEFAULTS)]]), ...CAPTCHA_DEFAULTS];
+  const defChoices = [...(explicit ? [] : [['inherit', inh(opt.defKey, modeDefaults(opt.which))]]), ...modeDefaults(opt.which)];
   const modes = group(`captcha-${key}-${seq}`, modeChoices, initial(key));
   const defs = group(`captcha-${opt.defKey}-${seq}`, defChoices, initial(opt.defKey));
   const defId = `captcha-${opt.defKey}-${seq}-legend`;
-  const defBox = h('fieldset.captcha-default', {}, h('legend', { id: defId, text: 'Default for new shares:' }), ...defs.map((x) => x.el));
+  const defBox = h('fieldset.captcha-default', {}, h('legend', { id: defId, text: opt.which === 'password' ? 'Default for new links:' : 'Default for new shares:' }), ...defs.map((x) => x.el));
   const noteId = `captcha-${key}-${seq}-note`;
-  const note = h(`p.mono${active ? '.muted' : '.warn'}`, { id: noteId, text: active
-    ? (opt.which === 'reverse' ? 'Uploaders complete the CAPTCHA before they can send files. Stored per link when it is created.' : 'Recipients complete the CAPTCHA before anything of a share is sent to them; the API and the CLI cannot open such a share. Stored per share when it is created.')
-    : 'The CAPTCHA is not active until Turnstile is configured (Security → CAPTCHA): until then it is saved but not asked for.' });
+  const note = h(`p.mono${active || opt.which === 'password' ? '.muted' : '.warn'}`, { id: noteId, text: opt.which === 'password'
+    ? 'Uploaders enter it before they can send files; it only lets them in (the user never needs it, and it encrypts nothing). Stored per link; where the role allows editing, the user can add, change or remove it later, within this option.'
+    : active
+      ? (opt.which === 'reverse' ? 'Uploaders complete the CAPTCHA before they can send files. Stored per link; where the role allows editing, the user can change it later, within this option.' : 'Recipients complete the CAPTCHA before anything of a share is sent to them; the API and the CLI cannot open such a share. Stored per share when it is created.')
+      : 'The CAPTCHA is not active until Turnstile is configured (Security → CAPTCHA): until then it is saved but not asked for.' });
   const el = h('fieldset.captcha-role', { 'aria-describedby': noteId }, h('legend', { text: label }), ...modes.map((x) => x.el), defBox, note);
   const checked = (list) => list.find((x) => x.r.checked)?.r.value ?? 'inherit';
   const read = (list) => ({ get value() { const v = checked(list); return v === 'inherit' ? 'inherit' : `enum:${v}`; } });
@@ -387,7 +404,7 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
     if (type === 'captcha') {
       const c = captchaInput({ key, label, opt, rows, inherited, explicit, active: !!overview?.turnstile });
       const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
-      const effText = eff === undefined ? '' : `effective: ${captchaModeText(eff, opt.which)}${eff === 'allow' && effective[opt.defKey] ? `, ${CAPTCHA_DEFAULTS.find(([k]) => k === effective[opt.defKey])?.[1]}` : ''}`;
+      const effText = eff === undefined ? '' : `effective: ${captchaModeText(eff, opt.which)}${eff === 'allow' && effective[opt.defKey] ? `, ${modeDefaults(opt.which).find(([k]) => k === effective[opt.defKey])?.[1]}` : ''}`;
       const row = h('div.limit-row.captcha-row', {}, c.el, h('span.mono.muted', { text: [defaultText(key, type, opt), effText].filter(Boolean).join(' · ') }));
       box.appendChild(row);
       ctls.push({ key, type, mode: c.mode }, { key: opt.defKey, type, mode: c.def });
@@ -823,6 +840,7 @@ async function ownerRole(box) {
   box.append(h('h2.section-title', { text: 'Owner role' }),
     h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
     h('p.mono.muted', { id: 'owner-captcha', text: `CAPTCHA: allowed on shares and on reverse shares — you choose for each one (the box starts off for shares and on for reverse shares).${overview.turnstile ? '' : ' Not active until Turnstile is configured (Security → CAPTCHA).'}` }),
+    h('p.mono.muted', { id: 'owner-reverse', text: 'Receive links: any expiry up to 365 days, or none; any number of views, or unlimited; an uploader password if you want one (the box starts off); and you can change a link after making it.' }),
     h('div.card.stack', {},
       h('h3.field-label', { text: 'Your sessions' }), dur('session.idleSec', 'Sign out after being idle for'), dur('session.absSec', 'Sign out in any case after'),
       h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
@@ -1136,6 +1154,7 @@ const PUBLIC_ID = 'public-user-0000';
 const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs', 'receiptLanguages',
   'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec',
   'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes', 'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes',
+  'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reversePassword', 'reversePasswordDefault', 'reverseEdit',
   'shareCaptcha', 'shareCaptchaDefault', 'reverseCaptcha', 'reverseCaptchaDefault'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],

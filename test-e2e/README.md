@@ -107,7 +107,7 @@ BASE=http://localhost:8787 WT=$PWD node test-e2e/csrf.mjs
 
 What it covers (SECURITY.md, *CAPTCHA on shares*), with the real Cloudflare Turnstile widget and
 Cloudflare's testing keys (they always pass): Admin → Roles' CAPTCHA radios (and "Default for new
-shares" under "Allow"); the composer's, the Drive Share dialog's and the Receive files dialog's
+shares" under "Allow"); the composer's, the Drive Share dialog's and the Receive dialog's
 boxes; a protected note, file share, Drive share and reverse link, each through its check page
 (the Turnstile CSP; the link's key not in its address, page or `sessionStorage`; Continue disabled
 until the CAPTCHA passes) and back on its strict page (the key back, no Turnstile script), a
@@ -123,6 +123,25 @@ npx wrangler dev --port 8787 --persist-to .wrangler/captcha-state \
   --var TURNSTILE_SITEKEY:1x00000000000000000000AA --var TURNSTILE_SECRET:1x0000000000000000000000000000000AA
 WT=$PWD BASE=http://localhost:8787 node test-e2e/captcha.mjs
 # behind an HTTPS-intercepting proxy: PROXY_SPKI=<its CA's SPKI hash> (HTTPS_PROXY is used when set)
+```
+
+## `reverse-parity.mjs` — Receive links with the options of regular shares
+
+What it covers ([docs/REVERSE.md](../docs/REVERSE.md) §5, §6.1, §8): the Default role's "no
+expiry" option off, with its default hint, in Admin → Roles; a user whose role allows it makes a
+Receive link with no expiry, an uploader password and 2 views in the Drive's Receive… dialog; an
+anonymous uploader sends a file twice and is refused the third time (the views are used up); My
+shares shows "No expiry" and "0 left of 2 views", filters by "no expiry", and Edit changes the
+password and the views (4); the old password is then refused and the new one sends; Edit gives
+the link an expiry, which the uploader page shows, and a shorter one is refused; the files are in
+the Drive; nothing on the wire names a file or carries a password; the audit names what changed,
+never a value; axe (WCAG 2.2 A/AA and the AAA contrast rule) on the new dialog and the Edit row;
+no page errors or CSP / Trusted Types violations. It needs a fresh server (no owner yet):
+
+```sh
+rm -rf .wrangler/rp-state
+npx wrangler dev --port 9170 --persist-to .wrangler/rp-state
+WT=$PWD BASE=http://localhost:9170 node test-e2e/reverse-parity.mjs
 ```
 
 ## `quotas.mjs` — role quota kinds

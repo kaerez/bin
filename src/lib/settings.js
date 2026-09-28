@@ -263,7 +263,42 @@ export const LIMITS = {
   shareCaptchaDefault: { type: 'enum', values: CAPTCHA_DEFAULTS, def: 'off', owner: 'off' },
   reverseCaptcha:      { type: 'enum', values: CAPTCHA_MODES, def: 'require', owner: 'allow' },
   reverseCaptchaDefault: { type: 'enum', values: CAPTCHA_DEFAULTS, def: 'on', owner: 'on' },
+  // Reverse shares, as regular shares have them (docs/REVERSE.md §5): the
+  // longest expiry (null: up to MAX_TTL), links with no expiry at all (off by
+  // default: such a link takes uploads until it is revoked), the most views a
+  // link may have (a view: one upload session granted, after the link proof,
+  // the CAPTCHA and the password) and whether a link may have unlimited
+  // views; the uploader password ("allow": the user chooses per link, the
+  // *Default option pre-sets the box; "require": every link has one; "off":
+  // none); and whether the user may change a link after creating it (its
+  // expiry and views, limits, CAPTCHA, password and note; the label and
+  // revoking stay allowed). The owner: everything, no limits. The public
+  // account has no reverse shares (PUBLIC_NA_LIMITS).
+  reverseMaxExpireSec: { type: 'int', min: 60, max: MAX_TTL, nullable: true, def: null, owner: null },
+  reverseNoExpiry:     { type: 'bool', def: false, owner: true },
+  reverseMaxViews:     { type: 'int', min: 1, max: MAX_VIEWS, nullable: true, def: null, owner: null },
+  reverseAllowUnlimitedViews: { type: 'bool', def: true, owner: true },
+  reversePassword:     { type: 'enum', values: CAPTCHA_MODES, def: 'allow', owner: 'allow' },
+  reversePasswordDefault: { type: 'enum', values: CAPTCHA_DEFAULTS, def: 'off', owner: 'off' },
+  reverseEdit:         { type: 'bool', def: true, owner: true },
 };
+
+/** The reverse-share role options (none applies to the public account). */
+export const REVERSE_KEYS = ['reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes', 'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews',
+  'reverseAllowUnlimitedViews', 'reversePassword', 'reversePasswordDefault', 'reverseEdit'];
+/** The password modes of reverse shares (reversePassword) and their per-link defaults (reversePasswordDefault). */
+export const PASSWORD_MODES = CAPTCHA_MODES;
+export const PASSWORD_DEFAULTS = CAPTCHA_DEFAULTS;
+/**
+ * The stored expiry of a reverse share with none (the reverseNoExpiry role
+ * option): the last second of the year 9999, so every "expires <= now" check
+ * — in SQL and in code — keeps reading it as not expired, and nothing ever
+ * treats it as 0 or NaN. The API never shows it: every response says
+ * `expires: null` instead (apiExpiry).
+ */
+export const NO_EXPIRY = 253402300799;
+/** A stored expiry as the API shows it: null for NO_EXPIRY (no expiry). */
+export const apiExpiry = (v) => (Number.isSafeInteger(v) && v >= NO_EXPIRY ? null : v);
 
 /**
  * Whether a new share of `which` ('share' or 'reverse') gets the CAPTCHA, from
@@ -284,6 +319,20 @@ export function resolveCaptcha(L, which, requested) {
     return { ok: false, error: 'captcha_disabled', message: which === 'reverse' ? 'CAPTCHA is disabled for reverse shares of your role.' : 'CAPTCHA is disabled for shares of your role.' };
   }
   return { ok: true, captcha: false };
+}
+
+/**
+ * Whether a reverse share may have (`has`: true) or lack (false) an uploader
+ * password under the resolved limits `L` (reversePassword): "require" refuses
+ * a link without one, "off" refuses one → { ok: true } or { ok: false,
+ * error, message }. The browser pre-sets its box from reversePasswordDefault;
+ * the server decides.
+ */
+export function checkReversePassword(L, has) {
+  const mode = L.reversePassword;
+  if (mode === 'require' && !has) return { ok: false, error: 'password_required_by_role', message: 'Your role requires a password on every upload link.' };
+  if (mode === 'off' && has) return { ok: false, error: 'password_disabled', message: 'Upload-link passwords are disabled for your role.' };
+  return { ok: true };
 }
 
 /** Hard ceiling on active reverse shares per account, whatever the role says. */
@@ -308,8 +357,12 @@ export const API_SCOPES = Object.freeze(['notes', 'files', 'policy', 'read', 'ma
 export const DEFAULT_KEY_SCOPES = Object.freeze(['notes', 'files', 'policy']);
 
 // Keys the API channel may restrict further (never widen).
+// Reverse shares are created in the browser only, but an API key with "manage"
+// reaches them (PATCH and revoke /api/private/shares/<id>): their expiry,
+// views and edit options can be restricted for the API too.
 export const API_LIMIT_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec',
-  'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth'];
+  'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth',
+  'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reverseEdit'];
 
 export function checkLimit(key, value, channel = 'all') {
   const s = Object.prototype.hasOwnProperty.call(LIMITS, key) ? LIMITS[key] : null;

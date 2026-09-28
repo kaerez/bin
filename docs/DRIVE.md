@@ -14,7 +14,7 @@ anything in this file is a coordinated change: update it first.
   share goes; the drive data stays**. Shares reference the drive's stored ciphertext; nothing is
   copied or re-encrypted.
 - Deleting a drive item ends every share that references it (recipients get "gone").
-- **Reverse shares** ("Receive files…", [`REVERSE.md`](./REVERSE.md)): anonymous uploads land in
+- **Reverse shares** ("Receive…", [`REVERSE.md`](./REVERSE.md)): anonymous uploads land in
   a Drive folder the user chooses, encrypted to the link's key until the user's browser takes
   them in.
 - Terminology: the person who owns a drive is the **user**; "owner" means the admin.
@@ -380,7 +380,9 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   never completes (the browser deletes the unfinished file, or the purge removes it). Files
   taken in from reverse shares are counted under Receive (docs/REVERSE.md §6.2), not here.
 - Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
-  `reverseCaptcha`, `reverseCaptchaDefault`): [`REVERSE.md`](./REVERSE.md) §5. The reverse-share
+  `reverseMaxExpireSec`, `reverseNoExpiry`, `reverseMaxViews`, `reverseAllowUnlimitedViews`,
+  `reversePassword`, `reversePasswordDefault`, `reverseEdit`, `reverseCaptcha`,
+  `reverseCaptchaDefault`): [`REVERSE.md`](./REVERSE.md) §5. The reverse-share
   CAPTCHA is shown in the role editor only while the role has the Drive and reverse shares.
 - New keys join the Default role (a Directory migration materialises them) and appear in the
   role editors under a **Drive** section.

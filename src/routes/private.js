@@ -20,6 +20,8 @@ import { requireTurnstile, turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turns
 import { creationOptions, requestOptions } from '../lib/webauthn.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { handleDrive, syncCredentialWraps, drivePasswordChanged } from './drive.js';
+import { changeReverse } from './reverse.js';
+import { apiExpiry } from '../lib/settings.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const EXTRA_KEYS = ['max', 'quota', 'until', 'policy', 'refused'];
@@ -446,31 +448,38 @@ async function liveStatus(env, id, uid) {
 export async function withLiveStatus(env, dir, rows, uid = null) {
   return Promise.all(rows.map((x) => ('captcha' in x ? { ...x, captcha: !!x.captcha } : x)).map(async (r) => {
     const received = r.kind === 'reverse' ? { received: { files: 0, bytes: 0 } } : {};
+    // A reverse share with no expiry: the API says null (src/lib/settings.js NO_EXPIRY).
+    const out = (x) => ({ ...x, expires: apiExpiry(x.expires) });
     if (r.status !== 'active') {
       if (r.kind === 'reverse') {
         const s = await liveStatus(env, r.id, r.user_id ?? uid);
         received.received = { files: s.files ?? 0, bytes: s.bytes ?? 0 };
       }
-      return { ...r, left: null, ...received };
+      return out({ ...r, left: null, ...received });
     }
     const s = await liveStatus(env, r.id, r.user_id ?? uid);
     if (r.kind === 'reverse') received.received = { files: s.files ?? 0, bytes: s.bytes ?? 0 };
     if (s.status === 'gone') {
       await dir.markShareEnded(r.id, s.state === 'expired' ? 'expired' : 'ended');
-      return { ...r, status: s.state === 'expired' ? 'expired' : 'ended', left: 0, ...received };
+      return out({ ...r, status: s.state === 'expired' ? 'expired' : 'ended', left: 0, ...received });
     }
     // A paused reverse link (the owner started over; docs/DRIVE.md §3.2) is still active: it resumes on a restore.
     if (s.paused) received.paused = true;
-    return { ...r, views_total: s.views ?? r.views_total, left: s.left ?? null, expires: s.expires ?? r.expires, ...received };
+    // A reverse share's views live in its Drive (null there: unlimited).
+    const views = r.kind === 'reverse' && s.status === 'ok' ? { views_total: s.views ?? null, left: s.left ?? null, used: s.used ?? 0 }
+      : { views_total: s.views ?? r.views_total, left: s.left ?? null };
+    return out({ ...r, ...views, expires: s.expires ?? r.expires, ...received });
   }));
 }
 
 async function listShares(env, a, url) {
   const q = (url.searchParams.get('q') || '').slice(0, 100);
   const status = ['active', 'revoked', 'expired', 'consumed', 'deleted', 'ended'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : '';
+  // expiry=none: only the reverse shares with no expiry; expiry=set: only shares that expire.
+  const expiry = ['none', 'set'].includes(url.searchParams.get('expiry')) ? url.searchParams.get('expiry') : '';
   const offset = Number(url.searchParams.get('offset')) || 0;
   const dir = directory(env);
-  const { rows, total } = await dir.listShares(a.user.id, { q, status, limit: 50, offset });
+  const { rows, total } = await dir.listShares(a.user.id, { q, status, expiry, limit: 50, offset });
   return { rows: await withLiveStatus(env, dir, rows, a.user.id), total };
 }
 
@@ -480,7 +489,7 @@ async function updateShare(request, env, a, id, info) {
   const row = await dir.getShare(a.user.id, id);
   if (!row) return err(404, 'not_found', 'Share not found.');
   if (row.locked) return shareLocked();
-  return changeShare(env, dir, row, info, body, { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId });
+  return changeShare(env, dir, row, info, body, { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId, request, impersonating: !!a.actor });
 }
 
 const shareLocked = () => err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
@@ -491,14 +500,15 @@ const shareLocked = () => err(423, 'share_locked', 'The administrator has locked
  * is bounded only by the hard protocol maxima and may change locked shares.
  * Views and expiry can only grow — the stores cannot shrink them safely.
  */
-export async function changeShare(env, dir, row, info, body, { uid, actor, admin = null, channel = 'all', keyId = null }) {
+export async function changeShare(env, dir, row, info, body, { uid, actor, admin = null, channel = 'all', keyId = null, request = null, impersonating = false }) {
+  // A reverse share has more to change (its limits, CAPTCHA, password and note): src/routes/reverse.js.
+  if (info.reverse) return changeReverse(env, dir, row, body, { uid, actor, admin, channel, keyId, request, impersonating });
   const id = row.id;
   const patch = {};
   if (body.label !== undefined) patch.label = body.label;
   const change = {};
   if (body.views !== undefined) {
     if (body.views !== null && !(Number.isSafeInteger(body.views) && body.views >= 1 && body.views <= MAX_VIEWS)) return err(400, 'invalid_views', 'Invalid views.');
-    if (info.reverse) return err(400, 'invalid', 'A reverse share has no views: set its file and byte limits when creating it.');
     if (!info.burn && !info.file) return err(400, 'invalid', 'This note already has unlimited views.');
     change.views = body.views;
   }
@@ -520,7 +530,6 @@ export async function changeShare(env, dir, row, info, body, { uid, actor, admin
     let r;
     if (info.file) r = await fileStub(env, id).extend(change);
     else if (info.burn) r = await burnStub(env, id).extend(change);
-    else if (info.reverse) r = await driveStub(env, row.user_id ?? uid).extendReverse(row.user_id ?? uid, id, change.expires);
     else r = await extendKv(env, id, change);
     if (r.status === 'invalid') return err(400, 'invalid', r.message);
     if (r.status !== 'ok') {

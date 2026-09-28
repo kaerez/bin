@@ -1,5 +1,5 @@
 // captcha.js — the per-share CAPTCHA choice where a share is created (the
-// composer, the Drive's Share and Receive files dialogs), from the creator's
+// composer, the Drive's Share and Receive dialogs), from the creator's
 // role options (src/lib/settings.js: shareCaptcha / reverseCaptcha and their
 // defaults): "allow" shows the box pre-set from the role's default, "require"
 // shows it ticked and disabled, "off" hides it. The server applies the role

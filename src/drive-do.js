@@ -26,6 +26,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { timingSafeEqualHex, utf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, TAG } from '../public/js/files.js';
 import { chunkHash, ciphertextHash } from '../public/js/drivekeys.js';
+import { NO_EXPIRY } from './lib/settings.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, parent TEXT, kind TEXT NOT NULL CHECK(kind IN ('dir','file')),
@@ -78,6 +79,10 @@ CREATE TABLE IF NOT EXISTS rhuman (j TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 // its link key is sealed under (null: sealed by the release before).
 // reverse.retired: a link of the release before whose key the upgrade could
 // not open (it was ended and its key removed: docs/DRIVE.md §3.3).
+// reverse.views / used: the link's views (null: unlimited) and the views used
+// — a view is one upload session granted (docs/REVERSE.md §5); counted for
+// every link from this release on. reverse.expires is NO_EXPIRY for a link
+// with no expiry (src/lib/settings.js): never expired, never pruned by it.
 // archive_*: an owner's Drive started over in the release before; kept as it
 // is until the owner deletes it (Admin → Security → Keys); nothing here opens
 // it, and it does not count towards the Drive's capacity.
@@ -92,6 +97,7 @@ const COLUMNS = [
   ['upchunks', 'h', 'TEXT'], ['reverse', 'mek', 'TEXT'],
   ['reverse', 'captcha', 'INTEGER NOT NULL DEFAULT 1'],
   ['reverse', 'retired', 'INTEGER'],
+  ['reverse', 'views', 'INTEGER'], ['reverse', 'used', 'INTEGER NOT NULL DEFAULT 0'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
 const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify', 'wrapsHeld'];
@@ -142,6 +148,10 @@ const NOT_ARCHIVED_KEY = 'rs NOT IN (SELECT id FROM reverse WHERE agen IS NOT NU
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
+/** The reverse columns updateReverse may change (and restoreReverse put back). */
+const REVERSE_EDITABLE = ['expires', 'views', 'ph', 'salt', 't', 'note', 'captcha', 'opts'];
+/** A reverse share's views left (null: unlimited). */
+const viewsLeft = (r) => (r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)));
 /** The smaller of two byte limits (null: none). */
 const capBytes = (a, b) => (a === null || a === undefined ? b ?? null : b === null || b === undefined ? a : Math.min(a, b));
 
@@ -1055,6 +1065,7 @@ export class Drive extends DurableObject {
       id: r.id, folder: r.folder, created: r.created, expires: r.expires, status: this.#reverseState(r),
       password: !!r.ph, note: !!r.note, captcha: r.captcha !== 0, maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null,
       maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null, files: r.files, bytes: r.bytes,
+      views: r.views ?? null, used: r.used ?? 0, left: viewsLeft(r),
       pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NULL", r.id).one().c,
       failed: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NOT NULL", r.id).one().c,
       // Received items kept in an archive (the owner started over), sealed as they arrived.
@@ -1140,9 +1151,13 @@ export class Drive extends DurableObject {
     this.#dropEndedReverse();
     if (this.sql.exec('SELECT COUNT(*) AS c FROM reverse').one().c >= MAX_REVERSE) return fail(409, 'too_many_reverse', `A Drive holds at most ${MAX_REVERSE} reverse shares.`);
     const t = nowSec();
-    this.sql.exec(`INSERT INTO reverse (id, folder, priv, mek, lh, ph, salt, t, note, opts, created, expires, status, captcha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
-      rec.id, rec.folder, rec.priv, rec.mek, rec.lh, rec.ph ?? null, rec.salt ?? null, rec.t ?? null, rec.note ?? null, JSON.stringify(rec.opts), t, t + rec.ttl, rec.captcha === true ? 1 : 0);
-    return { ok: true, id: rec.id, created: t, expires: t + rec.ttl };
+    // ttl null: no expiry (the role allowed it: src/directory-do.js claimReverse).
+    const expires = rec.ttl === null ? NO_EXPIRY : t + rec.ttl;
+    const views = Number.isSafeInteger(rec.views) && rec.views >= 1 ? rec.views : null;
+    this.sql.exec(`INSERT INTO reverse (id, folder, priv, mek, lh, ph, salt, t, note, opts, created, expires, status, captcha, views, used)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 0)`,
+    rec.id, rec.folder, rec.priv, rec.mek, rec.lh, rec.ph ?? null, rec.salt ?? null, rec.t ?? null, rec.note ?? null, JSON.stringify(rec.opts), t, expires, rec.captcha === true ? 1 : 0, views);
+    return { ok: true, id: rec.id, created: t, expires };
   }
 
   /** Every reverse share (or one folder's), newest first, with its sealed private key. */
@@ -1161,8 +1176,9 @@ export class Drive extends DurableObject {
     if (!r) return { status: 'gone' };
     const st = this.#reverseState(r);
     // Paused (the owner started over) is not ended: the link resumes when the archive is restored.
-    if (st === 'paused') return { status: 'ok', paused: true, files: r.files, bytes: r.bytes, expires: r.expires };
-    return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires } : { status: 'gone', state: st, files: r.files, bytes: r.bytes };
+    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0 };
+    if (st === 'paused') return { status: 'ok', paused: true, files: r.files, bytes: r.bytes, expires: r.expires, ...v };
+    return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires, ...v } : { status: 'gone', state: st, files: r.files, bytes: r.bytes, ...v };
   }
 
   /**
@@ -1187,14 +1203,68 @@ export class Drive extends DurableObject {
     });
   }
 
-  /** A later expiry (My shares' Extend; a paused link too: it has not ended). */
-  async extendReverse(uid, id, expires) {
+  /**
+   * Change a reverse share (My shares' Edit; a paused link too: it has not
+   * ended), all at once or nothing — values arrive validated and allowed by
+   * the role (the Worker checked them). `change`:
+   * - `expires`: as for regular shares, an expiry can only be extended —
+   *   except that a link with no expiry (NO_EXPIRY) may be given one (any
+   *   time in the future), and any link may be given none;
+   * - `views` (null: unlimited): raised, or lowered, never below the views
+   *   already used (a used-up link takes new sessions again once raised);
+   * - `password` ({ ph, salt, t } or null: none): the uploader's gate only;
+   *   the link's lockout state stays as it is;
+   * - `note` (the sealed note as stored, or null), `opts` (a partial
+   *   { maxFiles, maxBytes, maxFileBytes, types }), `captcha` (true / false).
+   * Sessions already started keep going. → { status: 'ok' | 'gone' | 'invalid', … }.
+   */
+  async updateReverse(uid, id, change = {}) {
     this.#bind(uid);
     const r = this.#reverse(id);
     if (!r || !['active', 'paused'].includes(this.#reverseState(r))) return { status: 'gone' };
-    if (!Number.isSafeInteger(expires) || expires <= r.expires) return { status: 'invalid', message: 'Expiry can only be extended.' };
-    this.sql.exec('UPDATE reverse SET expires = ? WHERE id = ?', expires, id);
-    return { status: 'ok', expires };
+    const used = r.used ?? 0;
+    const set = {};
+    if (change.expires !== undefined) {
+      const e = change.expires;
+      if (!Number.isSafeInteger(e) || e <= nowSec()) return { status: 'invalid', message: 'Expiry must be in the future.' };
+      if (e !== r.expires) {
+        if (r.expires < NO_EXPIRY && e < NO_EXPIRY && e < r.expires) return { status: 'invalid', message: 'Expiry can only be extended.' };
+        set.expires = Math.min(e, NO_EXPIRY);
+      }
+    }
+    if (change.views !== undefined) {
+      const v = change.views;
+      if (v !== null && !(Number.isSafeInteger(v) && v >= 1)) return { status: 'invalid', message: 'Invalid views.' };
+      if (v !== null && v < used) return { status: 'invalid', message: `Views cannot be fewer than the ${used} already used.`, used };
+      set.views = v;
+    }
+    if (change.password !== undefined) {
+      const p = change.password;
+      Object.assign(set, p === null ? { ph: null, salt: null, t: null } : { ph: p.ph, salt: p.salt, t: p.t });
+    }
+    if (change.note !== undefined) set.note = change.note;
+    if (change.captcha !== undefined) set.captcha = change.captcha ? 1 : 0;
+    if (change.opts !== undefined) {
+      let opts = {};
+      try { opts = JSON.parse(r.opts); } catch { /* none */ }
+      for (const k of ['maxFiles', 'maxBytes', 'maxFileBytes', 'types']) if (change.opts[k] !== undefined) opts[k] = change.opts[k];
+      set.opts = JSON.stringify(opts);
+    }
+    // Column names come only from the fixed keys above; every value is bound.
+    const cols = Object.keys(set);
+    // What they held (restoreReverse puts it back when the share index refuses the change).
+    const prev = Object.fromEntries(cols.map((c) => [c, r[c] ?? null]));
+    if (cols.length) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => set[c]), id);
+    const n = this.#reverse(id);
+    return { status: 'ok', expires: n.expires, views: n.views ?? null, used: n.used ?? 0, left: viewsLeft(n), captcha: n.captcha !== 0, password: !!n.ph, prev };
+  }
+
+  /** Undo an updateReverse (`prev`, as it returned it): only the columns it can change. */
+  async restoreReverse(uid, id, prev = {}) {
+    this.#bind(uid);
+    const cols = Object.keys(prev).filter((c) => REVERSE_EDITABLE.includes(c));
+    if (cols.length && this.#reverse(id)) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => prev[c]), id);
+    return { ok: true };
   }
 
   /**
@@ -1212,7 +1282,8 @@ export class Drive extends DurableObject {
     const o = this.#reverseOut(r, { priv: false });
     o.maxBytes = capBytes(o.maxBytes, roleMaxBytes);
     return {
-      status: 'ok', lh: r.lh, ph: r.ph,
+      // Its views used up: no new session (sessions already started keep going).
+      status: 'ok', lh: r.lh, ph: r.ph, usedUp: viewsLeft(r) === 0,
       head: {
         note: r.note ? JSON.parse(r.note) : null,
         password: r.ph ? { salt: r.salt, t: r.t, lockedUntil: r.pwlock && r.pwlock > nowSec() ? r.pwlock : null } : null,
@@ -1239,6 +1310,8 @@ export class Drive extends DurableObject {
     const st = this.#reverseState(r);
     if (st === 'paused') return { status: 'paused' };
     if (st !== 'active') return { status: 'gone' };
+    // Its views used up: nothing below is answered (no grant spent, no password checked).
+    if (viewsLeft(r) === 0) return { status: 'used_up' };
     const t = nowSec();
     // A CAPTCHA grant (checked by the Worker) starts one session, whatever
     // follows (a wrong password included): each attempt costs a CAPTCHA.
@@ -1269,7 +1342,12 @@ export class Drive extends DurableObject {
       return { status: 'busy', lapsed };
     }
     const expires = Math.min(r.expires, t + Math.min(ttl, SESSION_IDLE_SEC));
-    this.sql.exec('INSERT INTO rsessions (hash, rid, expires, net, started) VALUES (?, ?, ?, ?, ?)', hash, id, expires, tag, t);
+    // One view: the session granted. Nothing since the link was read awaited,
+    // so concurrent starts are counted one after another (never over its views).
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('UPDATE reverse SET used = used + 1 WHERE id = ?', id);
+      this.sql.exec('INSERT INTO rsessions (hash, rid, expires, net, started) VALUES (?, ?, ?, ?, ?)', hash, id, expires, tag, t);
+    });
     await this.#schedulePurge();
     return { status: 'ok', expires, lapsed };
   }

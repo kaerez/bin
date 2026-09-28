@@ -21,7 +21,7 @@ import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES, MAX_REVERSE_ACTIVE,
-  CAPTCHA_KEYS, resolveCaptcha,
+  CAPTCHA_KEYS, resolveCaptcha, REVERSE_KEYS, NO_EXPIRY, checkReversePassword,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
@@ -65,7 +65,7 @@ CREATE INDEX IF NOT EXISTS activity_subject ON activity(subject_id, id);
 CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
   created INTEGER NOT NULL, expires INTEGER NOT NULL, views_total INTEGER, status TEXT NOT NULL,
   locked INTEGER NOT NULL DEFAULT 0, locked_by TEXT, locked_at INTEGER, opens_total INTEGER NOT NULL DEFAULT 0, lh TEXT,
-  captcha INTEGER NOT NULL DEFAULT 0);
+  captcha INTEGER NOT NULL DEFAULT 0, ended INTEGER);
 CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id, created);
 CREATE TABLE IF NOT EXISTS ip_rules (id TEXT PRIMARY KEY, cidr TEXT NOT NULL, action TEXT NOT NULL, expires INTEGER,
   note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
@@ -255,6 +255,21 @@ const MIGRATIONS = [
       SELECT id, 'pending', ? FROM users WHERE role = 'owner'
         OR (role = 'user' AND (id IN (SELECT user_id FROM drive_usage) OR ('drive.escrowKid:' || id) IN (SELECT k FROM meta)))`, ts);
   },
+  // 17: reverse shares get the options regular shares have (docs/REVERSE.md
+  // §5): their own longest expiry, no expiry, views, the password mode and
+  // editing. Until now a reverse link's expiry was held to the regular
+  // maxExpireSec: every role (and API channel) that set it keeps that bound
+  // as its reverseMaxExpireSec, so nothing becomes longer than it could be;
+  // the Default role gets a value for every new option. shares.ended: when a
+  // share stopped being active (an indefinite one is pruned from the index
+  // 30 days after it ended, as the others are after their expiry).
+  (m) => {
+    m.addColumn('shares', 'ended', 'INTEGER');
+    for (const r of m.sql.exec("SELECT user_id, channel, value FROM limits WHERE key = 'maxExpireSec' AND (user_id = '' OR user_id LIKE 'r:%')").toArray()) {
+      m.sql.exec("INSERT OR IGNORE INTO limits (user_id, channel, key, value) VALUES (?, ?, 'reverseMaxExpireSec', ?)", r.user_id, r.channel, r.value);
+    }
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -320,7 +335,7 @@ export const MAX_SHARE_FILTER_USERS = 500; // ~19 bytes per id in the URL: stays
 export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
   'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax',
   'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes',
-  'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes', ...CAPTCHA_KEYS]);
+  ...REVERSE_KEYS, ...CAPTCHA_KEYS]);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -330,6 +345,8 @@ const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
+/** What the activity log may name when a reverse share's details change (the names only, never a value). */
+const REVERSE_DETAIL = ['password=set', 'password=removed', 'note=set', 'note=removed', 'limits'];
 /** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
 const PENDING_REVERSE_SEC = 600;
 /**
@@ -425,6 +442,28 @@ const RECEIPT_FIELDS = [
 const now = () => Math.floor(Date.now() / 1000);
 const newId = () => b64urlFromBytes(randomBytes(12));
 const fail = (status, error, message, extra) => ({ ok: false, status, error, message, ...(extra || {}) });
+/** The SQL condition (one bound NO_EXPIRY) of a share list's expiry filter: 'none', 'set' or '' (any). */
+const expiryFilter = (expiry) => (expiry === 'none' ? ' AND expires >= ?' : expiry === 'set' ? ' AND expires < ?' : '');
+
+/**
+ * A reverse share's expiry and views against the resolved limits `L`:
+ * `expireSec` (seconds from now; null: no expiry, reverseNoExpiry) and
+ * `views` (null: unlimited, reverseAllowUnlimitedViews; else at most
+ * reverseMaxViews); undefined skips a check. → { ok } or a failure.
+ */
+function reverseLimits(L, { expireSec, views, via = '' }) {
+  if (expireSec === null) {
+    if (!L.reverseNoExpiry) return fail(403, 'no_expiry_disabled', `Upload links without an expiry are not allowed for this account${via}.`);
+  } else if (expireSec !== undefined && L.reverseMaxExpireSec !== null && expireSec > L.reverseMaxExpireSec) {
+    return fail(403, 'expiry_too_long', `An upload link may expire at most ${L.reverseMaxExpireSec} seconds from now${via}.`, { max: L.reverseMaxExpireSec });
+  }
+  if (views === null) {
+    if (!L.reverseAllowUnlimitedViews) return fail(403, 'unlimited_views_disabled', `Upload links with unlimited views are not allowed for this account${via}.`);
+  } else if (views !== undefined && L.reverseMaxViews !== null && views > L.reverseMaxViews) {
+    return fail(403, 'too_many_views', `An upload link may have at most ${L.reverseMaxViews} views${via}.`, { max: L.reverseMaxViews });
+  }
+  return { ok: true };
+}
 
 function cleanLabel(s) {
   if (s === undefined || s === null) return '';
@@ -1823,7 +1862,7 @@ export class Directory extends DurableObject {
     // The CAPTCHA flag is never cleared by re-recording (as the lock).
     const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh, captcha) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
       ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, label = excluded.label, created = excluded.created,
-        expires = excluded.expires, views_total = excluded.views_total, status = 'active', captcha = MAX(shares.captcha, excluded.captcha)
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active', ended = NULL, captcha = MAX(shares.captcha, excluded.captcha)
       WHERE shares.user_id = excluded.user_id AND shares.kind != 'reverse'`,
       id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null, captcha === true ? 1 : 0).rowsWritten;
     if (!w) return fail(409, 'exists', 'A share with this id already exists.');
@@ -1831,13 +1870,14 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
-  async listShares(uid, { q = '', status = '', limit = 50, offset = 0 } = {}) {
+  async listShares(uid, { q = '', status = '', expiry = '', limit = 50, offset = 0 } = {}) {
     const lim = Math.max(1, Math.min(100, limit | 0));
     const off = Math.max(0, offset | 0);
     const like = `%${String(q).replace(/[%_\\]/g, (c) => '\\' + c)}%`;
     // A reverse share being created (`pending`, below) is not listed yet.
-    const where = `WHERE user_id = ? AND status != 'pending' AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}`;
-    const args = status ? [uid, like, String(status)] : [uid, like];
+    // `expiry`: 'none' — only reverse shares with no expiry; 'set' — only shares that expire.
+    const where = `WHERE user_id = ? AND status != 'pending' AND label LIKE ? ESCAPE '\\' ${status ? 'AND status = ?' : ''}${expiryFilter(expiry)}`;
+    const args = [uid, like, ...(status ? [String(status)] : []), ...(expiry === 'none' || expiry === 'set' ? [NO_EXPIRY] : [])];
     const rows = this.sql.exec(
       `SELECT id, kind, label, created, expires, views_total, status, locked, captcha,
         MAX(shares.opens_total, (SELECT COUNT(*) FROM opens o WHERE o.share_id = shares.id)) AS opens FROM shares ${where} ORDER BY created DESC LIMIT ? OFFSET ?`,
@@ -1963,7 +2003,7 @@ export class Directory extends DurableObject {
    * { admin: ownerId } instead, which bypasses the owner scope and the lock and
    * logs the action as a direct admin action (hidden from the user's log).
    */
-  async updateShare(uid, id, { label, expires, views, status }, actorId = uid, { admin = null, keyId = null } = {}) {
+  async updateShare(uid, id, { label, expires, views, status, captcha, detail = [] }, actorId = uid, { admin = null, keyId = null } = {}) {
     if (admin) {
       const o = this.#user(admin);
       if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can change other users’ shares.');
@@ -1980,9 +2020,20 @@ export class Directory extends DurableObject {
       this.sql.exec('UPDATE shares SET label = ? WHERE id = ?', l, id);
       parts.push('label');
     }
-    if (expires !== undefined) { this.sql.exec('UPDATE shares SET expires = ? WHERE id = ?', expires, id); parts.push(`expires=${expires}`); }
+    if (expires !== undefined) {
+      if (!Number.isSafeInteger(expires)) return fail(400, 'invalid_expiry', 'Invalid expiry.');
+      this.sql.exec('UPDATE shares SET expires = ? WHERE id = ?', expires, id);
+      parts.push(`expires=${expires >= NO_EXPIRY ? 'none' : expires}`);
+    }
     if (views !== undefined) { this.sql.exec('UPDATE shares SET views_total = ? WHERE id = ?', views, id); parts.push(`views=${views ?? 'unlimited'}`); }
-    if (status !== undefined) { this.sql.exec('UPDATE shares SET status = ? WHERE id = ?', status, id); parts.push(`status=${status}`); }
+    // A reverse share's CAPTCHA (its uploaders pass it before a session starts: reverseTarget reads it here).
+    if (captcha !== undefined && row.kind === 'reverse') { this.sql.exec('UPDATE shares SET captcha = ? WHERE id = ?', captcha ? 1 : 0, id); parts.push(`captcha=${captcha ? 'on' : 'off'}`); }
+    // What else changed on a reverse share (names only: never a value the user typed).
+    for (const d of Array.isArray(detail) ? detail : []) if (REVERSE_DETAIL.includes(d)) parts.push(d);
+    if (status !== undefined) {
+      this.sql.exec("UPDATE shares SET status = ?, ended = CASE WHEN ? = 'active' THEN NULL ELSE COALESCE(ended, ?) END WHERE id = ?", status, status, now(), id);
+      parts.push(`status=${status}`);
+    }
     // A change made with an API key names the key (its id, never the secret).
     if (keyId && !admin) parts.push(`apikey=${String(keyId).slice(0, 16)}`);
     this.#log(actor, subject, status === 'revoked' ? 'share.revoked' : 'share.updated', `id=${id} ${parts.join(' ')}`);
@@ -2006,7 +2057,7 @@ export class Directory extends DurableObject {
    * Admin: every user's shares with filters. Times are unix seconds;
    * `users` is a list of user ids; each range bound is optional.
    */
-  async adminListShares({ users = [], kind = '', status = '', q = '', locked = null, createdFrom = null, createdTo = null, expiresFrom = null, expiresTo = null, limit = 50, offset = 0 } = {}) {
+  async adminListShares({ users = [], kind = '', status = '', q = '', locked = null, expiry = '', createdFrom = null, createdTo = null, expiresFrom = null, expiresTo = null, limit = 50, offset = 0 } = {}) {
     const lim = Math.max(1, Math.min(200, limit | 0));
     const off = Math.max(0, offset | 0);
     const where = ["s.status != 'pending'"];
@@ -2018,6 +2069,9 @@ export class Directory extends DurableObject {
     if (status) { where.push('s.status = ?'); args.push(String(status)); }
     if (q) { where.push("s.label LIKE ? ESCAPE '\\'"); args.push(`%${String(q).slice(0, 100).replace(/[%_\\]/g, (c) => '\\' + c)}%`); }
     if (locked === true || locked === false) { where.push('s.locked = ?'); args.push(locked ? 1 : 0); }
+    // Reverse shares with no expiry (NO_EXPIRY), or only the shares that expire.
+    if (expiry === 'none') { where.push('s.expires >= ?'); args.push(NO_EXPIRY); }
+    if (expiry === 'set') { where.push('s.expires < ?'); args.push(NO_EXPIRY); }
     const range = (col, from, to) => {
       if (Number.isSafeInteger(from)) { where.push(`${col} >= ?`); args.push(from); }
       if (Number.isSafeInteger(to)) { where.push(`${col} <= ?`); args.push(to); }
@@ -2034,7 +2088,7 @@ export class Directory extends DurableObject {
   }
 
   async markShareEnded(id, status) {
-    this.sql.exec("UPDATE shares SET status = ? WHERE id = ? AND status = 'active'", status, id);
+    this.sql.exec("UPDATE shares SET status = ?, ended = ? WHERE id = ? AND status = 'active'", status, now(), id);
     await this.#dropDriveRefs([id]);
   }
 
@@ -2055,7 +2109,7 @@ export class Directory extends DurableObject {
   /** A recipient used "delete now" (the sender allowed it): end the row and tell the sender. */
   async shareDeletedByRecipient(id) {
     const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
-    this.sql.exec("UPDATE shares SET status = 'deleted' WHERE id = ? AND status = 'active'", id);
+    this.sql.exec("UPDATE shares SET status = 'deleted', ended = ? WHERE id = ? AND status = 'active'", now(), id);
     if (row) this.#log(null, row.user_id, 'share.deleted_by_recipient', `id=${id}`);
     await this.#dropDriveRefs([id]);
   }
@@ -3117,7 +3171,7 @@ export class Directory extends DurableObject {
     const list = (Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string').slice(0, 10000);
     let n = 0;
     for (const id of list) {
-      n += this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, uid).rowsWritten;
+      n += this.sql.exec("UPDATE shares SET status = 'revoked', ended = ? WHERE id = ? AND user_id = ? AND status = 'active'", now(), id, uid).rowsWritten;
     }
     const why = reason === 'account deleted' || reason === 'link retired' ? reason : 'drive item deleted';
     if (n) this.#log(actorId, uid, 'share.revoked', `${why}: ${n} share${n === 1 ? '' : 's'}`);
@@ -3137,9 +3191,12 @@ export class Directory extends DurableObject {
    * that was ever a reverse share (reverse_ids, kept after its row is pruned
    * or its account deleted) is refused too: an old link never opens a later
    * share.
-   * → { ok, maxBytes (the share's effective limit, null: none) }.
+   * `expireSec` null: no expiry (reverseNoExpiry); `views` null: unlimited
+   * (reverseAllowUnlimitedViews), else at most reverseMaxViews; `password`:
+   * whether the link has one (reversePassword).
+   * → { ok, maxBytes (the share's effective limit, null: none), captcha, expires }.
    */
-  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null, captcha }) {
+  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null, captcha, views = null, password = false }) {
     if (typeof id !== 'string' || !/^r[A-Za-z0-9_-]{22}$/.test(id)) return fail(400, 'invalid', 'Invalid reverse-share id.');
     const h = await reverseIdHash(id); // before any check: nothing below awaits
     const u = this.#user(uid);
@@ -3148,9 +3205,10 @@ export class Directory extends DurableObject {
     const L = this.#effective(u).all;
     if (!L.driveEnabled) return fail(403, 'drive_disabled', 'Your role does not include a Drive.');
     if (!L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
-    if (L.maxExpireSec !== null && expireSec > L.maxExpireSec) {
-      return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds.`, { max: L.maxExpireSec });
-    }
+    const lim = reverseLimits(L, { expireSec, views });
+    if (!lim.ok) return lim;
+    const pw = checkReversePassword(L, password === true);
+    if (!pw.ok) return fail(403, pw.error, pw.message);
     const roleMax = L.reverseMaxBytes ?? null;
     if (roleMax !== null && maxBytes !== null && maxBytes > roleMax) {
       return fail(403, 'reverse_too_large', `A reverse share may receive at most ${roleMax} bytes.`, { max: roleMax });
@@ -3164,12 +3222,13 @@ export class Directory extends DurableObject {
       AND ((status = 'active' AND expires > ?) OR status = 'pending')`, uid, ts).one().c;
     const cap = Math.min(MAX_REVERSE_ACTIVE, L.reverseMaxActive ?? MAX_REVERSE_ACTIVE);
     if (active >= cap) return fail(409, 'too_many_reverse', `At most ${cap} active reverse shares at once.`, { max: cap });
+    const expires = expireSec === null ? NO_EXPIRY : ts + expireSec;
     // The quotas of kind receive-link and receive (given back when the claim does not complete: releaseReverse).
     const q = this.#chargeQuotas(uid, 'all', 'receive-link');
     if (!q.ok) return q;
     const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh, captcha)
-      VALUES (?, ?, 'reverse', ?, ?, ?, NULL, 'pending', ?, ?) ON CONFLICT(id) DO NOTHING`,
-      id, uid, cleanLabel(label) ?? '', ts, ts + expireSec, typeof lh === 'string' && lh.length <= 64 ? lh : null, hc.captcha ? 1 : 0).rowsWritten;
+      VALUES (?, ?, 'reverse', ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(id) DO NOTHING`,
+      id, uid, cleanLabel(label) ?? '', ts, expires, views, typeof lh === 'string' && lh.length <= 64 ? lh : null, hc.captcha ? 1 : 0).rowsWritten;
     if (!w) {
       await this.refund(uid, q.hits);
       return fail(409, 'exists', 'A share with this id already exists.');
@@ -3178,17 +3237,63 @@ export class Directory extends DurableObject {
   }
 
   /**
+   * May `uid` change reverse share `id` this way (docs/REVERSE.md §6.1)? The
+   * role's options, for the channel the change comes through (an API key gets
+   * the API limits): reverseEdit for anything but the label, then each value
+   * as on create — the expiry (`expires`: a time, or null for none) against
+   * reverseMaxExpireSec / reverseNoExpiry, the views against reverseMaxViews /
+   * reverseAllowUnlimitedViews, the byte limit against reverseMaxBytes, the
+   * CAPTCHA against reverseCaptcha, the password against reversePassword.
+   * The owner changing another user's link directly (`admin`) is held only to
+   * that user's reverseNoExpiry. → { ok } or a failure.
+   */
+  async authorizeReverseChange(uid, change, { channel = 'all', admin = false } = {}) {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
+    const eff = this.#effective(u);
+    const L = channel === 'api' ? eff.api : eff.all;
+    const via = channel === 'api' ? ' via the API' : '';
+    if (admin) {
+      if (change.expires === null && !eff.all.reverseNoExpiry) return fail(403, 'no_expiry_disabled', 'This user’s role does not allow upload links without an expiry.');
+      return { ok: true };
+    }
+    if (!L.driveEnabled || !L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
+    const detail = Object.keys(change).some((k) => k !== 'label');
+    if (detail && !L.reverseEdit) return fail(403, 'reverse_edit_disabled', `Your role does not allow changing an upload link after it is made${via}.`);
+    const lim = reverseLimits(L, { expireSec: change.expires === undefined ? undefined : change.expires === null ? null : change.expires - now(), views: change.views, via });
+    if (!lim.ok) return lim;
+    // The byte limit as on create: at most the role's, which "none" means (null).
+    const roleMax = L.reverseMaxBytes ?? null;
+    if (change.maxBytes !== undefined && roleMax !== null && change.maxBytes !== null && change.maxBytes > roleMax) {
+      return fail(403, 'reverse_too_large', `A reverse share may receive at most ${roleMax} bytes.`, { max: roleMax });
+    }
+    if (change.captcha !== undefined) {
+      const mode = L.reverseCaptcha;
+      if (mode === 'require' && change.captcha !== true) return fail(403, 'captcha_required_by_role', 'Your role requires the CAPTCHA on every upload link.');
+      if (mode === 'off' && change.captcha === true) return fail(403, 'captcha_disabled', 'CAPTCHA is disabled for reverse shares of your role.');
+    }
+    if (change.password !== undefined) {
+      const pw = checkReversePassword(L, change.password !== null);
+      if (!pw.ok) return fail(403, pw.error, pw.message);
+    }
+    return { ok: true, ...(change.maxBytes !== undefined ? { maxBytes: change.maxBytes ?? roleMax } : {}) };
+  }
+
+  /**
    * The Drive holds the claimed reverse share now: it is listed and takes
    * uploads (logged as created), and its id can never be claimed again.
    */
   async activateReverse(uid, id, { created, expires }, actorId = uid) {
+    if (!Number.isSafeInteger(expires)) return fail(400, 'invalid', 'Invalid expiry.');
     const h = typeof id === 'string' ? await reverseIdHash(id) : ''; // before the update: nothing below awaits
     const w = this.sql.exec("UPDATE shares SET status = 'active', created = ?, expires = ? WHERE id = ? AND user_id = ? AND kind = 'reverse' AND status = 'pending'",
       created, expires, id, uid).rowsWritten;
     if (!w) return fail(409, 'exists', 'This reverse share is no longer being created.');
     this.sql.exec('INSERT OR IGNORE INTO reverse_ids (h) VALUES (?)', h);
-    const flagged = this.sql.exec('SELECT captcha FROM shares WHERE id = ?', id).toArray()[0]?.captcha === 1;
-    this.#log(actorId, uid, 'share.created', `id=${id} kind=reverse${flagged ? ' captcha' : ''}`);
+    const row = this.sql.exec('SELECT captcha, views_total FROM shares WHERE id = ?', id).toArray()[0];
+    const extra = `${row?.captcha === 1 ? ' captcha' : ''}${expires >= NO_EXPIRY ? ' expires=none' : ''}${Number.isSafeInteger(row?.views_total) ? ` views=${row.views_total}` : ''}`;
+    this.#log(actorId, uid, 'share.created', `id=${id} kind=reverse${extra}`);
     return { ok: true };
   }
 
@@ -4347,9 +4452,12 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM trackers WHERE last_seen < ?', idleBefore);
     this.sql.exec('DELETE FROM ip_rules WHERE expires IS NOT NULL AND expires < ?', ts);
     const expiring = this.sql.exec("SELECT id FROM shares WHERE kind = 'drive' AND status = 'active' AND expires > 0 AND expires < ?", ts).toArray().map((r) => r.id);
-    this.sql.exec("UPDATE shares SET status = 'expired' WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
+    this.sql.exec("UPDATE shares SET status = 'expired', ended = expires WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
     await this.#dropDriveRefs(expiring);
-    this.sql.exec("DELETE FROM shares WHERE status != 'active' AND locked = 0 AND expires < ?", ts - SHARE_PRUNE_SEC);
+    // An ended share leaves the index 30 days after it expired — or, for a
+    // reverse share with no expiry (NO_EXPIRY), 30 days after it ended.
+    this.sql.exec(`DELETE FROM shares WHERE status != 'active' AND locked = 0
+      AND (CASE WHEN expires >= ? THEN COALESCE(ended, created) ELSE expires END) < ?`, NO_EXPIRY, ts - SHARE_PRUNE_SEC);
     this.sql.exec("DELETE FROM shares WHERE status = 'pending' AND created < ?", ts - PENDING_REVERSE_SEC);
     // Receipts go with their share: once the share row is gone nobody can see them.
     this.sql.exec('DELETE FROM opens WHERE share_id NOT IN (SELECT id FROM shares)');

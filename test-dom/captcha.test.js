@@ -1,7 +1,7 @@
 // captcha.test.js (DOM) — CAPTCHA on shares in the browser:
 //   - the per-share box (public/js/captcha.js) for "allow" (pre-set from the
 //     role's default), "require" (ticked, disabled) and "off" (hidden), in the
-//     composer, the Drive's Share dialog and its Receive files dialog, and
+//     composer, the Drive's Share dialog and its Receive dialog, and
 //     what each sends;
 //   - the recipient's viewer (public/js/view.js) with a share that has the
 //     CAPTCHA: the key leaves the address bar at once and is kept only sealed
@@ -149,7 +149,7 @@ describe('the composer', () => {
 });
 
 // ── the Drive's dialogs ────────────────────────────────────────────────────
-describe('the Drive: Share and Receive files', () => {
+describe('the Drive: Share and Receive', () => {
   let S;
   async function openDrive(limits) {
     S = fakeServer();
@@ -195,7 +195,7 @@ describe('the Drive: Share and Receive files', () => {
     expect('captcha' in S.shareBodies[0]).toBe(false);
   }, T);
 
-  it('Receive files: the reverse options; the folder\'s links show the CAPTCHA', async () => {
+  it('Receive: the reverse options; the folder\'s links show the CAPTCHA', async () => {
     await openDrive({ reverseCaptcha: 'allow', reverseCaptchaDefault: 'on' });
     $('#drive-receive').click();
     const d = await until(() => dialog());

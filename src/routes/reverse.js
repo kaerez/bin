@@ -1,4 +1,4 @@
-// reverse.js — reverse shares ("Receive files", docs/REVERSE.md): the user's
+// reverse.js — reverse shares ("Receive", docs/REVERSE.md): the user's
 // routes under /api/private/drive (create, list, the received files and their
 // re-wrap) and the anonymous uploader's routes under /api/reverse/<id>.
 //
@@ -25,8 +25,8 @@ import { binding } from '../lib/config.js';
 import { turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { issueGrant, readGrant, netTag, captchaRequired, verifyCaptcha, HUMAN_HEADER } from '../lib/human.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
-import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
-import { expireSeconds, isProof, ARGON2, MAX_TTL } from '../../public/js/format.js';
+import { HARD_MAX_DRIVE_BYTES, NO_EXPIRY, apiExpiry } from '../lib/settings.js';
+import { expireSeconds, isProof, ARGON2, MAX_TTL, MAX_VIEWS } from '../../public/js/format.js';
 import { MAX_CHUNK_CT } from '../../public/js/files.js';
 import { normalizeRules, checkDeclaredTypes, refusedTypes, describeType } from '../../public/js/filepolicy.js';
 import { b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
@@ -50,7 +50,7 @@ const MAX_NAME_CT = 512;
 const MAX_DEK_CT = 128;
 /** Bound parameters per query stay well under the Durable Object SQLite limit (100). */
 const ID_BATCH = 80;
-const GONE = 'This link no longer accepts files: it has expired or was revoked.';
+const GONE = 'This link no longer accepts files: it has expired, was revoked, or has taken all the uploads it allows.';
 // The owner started over: the link's key is in the archive until a kit restores it (docs/DRIVE.md §3.2).
 const PAUSED = 'This link is not accepting files right now.';
 const pausedRes = () => err(409, 'paused', PAUSED);
@@ -117,7 +117,7 @@ export async function handleReverseOwner(request, env, url, a) {
           const row = byId.get(x.id);
           // The index row decides (revoked, expired, locked by the admin); the Drive adds the counters.
           const status = row.status !== 'active' ? row.status : ['active', 'paused'].includes(x.status) ? x.status : 'ended';
-          return { ...x, label: row.label, locked: !!row.locked, status };
+          return { ...x, expires: apiExpiry(x.expires), label: row.label, locked: !!row.locked, status };
         }),
       });
     }
@@ -212,32 +212,25 @@ async function createReverse(request, env, dir, a) {
   if (typeof body.lh !== 'string' || !B64_43.test(body.lh)) return invalid('lh must be the link proof\'s hash.');
   const note = body.note === undefined || body.note === null ? null : encField(body.note, MAX_NOTE_CT);
   if (note === null && body.note !== undefined && body.note !== null) return invalid('note must be {iv, ct}.');
-  let pw = null;
-  if (body.password !== undefined && body.password !== null) {
-    const x = body.password;
-    if (!isObj(x) || typeof x.salt !== 'string' || !SALT_RE.test(x.salt) || !Number.isInteger(x.t) || x.t < ARGON2.tMin || x.t > ARGON2.tMax
-        || typeof x.ph !== 'string' || !B64_43.test(x.ph)) return invalid('password must be { salt, t, ph }.');
-    pw = { salt: x.salt, t: x.t, ph: x.ph };
-  }
-  const ttl = expireSeconds(body.expire);
-  if (ttl === null || ttl > MAX_TTL) return err(400, 'invalid_expire', 'Invalid expiry.');
+  const pw = body.password === undefined || body.password === null ? null : passwordOf(body.password);
+  if (pw === undefined) return invalid('password must be { salt, t, ph }.');
+  // "never": no expiry (only where the role allows it: reverseNoExpiry).
+  const ttl = body.expire === 'never' ? null : expireSeconds(body.expire);
+  if (body.expire !== 'never' && (ttl === null || ttl > MAX_TTL)) return err(400, 'invalid_expire', 'Invalid expiry.');
+  // Views (a view: one upload session granted); none sent: unlimited.
+  const views = body.views === undefined ? null : body.views;
+  if (!validViews(views)) return err(400, 'invalid_views', `views must be 1–${MAX_VIEWS} or null (unlimited).`);
   const maxFiles = bound(body.maxFiles, MAX_REVERSE_FILES);
   const maxBytes = bound(body.maxBytes, HARD_MAX_DRIVE_BYTES);
   const maxFileBytes = bound(body.maxFileBytes, HARD_MAX_DRIVE_BYTES);
   if (maxFiles === undefined) return invalid(`maxFiles must be 1–${MAX_REVERSE_FILES} or null.`);
   if (maxBytes === undefined || maxFileBytes === undefined) return invalid('maxBytes and maxFileBytes must be a number of bytes or null.');
-  let types = null;
-  if (body.types !== undefined && body.types !== null) {
-    if (!isObj(body.types) || !['allow', 'block'].includes(body.types.mode)) return invalid('types must be { mode: "allow" | "block", rules }.');
-    let rules;
-    try { rules = normalizeRules(body.types.rules); } catch (e) { return invalid(e.message); }
-    if (!rules.length) return invalid('List at least one file type, or allow any type.');
-    types = { mode: body.types.mode, rules };
-  }
+  const types = body.types === undefined || body.types === null ? null : typesOf(body.types);
+  if (typeof types === 'string') return invalid(types);
   // The id is claimed in the share index first, atomically with the role's
   // checks and its count of active reverse shares: an id another account
   // holds is refused (409), and concurrent creates cannot pass the limit.
-  const claim = await dir.claimReverse(uid, { id: body.id, expireSec: ttl, maxBytes, label: body.label, lh: body.lh, captcha: body.captcha });
+  const claim = await dir.claimReverse(uid, { id: body.id, expireSec: ttl, maxBytes, label: body.label, lh: body.lh, captcha: body.captcha, views, password: !!pw });
   if (!claim.ok) return fromDo(claim);
   let r;
   try {
@@ -259,7 +252,7 @@ async function createReverse(request, env, dir, a) {
     await checkLinkKey(uid, await userKeys(env, uid), body.id, body.mek, priv);
     const stored = await toRest(await fieldKeys(env, uid), uid, 'linkKey', body.id, priv);
     r = await driveStub(env, uid).createReverse(uid, {
-      id: body.id, folder, priv: stored, mek: body.mek, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl, captcha: claim.captcha === true,
+      id: body.id, folder, priv: stored, mek: body.mek, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl, views, captcha: claim.captcha === true,
       opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types },
     });
   } catch (e) {
@@ -276,7 +269,169 @@ async function createReverse(request, env, dir, a) {
     await dir.refund(uid, claim.refund);
     return fromDo(act);
   }
-  return json({ id: body.id, expires: r.expires, captcha: claim.captcha === true }, 201);
+  return json({ id: body.id, expires: apiExpiry(r.expires), views, captcha: claim.captcha === true }, 201);
+}
+
+/** An uploader password as the browser sends it → { salt, t, ph }, or undefined when malformed. */
+function passwordOf(x) {
+  if (!isObj(x) || typeof x.salt !== 'string' || !SALT_RE.test(x.salt) || !Number.isInteger(x.t) || x.t < ARGON2.tMin || x.t > ARGON2.tMax
+      || typeof x.ph !== 'string' || !B64_43.test(x.ph)) return undefined;
+  return { salt: x.salt, t: x.t, ph: x.ph };
+}
+/** A link's file types → { mode, rules }, or the reason they are refused (a string). */
+function typesOf(v) {
+  if (!isObj(v) || !['allow', 'block'].includes(v.mode)) return 'types must be { mode: "allow" | "block", rules }.';
+  let rules;
+  try { rules = normalizeRules(v.rules); } catch (e) { return e.message; }
+  if (!rules.length) return 'List at least one file type, or allow any type.';
+  return { mode: v.mode, rules };
+}
+const validViews = (v) => v === null || (Number.isSafeInteger(v) && v >= 1 && v <= MAX_VIEWS);
+const now = () => Math.floor(Date.now() / 1000);
+
+/**
+ * PATCH /api/private/shares/<id> of a reverse share (src/routes/private.js
+ * changeShare; a session, or an API key with "manage"): the label, and —
+ * where the role allows (reverseEdit and the value's own option, for the
+ * channel the change comes through) — the expiry (`expires`: a time, or null
+ * for none), the views (`views`, null: unlimited), the limits (`maxFiles`,
+ * `maxBytes`, `maxFileBytes`, `types`), the CAPTCHA (`captcha`), the
+ * uploader password (`password`: { salt, t, ph } made in the browser from
+ * the link's key, or null: none) and the note (`note`: { iv, ct } sealed in
+ * the browser, or null: none). The server sees neither the password nor
+ * the note. The owner changing another user's link directly (`admin`) may
+ * change the label, expiry and views only.
+ */
+export async function changeReverse(env, dir, row, body, { uid, actor, admin = null, channel = 'all', keyId = null, request = null, impersonating = false }) {
+  const id = row.id;
+  const change = {}; // the values as the role checks them
+  const set = {}; // what the Drive stores
+  if (body.label !== undefined) change.label = body.label;
+  if (body.expires !== undefined) {
+    if (body.expires !== null && !(Number.isSafeInteger(body.expires) && body.expires > now() && body.expires <= now() + MAX_TTL)) {
+      return err(400, 'invalid_expiry', 'Expiry must be in the future and within 365 days, or null for none.');
+    }
+    change.expires = body.expires;
+    set.expires = body.expires === null ? NO_EXPIRY : body.expires;
+  }
+  if (body.views !== undefined) {
+    if (!validViews(body.views)) return err(400, 'invalid_views', `views must be 1–${MAX_VIEWS} or null (unlimited).`);
+    change.views = set.views = body.views;
+  }
+  const opts = {};
+  if (body.maxFiles !== undefined) {
+    opts.maxFiles = bound(body.maxFiles, MAX_REVERSE_FILES);
+    if (opts.maxFiles === undefined) return invalid(`maxFiles must be 1–${MAX_REVERSE_FILES} or null.`);
+  }
+  for (const k of ['maxBytes', 'maxFileBytes']) {
+    if (body[k] === undefined) continue;
+    opts[k] = bound(body[k], HARD_MAX_DRIVE_BYTES);
+    if (opts[k] === undefined) return invalid('maxBytes and maxFileBytes must be a number of bytes or null.');
+  }
+  if (body.types !== undefined) {
+    opts.types = body.types === null ? null : typesOf(body.types);
+    if (typeof opts.types === 'string') return invalid(opts.types);
+  }
+  if (Object.keys(opts).length) {
+    set.opts = opts;
+    change.limits = true;
+    if (opts.maxBytes !== undefined) change.maxBytes = opts.maxBytes;
+  }
+  if (body.captcha !== undefined) {
+    if (typeof body.captcha !== 'boolean') return err(400, 'invalid_captcha', 'captcha must be true or false.');
+    change.captcha = set.captcha = body.captcha;
+  }
+  if (body.password !== undefined) {
+    const pw = body.password === null ? null : passwordOf(body.password);
+    if (pw === undefined) return invalid('password must be { salt, t, ph } or null.');
+    change.password = set.password = pw;
+  }
+  if (body.note !== undefined) {
+    const note = body.note === null ? null : encField(body.note, MAX_NOTE_CT);
+    if (note === null && body.note !== null) return invalid('note must be {iv, ct} or null.');
+    change.note = set.note = note;
+  }
+  const keys = Object.keys(change);
+  if (!keys.length) return invalid('Nothing to change.');
+  if (admin && keys.some((k) => !['label', 'expires', 'views'].includes(k))) {
+    return err(403, 'user_only', 'Only the user can change a link’s limits, CAPTCHA, password or note.');
+  }
+  const detail = keys.some((k) => k !== 'label');
+  if (detail && row.status !== 'active') return err(409, 'not_active', 'Only active shares can be changed.');
+  const ok = await dir.authorizeReverseChange(uid, change, { channel, admin: !!admin });
+  if (!ok.ok) return fromDo(ok);
+  if (ok.maxBytes !== undefined) set.opts.maxBytes = ok.maxBytes; // "none" is the role's limit, when it has one
+  const patch = {};
+  if (change.label !== undefined) patch.label = change.label;
+  const owner = row.user_id ?? uid;
+  const drive = driveStub(env, owner);
+  let r = null;
+  if (detail) {
+    // The lock first, before anything is checked or written (the admin may have locked it since `row` was read).
+    if (!admin && await dir.isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
+    // A change that weakens the link's protection — removing or changing its
+    // password, turning its CAPTCHA off, no expiry, unlimited views — needs
+    // what creating one needs: the user's password or a passkey (a stolen
+    // session alone cannot turn a link into an open, lasting upload channel).
+    // Never through an API key; the owner acting as the user, or changing it
+    // directly, confirms nothing, as for every other change to the account.
+    if (!admin) {
+      const cur = await drive.reverseStatus(owner, id);
+      if (cur.status !== 'ok') {
+        await dir.markShareEnded(id, 'ended');
+        return err(410, 'gone', 'This share no longer exists.');
+      }
+      const weak = weakening(change, cur);
+      if (weak.length) {
+        if (channel === 'api') {
+          return err(403, 'step_up_required', 'Removing or changing an upload link’s password, turning its CAPTCHA off, removing its expiry or its views limit needs your password or a passkey in the browser; an API key cannot do it.', { weakens: weak });
+        }
+        if (!impersonating) {
+          const g = await ipContext(env, request);
+          const step = await stepUpFrom(body, new URL(request.url));
+          const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
+          if (!v.ok) return afterRefusal(env, g, v, fromDo(v));
+        }
+      }
+    }
+    r = await drive.updateReverse(owner, id, set);
+    if (r.status === 'invalid') return err(400, 'invalid', r.message, r.used !== undefined ? { used: r.used } : undefined);
+    if (r.status !== 'ok') {
+      await dir.markShareEnded(id, 'ended');
+      return err(410, 'gone', 'This share no longer exists.');
+    }
+    if (set.expires !== undefined) patch.expires = r.expires;
+    if (set.views !== undefined) patch.views = r.views;
+    // The index enforces the CAPTCHA (the uploader's begin reads it there).
+    if (set.captcha !== undefined) patch.captcha = r.captcha;
+    patch.detail = [
+      ...(set.password !== undefined ? [set.password ? 'password=set' : 'password=removed'] : []),
+      ...(set.note !== undefined ? [set.note ? 'note=set' : 'note=removed'] : []),
+      ...(set.opts !== undefined ? ['limits'] : []),
+    ];
+  }
+  const u = await dir.updateShare(uid, id, patch, actor, { admin, keyId });
+  if (!u.ok) {
+    // The index refused (locked in the meantime): the Drive goes back to what it held, so the two never differ.
+    if (r && r.prev) await drive.restoreReverse(owner, id, r.prev);
+    return fromDo(u);
+  }
+  return json(r ? { ok: true, expires: apiExpiry(r.expires), views: r.views, left: r.left, used: r.used } : { ok: true });
+}
+
+/**
+ * Which parts of `change` weaken reverse share `cur` (its state in the Drive:
+ * expires, views, password, captcha) → a list of names (empty: none). Adding
+ * a password where there is none, turning the CAPTCHA on, an expiry, fewer
+ * views or tighter limits never weaken it.
+ */
+export function weakening(change, cur) {
+  const out = [];
+  if (change.expires === null && !(cur.expires >= NO_EXPIRY)) out.push('expires');
+  if (change.views === null && cur.views !== null && cur.views !== undefined) out.push('views');
+  if (change.password !== undefined && cur.password) out.push('password');
+  if (change.captcha === false && cur.captcha) out.push('captcha');
+  return out;
 }
 
 // ── the uploader (anonymous) ─────────────────────────────────────────────────
@@ -350,6 +505,11 @@ export async function handleReversePublic(request, env, url) {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
+    // A link whose views are used up (or that ended in its Drive) takes no
+    // session: no CAPTCHA is checked and no grant is issued for it. Without a
+    // link proof here, the 410 counts in the Guard as for any ended link.
+    const o = await drive.reverseOpen(uid, id);
+    if ((o.status !== 'ok' && o.status !== 'paused') || o.usedUp) return failed(env, g, err(410, 'gone', GONE));
     if (!captcha) return json({ grant: null, expires: null });
     await verifyCaptcha(env, g, request, TURNSTILE_ACTIONS.reverse);
     const r = await issueGrant(env, { kind: 'r', id, net: await netTag(env, g.key) });
@@ -360,8 +520,9 @@ export async function handleReversePublic(request, env, url) {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
     const r = await drive.reverseOpen(uid, id, { roleMaxBytes: tg.roleMaxBytes });
     if (r.status === 'paused') return pausedRes(); // the link proof matched (above)
-    if (r.status !== 'ok') return err(410, 'gone', GONE);
-    return json({ ...r.head, captcha });
+    // Revoked, expired, or its views used up (as a used-up share: 410).
+    if (r.status !== 'ok' || r.usedUp) return err(410, 'gone', GONE);
+    return json({ ...r.head, expires: apiExpiry(r.head.expires), captcha });
   }
 
   if (action === 'begin') {
@@ -369,7 +530,8 @@ export async function handleReversePublic(request, env, url) {
     const r = await drive.reverseOpen(uid, id);
     // Paused: no session, before the human check and the password (nothing is answered).
     if (r.status === 'paused') return pausedRes();
-    if (r.status !== 'ok') return err(410, 'gone', GONE);
+    // Its views used up: no session either, and no CAPTCHA or password is checked.
+    if (r.status !== 'ok' || r.usedUp) return err(410, 'gone', GONE);
     const kp = request.headers.get('x-key-proof');
     if (r.ph && !kp) return err(401, 'password_required', 'This link needs a password.', { salt: r.head.password.salt, t: r.head.password.t });
     const lockedRes = (until) => err(429, 'password_locked', 'Too many wrong passwords for this link. Try again later.', { until });
@@ -414,6 +576,7 @@ export async function handleReversePublic(request, env, url) {
     if (s.status === 'pw_locked') return lockedRes(s.until);
     if (s.status === 'busy') return err(429, 'busy', 'Too many uploads to this link are in progress. Try again later.');
     if (s.status === 'paused') return pausedRes();
+    // used_up (the last view went to a concurrent start) or ended: 410, as a used-up share.
     if (s.status !== 'ok') return err(410, 'gone', GONE);
     return json({ grant, expires: s.expires });
   }
