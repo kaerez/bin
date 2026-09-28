@@ -309,6 +309,14 @@ Level A and AA failures (all fixed):
   Received files taken in (in the background) after a dialog opened no longer raise their toast
   outside it; the Drive's status line says the same and stays (`public/dashboard/js/drive-app.js`
   `takeInReceived`; `test-dom/reverse.test.js`).
+- **1.4.3** (the reverse shares' suite with Turnstile's testing keys, 2 runs in 5 after `main`
+  8889932): "Send files" failed colour contrast right after it was enabled. Buttons transitioned
+  `opacity` from their disabled 0.45 over 0.2 s, so an enabled button was drawn part-way
+  transparent (reproduced deterministically: opacity 0.57 and 2.24:1, 40 ms after enabling, light
+  theme) → no opacity transition on `.cta`, `.send` or the toast (`public/css/styles.css`;
+  `test-dom/wcag22.test.js`), so an enabled control is at full contrast at once.
+- **1.3.1, 3.2.3** (the CAPTCHA check page from `main`): its footer was inside `<main>` with the
+  old link texts and no glossary link → every page's footer, after `<main>`.
 - **2.4.7** (the CAPTCHA, found with Turnstile's testing keys) focus inside Cloudflare's widget
   showed no ring on secbin's side → its container draws one. In Chromium `:focus-within` does not
   match while focus is in the widget's frame (behind a closed shadow root), and the page gets no

@@ -376,7 +376,7 @@ describe('links that open a new tab say so', () => {
     expect(a.querySelector('.sr-only').textContent).toBe(' (opens in a new tab)');
   });
   it('in every page footer, which is the same on every page (3.2.3, 3.2.6)', () => {
-    const pages = ['index.html', 'accessibility/index.html', 'r/index.html', 'dashboard/index.html',
+    const pages = ['index.html', 'accessibility/index.html', 'r/index.html', 'check/index.html', 'dashboard/index.html',
       ...readdirSync(join(ROOT, 'public/dashboard'), { withFileTypes: true }).filter((d) => d.isDirectory() && existsSync(join(ROOT, 'public/dashboard', d.name, 'index.html'))).map((d) => `dashboard/${d.name}/index.html`)];
     const foots = new Set();
     for (const p of pages) {
@@ -468,6 +468,21 @@ describe('humanCheck help', () => {
 });
 
 // ── 1.4.3 / 1.4.6 / 1.4.11: the palette ──────────────────────────────────────
+// A control that becomes enabled (the CAPTCHA passed, files chosen) or a toast that appears must
+// meet contrast at once: a transition on opacity from a disabled .45 (or a hidden 0) passes through
+// low contrast (reproduced: 2.24:1 on "Send files" 40 ms after it was enabled, light theme).
+describe('no opacity transitions on buttons or the toast', () => {
+  it('.cta, .send and #toast do not transition opacity', () => {
+    const css = readFileSync(join(ROOT, 'public/css/styles.css'), 'utf8');
+    for (const sel of ['.cta', '.send', '#toast']) {
+      const rule = new RegExp(`(^|\\n)${sel.replace('.', '\\.')} \\{([^}]*)\\}`).exec(css);
+      expect(rule, sel).not.toBeNull();
+      const tr = /transition:\s*([^;]*)/.exec(rule[2]);
+      expect(tr ? tr[1] : '', sel).not.toMatch(/opacity|\ball\b/);
+    }
+  });
+});
+
 describe('palette', () => {
   const css = pub('css/styles.css');
   const block = (sel) => {

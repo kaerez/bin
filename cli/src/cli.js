@@ -57,9 +57,13 @@ create / send flags:
   --password-env <VAR>   read the password from an environment variable
   --api-key-file <path>  read the API key from a file (default: $SECBIN_API_KEY)
   -q, --qr               also print a scannable QR code (to stderr)
-  -j, --json             print {url, id, deletetoken, expires, views} as JSON
+  -j, --json             print {url, id, deletetoken, expires, views, captcha} as JSON
   --recipient-can-delete let whoever opens the share delete it at once
                          ("delete now"; the administrator must allow it)
+  --captcha              recipients must pass a CAPTCHA in a browser first (such
+                         a share opens in a browser only); --no-captcha: they
+                         need not. Default: your role's (it may require one or
+                         not allow one)
 create only:
   -t, --text <string>    use the given string as the note content
   -f, --file <path>      read content from a file instead of stdin
@@ -167,6 +171,9 @@ function apiMessage(e) {
     case 'bad_password': return 'wrong password (the share was not opened)';
     case 'bad_token': return 'wrong delete token (nothing was deleted)';
     case 'bad_grant': return 'the download window has expired — open the link again (this uses another view if the share is view-limited)';
+    // A share with the CAPTCHA: only a browser can pass it (nothing was opened or spent).
+    case 'captcha_required': return 'This share requires a CAPTCHA; open it in a browser';
+    case 'captcha_disabled': return `refused by the server: ${m} (leave out --captcha)`;
     case 'blocked': return 'blocked — too many invalid requests from your network; try again later';
     case 'unauthenticated':
     case 'invalid_api_key': return `the server rejected the API key: ${m} (check SECBIN_API_KEY / --api-key-file)`;

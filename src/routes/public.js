@@ -3,6 +3,13 @@
 // the public viewer policy. Every failure a guesser would produce (unknown id,
 // wrong #fragment, wrong password, bad grant, bad delete token) feeds the
 // Guard's "invalid" scope, and blocked callers are refused up front.
+//
+// A share with the CAPTCHA (its sender's role, src/lib/settings.js) serves
+// nothing of itself — head, open, "delete now", chunks — without a CAPTCHA
+// grant (X-Secbin-Human, src/lib/human.js), got from POST …/<id>/human with a
+// Turnstile token for the action "share-open". Without one: 403
+// captcha_required, which is not counted as an invalid fetch, and no view is
+// spent. Inactive (no grant needed) while the server has no Turnstile keys.
 
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
@@ -12,7 +19,8 @@ import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
 import { b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { binding } from '../lib/config.js';
-import { turnstileKeys } from '../lib/turnstile.js';
+import { turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { issueGrant, readGrant, renewGrant, netTag, captchaRequired, verifyCaptcha, HUMAN_HEADER } from '../lib/human.js';
 
 const GONE = 'This share does not exist, has expired, or has no views left.';
 
@@ -52,9 +60,13 @@ async function failed(env, g, res) {
  * without a proof (the first metadata fetch) is not counted for a known share.
  * The answer is the same "gone" either way.
  */
-async function goneFor(env, g, id, res, lh = null) {
-  if ((await directory(env).goneShare(id, lh)) === 'ok') return res;
-  return failed(env, g, res);
+async function goneFor(env, g, id, res, lh = null, hide = false) {
+  // While the CAPTCHA is in force, a request without a grant learns nothing
+  // about an id before the check: a missing or ended share answers exactly as
+  // a protected one (403 captcha_required). The Guard counts it as before.
+  const out = hide ? captchaRequired().toResponse() : res;
+  if ((await directory(env).goneShare(id, lh)) === 'ok') return out;
+  return failed(env, g, out);
 }
 
 /**
@@ -120,7 +132,7 @@ export async function handlePublic(request, env, url) {
   }
 
   // /chunk/<i> reads a file share's stream; /chunk/<ref>/<i> a Drive share's file.
-  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|extend|chunk)(?:\/(\d{1,6})(?:\/(\d{1,6}))?)?)?$/);
+  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|extend|chunk|human)(?:\/(\d{1,6})(?:\/(\d{1,6}))?)?)?$/);
   if (!m) return null;
   const [, kind, rawId, action, idx, idx2] = m;
   const id = decodePathSegment(rawId);
@@ -139,8 +151,23 @@ export async function handlePublic(request, env, url) {
     return failed(env, g, err(404, 'not_found', GONE));
   }
 
+  if (action === 'human' && idx === undefined) {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    return humanGrant(request, env, g, id);
+  }
+  // The CAPTCHA: `human.ok` when this request may see a share that has one
+  // (a valid grant, or the check is inactive: no Turnstile keys). Stores
+  // answer 'captcha' otherwise; a used grant is renewed in the response.
+  const human = await humanOf(request, env, g, id);
+  const withHuman = async (res) => {
+    if (res.status >= 400 || !human.claims) return res;
+    const next = await renewGrant(env, human.claims);
+    if (next) res.headers.set(HUMAN_HEADER, next.grant);
+    return res;
+  };
+
   if (!action) {
-    if (request.method === 'GET') return readHead(env, g, id, info);
+    if (request.method === 'GET') return withHuman(await readHead(env, g, id, info, human.ok));
     if (request.method === 'DELETE') return deleteByToken(request, env, g, id, info);
     return methodNotAllowed('GET, DELETE');
   }
@@ -148,67 +175,113 @@ export async function handlePublic(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
     const proofs = await proofHashes(request);
-    const res = await (info.file ? openFile(env, g, id, proofs) : openPaste(env, g, id, info, proofs));
+    const res = await (info.file ? openFile(env, g, id, proofs, human.ok) : openPaste(env, g, id, info, proofs, human.ok));
     if (res.status === 200) await recordOpen(env, request, id);
-    return res;
+    return withHuman(res);
   }
   if (action === 'expire') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertNotCrossSite(request);
     const proofs = await proofHashes(request);
-    return expireByOpener(env, g, id, info, proofs);
+    return expireByOpener(env, g, id, info, proofs, human.ok);
   }
   if (action === 'extend' && info.file && idx === undefined) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    return extendGrant(request, env, g, id);
+    return withHuman(await extendGrant(request, env, g, id, human.ok));
   }
   if (action === 'chunk' && info.file && idx !== undefined) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
-    return idx2 === undefined ? downloadChunk(request, env, g, id, Number(idx)) : downloadChunk(request, env, g, id, Number(idx2), Number(idx));
+    return withHuman(idx2 === undefined ? await downloadChunk(request, env, g, id, Number(idx), null, human.ok)
+      : await downloadChunk(request, env, g, id, Number(idx2), Number(idx), human.ok));
   }
   return err(404, 'not_found', 'Not found.');
 }
 
-async function readHead(env, g, id, info) {
+/**
+ * The request's standing for a share with the CAPTCHA: { ok, claims }. `ok`
+ * when it carries a valid grant for this share and network, or when the check
+ * is inactive (the server has no Turnstile keys, so a share's flag cannot be
+ * acted on: shares stay reachable rather than locked for good).
+ */
+async function humanOf(request, env, g, id) {
+  const token = request.headers.get(HUMAN_HEADER);
+  if (token) {
+    const claims = await readGrant(env, token, { kind: 's', id, net: await netTag(env, g.key) });
+    if (claims) return { ok: true, claims };
+  }
+  return { ok: !(await turnstileKeys(env)), claims: null };
+}
+
+/**
+ * POST /api/(paste|file)/<id>/human: a CAPTCHA grant for share `id`. With a
+ * Turnstile token (X-Secbin-Turnstile, action "share-open") a new grant; with
+ * a valid grant (X-Secbin-Human) the same grant renewed (the recipient's page
+ * keeps it alive while it is open). Nothing of the share is looked up or
+ * spent. `{ grant: null }` while the check is inactive.
+ */
+async function humanGrant(request, env, g, id) {
+  assertNotCrossSite(request);
+  if ((request.headers.get('x-secbin-intent') || '') !== '1') return err(400, 'missing_intent', 'This request requires the "X-Secbin-Intent: 1" header.');
+  if (!(await turnstileKeys(env))) return json({ grant: null, expires: null });
+  const net = await netTag(env, g.key);
+  const held = request.headers.get(HUMAN_HEADER);
+  if (held) {
+    const claims = await readGrant(env, held, { kind: 's', id, net });
+    if (!claims) throw captchaRequired();
+    const next = await renewGrant(env, claims);
+    return json(next ? { grant: next.grant, expires: next.expires } : { grant: held, expires: claims.exp });
+  }
+  await verifyCaptcha(env, g, request, TURNSTILE_ACTIONS.share);
+  const r = await issueGrant(env, { kind: 's', id, net });
+  return json({ grant: r.grant, expires: r.expires });
+}
+
+async function readHead(env, g, id, info, human) {
   if (info.file) {
-    const r = await fileStub(env, id).head();
-    if (r.status !== 'ok') return goneFor(env, g, id, err(410, 'gone', GONE));
+    const r = await fileStub(env, id).head(human);
+    if (r.status === 'captcha') throw captchaRequired();
+    if (r.status !== 'ok') return goneFor(env, g, id, err(410, 'gone', GONE), null, !human);
     return json(r.head);
   }
   if (info.burn) {
-    const r = await burnStub(env, id).head();
-    if (r.status !== 'ok') return goneFor(env, g, id, err(410, 'gone', GONE));
+    const r = await burnStub(env, id).head(human);
+    if (r.status === 'captcha') throw captchaRequired();
+    if (r.status !== 'ok') return goneFor(env, g, id, err(410, 'gone', GONE), null, !human);
     return json(r.head);
   }
   const rec = await kvGet(env, id);
-  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE));
+  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE), null, !human);
+  if (rec.hc && !human) throw captchaRequired();
   return json({ v: rec.paste.v, adata: rec.paste.adata, meta: rec.paste.meta });
 }
 
-async function openPaste(env, g, id, info, { lh, kh }) {
+async function openPaste(env, g, id, info, { lh, kh }, human) {
   if (info.burn) {
-    const r = await burnStub(env, id).open(lh, kh);
+    const r = await burnStub(env, id).open(lh, kh, human);
+    if (r.status === 'captcha') throw captchaRequired();
     if (r.status === 'ok') {
       if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
       return json(r.paste);
     }
     if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
-    return goneFor(env, g, id, err(410, 'gone', GONE), lh);
+    return goneFor(env, g, id, err(410, 'gone', GONE), lh, !human);
   }
   const rec = await kvGet(env, id);
-  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE), lh);
+  if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE), lh, !human);
+  if (rec.hc && !human) throw captchaRequired();
   if (!eqB64(lh, rec.acc.lh)) return failed(env, g, proofFailure('bad_link'));
   if (!eqB64(kh, rec.acc.kh)) return failed(env, g, proofFailure('bad_password'));
   const p = rec.paste;
   return json({ v: p.v, ct: p.ct, wk: p.wk, adata: p.adata, meta: p.meta });
 }
 
-async function openFile(env, g, id, { lh, kh }) {
+async function openFile(env, g, id, { lh, kh }, human) {
   const grant = genToken();
   const client = (await hashToken(`grant-client:${g.key}`)).slice(0, 16);
   // The sender's role decides the download window and the viewer policy, now.
   const policy = await directory(env).shareOpenPolicy(id);
-  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client);
+  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client, human);
+  if (r.status === 'captcha') throw captchaRequired();
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
     // `now`: the server's time, so the viewer's download-window warning does not depend on its clock.
@@ -220,7 +293,7 @@ async function openFile(env, g, id, { lh, kh }) {
   if (r.status === 'busy') {
     return json({ error: 'busy', message: 'Too many downloads of this share are in progress. Try again in a few minutes.' }, 429, { 'retry-after': '300' });
   }
-  return goneFor(env, g, id, err(410, 'gone', GONE), lh);
+  return goneFor(env, g, id, err(410, 'gone', GONE), lh, !human);
 }
 
 /**
@@ -228,9 +301,18 @@ async function openFile(env, g, id, { lh, kh }) {
  * someone who can open the share), works only when the sender allowed it, and
  * is refused while the admin has the share locked. Spends no view.
  */
-async function expireByOpener(env, g, id, info, { lh, kh }) {
+async function expireByOpener(env, g, id, info, { lh, kh }, human) {
   const dir = directory(env);
   if (info.file) binding(env, 'FILES');
+  // Without a grant (while the CAPTCHA is in force) nothing is said about a
+  // share that has the CAPTCHA, nor about one that is missing or has ended
+  // (not even whether it may be deleted or is locked): the same 403
+  // captcha_required. The stores check again below.
+  if (!human) {
+    const st = await dir.shareCaptchaState(id);
+    if (st === 'captcha') throw captchaRequired();
+    if (st === 'none') return goneFor(env, g, id, err(410, 'gone', GONE), lh, true);
+  }
   // Checked now, not only at creation: a lock, or the admin withdrawing the
   // sender's permission, stops "delete now" on existing shares too.
   const allowed = await dir.recipientDeleteStatus(id);
@@ -238,22 +320,24 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
   if (allowed !== 'ok') return err(403, 'not_allowed', 'Recipients may not delete this share.');
   let status;
   if (info.file || info.burn) {
-    status = (await (info.file ? fileStub(env, id) : burnStub(env, id)).expireByOpener(lh, kh)).status;
+    status = (await (info.file ? fileStub(env, id) : burnStub(env, id)).expireByOpener(lh, kh, human)).status;
   } else {
     const rec = await kvGet(env, id);
     if (!rec) status = 'gone';
+    else if (rec.hc && !human) status = 'captcha';
     else if (!eqB64(lh, rec.acc.lh)) status = 'bad_link';
     else if (!eqB64(kh, rec.acc.kh)) status = 'bad_password';
     else if (rec.paste.meta.deletable !== true) status = 'not_allowed';
     else { await kvDelete(env, id); status = 'ok'; }
   }
+  if (status === 'captcha') throw captchaRequired();
   if (status === 'ok') {
     await dir.shareDeletedByRecipient(id);
     return json({ status: 'deleted', id });
   }
   if (status === 'bad_link' || status === 'bad_password') return failed(env, g, proofFailure(status));
   if (status === 'not_allowed') return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
-  return goneFor(env, g, id, err(410, 'gone', GONE), lh);
+  return goneFor(env, g, id, err(410, 'gone', GONE), lh, !human);
 }
 
 /**
@@ -266,28 +350,33 @@ async function expireByOpener(env, g, id, info, { lh, kh }) {
  * stops asking after the first 409) and a share that has ended (a late tab
  * asks once). Each extension is recorded in the share owner's activity log.
  */
-async function extendGrant(request, env, g, id) {
+async function extendGrant(request, env, g, id, human = false) {
   const grant = request.headers.get('x-download-grant') || '';
   if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) return failed(env, g, err(403, 'bad_grant', 'A valid X-Download-Grant header is required.'));
   const policy = await directory(env).shareOpenPolicy(id);
-  if (!policy.known) return failed(env, g, err(410, 'gone', GONE));
-  const r = await fileStub(env, id).extendGrant(await hashToken(grant), policy.grantSec);
+  // As on the chunk route: without a CAPTCHA grant (while the CAPTCHA is in force) a missing share
+  // answers exactly as a protected one, and a share that has the CAPTCHA is not extended.
+  if (!policy.known) return failed(env, g, human ? err(410, 'gone', GONE) : captchaRequired().toResponse());
+  const r = await fileStub(env, id).extendGrant(await hashToken(grant), policy.grantSec, human);
+  if (r.status === 'captcha') throw captchaRequired();
   if (r.status === 'ok') {
     await directory(env).recordDownloadExtended(id, { n: r.extensions, until: r.grantExpires });
     return json({ grantExpires: r.grantExpires, extensionsLeft: r.extensionsLeft, now: Math.floor(Date.now() / 1000) });
   }
   if (r.status === 'limit') return failed(env, g, err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires }));
   if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'The download window has expired — open the link again.'));
-  return failed(env, g, err(410, 'gone', GONE));
+  return failed(env, g, human ? err(410, 'gone', GONE) : captchaRequired().toResponse());
 }
 
 /** Chunk i of a file share's stream, or (with `ref`) chunk i of a Drive share's file number `ref`. */
-async function downloadChunk(request, env, g, id, i, ref = null) {
+async function downloadChunk(request, env, g, id, i, ref = null, human = false) {
   const grant = request.headers.get('x-download-grant') || '';
   if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) return failed(env, g, err(403, 'bad_grant', 'A valid X-Download-Grant header is required.'));
   const stub = fileStub(env, id);
-  const r = ref === null ? await stub.chunkAccess(await hashToken(grant), i) : await stub.chunkAccessRef(await hashToken(grant), ref, i);
+  const r = ref === null ? await stub.chunkAccess(await hashToken(grant), i, human) : await stub.chunkAccessRef(await hashToken(grant), ref, i, human);
+  if (r.status === 'captcha') throw captchaRequired();
   if (r.status === 'bad_index') return err(404, 'not_found', 'No such chunk.');
+  if (r.status === 'gone' && !human) return failed(env, g, captchaRequired().toResponse()); // as a protected share (see goneFor)
   if (r.status !== 'ok') return failed(env, g, err(r.status === 'bad_grant' ? 403 : 410, r.status === 'bad_grant' ? 'bad_grant' : 'gone',
     r.status === 'bad_grant' ? 'The download window has expired — open the link again.' : GONE));
   const obj = await binding(env, 'FILES').get(r.key);

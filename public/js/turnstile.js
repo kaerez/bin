@@ -15,8 +15,10 @@ import { fetchConfig } from './api.js';
 import { holdSessionKeys } from './drivekeys.js';
 
 const WAIT_MS = 120000;
-const LOAD_FAILED = 'The CAPTCHA (Cloudflare Turnstile) could not load. Check your connection or content blocker, then reload the page.';
-const NOT_DONE = 'Complete the CAPTCHA, then try again.';
+// `noun`: what the page calls the check ("CAPTCHA" everywhere in the UI).
+const loadFailed = (noun) => `The ${noun} (Cloudflare Turnstile) could not load. Check your connection or content blocker, then reload the page.`;
+const LOAD_FAILED = loadFailed('CAPTCHA');
+const notDone = (noun) => `Complete the ${noun}, then try again.`;
 
 let loader = null;
 function loadScript() {
@@ -77,7 +79,6 @@ function watchFocus(container) {
 }
 
 const OFF = Object.freeze({ active: false, take: async () => null, gate: () => {}, remove: () => {} });
-const WAITING = 'Waiting for the CAPTCHA…';
 // The way on for anyone who cannot complete the widget (a third-party
 // component): the page's own alternative, if any, and the site's contact.
 const HELP = 'If you cannot complete it, ';
@@ -133,7 +134,7 @@ function gate(btn, waiting) {
  * widget can serve several buttons: each take() uses up the token and starts
  * a fresh check.
  */
-export function humanCheck(container, action, { gate: buttons = [], alternative = '' } = {}) {
+export function humanCheck(container, action, { gate: buttons = [], alternative = '', noun = 'CAPTCHA' } = {}) {
   let token = null;
   let state = 'pending'; // pending (site key unknown) | on | off
   let broken = null;
@@ -149,7 +150,7 @@ export function humanCheck(container, action, { gate: buttons = [], alternative 
     note.className = 'mono muted human-wait';
     note.id = `human-wait-${++noteSeq}`;
     note.setAttribute('role', 'status');
-    note.append(WAITING, ...helpNodes(alternative));
+    note.append(`Waiting for the ${noun}…`, ...helpNodes(alternative));
     note.hidden = true;
     gated[0].insertAdjacentElement('afterend', note);
     for (const b of gated) b.setAttribute('aria-describedby', [b.getAttribute('aria-describedby'), note.id].filter(Boolean).join(' '));
@@ -192,7 +193,7 @@ export function humanCheck(container, action, { gate: buttons = [], alternative 
         'error-callback': () => { token = null; update(); },
       });
     } catch (e) {
-      broken = e instanceof Error ? e : new Error(LOAD_FAILED);
+      broken = e instanceof Error ? new Error(e.message === LOAD_FAILED ? loadFailed(noun) : e.message) : new Error(loadFailed(noun));
       update();
       // The buttons stay disabled: say why, where the widget would be.
       const note = document.createElement('p');
@@ -214,7 +215,7 @@ export function humanCheck(container, action, { gate: buttons = [], alternative 
       async take() {
         if (broken) throw broken;
         const t = token || await new Promise((resolve, reject) => {
-          const w = { resolve, reject: () => reject(new Error(NOT_DONE)) };
+          const w = { resolve, reject: () => reject(new Error(notDone(noun))) };
           waiters.push(w);
           setTimeout(() => { if (waiters.includes(w)) { waiters = waiters.filter((x) => x !== w); w.reject(); } }, WAIT_MS);
         });

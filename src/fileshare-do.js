@@ -17,6 +17,11 @@
 // files it references ({ key: 'd/<uid>/<node>', chunks, size }) — instead of
 // an uploaded stream: created active, its purge deletes only this record
 // (never a d/ object: the Drive owns those), and chunks are read by (ref, i).
+//
+// A share with the CAPTCHA (`hc`, from the sender's role at creation) serves
+// nothing — head, open, "delete now", chunks — unless the Worker has verified
+// a CAPTCHA grant for it (`human`); the answer is then 'captcha' and no view
+// is spent (src/lib/human.js).
 
 import { DurableObject } from 'cloudflare:workers';
 import { verifyToken } from './lib/ids.js';
@@ -93,12 +98,12 @@ export class FileShare extends DurableObject {
   }
 
   // ── upload ────────────────────────────────────────────────────────────────
-  async init({ id, uid, uth, dth, padded, views, expire, ttl, pendingSec, deletable = false }) {
+  async init({ id, uid, uth, dth, padded, views, expire, ttl, pendingSec, deletable = false, hc = false }) {
     return this.ctx.blockConcurrencyWhile(async () => {
       if (await this.#rec()) return false;
       const chunks = Math.ceil(padded / CHUNK);
       const deadline = nowSec() + pendingSec;
-      await this.#put({ id, state: 'pending', uid, uth, dth, padded, chunks, sizes: [], views, left: views, expire, ttl, deadline, grants: [], deletable: !!deletable });
+      await this.#put({ id, state: 'pending', uid, uth, dth, padded, chunks, sizes: [], views, left: views, expire, ttl, deadline, grants: [], deletable: !!deletable, hc: hc === true });
       await this.ctx.storage.setAlarm(deadline * 1000);
       return true;
     });
@@ -145,12 +150,12 @@ export class FileShare extends DurableObject {
       if (rec.deletable) meta.deletable = true;
       const next = {
         id: rec.id, state: 'active', dth: rec.dth, padded: rec.padded, chunks: rec.chunks, views: rec.views, left: rec.left,
-        expire: rec.expire, ttl: rec.ttl, expires, acc, grants: [],
+        expire: rec.expire, ttl: rec.ttl, expires, acc, grants: [], hc: rec.hc === true,
         paste: { v: paste.v, ct: paste.ct, wk: paste.wk, adata: paste.adata, meta },
       }; // uid + upload token dropped: the share is no longer linked to the uploader here
       await this.#put(next);
       await this.ctx.storage.setAlarm(expires * 1000);
-      return { status: 'ok', created, expires };
+      return { status: 'ok', created, expires, hc: next.hc };
     });
   }
 
@@ -158,7 +163,7 @@ export class FileShare extends DurableObject {
    * A Drive share: active at once, referencing Drive files (`refs`) instead of
    * an upload. The encrypted manifest must declare what was authorized.
    */
-  async initRefs({ id, dth, refs, views, expire, ttl, deletable = false, paste, acc }) {
+  async initRefs({ id, dth, refs, views, expire, ttl, deletable = false, paste, acc, hc = false }) {
     return this.ctx.blockConcurrencyWhile(async () => {
       if (await this.#rec()) return { status: 'exists' };
       if (paste.adata.bar !== (views !== null) || paste.meta.expire !== expire
@@ -169,7 +174,7 @@ export class FileShare extends DurableObject {
       if (views !== null) meta.views = views;
       if (deletable) meta.deletable = true;
       await this.#put({
-        id, state: 'active', dth, padded: 0, chunks: 0, views, left: views, expire, ttl, expires, acc, grants: [],
+        id, state: 'active', dth, padded: 0, chunks: 0, views, left: views, expire, ttl, expires, acc, grants: [], hc: hc === true,
         refs: refs.map((r) => ({ key: r.key, chunks: r.chunks, size: r.size })),
         paste: { v: paste.v, ct: paste.ct, wk: paste.wk, adata: paste.adata, meta },
       });
@@ -185,9 +190,10 @@ export class FileShare extends DurableObject {
     return m;
   }
 
-  async head() {
+  async head(human = false) {
     const rec = await this.#live();
     if (!rec || rec.state !== 'active') return { status: 'gone' };
+    if (rec.hc && human !== true) return { status: 'captcha' };
     return { status: 'ok', head: { v: rec.paste.v, adata: rec.paste.adata, meta: this.#metaOut(rec) }, padded: rec.padded, chunks: rec.chunks };
   }
 
@@ -195,10 +201,11 @@ export class FileShare extends DurableObject {
    * Verify proofs, spend a view, register a grant (hash) valid for grantSec.
    * `client` is an opaque hash of the caller's tracking key (never an IP).
    */
-  async open(lh, kh, grantHash, grantSec, client = '') {
+  async open(lh, kh, grantHash, grantSec, client = '', human = false) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#live();
       if (!rec || rec.state !== 'active') return { status: 'gone' };
+      if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
       if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
       const t = nowSec();
@@ -245,12 +252,13 @@ export class FileShare extends DurableObject {
   }
 
   /** "Delete now" by someone holding both proofs, when the sender allowed it. */
-  async expireByOpener(lh, kh) {
+  async expireByOpener(lh, kh, human = false) {
     return this.ctx.blockConcurrencyWhile(async () => {
       // Only an active share: after its last view, downloads already granted
       // run out on their own and are not cut short by a recipient.
       const rec = await this.#live();
       if (!rec || rec.state !== 'active') return { status: 'gone' };
+      if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
       if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
       if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };
@@ -266,10 +274,12 @@ export class FileShare extends DurableObject {
    * MAX_GRANT_EXTENSIONS times. Spends no view. After the last view (closed)
    * the purge waits for the extended grant.
    */
-  async extendGrant(grantHash, grantSec) {
+  async extendGrant(grantHash, grantSec, human = false) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#live();
       if (!rec || rec.state === 'pending') return { status: 'gone' };
+      // A share with the CAPTCHA: only with a CAPTCHA grant, as for its chunks.
+      if (rec.hc && human !== true) return { status: 'captcha' };
       const t = nowSec();
       const grants = await this.#grants(rec, t);
       const g = grants.find((x) => safeEq(x.h, grantHash));
@@ -289,18 +299,20 @@ export class FileShare extends DurableObject {
   }
 
   /** Is `grantHash` currently valid for chunk i? */
-  async chunkAccess(grantHash, i) {
+  async chunkAccess(grantHash, i, human = false) {
     const rec = await this.#live();
     if (!rec || rec.state === 'pending') return { status: 'gone' };
+    if (rec.hc && human !== true) return { status: 'captcha' };
     if (!Number.isInteger(i) || i < 0 || i >= rec.chunks) return { status: 'bad_index' };
     if (!(await this.#grants(rec)).some((g) => safeEq(g.h, grantHash))) return { status: 'bad_grant' };
     return { status: 'ok', key: r2Key(rec.id, i) };
   }
 
   /** Drive shares: is `grantHash` valid for chunk i of ref `ref`? Returns the Drive object's key. */
-  async chunkAccessRef(grantHash, ref, i) {
+  async chunkAccessRef(grantHash, ref, i, human = false) {
     const rec = await this.#live();
     if (!rec || rec.state === 'pending') return { status: 'gone' };
+    if (rec.hc && human !== true) return { status: 'captcha' };
     if (!Array.isArray(rec.refs) || !Number.isInteger(ref) || ref < 0 || ref >= rec.refs.length) return { status: 'bad_index' };
     const r = rec.refs[ref];
     if (!Number.isInteger(i) || i < 0 || i >= r.chunks) return { status: 'bad_index' };

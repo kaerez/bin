@@ -325,15 +325,19 @@ describe('PWA wiring', () => {
     }
   });
 
-  it('every page links the manifest, the touch icon and theme color, and loads pwa.js', () => {
+  it('every page links the manifest, the touch icon and theme color, and loads pwa.js — except a share\'s CAPTCHA page, which must not', () => {
     const list = pages();
     expect(list.length).toBeGreaterThanOrEqual(7);
+    // The CAPTCHA page runs Cloudflare's script and has worker-src 'none': it registers no service worker.
+    const CHECK = 'public/check/index.html';
+    expect(list).toContain(CHECK);
     for (const p of list) {
       const html = read(p);
       expect(html, p).toContain('<link rel="manifest" href="/manifest.webmanifest" />');
       expect(html, p).toContain('<link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />');
       expect(html, p).toMatch(/<meta name="theme-color" content="#[0-9a-f]{6}" \/>/);
-      expect(html, p).toContain('<script type="module" src="/js/pwa.js"></script>');
+      if (p === CHECK) expect(html, p).not.toMatch(/pwa\.js|install-banner\.js|serviceWorker/);
+      else expect(html, p).toContain('<script type="module" src="/js/pwa.js"></script>');
     }
   });
 });

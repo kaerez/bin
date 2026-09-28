@@ -17,6 +17,7 @@ import { walkEntry } from './walk.js';
 import { folderBrowser } from './tree.js';
 import { buildSecret, describeHost, describeUrlRules, parseShareUrl, urlRulesOf, ShareTypeError } from './sharetypes.js';
 import { declare, describeType, fileExt, refusedTypes, uncheckableExt } from './filepolicy.js';
+import { captchaChoice, captchaHint, captchaValue } from './captcha.js';
 
 const UNIT_WORDS = { m: ['minute', 'minutes'], h: ['hour', 'hours'], d: ['day', 'days'] };
 const ARROW_LEAD_MS = 150;
@@ -27,6 +28,7 @@ let profile = null;
 // account API (api.js) or the public one (api.js publicApi).
 let api = null;
 let publicMode = false;
+let captcha = { show: false };
 let mode = 'note';
 const MODES = ['note', 'url', 'secret', 'files'];
 const SECRET_INPUTS = { title: '#sec-title', username: '#sec-username', password: '#sec-password', url: '#sec-url', totp: '#sec-totp', notes: '#sec-notes' };
@@ -71,6 +73,18 @@ function init() {
   }
   setMode(first);
   $('#deletable-opt').hidden = !L.openerDelete;
+  // The CAPTCHA, as the role says (the signed-in composer only; the server decides again).
+  captcha = publicMode ? captchaChoice(null, 'share') : captchaChoice(profile, 'share');
+  const capBox = $('#captcha-opt');
+  if (capBox) {
+    capBox.hidden = !captcha.show;
+    const c = $('#captcha');
+    c.checked = captcha.checked;
+    c.disabled = captcha.disabled;
+    const hint = $('#captcha-hint');
+    hint.textContent = captchaHint(captcha, 'share');
+    hint.classList.toggle('warn', !captcha.active);
+  }
   wireTypedPanels();
 
   // Limits → control bounds (the server remains authoritative).
@@ -211,7 +225,8 @@ function readOptions() {
   if (L.maxExpireSec !== null && sec > L.maxExpireSec) return { error: `Your account allows an expiry of at most ${Math.floor(L.maxExpireSec / 60)} minutes.` };
   const n = Number(nRaw);
   const deletable = !!L.openerDelete && $('#deletable').checked;
-  return { views, expire, expiryText: `${n} ${UNIT_WORDS[unit][n === 1 ? 0 : 1]}`, label: publicMode ? '' : $('#share-label').value.trim(), deletable };
+  return { views, expire, expiryText: `${n} ${UNIT_WORDS[unit][n === 1 ? 0 : 1]}`, label: publicMode ? '' : $('#share-label').value.trim(), deletable,
+    captcha: captchaValue(captcha, $('#captcha')) };
 }
 
 function wireOptions() {
@@ -458,7 +473,7 @@ async function submit(password, opts) {
     if (mode !== 'files') {
       const { text, fmt } = mode === 'note' ? { text: $('#editor').value, fmt: 'plaintext' } : opts.typed;
       const { body, fragment } = await encryptPaste({ text, fmt, password, bar: opts.views !== null, expire: opts.expire, views: opts.views ?? undefined, deletable: opts.deletable });
-      const r = await api.createNote(body, opts.label || undefined);
+      const r = await api.createNote(body, opts.label || undefined, opts.captcha === undefined ? {} : { captcha: opts.captcha });
       result = { kind: 'paste', id: r.id, deletetoken: r.deletetoken, fragment };
     } else {
       result = await uploadFiles(password, opts, (txt) => { progress.textContent = txt; sendTxt.textContent = 'Uploading…'; });
@@ -468,6 +483,7 @@ async function submit(password, opts) {
     $('#editor').value = '';
     clearTyped();
     $('#deletable').checked = false;
+    if ($('#captcha')) $('#captcha').checked = captcha.checked;
     items.clear();
     progress.textContent = '';
     showSuccess({ ...result, url: `${location.origin}/p/${result.id}#${result.fragment}`, views: opts.views, expiryText: opts.expiryText });
@@ -489,6 +505,7 @@ async function uploadFiles(password, opts, report) {
 
   const initBody = { views: opts.views, expire: opts.expire, padded: l.padded };
   if (opts.deletable) initBody.deletable = true;
+  if (opts.captcha !== undefined) initBody.captcha = opts.captcha;
   // Only declared when a limit needs it — the server otherwise learns nothing
   // about how many files there are or how big any one of them is.
   if (L.maxFilesPerShare !== null) initBody.files = files.length;

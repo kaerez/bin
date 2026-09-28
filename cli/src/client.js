@@ -168,8 +168,9 @@ export class Client {
   }
 
   /** Create a note. `paste` is encryptPaste().body. Returns { id, deletetoken, expires }. */
-  async createNote(paste, label) {
-    const d = await this.request('/api/private/paste', { method: 'POST', auth: true, body: { paste, label } });
+  /** `captcha`: true / false, or undefined (the account role's default). */
+  async createNote(paste, label, captcha) {
+    const d = await this.request('/api/private/paste', { method: 'POST', auth: true, body: { paste, label, ...(typeof captcha === 'boolean' ? { captcha } : {}) } });
     if (typeof d.id !== 'string' || typeof d.deletetoken !== 'string' || !TOKEN_RE.test(d.deletetoken)) throw malformed();
     return d;
   }

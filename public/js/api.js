@@ -36,6 +36,24 @@ const touched = (path, res) => {
   if (res.ok && path.startsWith('/api/private/')) for (const fn of activity) { try { fn(path); } catch { /* a listener's bug is not the request's */ } }
 };
 
+// CAPTCHA grants (src/lib/human.js) for shares that have the CAPTCHA, by share
+// id: sent with every call about that share, renewed from the responses.
+const humanGrants = new Map();
+let onHumanGrant = () => {};
+/** Use `grant` (or none: null) for the calls about share `id`. */
+export function setHumanGrant(id, grant) {
+  if (typeof grant === 'string' && grant) humanGrants.set(id, grant);
+  else humanGrants.delete(id);
+}
+export const humanGrantOf = (id) => humanGrants.get(id) ?? null;
+/** `fn(id, grant)` is called when the server renews a grant (the page keeps it for the tab). */
+export const setHumanGrantListener = (fn) => { onHumanGrant = typeof fn === 'function' ? fn : () => {}; };
+const humanHeaders = (id) => (humanGrants.has(id) ? { 'x-secbin-human': humanGrants.get(id) } : {});
+function renewedHuman(id, res) {
+  const g = res.headers && typeof res.headers.get === 'function' ? res.headers.get('x-secbin-human') : null;
+  if (id && g && /^h1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(g)) { humanGrants.set(id, g); onHumanGrant(id, g); }
+}
+
 // ── CSRF token and the page's session ────────────────────────────────────────
 // Every state-changing request of a signed-in page carries a CSRF token in
 // X-Secbin-CSRF (src/lib/csrf.js), and the token a page sends is the one of
@@ -164,8 +182,8 @@ async function isCsrfMismatch(res) {
   }
 }
 
-async function request(path, { method = 'GET', body, headers = {}, raw = false, signal } = {}) {
-  const init = { method, headers: { ...headers }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual', ...(signal ? { signal } : {}) };
+async function request(path, { method = 'GET', body, headers = {}, raw = false, signal, human: humanId } = {}) {
+  const init = { method, headers: { ...headers, ...(humanId ? humanHeaders(humanId) : {}) }, cache: 'no-store', credentials: 'same-origin', redirect: 'manual', ...(signal ? { signal } : {}) };
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json';
     init.body = JSON.stringify(body);
@@ -173,6 +191,7 @@ async function request(path, { method = 'GET', body, headers = {}, raw = false, 
   const res = await send(path, init);
   if (res.type === 'opaqueredirect') throw new ApiError('Please log in.', 401, 'unauthenticated');
   touched(path, res);
+  if (humanId) renewedHuman(humanId, res);
   if (raw && res.ok) return res;
   const data = await readJson(res);
   if (!res.ok) {
@@ -187,35 +206,47 @@ const enc = encodeURIComponent;
 
 // ── public share API ──────────────────────────────────────────────────────────
 export const fetchConfig = () => request('/api/config');
-export const fetchHead = (kind, id) => request(`/api/${kind}/${enc(id)}`);
+export const fetchHead = (kind, id) => request(`/api/${kind}/${enc(id)}`, { human: id });
 
 /** Open a note or file share with its access proofs (the only way to get ciphertext). */
 export const openShare = (kind, id, { linkProof, keyProof }) =>
-  request(`/api/${kind}/${enc(id)}/open`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof } });
+  request(`/api/${kind}/${enc(id)}/open`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof }, human: id });
 
 /**
  * "Delete now" as a recipient (the sender allowed it): the same two access
  * proofs as opening; spends no view.
  */
 export const expireShare = (kind, id, { linkProof, keyProof }) =>
-  request(`/api/${kind}/${enc(id)}/expire`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof } });
+  request(`/api/${kind}/${enc(id)}/expire`, { method: 'POST', headers: { 'x-link-proof': linkProof, 'x-key-proof': keyProof }, human: id });
+
+/**
+ * A CAPTCHA grant for share `id` (the check page): with a Turnstile `token`
+ * a new one; without, the grant held for `id` renewed (a keep-alive) →
+ * { grant, expires } (grant null while the server has no CAPTCHA).
+ */
+export async function shareHuman(kind, id, token = null) {
+  const d = await request(`/api/${kind}/${enc(id)}/human`, { method: 'POST', headers: { ...INTENT, ...human(token) }, human: token ? null : id });
+  if (d.grant !== null && typeof d.grant !== 'string') throw malformed();
+  if (d.grant) setHumanGrant(id, d.grant);
+  return d;
+}
 
 /** Keep a file share's download window open longer (at most ten times; spends no view). */
 export async function extendDownloads(id, grant) {
-  const d = await request(`/api/file/${enc(id)}/extend`, { method: 'POST', headers: { 'x-download-grant': grant } });
+  const d = await request(`/api/file/${enc(id)}/extend`, { method: 'POST', headers: { 'x-download-grant': grant }, human: id });
   if (!Number.isFinite(d.grantExpires) || !Number.isInteger(d.extensionsLeft)) throw malformed();
   return d;
 }
 
 /** One encrypted chunk of a file share, under a download grant. */
 export async function fetchChunk(id, i, grant) {
-  const res = await request(`/api/file/${enc(id)}/chunk/${i}`, { headers: { 'x-download-grant': grant }, raw: true });
+  const res = await request(`/api/file/${enc(id)}/chunk/${i}`, { headers: { 'x-download-grant': grant }, raw: true, human: id });
   return new Uint8Array(await res.arrayBuffer());
 }
 
 /** Chunk `i` of file `ref` of a Drive share (manifest v3), under a download grant. */
 export async function fetchRefChunk(id, ref, i, grant) {
-  const res = await request(`/api/file/${enc(id)}/chunk/${ref}/${i}`, { headers: { 'x-download-grant': grant }, raw: true });
+  const res = await request(`/api/file/${enc(id)}/chunk/${ref}/${i}`, { headers: { 'x-download-grant': grant }, raw: true, human: id });
   return new Uint8Array(await res.arrayBuffer());
 }
 
@@ -256,8 +287,9 @@ export const removePasskey = (id, step, turnstile) => request(`/api/private/me/p
 export const regenerateRecoveryCodes = (step, turnstile) => request('/api/private/me/recovery-codes', { method: 'POST', headers: human(turnstile), body: { ...step } });
 export const setSecondFactor = (on, step, turnstile) => request('/api/private/me/second-factor', { method: 'POST', headers: human(turnstile), body: { on, ...step } });
 
-export async function createNote(paste, label) {
-  const d = await request('/api/private/paste', { method: 'POST', body: { paste, label } });
+/** `extra`: { captcha } (true / false; left out: the role's default). */
+export async function createNote(paste, label, extra = {}) {
+  const d = await request('/api/private/paste', { method: 'POST', body: { paste, label, ...extra } });
   if (typeof d.id !== 'string' || typeof d.deletetoken !== 'string') throw malformed();
   return d;
 }
@@ -371,9 +403,11 @@ const R = (id) => `/api/reverse/${enc(id)}`;
 const grantH = (grant) => ({ 'x-reverse-grant': grant });
 export const reverseApi = {
   open: (id, linkProof) => request(`${R(id)}/open`, { method: 'POST', headers: { ...INTENT, 'x-link-proof': linkProof } }),
-  begin: (id, { linkProof, keyProof, turnstile }) => request(`${R(id)}/begin`, {
-    method: 'POST', headers: { ...INTENT, 'x-link-proof': linkProof, ...(keyProof ? { 'x-key-proof': keyProof } : {}), ...human(turnstile) },
+  // `humanGrant`: a CAPTCHA grant from human() (the check page), when the link has the CAPTCHA.
+  begin: (id, { linkProof, keyProof, turnstile, humanGrant }) => request(`${R(id)}/begin`, {
+    method: 'POST', headers: { ...INTENT, 'x-link-proof': linkProof, ...(keyProof ? { 'x-key-proof': keyProof } : {}), ...human(turnstile), ...(humanGrant ? { 'x-secbin-human': humanGrant } : {}) },
   }),
+  human: (id, token) => request(`${R(id)}/human`, { method: 'POST', headers: { ...INTENT, ...human(token) } }),
   createFile: (id, grant, body, signal) => request(`${R(id)}/files`, { method: 'POST', headers: grantH(grant), body, signal }),
   putChunk: (id, node, i, bytes, uploadToken, signal) => putChunkTo(`${R(id)}/files/${enc(node)}/chunk/${i}`, bytes, uploadToken, signal),
   finalize: (id, grant, node, uploadToken) => request(`${R(id)}/files/${enc(node)}/finalize`, { method: 'POST', headers: { ...INTENT, ...grantH(grant), 'x-upload-token': uploadToken } }),

@@ -193,7 +193,7 @@ describe('L-1: the human check before the password; a lockout per link', () => {
       });
       for (const pw of ['wrong guess', 'correct horse']) {
         const res = await guess(pw);
-        expect([res.status, await errorOf(res)]).toEqual([403, 'turnstile_required']);
+        expect([res.status, await errorOf(res)]).toEqual([403, 'captcha_required']);
         const bad = await guess(pw, 'nope');
         expect([bad.status, await errorOf(bad)]).toEqual([403, 'turnstile_failed']);
       }

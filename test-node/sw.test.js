@@ -5,9 +5,12 @@
 // under /api/ or /p/, nothing with a query string, nothing cross-origin and no
 // non-GET request is ever intercepted — so it can never be served from, or
 // written to, the cache.
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { createHash, webcrypto } from 'node:crypto';
 import vm from 'node:vm';
+import { generatedBlock, buildManifest } from '../tools/sw-manifest.mjs';
+import { SECURITY_HEADERS } from '../src/lib/http.js';
 
 const ORIGIN = 'https://bin.example';
 const src = readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
@@ -16,7 +19,7 @@ let ctx;
 const listeners = {};
 beforeAll(() => {
   ctx = {
-    URL, Headers, Request, Response, Promise,
+    URL, Headers, Request, Response, Promise, crypto: webcrypto, btoa,
     self: {
       location: new URL(`${ORIGIN}/sw.js`),
       addEventListener: (type, fn) => { listeners[type] = fn; },
@@ -142,5 +145,94 @@ describe('service worker response rules', () => {
     await done;
     ctx.caches = saved;
     expect(deleted).toEqual(['secbin-static-old']);
+  });
+});
+
+// ── the integrity manifest (security re-audit N3) ──────────────────────────
+describe('service worker: cached copies are served only when they are this build\'s assets', () => {
+  const sha = (text) => createHash('sha256').update(text).digest('base64');
+  const REAL = '/js/view.js';
+  const realBody = readFileSync(new URL('../public/js/view.js', import.meta.url));
+  /** A Cache Storage stub: one cache, a Map of key → Response. */
+  function cacheStorage(entries = {}) {
+    const m = new Map(Object.entries(entries));
+    const deleted = [];
+    const cache = {
+      match: async (k) => (m.has(k) ? m.get(k).clone() : undefined),
+      put: async (k, r) => { m.set(k, r); },
+      delete: async (k) => { deleted.push(k); return m.delete(k); },
+    };
+    return { store: { open: async () => cache, keys: async () => [] }, m, deleted };
+  }
+  const saved = {};
+  beforeAll(() => { saved.caches = ctx.caches; saved.fetch = ctx.fetch; });
+  afterEach(() => { ctx.caches = saved.caches; ctx.fetch = saved.fetch; });
+  const offline = async () => { throw new TypeError('Failed to fetch'); };
+
+  it('the manifest in sw.js is current (tools/sw-manifest.mjs), covers the landing page and every static asset, and carries the security headers', () => {
+    expect(src).toContain(generatedBlock());
+    const m = buildManifest();
+    expect(m['/']).toBe(sha(readFileSync(new URL('../public/index.html', import.meta.url))));
+    expect(m[REAL]).toBe(sha(realBody));
+    expect(Object.keys(m).every((p) => p === '/' || p === '/manifest.webmanifest' || p === '/favicon.ico' || /^\/(css|fonts|img|js)\//.test(p))).toBe(true);
+    expect(Object.keys(m)).not.toContain('/sw.js');
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) expect(src).toContain(`${JSON.stringify(k)}: ${JSON.stringify(v)}`);
+  });
+
+  it('PoC N3: a poisoned cache entry (a script of this origin wrote it) is never served offline; it is deleted and the request fails', async () => {
+    for (const [path, body, headers] of [
+      [REAL, 'alert(document.cookie)', { 'content-type': 'text/javascript' }],
+      ['/', '<!doctype html><script>steal()</script>', { 'content-type': 'text/html' }], // no CSP of its own
+      [REAL, `${realBody.toString('utf8')}\n;steal()`, { 'content-type': 'text/javascript' }], // the real file, appended to
+    ]) {
+      const c = cacheStorage({ [`${ORIGIN}${path}`]: new Response(body, { headers }) });
+      ctx.caches = c.store;
+      ctx.fetch = offline;
+      await expect(ctx.networkFirst(req(path, { mode: path === '/' ? 'navigate' : 'no-cors' }))).rejects.toThrow('Failed to fetch');
+      expect(c.deleted).toEqual([`${ORIGIN}${path}`]);
+    }
+  });
+
+  it('a verified copy is served offline, rebuilt with this build\'s content type and security headers (never the stored ones)', async () => {
+    const c = cacheStorage({ [`${ORIGIN}${REAL}`]: new Response(realBody, { headers: { 'content-type': 'text/html', 'content-security-policy': "script-src 'unsafe-inline'" } }) });
+    ctx.caches = c.store;
+    ctx.fetch = offline;
+    const res = await ctx.networkFirst(req(REAL));
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).equals(realBody)).toBe(true);
+    expect(res.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) expect(res.headers.get(k)).toBe(v);
+  });
+
+  it('a network body that is not this build\'s is not stored; this build\'s is, with rebuilt headers; a path outside the manifest is never cached', async () => {
+    const pending = [];
+    const waitUntil = (p) => pending.push(p);
+    let c = cacheStorage();
+    ctx.caches = c.store;
+    ctx.fetch = async () => new Response('tampered in transit', { status: 200, headers: { 'content-type': 'text/javascript' } });
+    // A fetched same-origin response is 'basic' in a browser; Node's Response says 'default'.
+    const typeDesc = Object.getOwnPropertyDescriptor(Response.prototype, 'type');
+    Object.defineProperty(Response.prototype, 'type', { configurable: true, get() { return 'basic'; } });
+    try {
+      await ctx.networkFirst(req(REAL), waitUntil);
+      await Promise.all(pending.splice(0));
+      expect(c.m.size).toBe(0);
+      ctx.fetch = async () => new Response(realBody, { status: 200, headers: { 'content-type': 'text/javascript' } });
+      await ctx.networkFirst(req(REAL), waitUntil);
+      await Promise.all(pending.splice(0));
+      expect([...c.m.keys()]).toEqual([`${ORIGIN}${REAL}`]);
+      expect(c.m.get(`${ORIGIN}${REAL}`).headers.get('content-security-policy')).toBe(SECURITY_HEADERS['content-security-policy']);
+      // Not in the manifest: fetched, never stored, never served from cache.
+      c = cacheStorage({ [`${ORIGIN}/js/not-a-real-file.js`]: new Response('x') });
+      ctx.caches = c.store;
+      ctx.fetch = async () => new Response('x', { status: 200 });
+      await ctx.networkFirst(req('/js/not-a-real-file.js'), waitUntil);
+      await Promise.all(pending.splice(0));
+      expect([...c.m.keys()]).toEqual([`${ORIGIN}/js/not-a-real-file.js`]); // untouched, not re-stored
+      ctx.fetch = offline;
+      await expect(ctx.networkFirst(req('/js/not-a-real-file.js'))).rejects.toThrow('Failed to fetch');
+    } finally {
+      Object.defineProperty(Response.prototype, 'type', typeDesc);
+    }
   });
 });
