@@ -226,6 +226,24 @@ describe('Admin → Security → Keys', () => {
     await until(() => !S.subs.some((x) => x.id === old));
   }, 60000);
 
+  it('no stray "null" text: a user’s file keys with no more pages, and the upgrade card with one Drive waiting', async () => {
+    S = fakeServer({ role: 'owner' });
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    S.migrationDrives = [{ id: 'uBBBBBBBBBBBBBBB', username: 'bea', state: 'pending', v1Items: 2, v1Links: 0 }];
+    const { keysSection } = await import('../public/dashboard/js/admin-keys.js');
+    mount(keysSection({ profile: profile() }));
+    await until(() => $('#keys-subs-table tbody tr') && $('#keys-upgrade') && !$('#keys-upgrade').hidden);
+    await until(() => $('#keys-user option'));
+    $('#keys-user-confirm').value = 'pw';
+    $('#keys-user-deks').click();
+    await until(() => /No files/.test($('#keys-user-out').textContent));
+    const stray = [];
+    const walk = (n) => { for (const c of n.childNodes) { if (c.nodeType === 3 && ['null', 'undefined'].includes(c.textContent.trim())) stray.push(n.id || n.nodeName); else if (c.nodeType === 1) walk(c); } };
+    walk(document.body);
+    expect(stray).toEqual([]);
+  });
+
   it('the key kit: download (the step-up, passphrase warning), then verify the saved file with a date', async () => {
     await open();
     const saves = captureSaves();

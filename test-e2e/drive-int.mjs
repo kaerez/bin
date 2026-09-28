@@ -1,12 +1,13 @@
 // drive-int.mjs — Dashboard → Drive end to end against the REAL server (shard A)
-// and the real client (public/js/driveclient.js): the Drive set up and unlocked
-// at sign-in, the wraps kept current by Account (recovery codes, passkey PRF),
-// the page's unlock prompt (wrong password, recovery code, passkey, password),
-// the tree (collapsed by default, + expands, selecting shows the right pane,
+// and the real client (public/js/driveclient.js), with the key model v2
+// (docs/DRIVE.md §3): the set-up page making the Drive keys, the Drive opening
+// right after any sign-in (password, passkey, recovery code) with no prompt,
+// the KEKs in the page's memory only (never in browser storage; a key planted
+// there is ignored), the tree (collapsed by default, + expands, selecting shows the right pane,
 // keyboard), upload (files, folder), new folder, rename, move, delete,
 // download (file, folder zip), Share… with the link, the recipient's view of a
 // drive share, an item's shares with revoke, the disabled notice for a role
-// without a Drive, the mobile tree toggle, zero-knowledge on the wire, CSP
+// without a Drive, the mobile tree toggle, no names or contents on the wire, CSP
 // cleanliness and axe (WCAG 2.2 A/AA) on every state in both themes.
 // A manual test, not run in CI: see test-e2e/README.md. Needs a fresh
 // `wrangler dev` (no owner yet), playwright-core and axe-core, a Chromium and
@@ -78,7 +79,8 @@ const waitRows = (p, fn, arg) => p.waitForFunction(fn, arg, { timeout: 30000 });
 const hasRow = (n) => [...document.querySelectorAll('#drive-rows tr')].some((tr) => tr.children[1].textContent.trim() === n);
 const titleIs = (n) => document.querySelector('#drive-pane-title').textContent === n;
 const driveState = (p) => p.evaluate(async () => (await fetch('/api/private/drive', { cache: 'no-store' })).json());
-const tabKey = (p) => p.evaluate(() => sessionStorage.getItem('secbin_dk'));
+// Every key the tab's storage holds (the KEKs must never be there).
+const stored = (p) => p.evaluate(() => [...Object.keys(sessionStorage), ...Object.keys(localStorage)].filter((k) => /^secbin_(kek|dk)/.test(k)));
 
 async function mkdirUI(p, name) {
   await p.click('#drive-mkdir');
@@ -103,8 +105,9 @@ async function login(p, user, pw) {
 }
 
 let codes;
+let st;
 try {
-  // ── the owner signs in: the Drive is set up and unlocked for the tab ──
+  // ── the set-up makes the Drive keys; the owner signs in ─────────────────
   const ctx = await b.newContext({ acceptDownloads: true, reducedMotion: 'reduce', viewport: { width: 1280, height: 900 } });
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
   const p = await ctx.newPage();
@@ -118,10 +121,11 @@ try {
   await p.fill('#setup-token', TOKEN); await p.fill('#setup-user', 'owner'); await p.fill('#setup-pass', PW); await p.fill('#setup-pass2', PW);
   await p.click('#setup-btn');
   await p.waitForFunction(() => /created/.test(document.querySelector('#setup-msg').textContent), null, { timeout: 30000 });
+  check('set-up: the Drive keys were made; the page says to download the key kit', /Drive keys were created.*key kit/.test(await p.textContent('#setup-msg')));
   await login(p, 'owner', PW);
-  check('sign-in: the tab holds the Drive key', !!(await tabKey(p)));
-  let st = await driveState(p);
-  check('sign-in: first time, the Drive is set up (pw wrap; the owner\'s escrow key)', st.enabled === true && st.wraps.some((w) => w.kind === 'pw') && !!st.escrowPub && typeof st.escrowPriv === 'string', JSON.stringify(st.wraps.map((w) => w.kind)));
+  check('sign-in: no Drive key in the tab\'s storage', (await stored(p)).length === 0, (await stored(p)).join(','));
+  st = await driveState(p);
+  check('drive state: a current sub-MEK, and no key, wrap or salt', st.enabled === true && /^m[A-Za-z0-9_-]{11}$/.test(st.current || '') && ['wraps', 'driveSalt', 'escrowPub', 'escrowPriv', 'kcv', 'keys'].every((k) => st[k] === undefined), JSON.stringify(Object.keys(st)));
   check('nav: the owner sees the Drive link (caps.driveEnabled)', await p.isVisible('#nav-drive'));
 
   // A user whose role (Default) has no Drive.
@@ -134,7 +138,7 @@ try {
   await u.locator('button:has-text("Create user")').first().click();
   await p.waitForFunction(() => document.getElementById('toast').textContent === 'User created.', null, { timeout: 30000 });
 
-  // A passkey (PRF) and recovery codes: Account keeps the Drive's wraps current.
+  // A passkey and recovery codes: the Drive does not depend on them (nothing about the Drive changes).
   await p.goto(`${BASE}/dashboard/account/`);
   await p.waitForSelector('#passkeys-body td');
   await p.fill('#passkey-current', PW);
@@ -142,38 +146,36 @@ try {
   await p.click('#passkey-add');
   await p.waitForSelector('#recovery-new:not([hidden])', { timeout: 60000 });
   codes = await p.$$eval('#recovery-list li', (l) => l.map((x) => x.textContent));
-  await p.waitForTimeout(1500);
-  st = await driveState(p);
-  check('account: 20 recovery codes → 20 recovery wraps', st.wraps.filter((w) => w.kind === 'recovery').length === 20, String(st.wraps.filter((w) => w.kind === 'recovery').length));
-  const pkWrap = st.wraps.some((w) => w.kind === 'passkey');
-  info(`passkey wrap after registration: ${pkWrap ? 'yes (PRF at creation)' : 'no (PRF only on use)'}`);
+  check('account: 20 recovery codes', codes.length === 20, String(codes.length));
+  const st0 = await driveState(p);
+  check('account: the Drive keeps no wrap for a passkey or the codes', st0.wraps === undefined && st0.current === st.current);
 
-  // ── the sign-in unlock with a passkey (PRF) and with a recovery code ──
+  // ── any sign-in (a passkey, a recovery code): the Drive opens with no prompt ──
   // Signing out is a change: the session's CSRF token too, as the page's own client sends it (api.js).
   const logout = () => p.evaluate(() => fetch('/api/auth/logout', { method: 'POST', headers: { 'x-secbin-intent': '1', 'x-secbin-csrf': (document.cookie.match(/(?:^|;\s*)__Host-secbin_csrf=([^;]+)/) || [])[1] || '' } }));
-  const forget = () => p.evaluate(() => { sessionStorage.removeItem('secbin_dk'); sessionStorage.removeItem('secbin_dk_uid'); });
-  if (pkWrap) {
-    await logout(); await forget();
-    await p.goto(`${BASE}/dashboard/login/`);
-    await p.click('#passkey-btn');
-    await p.waitForURL(`${BASE}/dashboard/`, { timeout: 60000 });
-    check('sign-in with a passkey alone: the tab holds the Drive key (PRF)', !!(await tabKey(p)));
-  } else {
-    info('passkey sign-in unlock not checked: no passkey wrap');
-  }
-  await logout(); await forget();
+  const opensWithNoPrompt = async (label) => {
+    await p.goto(`${BASE}/dashboard/drive/`);
+    await p.waitForSelector('#drive-app, #drive-unavailable, #drive-disabled', { timeout: 30000 });
+    check(`${label}: the Drive opens with no prompt`, await p.isVisible('#drive-app') && await p.isHidden('input[type="password"]'));
+    check(`${label}: no Drive key in the tab's storage`, (await stored(p)).length === 0, (await stored(p)).join(','));
+  };
+  await logout();
+  await p.goto(`${BASE}/dashboard/login/`);
+  await p.click('#passkey-btn');
+  await p.waitForURL(`${BASE}/dashboard/`, { timeout: 60000 });
+  await opensWithNoPrompt('sign-in with a passkey alone');
+  await logout();
   await p.goto(`${BASE}/dashboard/login/`);
   await p.click('#recovery-toggle');
   await p.fill('#login-user', 'owner'); await p.fill('#login-code', codes[1]); await p.click('#login-btn');
   await p.waitForURL(/\/dashboard\/account\/\?recovery=19/, { timeout: 60000 });
-  check('sign-in with a recovery code: the tab holds the Drive key', !!(await tabKey(p)));
-  st = await driveState(p);
-  check('sign-in with a recovery code: that code\'s wrap is gone (19 left)', st.wraps.filter((w) => w.kind === 'recovery').length === 19, String(st.wraps.filter((w) => w.kind === 'recovery').length));
+  await opensWithNoPrompt('sign-in with a recovery code');
 
   // ── the Drive page in the same tab: no prompt ──
   await p.goto(`${BASE}/dashboard/drive/`);
-  await p.waitForSelector('#drive-app, #drive-unlock', { timeout: 30000 });
-  check('drive: unlocked at sign-in (no prompt in this tab)', await p.isVisible('#drive-app'));
+  await p.waitForSelector('#drive-app', { timeout: 30000 });
+  check('drive: open (no set-up, unlock or recovery screen)', await p.isVisible('#drive-app') && (await p.$('#drive-unlock')) === null);
+  check('drive: the page says the Drive is not end-to-end encrypted', /not end-to-end encrypted/.test(await p.textContent('main')));
   check('nav: Drive link current on the Drive page', (await p.getAttribute('#nav-drive', 'aria-current')) === 'page');
   await waitRows(p, () => !document.getElementById('drive-empty').hidden);
   check('drive: a new Drive is empty', true);
@@ -413,68 +415,49 @@ try {
   await p.setViewportSize({ width: 1280, height: 900 });
   await p.screenshot({ path: path.join(OUT, 'drive-desktop.png'), fullPage: true });
 
-  // ── reload keeps the key; a new tab asks; each way of unlocking ───────
+  // ── reload and a new tab: the keys come from the server each time; a planted key is ignored ──
   await p.reload();
   await p.waitForSelector('#drive-app');
-  check('reload: still unlocked in this tab (no prompt)', await p.isHidden('#drive-unlock'));
+  check('reload: open again (no prompt), nothing in the tab\'s storage', await p.isVisible('#drive-app') && (await stored(p)).length === 0);
   const state = await ctx.storageState();
-  const p2 = await (await b.newContext({ storageState: state, reducedMotion: 'reduce' })).newPage();
+  const p2ctx = await b.newContext({ storageState: state, reducedMotion: 'reduce' });
+  // Any script on the origin could write these slots: a KEK of its own, and an old Drive key.
+  const junk = Buffer.alloc(32, 9).toString('base64url');
+  const me = await p.evaluate(async () => (await (await fetch('/api/private/me', { cache: 'no-store' })).json()).user.id);
+  await p2ctx.addInitScript(([uid, cur, k]) => {
+    if (sessionStorage.getItem('planted')) return;
+    sessionStorage.setItem('planted', '1');
+    const slot = JSON.stringify({ u: uid, c: cur, k: { [cur]: k } });
+    sessionStorage.setItem('secbin_kek', slot);
+    sessionStorage.setItem('secbin_kek_imp', slot);
+    sessionStorage.setItem('secbin_dk', k);
+    sessionStorage.setItem('secbin_dk_uid', uid);
+    localStorage.setItem('secbin_kek', slot);
+  }, [me, st.current, junk]);
+  const p2 = await p2ctx.newPage();
   watch(p2);
   await p2.goto(`${BASE}/dashboard/drive/`);
-  await p2.waitForSelector('#drive-unlock');
-  check('new tab: the unlock prompt (the key is per tab)', (await p2.textContent('#drive-unlock h2')) === 'Unlock your Drive');
-  check('unlock: focus in the password field', await p2.evaluate(() => document.activeElement.id === 'drive-unlock-pw'));
-  check('unlock: password and recovery code offered', await p2.isVisible('#drive-unlock-pw') && await p2.isVisible('#drive-code-toggle'));
-  await audit(p2, 'unlock');
-  await p2.click('#drive-unlock-btn');
-  check('unlock: empty password is refused', /Enter your password/.test(await p2.textContent('#drive-unlock-msg')));
-  await p2.fill('#drive-unlock-pw', 'wrong-password');
-  await p2.click('#drive-unlock-btn');
-  await p2.waitForFunction(() => /does not unlock/.test(document.querySelector('#drive-unlock-msg').textContent), null, { timeout: 60000 });
-  check('unlock: wrong password → alert, field invalid and described', (await p2.getAttribute('#drive-unlock-pw', 'aria-invalid')) === 'true' && (await p2.getAttribute('#drive-unlock-msg', 'role')) === 'alert');
-  await p2.click('#drive-code-toggle');
-  check('unlock: recovery code form expands', await p2.isVisible('#drive-unlock-code') && (await p2.getAttribute('#drive-code-toggle', 'aria-expanded')) === 'true');
-  await audit(p2, 'unlock (recovery code)');
-  await p2.fill('#drive-unlock-code', 'AAAA-BBBB-CCCC-DDDD');
-  await p2.evaluate(() => { document.querySelector('#drive-unlock-msg').textContent = ''; });
-  await p2.click('#drive-unlock-code-btn');
-  await p2.waitForFunction(() => /does not unlock/.test(document.querySelector('#drive-unlock-msg').textContent), null, { timeout: 30000 });
-  check('unlock: a wrong recovery code is refused', true);
-  await p2.fill('#drive-unlock-code', codes[0]);
-  await p2.click('#drive-unlock-code-btn');
   await p2.waitForSelector('#drive-app', { timeout: 30000 });
   await waitRows(p2, hasRow, 'Documents');
-  check('unlock: a recovery code unlocks, names decrypt', true);
-  await p2.context().close();
+  check('new tab with keys planted in storage: the Drive opens with the server\'s keys (names decrypt)', true);
+  check('new tab: the planted KEK slots are removed', await p2.evaluate(() => ['secbin_kek', 'secbin_kek_imp'].every((k) => sessionStorage.getItem(k) === null)));
+  await mkdirUI(p2, 'Made after a plant');
+  await p2ctx.close();
+  // A clean tab reads what the planted tab made: it was sealed under the server's KEK, not the planted one.
   const p3 = await (await b.newContext({ storageState: state, reducedMotion: 'reduce' })).newPage();
   watch(p3);
   await p3.goto(`${BASE}/dashboard/drive/`);
-  await p3.waitForSelector('#drive-unlock');
-  await p3.fill('#drive-unlock-pw', PW);
-  await p3.press('#drive-unlock-pw', 'Enter');
-  await p3.waitForSelector('#drive-app', { timeout: 60000 });
-  check('unlock: the password unlocks (Enter submits)', true);
+  await p3.waitForSelector('#drive-app', { timeout: 30000 });
+  await waitRows(p3, hasRow, 'Made after a plant');
+  check('a clean tab opens the folder the planted tab made (sealed under the server\'s KEK)', true);
   await p3.context().close();
-  // The passkey (PRF) unlock, in the tab that has the virtual authenticator.
-  st = await driveState(p);
-  if (st.wraps.some((w) => w.kind === 'passkey')) {
-    await p.evaluate(() => { sessionStorage.removeItem('secbin_dk'); sessionStorage.removeItem('secbin_dk_uid'); });
-    await p.reload();
-    await p.waitForSelector('#drive-unlock');
-    check('unlock: the passkey is offered (it has a Drive wrap)', await p.isVisible('#drive-unlock-passkey'));
-    await p.click('#drive-unlock-passkey');
-    await p.waitForSelector('#drive-app', { timeout: 30000 });
-    check('unlock: a passkey (PRF) unlocks', !!(await tabKey(p)));
-  } else {
-    info('passkey unlock not checked: the virtual authenticator gave no PRF output at registration');
-  }
 
   // ── a role without a Drive ────────────────────────────────────────────
   const a = await (await b.newContext({ reducedMotion: 'reduce' })).newPage();
   watch(a);
   await login(a, 'alice', ALICE_PW);
   check('nav: no Drive link when the role has none', await a.isHidden('#nav-drive'));
-  check('sign-in: no Drive key for a role without a Drive', !(await tabKey(a)));
+  check('sign-in: no Drive key in storage for a role without a Drive', (await stored(a)).length === 0);
   await a.goto(`${BASE}/dashboard/drive/`);
   await a.waitForSelector('#drive-disabled');
   check('disabled: "Drive is not enabled for your account"', /Drive is not enabled for your account/.test(await a.textContent('#drive-disabled')));
@@ -483,7 +466,7 @@ try {
 
   // ── zero knowledge on the wire ────────────────────────────────────────
   const leaks = ['Documents', 'readme.txt', 'notes.md', 'Welcome to the Drive', 'Q1 numbers', PW, 'pw-one'].filter((s) => wire.some((w) => w.includes(s)));
-  check('wire: no names, contents or secrets in any Drive request', leaks.length === 0 && wire.length > 0, leaks.join(','));
+  check('wire: no names, contents or passwords in any Drive request (sealed in the browser)', leaks.length === 0 && wire.length > 0, leaks.join(','));
   const noToken = changes.filter((c) => !c.token).map((c) => c.what);
   const refused = changes.filter((c) => c.status === 403 && c.token).length;
   check('wire: every Drive change carries the session’s CSRF token (chunk uploads included)', changes.length > 0 && changes.some((c) => /\/chunk\//.test(c.what)) && noToken.length === 0, `${changes.length} changes; without: ${[...new Set(noToken)].join(', ')}`);

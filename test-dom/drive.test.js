@@ -172,6 +172,24 @@ describe('startDrive states', () => {
     expect(S.audit.some((x) => x.action === 'drive.keys_used')).toBe(true);
   });
 
+  it('a Drive waiting for its upgrade with no usable old key in the tab (none, or not this Drive’s): the password form, once', async () => {
+    for (const reason of ['locked', 'wrong']) {
+      await server();
+      S.migration = { pending: true, v1Items: 1, v1Links: 0, legacy: true };
+      const calls = [];
+      const upgrade = {
+        upgradeOwnDrive: async () => { calls.push('upgrade'); const e = new Error('no key'); e.name = 'UpgradeBlocked'; e.reason = reason; throw e; },
+        legacyUnlock: async () => { calls.push('unlock'); },
+      };
+      const mount = mountPoint();
+      const r = await startDrive(mount, deps({ upgrade }));
+      await r.app.ready;
+      await until(() => mount.querySelector('#drive-upgrade-form'));
+      expect(mount.querySelector('#drive-upgrade-msg').hidden).toBe(true);
+      expect(calls).toEqual(['upgrade']);
+    }
+  });
+
   it('a Drive made before the key model v2: the upgrade notice; the owner acting as the user is sent to Admin', async () => {
     await server();
     S.migration = { pending: true, v1Items: 2, v1Links: 0, legacy: true };

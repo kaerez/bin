@@ -309,7 +309,7 @@ function banners(client, deps) {
     const who = deps.profile && deps.profile.user ? deps.profile.user.username : 'this user';
     out.push(h('div.card.drive-notice.drive-imp-note', { id: 'drive-imp-note', role: 'note' },
       h('p', { text: `You are in ${who}’s Drive: browse, upload, download, move, rename, delete and share as they would.` }),
-      h('p.muted', { text: `The server gave you ${who}’s Drive keys as the administrator; that is recorded in the admin audit, and what you do here is too (not in their activity).` })));
+      h('p.muted', { text: `The server gave you ${who}’s Drive keys as the administrator; that is recorded in the admin audit. What you do here shows in their activity as their own, and in the admin audit as yours.` })));
   }
   if (client.migration) out.push(upgradeBox(client, deps));
   return out;
@@ -352,7 +352,7 @@ function upgradeBox(client, deps) {
       if (deps.onUpgraded) deps.onUpgraded(r);
     } catch (e) {
       bar.hide();
-      if (e && e.name === 'UpgradeBlocked' && e.reason === 'locked') { box.append(unlockForm()); return; }
+      if (e && e.name === 'UpgradeBlocked' && (e.reason === 'locked' || e.reason === 'wrong')) { box.append(unlockForm()); return; } // no old key in the tab, or not this Drive's (removed)
       showMsg(msg, `The upgrade stopped: ${friendlyError(e)} It carries on where it stopped the next time this page opens.`);
     }
   };

@@ -480,12 +480,12 @@ function upgradeCard(profile) {
       }
       draw();
     });
-    card.replaceChildren(h('h3.section-title', { id: 'keys-upgrade-title', text: 'Drive upgrade' }),
+    card.replaceChildren(...[h('h3.section-title', { id: 'keys-upgrade-title', text: 'Drive upgrade' }),
       h('p.subtitle', { text: 'Drives made before this release use the old Drive keys until they are upgraded: each item is sealed again under its user’s new key and checked, then the old keys (and, once every Drive is upgraded, your escrow keys) are removed. A user’s own Drive page does it after their next sign-in; you can do it here, through your escrow key of that release, for users who have not signed in. Your own old Drive key must be open in this tab: it is when you signed in with your password.' }),
       h('div.table-wrap', {}, h('table.table', { id: 'keys-upgrade-table' }, h('caption.sr-only', { text: 'Drives and their upgrade' }),
         h('thead', {}, h('tr', {}, ...['User', 'State', 'Items left'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
         tbody)),
-      r.left > 1 ? h('div.btn-row', {}, all) : null, bar.el, msg);
+      r.left > 1 ? h('div.btn-row', {}, all) : null, bar.el, msg].filter(Boolean));
   };
   draw();
   return card;
@@ -524,8 +524,8 @@ function userKeysCard(profile) {
     try {
       const step = await stepFrom(mine, profile);
       const r = await keysApi.userView(pick.value, { what: 'deks', ...step });
-      out.replaceChildren(r.files.length ? h('ul.plan-list', {}, ...r.files.map((f) => h('li', {}, h('span.mono', { text: f.id }), ` ${f.name ?? '(name does not open)'}: `, f.dek ? masked(`the DEK of ${f.id}`, f.dek) : 'does not open')))
-        : h('p.mono', { text: 'No files.' }), r.next ? h('p.type-hint', { text: 'More files: the first 100 are shown.' }) : null);
+      out.replaceChildren(...[r.files.length ? h('ul.plan-list', {}, ...r.files.map((f) => h('li', {}, h('span.mono', { text: f.id }), ` ${f.name ?? '(name does not open)'}: `, f.dek ? masked(`the DEK of ${f.id}`, f.dek) : 'does not open')))
+        : h('p.mono', { text: 'No files.' }), r.next ? h('p.type-hint', { text: 'More files: the first 100 are shown.' }) : null].filter(Boolean));
     } catch (e) {
       showMsg(msg, friendlyError(e));
     }
