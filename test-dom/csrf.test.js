@@ -325,6 +325,7 @@ describe('the Drive keyring API: every call goes through the same token path', (
     verify: () => api.keysApi.verify({ root: 'x' }),
     restore: () => api.keysApi.restore({ ...STEP }),
     exportKeys: () => api.keysApi.exportKeys({ ...STEP }),
+    verifyExport: () => api.keysApi.verifyExport({ root: 'x', ...STEP }),
     importKeys: () => api.keysApi.importKeys({ dryRun: true, ...STEP }),
     userView: () => api.keysApi.userView(UID, STEP),
   };

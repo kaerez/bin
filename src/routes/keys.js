@@ -2,10 +2,11 @@
 // DRIVE.md §3, §3.1): the root MEK and the sub-MEKs (generate a candidate,
 // add, rotate, edit dates, set current, show, delete after a re-seal, change
 // the root), the re-seal jobs the owner's browser drives, the key kit
-// (download, verify, restore), the keys part of Import / export, and one
-// user's keys (view). The owner only, never while impersonating (the admin
-// route checks both); every change and every view needs the step-up and is
-// in the admin audit by fingerprint, never with a key.
+// (download, verify, restore), the keys part of Import / export (export, a
+// read-only verify of an export file, import), and one user's keys (view).
+// The owner only, never while impersonating (the admin route checks both);
+// every change and every view needs the step-up and is in the admin audit by
+// fingerprint, never with a key.
 //
 // The server can open everything it re-seals here: the DEKs and names of
 // every Drive item are unwrapped in this Worker, re-sealed and stored again,
@@ -255,6 +256,13 @@ export async function handleKeys(request, env, url, a) {
     const refused = await needStep(body);
     if (refused) return refused;
     return keysExport(env, dir, me, body, url);
+  }
+  if (p === '/api/private/admin/keys/export/verify') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    // Read-only, but it compares key material with this server's: the step-up too.
+    const refused = await needStep(body);
+    if (refused) return refused;
+    return keysVerify(env, dir, me, sid, body);
   }
   if (p === '/api/private/admin/keys/import') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -716,6 +724,70 @@ async function keysExport(env, dir, me, body, url) {
   return json({ document: doc });
 }
 
+/**
+ * Verify a keys export, read-only (nothing is written, no key is returned):
+ * `{ root?, subs?, users: [{ id, salt?, keks?, deks? }] }` where root, subs,
+ * salt and keks are check values (the Directory compares them with its own)
+ * and deks the file's [{ id, dek }], each tried on its file's first chunk
+ * here. → the Directory's result, each user with `deks: { total, opens,
+ * fails, missing, empty, unchecked, failed: [ids], missingIds: [ids] }`, and
+ * `matches` (everything in the file matches this server). Admin audit: the
+ * root's fingerprint and counts only.
+ */
+async function keysVerify(env, dir, me, sid, body) {
+  const check = (v) => (typeof v === 'string' && v.length <= 64 ? v : null);
+  const checks = (v) => (isObj(v) ? Object.fromEntries(Object.entries(v).filter(([id, x]) => MEK_ID_RE.test(id) && check(x) !== null).slice(0, 500)) : {});
+  const users = [];
+  for (const x of Array.isArray(body.users) ? body.users.slice(0, 5000) : []) {
+    if (!isObj(x) || !UID_RE.test(x.id ?? '')) return invalid('Each user is { id, salt, keks, deks }.');
+    users.push({ id: x.id, salt: check(x.salt), keks: checks(x.keks), deks: Array.isArray(x.deks) ? x.deks : null });
+  }
+  const subs = body.subs === undefined || body.subs === null ? null : checks(body.subs);
+  const r = await dir.keysExportVerify(me, sid, { root: check(body.root), subs, users: users.map(({ id, salt, keks }) => ({ id, salt, keks })) });
+  if (!r.ok) return fromDir(r);
+  if (users.some((x) => x.deks && x.deks.length)) binding(env, 'FILES');
+  let budget = MAX_DEKS;
+  for (const [i, x] of users.entries()) {
+    if (!x.deks) continue;
+    const d = { total: x.deks.length, opens: 0, fails: 0, missing: 0, empty: 0, unchecked: 0, failed: [], missingIds: [] };
+    const note = (list, id) => { if (list.length < 50 && typeof id === 'string') list.push(id.slice(0, 22)); };
+    for (const e of x.deks) {
+      if (budget-- <= 0) { d.unchecked++; continue; }
+      if (!isObj(e) || !NODE_ID_RE.test(e.id ?? '')) { d.fails++; continue; }
+      const it = await driveStub(env, x.id).itemKeys(x.id, e.id);
+      if (!it.ok || it.item.kind !== 'file' || it.item.state !== 'ready') { d.missing++; note(d.missingIds, e.id); continue; }
+      if (!it.item.chunks) { d.empty++; continue; }
+      if (KEY_RE.test(e.dek ?? '') && (await dekOpensChunk(env, x.id, e.id, it.item.chunks, e.dek))) d.opens++;
+      else { d.fails++; note(d.failed, e.id); }
+    }
+    r.users[i].deks = d;
+  }
+  const subsBad = r.subs.list.some((s) => s.result === 'mismatch') || r.subs.unknown.length > 0;
+  const userOk = (u) => u.username !== null && ['match', 'absent'].includes(u.salt) && u.keks.every((k) => k.result === 'match')
+    && (!u.deks || (u.deks.fails === 0 && u.deks.missing === 0 && u.deks.unchecked === 0));
+  const matches = r.root.result !== 'mismatch' && !subsBad && r.users.every(userOk);
+  const count = (list, f) => `${list.filter(f).length}/${list.length}`;
+  const keks = r.users.flatMap((u) => u.keks);
+  const deks = r.users.reduce((n, u) => ({ opens: n.opens + (u.deks?.opens ?? 0), total: n.total + (u.deks?.total ?? 0) }), { opens: 0, total: 0 });
+  await dir.adminLog({
+    action: 'keys.export_verified',
+    detail: `${matches ? 'matches' : 'does not match'}: root MEK ${r.root.result}${r.root.fp ? ` (here ${r.root.fp})` : ''}; sub-MEKs ${count(r.subs.list, (s) => s.result === 'match')} match, ${r.subs.unknown.length} unknown here; users ${r.users.length}: salts ${count(r.users.filter((u) => u.salt !== 'absent'), (u) => u.salt === 'match')}, KEKs ${count(keks, (k) => k.result === 'match')}, DEKs ${deks.opens}/${deks.total} open`,
+  }, { id: me, adm: true });
+  return json({ ...r, matches });
+}
+
+/** Does `dekText` (a file's DEK) open chunk 0 of file `nodeId` of `uid`'s Drive (an AES-GCM check)? */
+async function dekOpensChunk(env, uid, nodeId, chunks, dekText) {
+  const obj = await env.FILES.get(driveChunkKey(uid, nodeId, 0));
+  if (!obj) return false;
+  try {
+    await decryptChunk(await importFileKey(dekText), 0, chunks, new Uint8Array(await obj.arrayBuffer()));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function openDek0(uid, keys, it) {
   let last;
   for (const kek of keys ? keksOf(keys, it.mek) : []) {
@@ -795,15 +867,7 @@ async function restoreDek(env, uid, keys, d, dryRun) {
   }
   const dek = keyBytes(d.dek);
   // The DEK must open the file's first chunk (an empty file has none: it cannot be checked).
-  if (!item.chunks) return 'failed';
-  const obj = await env.FILES.get(driveChunkKey(uid, d.id, 0));
-  if (!obj) return 'failed';
-  try {
-    const key = await importFileKey(d.dek);
-    await decryptChunk(key, 0, item.chunks, new Uint8Array(await obj.arrayBuffer()));
-  } catch {
-    return 'failed';
-  }
+  if (!item.chunks || !(await dekOpensChunk(env, uid, d.id, item.chunks, d.dek))) return 'failed';
   if (dryRun) return 'restored';
   // Its name and metadata, when they still open; else placeholders (the content is back).
   let name = null;

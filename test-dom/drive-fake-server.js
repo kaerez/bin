@@ -20,7 +20,7 @@
 // (FAKE_CSRF). Not a test file itself (vitest.dom.config.js picks up *.test.js
 // only).
 import { vi } from 'vitest';
-import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
+import { CHUNK, TAG, encryptChunk, decryptChunk, importFileKey } from '../public/js/files.js';
 import {
   deriveKek, newKey, newSalt, newMekId, sealName, sealDek, openName, openDek, openLinkKey, keyFingerprint, keyCheckValue, saltCheckValue,
   sameCheck, effectiveAt, mekStatus,
@@ -404,6 +404,43 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       S.verifyBodies = (S.verifyBodies || []).concat([body]);
       return ok({ ok: true, complete: root === 'match' && subs.every((x) => x.result === 'match') && salts.match === 1, now: t, root, subs, salts, extraSubs: [] });
     }
+    if (p === '/api/private/admin/keys/export/verify') {
+      // As src/routes/keys.js keysVerify: the step-up, check values compared here, each DEK on its file's first chunk.
+      { const f2 = stepFail(body); if (f2) return f2; }
+      S.xverifyBodies = (S.xverifyBodies || []).concat([body]);
+      const t = now();
+      const same = async (given, key, kind) => typeof given === 'string' && sameCheck(given, await keyCheckValue(key, kind));
+      const root = { result: typeof body.root === 'string' ? ((await same(body.root, S.root, 'mek')) ? 'match' : 'mismatch') : 'absent', fp: await keyFingerprint(S.root) };
+      const list = [];
+      for (const x of S.subs) {
+        const given = body.subs ? body.subs[x.id] : undefined;
+        list.push({ id: x.id, fp: x.fp, from: x.from, until: x.until, status: mekStatus(S.subs, x, t), result: !body.subs ? 'absent' : typeof given !== 'string' ? 'missing' : (await same(given, x.key, 'mek')) ? 'match' : 'mismatch' });
+      }
+      const unknown = Object.keys(body.subs || {}).filter((id) => !S.subs.some((x) => x.id === id));
+      const users = [];
+      for (const x of body.users || []) {
+        if (x.id !== S.user.id) { users.push({ id: x.id, username: null, salt: 'unknown', keks: [] }); continue; }
+        const res = { id: x.id, username: S.user.username, salt: typeof x.salt !== 'string' ? 'absent' : sameCheck(x.salt, await saltCheckValue(S.salt, x.id)) ? 'match' : 'mismatch', keks: [] };
+        for (const [mekId, given] of Object.entries(x.keks || {})) {
+          const kek = await S.kekOf(mekId);
+          res.keks.push({ mekId, result: !kek ? 'unknown' : (await same(given, kek, 'kek')) ? 'match' : 'mismatch' });
+        }
+        if (x.deks) {
+          const d = { total: x.deks.length, opens: 0, fails: 0, missing: 0, empty: 0, unchecked: 0, failed: [], missingIds: [] };
+          for (const e of x.deks) {
+            const n = S.nodes.get(e.id);
+            if (!n || n.kind !== 'file') { d.missing++; d.missingIds.push(e.id); continue; }
+            try { await decryptChunk(await importFileKey(e.dek), 0, n.chunks, S.chunks.get(`${n.id}/0`)); d.opens++; } catch { d.fails++; d.failed.push(e.id); }
+          }
+          res.deks = d;
+        }
+        users.push(res);
+      }
+      const matches = root.result !== 'mismatch' && !list.some((x) => x.result === 'mismatch') && !unknown.length
+        && users.every((x) => x.username !== null && ['match', 'absent'].includes(x.salt) && x.keks.every((k) => k.result === 'match') && (!x.deks || (!x.deks.fails && !x.deks.missing)));
+      S.audit.push({ action: 'keys.export_verified', detail: matches ? 'matches' : 'does not match' });
+      return ok({ ok: true, now: t, root, subs: { inFile: !!body.subs, list, unknown }, users, matches });
+    }
     if (p === '/api/private/admin/keys/import') {
       { const f2 = stepFail(body); if (f2) return f2; } // the preview too (as the server: audit A F7)
       S.importBodies = (S.importBodies || []).concat([body]);
@@ -495,7 +532,14 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       for (const x of body.users || []) {
         const e = { id: x.id, username: x.id === S.user.id ? S.user.username : 'other' };
         if (x.keks) e.keks = await Promise.all(S.subs.map(async (sub) => ({ mekId: sub.id, fp: sub.fp, from: sub.from, until: sub.until, kek: b64urlFromBytes(await S.kekOf(sub.id)) })));
-        if (x.deks) e.deks = [];
+        if (x.deks) {
+          // This account's files: the DEK each seal holds (the others' Drives are not in the fake).
+          e.deks = [];
+          for (const n of x.id === S.user.id ? S.nodes.values() : []) {
+            if (n.kind !== 'file' || n.rs) continue;
+            e.deks.push({ id: n.id, dek: b64urlFromBytes(await openDek(await S.kekOf(n.mek), { userId: S.user.id, mekId: n.mek, salt: n.ks }, parsed(n.dek))) });
+          }
+        }
         doc.users.push(e);
       }
       S.exportBodies = (S.exportBodies || []).concat([body]);

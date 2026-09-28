@@ -6,8 +6,11 @@
 // asked, their files' DEKs (all, or only the file ids listed). The server
 // builds the document after the step-up; it is shown here masked (each value
 // behind "Show") and sealed in this browser under the export passphrase
-// before it is saved. Import: decrypt here, choose the parts, preview (a dry
-// run), then import with the step-up. Imports never replace working keys: a
+// before it is saved. Verify (read-only): decrypt a saved file here; the
+// server compares it with its own keys (check values; each DEK on its file's
+// first chunk) after the step-up and changes nothing. Import: decrypt here,
+// choose the parts, preview (a dry run), then import with the step-up.
+// Imports never replace working keys: a
 // KEK is only verified (it is derived), a DEK only restores a missing or
 // broken seal after it opened the file's first chunk, a salt only comes back
 // for an account that has none. DOM through h() only (strict CSP).
@@ -15,10 +18,10 @@
 import { keysApi, admin, SESSION_CHANGED_EVENT } from '../../js/api.js';
 import { h, showMsg, formatDate, friendlyError } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
-import { exportKeys, openKeysExport, importKeys, fpText } from '../../js/keysclient.js';
+import { exportKeys, openKeysExport, importKeys, verifyKeysExport, fpText } from '../../js/keysclient.js';
 import { ExportCryptError } from '../../js/exportcrypt.js';
 import { confirmStep, canUsePasskey } from './confirm.js';
-import { field, secret, fileInput, saveText, liveMsg } from './kit-ui.js';
+import { field, secret, fileInput, saveText, liveMsg, datePicker, takeFile, verifyResults } from './kit-ui.js';
 
 const UID_RE = /^[A-Za-z0-9_-]{16}$/;
 const NODE_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -96,7 +99,7 @@ function userPicker(accounts, prefix) {
     sync();
     showMsg(umsg, `${hit} of ${ids.size} id${ids.size === 1 ? '' : 's'} in the list are accounts here and are now chosen${ids.size > hit ? '; the others are not on this server' : ''}.`, false);
   });
-  const down = h('button.btn.mini', { type: 'button', text: 'Download the chosen ids', on: { click: () => {
+  const down = h('button.btn.mini', { type: 'button', text: 'Download the chosen ids (a list of user ids, no keys)', on: { click: () => {
     const ids = rows.filter((r) => r.box.checked).map((r) => r.u.id);
     saveText(`${ids.join('\n')}\n`, `secbin-user-ids-${location.hostname}-${new Date().toISOString().slice(0, 10)}.txt`);
   } } });
@@ -108,7 +111,8 @@ function userPicker(accounts, prefix) {
         h('button.btn.mini', { type: 'button', text: 'Select all', 'aria-label': 'Select all users shown', on: { click: set(true) } }),
         h('button.btn.mini', { type: 'button', text: 'Deselect all', 'aria-label': 'Deselect all users shown', on: { click: set(false) } }), count),
       list,
-      h('div.toolbar', {}, field('Choose from an id list (one id per line, or a JSON array)', upload), down), ulive),
+      h('div.toolbar', {}, field('Choose from an id list (one id per line, or a JSON array)', upload), down),
+      h('p.type-hint', { text: 'The downloaded list is a plain text file of the chosen user ids, one per line, with no keys: choose it here again later to pick the same users.' }), ulive),
   };
 }
 
@@ -146,7 +150,7 @@ function exportPart(profile, accounts, subs) {
   const pass2 = secret('kx-pass2', 'new-password');
   const noPass = h('p.type-hint.warn', { id: 'kx-nopass', role: 'note', text: 'No passphrase: the file is still encrypted, but with a key anyone can derive. With the root MEK and a sub-MEK (or a KEK), it opens Drive files: store it offline.' });
   pass1.addEventListener('input', () => { noPass.hidden = pass1.value !== ''; });
-  const build = h('button.btn', { type: 'button', id: 'kx-build', text: 'Build the export' });
+  const build = h('button.btn', { type: 'button', id: 'kx-build', text: 'Build the export', 'aria-describedby': 'kx-build-hint' });
   const save = h('button.btn', { type: 'button', id: 'kx-save', text: 'Encrypt and download', disabled: true });
   const discard = h('button.btn', { type: 'button', text: 'Discard', disabled: true });
   const { msg, live } = liveMsg('kx-msg');
@@ -214,9 +218,54 @@ function exportPart(profile, accounts, subs) {
     h('label.inline', {}, keks, h('span', { text: ' Their KEKs (one per sub-MEK)' })),
     field('Their file keys (DEKs)', deksMode), deksIds,
     field('Your password (or leave it empty to confirm with a passkey)', mine),
-    h('div.btn-row', {}, build), view,
+    h('div.btn-row', {}, build),
+    h('p.type-hint', { id: 'kx-build-hint', text: 'Build the export puts the parts ticked above into it: the root MEK and the sub-MEKs chosen, and the chosen users’ salts, KEKs and DEKs (as ticked). It is shown below, masked; “Encrypt and download” then encrypts it with the export passphrase and saves the file.' }), view,
     h('div.toolbar', {}, field('Export passphrase (optional)', pass1), field('Repeat', pass2)), noPass,
     h('div.btn-row', {}, save, discard), live);
+}
+
+// ── verify (read-only) ──────────────────────────────────────────────────────
+const VERDICTS = { complete: 'Everything in this file matches this server', incomplete: 'Not everything in this file matches this server', failed: 'This file cannot be used' };
+function verifyPart(profile) {
+  const file = fileInput('kv-file');
+  const pass = secret('kv-pass', 'off');
+  const day = datePicker('kv-date');
+  const mine = secret('kv-confirm', 'current-password');
+  const go = h('button.btn', { type: 'button', id: 'kv-verify', text: 'Verify', disabled: true, 'aria-describedby': 'kv-hint' });
+  const { msg, live } = liveMsg('kv-msg');
+  const out = h('div', { id: 'kv-out' });
+  onSessionGone(() => out.replaceChildren());
+  const sync = () => { go.disabled = !file.files || !file.files.length; };
+  file.addEventListener('change', sync);
+  go.addEventListener('click', async () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    if (f.size > 16 * 1024 * 1024) return showMsg(msg, 'That file is too large (max 16 MiB).');
+    go.disabled = true;
+    out.replaceChildren();
+    showMsg(msg, 'Decrypting…', false);
+    const date = day.seconds();
+    // The selected file, never a copy kept by this page: the input and its passphrase are cleared.
+    const { text, passphrase } = await takeFile(file, pass, sync);
+    try {
+      const doc = await openKeysExport(text, passphrase);
+      showMsg(msg, 'Checking…', false);
+      const res = await verifyKeysExport({ doc, step: await stepFrom(mine, profile), date });
+      msg.hidden = true;
+      out.replaceChildren(verifyResults(res, 'kv', VERDICTS));
+      out.querySelector('#kv-verdict').focus();
+    } catch (e) {
+      showMsg(msg, e instanceof ExportCryptError ? e.message : friendlyError(e));
+    } finally {
+      sync();
+    }
+  });
+  return h('fieldset.range', { id: 'kv-set' }, h('legend', { text: 'Verify a Drive keys export' }),
+    h('p.type-hint', { id: 'kv-hint', text: 'Check a saved export before you rely on it. The file is decrypted in this browser; the server compares its keys with its own (check values for the root MEK, sub-MEKs, user salts and KEKs; each DEK is tried on its file’s first chunk), changes nothing and sends no key back. The date (today by default; a future date too) shows which sub-MEK is in effect then and whether the file holds it.' }),
+    h('div.toolbar', {}, field('Drive keys export file to verify', file), field('Its passphrase', pass)),
+    field('The sub-MEK in effect on', day.el),
+    field('Your password (or leave it empty to confirm with a passkey)', mine),
+    h('div.btn-row', {}, go), live, out);
 }
 
 // ── import ──────────────────────────────────────────────────────────────────
@@ -343,7 +392,7 @@ export async function keysPortCard(profile) {
     return card;
   }
   card.append(
-    h('p.subtitle', { text: 'A file of its own, never part of the export above: the keys that open Drive files. The key kit (Security → Keys) holds everything at once; here you choose the parts. Every export and import is in the admin audit (what, not the keys).' }),
-    exportPart(profile, accounts, subs), importPart(profile));
+    h('p.subtitle', { text: 'A file of its own, never part of the export above: the keys that open Drive files. The key kit (Security → Keys) holds everything at once; here you choose the parts. Every export, verify and import is in the admin audit (what, not the keys).' }),
+    exportPart(profile, accounts, subs), verifyPart(profile), importPart(profile));
   return card;
 }

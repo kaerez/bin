@@ -15,6 +15,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Admin → Import / export: the account and system export and import confirm with a passkey
+  too.** The owner's password, or (the field left empty) a fresh passkey assertion
+  (`POST /api/private/me/reauth`, then `{ reauth }`), verified as every other step-up; a failed
+  passkey counts like a wrong password (the account's lockout and the network's login
+  failures). The import's preview and its apply each ask again. They took the password only.
+
 - **Drive key model v2** (docs/DRIVE.md §2, §3; SECURITY.md "Drive keys"). **Drive files are no
   longer end-to-end encrypted:** they are still encrypted in the browser (a random DEK per file;
   the DEK, name and metadata sealed under the user's KEK with a random per-item salt), but the
@@ -441,6 +447,17 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - a warning is logged when only one Turnstile key is set.
 
 ### Added
+
+- **Admin → Import / export → Drive keys: Verify** (docs/DRIVE.md §3.2): a saved Drive keys
+  export is decrypted in the browser and checked against this server, read-only, after the
+  step-up (`POST /api/private/admin/keys/export/verify`): the root MEK, the sub-MEKs (match,
+  differs, unknown here, missing from the file), each user's salt and KEKs (as check values,
+  never the keys), and each DEK on its file's first chunk; a date shows whether the file holds
+  the sub-MEK in effect then. The result list ends in "Everything in this file matches this
+  server" or what does not; no key is returned, and the admin audit (`keys.export_verified`)
+  has the root's fingerprint and counts only. The export's labels now say that "Download the
+  chosen ids" saves a list of user ids with no keys, and what "Build the export" and "Encrypt
+  and download" each do.
 
 - **WCAG 2.2 conformance audit** ([docs/WCAG22.md](docs/WCAG22.md)): every success criterion at
   A, AA and AAA with a verdict, evidence and the pages it concerns. On that evidence (Chromium,

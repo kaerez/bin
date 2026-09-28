@@ -14,7 +14,7 @@ import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib
 import { shareInfo } from '../lib/ids.js';
 import { MAX_SHARE_FILTER_USERS } from '../directory-do.js';
 import { validateExport, validateDecisions, PortableError, MAX_IMPORT_BYTES, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS, SYSTEM_PARTS } from '../lib/portable.js';
-import { adminDriveRoute, syncCredentialWraps, destroyDrive, drivePasswordChanged, legacyCleanup } from './drive.js';
+import { adminDriveRoute, syncCredentialWraps, destroyDrive, drivePasswordChanged, legacyCleanup, stepUp } from './drive.js';
 import { handleKeys } from './keys.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
@@ -116,24 +116,18 @@ export async function handleAdmin(request, env, url) {
     return r.ok ? json({ ok: true, locked: r.locked }) : fromDir(r);
   }
 
-  // ── export / import (always re-confirmed with the owner's password) ──────
+  // ── export / import (always re-confirmed: the owner's password or a passkey) ──
   if (p === '/api/private/admin/export' || p === '/api/private/admin/import') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const isImport = p.endsWith('import');
     // An export request lists the users, each with its parts (up to MAX_EXPORT_USERS).
     const body = await readJsonBody(request, isImport ? MAX_IMPORT_BYTES : 1024 * 1024);
-    const g = await ipContext(env, request);
     // Step-up: an export can hold password verifiers and an import can
     // create accounts and add passkeys, so a session alone (e.g. a stolen cookie) is not
-    // enough. A wrong password counts like a wrong current password.
-    const current = await verifierFrom(body.current);
-    const step = current ? await dir.verifyCurrent(me, current, { lockoutOff: g.off.all }) : { ok: false, status: 400, error: 'invalid_credential', message: 'Re-enter your password to continue.' };
-    if (!step.ok) {
-      if (step.error === 'wrong_password' || step.error === 'session_revoked') await recordFailure(env, g, 'login');
-      const res = fromDir(step);
-      if (step.error === 'session_revoked') appendCookies(res, logoutCookie());
-      return res;
-    }
+    // enough. `current` or `reauth`, as for the key routes; a wrong password or a failed
+    // passkey counts like a wrong current password (lockout, and the network's failures).
+    const refused = await stepUp(request, env, url, dir, me, body);
+    if (refused) return refused;
     if (!isImport) {
       // users: "all" or [id…] (each with the parts in `parts`), or [{id, parts}] (parts per user).
       const partsOf = (v) => (Array.isArray(v) ? USER_PARTS.filter((k) => v.includes(k)) : []);
@@ -158,6 +152,7 @@ export async function handleAdmin(request, env, url) {
       if (e instanceof PortableError) return err(400, 'invalid_import', e.message);
       throw e;
     }
+    const g = await ipContext(env, request);
     const r = await dir.importData(doc, decisions, { dryRun: body.dryRun !== false, callerIp: g.ip, host: url.hostname }, me);
     if (!r.ok) return json({ error: r.error, message: r.message, plan: r.plan }, r.status);
     if (r.applied) { invalidateGuardCaches(); invalidateTurnstileCache(); }

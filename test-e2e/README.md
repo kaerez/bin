@@ -71,6 +71,25 @@ It needs a fresh server (no owner yet):
 WT=$PWD BASE=http://localhost:8787 OUT=/tmp/keys node test-e2e/keys.mjs
 ```
 
+## `port-passkey.mjs` — Import / export with a passkey, and a Drive keys export verified
+
+What it covers (SECURITY.md, *Export / import*; [docs/DRIVE.md](../docs/DRIVE.md) §3.2), with
+Chromium's virtual WebAuthn authenticator: the owner adds a passkey; the account and system
+export and the import (its preview and its apply) each confirm with it when the password field is
+left empty (a reauth challenge, then `{ reauth }`, no password proof), and a wrong password is
+still refused; Import / export → Drive keys: the labels (the id list holds no keys; what "Build
+the export" and "Encrypt and download" do), an export confirmed with the passkey, then Verify of
+the saved file ("Everything in this file matches this server") and of a tampered copy (another
+root MEK, a wrong KEK, a broken DEK, a sub-MEK unknown here: what does not match), a wrong
+passphrase refused in the page; only check values (and the DEKs) sent, the keyring unchanged, the
+file still opening, the admin audit with fingerprints and counts only; axe (WCAG 2.2 A/AA) on
+every new state; no page errors or CSP / Trusted Types violations. It needs a fresh server (no
+owner yet), on `localhost` (passkeys need an RP ID):
+
+```sh
+WT=$PWD BASE=http://localhost:8787 node test-e2e/port-passkey.mjs
+```
+
 ## `drive-upgrade.mjs` — upgrading Drives made by the release before
 
 What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3.3), in two phases on one server state:

@@ -1089,10 +1089,11 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   well the verifiers inside resist an offline guess, is the owner's responsibility; with none,
   anyone who gets the file can read it, and the export form says so) → Argon2id m = 64 MiB, t = 3 → AES-256-GCM, with the fixed KDF
   parameters, salt and IV bound into the AAD). A crafted file cannot ask for more KDF work.
-- Export and import both require the **owner's password again** (step-up): a stolen session
-  cookie alone cannot exfiltrate verifiers or replace credentials. Wrong passwords count like
-  wrong current passwords (the account's sessions end at the lockout threshold) and against the
-  IP's login guard.
+- Export and import (its preview and its apply) both require the owner to **confirm again**
+  (step-up): the password, or a fresh passkey assertion (`reauth`), as every other step-up. A
+  stolen session cookie alone cannot exfiltrate verifiers or replace credentials. Wrong
+  passwords and failed passkeys count like wrong current passwords (the account's sessions end
+  at the lockout threshold) and against the IP's login guard.
 - **Every part is optional and chosen twice**: when exporting (only what is ticked leaves the
   server) and again when importing (only what is ticked is applied).
   - System parts: settings; roles; IP rules; Turnstile keys, off by default because they
