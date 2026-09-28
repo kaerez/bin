@@ -1088,7 +1088,8 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   short owner limit can push the record of configuration changes out; only clearing by hand
   removes them.
 - The owner can **clear** the log — everything, or one account's entries, optionally only those
-  older than a date. It needs the owner's password again (like export), and, as configured, it
+  older than a date. It needs the owner to confirm again, with the password or a passkey (like
+  export), and, as configured, it
   **leaves no record**: after a clear, nothing in the system shows that entries existed or were
   removed. The owner's own limits cover every admin action.
 

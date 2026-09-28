@@ -15,11 +15,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
-- **Admin → Import / export: the account and system export and import confirm with a passkey
-  too.** The owner's password, or (the field left empty) a fresh passkey assertion
-  (`POST /api/private/me/reauth`, then `{ reauth }`), verified as every other step-up; a failed
-  passkey counts like a wrong password (the account's lockout and the network's login
-  failures). The import's preview and its apply each ask again. They took the password only.
+- **Every step-up takes a passkey: Admin → Import / export (the account and system export and
+  import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left
+  empty, a fresh passkey assertion (`POST /api/private/me/reauth`, then `{ reauth }`), verified
+  as every other step-up; a failed passkey counts like a wrong password (the account's lockout
+  and the network's login failures). The import's preview and its apply each ask again. They
+  took the password only.
 
 - **Drive key model v2** (docs/DRIVE.md §2, §3; SECURITY.md "Drive keys"). **Drive files are no
   longer end-to-end encrypted:** they are still encrypted in the browser (a random DEK per file;

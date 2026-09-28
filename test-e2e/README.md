@@ -84,7 +84,8 @@ the export" and "Encrypt and download" do), an export confirmed with the passkey
 the saved file ("Everything in this file matches this server") and of a tampered copy (another
 root MEK, a wrong KEK, a broken DEK, a sub-MEK unknown here: what does not match), a wrong
 passphrase refused in the page; only check values (and the DEKs) sent, the keyring unchanged, the
-file still opening, the admin audit with fingerprints and counts only; axe (WCAG 2.2 A/AA) on
+file still opening, the admin audit with fingerprints and counts only; Admin → Audit → Clear logs
+confirmed with the passkey too; axe (WCAG 2.2 A/AA) on
 every new state; no page errors or CSP / Trusted Types violations. It needs a fresh server (no
 owner yet), on `localhost` (passkeys need an RP ID):
 

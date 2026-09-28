@@ -12,6 +12,7 @@
 // KEK, a broken DEK, a sub-MEK unknown here) that says what does not match;
 // only check values (and the DEKs) sent, nothing changed (the keyring, the
 // file still opening), the admin audit with fingerprints and counts only;
+// Admin → Audit → Clear logs confirmed with the passkey too;
 // axe (WCAG 2.2 A/AA) on every new state; no page errors or CSP / Trusted
 // Types violations. Synthetic data only. A manual test, not run in CI: see
 // test-e2e/README.md. Needs a fresh `wrangler dev` (no owner yet) on
@@ -84,7 +85,7 @@ try {
   // What the pages send: the step-up of each export, import and verify.
   const sent = [];
   p.on('request', (r) => {
-    if (r.method() !== 'POST' || !/\/api\/private\/(admin\/(export|import|keys\/export(\/verify)?)|me\/reauth)$/.test(new URL(r.url()).pathname)) return;
+    if (r.method() !== 'POST' || !/\/api\/private\/(admin\/(export|import|keys\/export(\/verify)?|logs\/clear)|me\/reauth)$/.test(new URL(r.url()).pathname)) return;
     let body = null;
     try { body = r.postDataJSON(); } catch { /* not JSON */ }
     sent.push({ path: new URL(r.url()).pathname, body });
@@ -254,6 +255,23 @@ try {
   check('admin audit: each verify recorded, with the root fingerprint and counts, never a key', vr.length === 2 && vr.some((r) => r.detail.startsWith('matches:') && r.detail.includes(before.root.fp)) && vr.some((r) => r.detail.startsWith('does not match:'))
     && !rows.some((r) => secrets.some((k) => String(r.detail).includes(k))), vr.map((r) => r.detail).join(' | '));
   check('admin audit: the export and the import recorded', rows.some((r) => r.action === 'export.created') && rows.some((r) => r.action === 'import.system'));
+
+  // ── Admin → Audit → Clear logs, confirmed with the passkey ──
+  await p.goto(`${BASE}/dashboard/admin/?load=${Date.now()}`);
+  await p.click('.tab[data-tab="audit"]');
+  const al = p.locator('.admin-panel[data-panel="audit"]');
+  await al.locator('text=Clear logs').waitFor({ timeout: 30000 });
+  check('clear logs: the step-up field says an empty field uses a passkey', (await al.locator(`input[aria-label="${MINE}"]`).count()) === 1);
+  await al.locator('select[aria-label="Which log entries"]').selectOption('user');
+  await al.locator('select[aria-label="Account"] option', { hasText: 'alice' }).first().waitFor({ state: 'attached' });
+  await al.locator('select[aria-label="Account"]').selectOption({ label: 'alice' });
+  await audit(p, 'Audit → Clear logs');
+  n = sent.length;
+  await al.locator('button:has-text("Delete log entries")').click();
+  await al.locator('button:has-text("Delete for good?")').click();
+  await p.waitForFunction(() => /log entr(y|ies) deleted\./.test(document.getElementById('toast').textContent), null, { timeout: 60000 });
+  const lc = sent.slice(n).filter((x) => x.path === '/api/private/admin/logs/clear');
+  check('clear logs: confirmed with the passkey (a reauth challenge, then { reauth })', since(n, '/api/private/me/reauth').length === 1 && lc.length === 1 && passkeyOnly(lc[0]), await p.textContent('#toast'));
 } catch (e) {
   check('no exception', false, e.message.split('\n')[0]);
 }

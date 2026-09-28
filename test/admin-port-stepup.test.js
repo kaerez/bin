@@ -5,7 +5,8 @@
 // /api/private/me/reauth). A wrong password or a failed passkey counts like
 // a failed confirmation (the account's lockout, and the network's login
 // failures); the import's preview and its apply both need it; the owner
-// acting as a user cannot reach either route.
+// acting as a user cannot reach either route. The same holds for clearing
+// logs (POST /api/private/admin/logs/clear).
 import { describe, it, expect, beforeAll } from 'vitest';
 import { owner, makeUser, fetchJson, proofFor, freshIp, intent, cookieOf, login, setOwnerCookie, ORIGIN } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
@@ -82,6 +83,33 @@ describe('the account and system import', () => {
     }
     // A user's own session: not the owner.
     expect((await exportSettings({ current: proofFor('user-password-123') }, { cookie: u.cookie })).status).toBe(403);
+  });
+});
+
+describe('clearing logs', () => {
+  const clearLogs = (step, body = { scope: 'all', before: 1 }, opts) => post('/api/private/admin/logs/clear', { ...step, ...body }, opts);
+  it('takes a passkey instead of the password, and refuses one that does not verify', async () => {
+    const ok = await clearLogs(await passkeyProof());
+    expect(ok.status, await ok.clone().text()).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true, deleted: 0 });
+    const bad = await clearLogs(await passkeyProof({ tamper: true }));
+    expect([bad.status, await errorOf(bad)]).toEqual([403, 'reauth_failed']);
+    const none = await clearLogs({});
+    expect([none.status, await errorOf(none)]).toEqual([400, 'reauth_required']);
+    expect((await clearLogs({ current: proofFor(OWNER_PW) })).status).toBe(200);
+    expect(await errorOf(await clearLogs({ current: proofFor('not-the-password') }))).toBe('wrong_password');
+  });
+
+  it('a failed passkey counts against the network; the owner acting as a user cannot clear logs', async () => {
+    const ip = freshIp();
+    expect(await errorOf(await clearLogs(await passkeyProof({ tamper: true }), undefined, { ip }))).toBe('reauth_failed');
+    const { tracking } = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
+    expect(tracking.find((t) => t.key === `${ip}/32` && t.scope === 'login')).toMatchObject({ count: 1 });
+    expect((await exportSettings(await passkeyProof())).status).toBe(200); // a good confirmation clears the account's count
+    const u = await makeUser('port-logs-imp');
+    const imp = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
+    const r = await clearLogs({ current: proofFor(OWNER_PW) }, undefined, { cookie: imp });
+    expect([r.status, await errorOf(r)]).toEqual([403, 'impersonating']);
   });
 });
 
