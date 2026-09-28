@@ -18,6 +18,7 @@
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes, bytesFromB64url } from './bytes.js';
 import { hkdf32, proofHash, DecryptError } from './crypto.js';
 import { ARGON2 } from './format.js';
+import { itemOf } from './receivekinds.js';
 
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
 const EMPTY = new Uint8Array(0);
@@ -180,14 +181,18 @@ export async function openNote(pub, id, value) {
  * Seal an upload's path and metadata with a fresh metadata key and wrap the
  * file key with it to the link's public key → { name, meta, wrap }.
  * `fk` is the file's 32-byte key (chunks: encryptChunk, as Drive files).
+ * `item`: a note, link or credential ({ kind, fmt?, title? },
+ * receivekinds.js): its kind marker goes into the sealed metadata, so the
+ * server never sees it.
  */
-export async function sealUpload(pub, id, nodeId, fk, { path, type, mtime, size }) {
+export async function sealUpload(pub, id, nodeId, fk, { path, type, mtime, size, item = null }) {
   if (!(fk instanceof Uint8Array) || fk.length !== 32) throw new TypeError('invalid file key');
   if (utf8(path).length > MAX_PATH_BYTES) throw new TypeError('path too long');
   const mk = randomBytes(32);
   const mkKey = await aesKey(mk);
   const name = out(await seal(mkKey, aad('name', nodeId), utf8(path)));
-  const meta = out(await seal(mkKey, aad('meta', nodeId), utf8(JSON.stringify({ type, mtime, size }))));
+  const marker = item ? itemOf(item) : null;
+  const meta = out(await seal(mkKey, aad('meta', nodeId), utf8(JSON.stringify({ type, mtime, size, ...(marker || {}) }))));
   const linkPub = await crypto.subtle.importKey('raw', pub, ECDH, false, []);
   const eph = await crypto.subtle.generateKey(ECDH, true, ['deriveBits']);
   const epk = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
@@ -205,7 +210,8 @@ export async function sealUpload(pub, id, nodeId, fk, { path, type, mtime, size 
 /**
  * Open a received item ({ id, name, meta, fk: { kind: 'rs', data } }) of
  * reverse share `rid` with its private key → { fk (32 bytes), path, type,
- * mtime, size }. DecryptError when anything does not open.
+ * mtime, size, item } (`item`: a note, link or credential's kind marker, or
+ * null for a file). DecryptError when anything does not open.
  */
 export async function openUpload(privateKey, rid, item) {
   const data = item && item.fk && item.fk.kind === 'rs' ? item.fk.data : null;
@@ -227,5 +233,5 @@ export async function openUpload(privateKey, rid, item) {
   let meta;
   try { meta = JSON.parse(fromUtf8(await open(mkKey, aad('meta', item.id), m.iv, m.ct))); } catch (e) { throw e instanceof DecryptError ? e : new DecryptError('invalid metadata'); }
   if (!meta || typeof meta !== 'object') throw new DecryptError('invalid metadata');
-  return { fk: both.slice(0, 32), path, type: typeof meta.type === 'string' ? meta.type : '', mtime: Number.isSafeInteger(meta.mtime) && meta.mtime >= 0 ? meta.mtime : 0, size: meta.size };
+  return { fk: both.slice(0, 32), path, type: typeof meta.type === 'string' ? meta.type : '', mtime: Number.isSafeInteger(meta.mtime) && meta.mtime >= 0 ? meta.mtime : 0, size: meta.size, item: itemOf(meta) };
 }

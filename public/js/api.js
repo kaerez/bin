@@ -437,8 +437,10 @@ const grantH = (grant) => ({ 'x-reverse-grant': grant });
 export const reverseApi = {
   open: (id, linkProof) => request(`${R(id)}/open`, { method: 'POST', headers: { ...INTENT, 'x-link-proof': linkProof } }),
   // `humanGrant`: a CAPTCHA grant from human() (the check page), when the link has the CAPTCHA.
-  begin: (id, { linkProof, keyProof, turnstile, humanGrant }) => request(`${R(id)}/begin`, {
+  // `type`: what the session sends (files, note, url, secret: public/js/receivekinds.js).
+  begin: (id, { linkProof, keyProof, turnstile, humanGrant, type = 'files' }) => request(`${R(id)}/begin`, {
     method: 'POST', headers: { ...INTENT, 'x-link-proof': linkProof, ...(keyProof ? { 'x-key-proof': keyProof } : {}), ...human(turnstile), ...(humanGrant ? { 'x-secbin-human': humanGrant } : {}) },
+    body: { type },
   }),
   human: (id, token) => request(`${R(id)}/human`, { method: 'POST', headers: { ...INTENT, ...human(token) } }),
   createFile: (id, grant, body, signal) => request(`${R(id)}/files`, { method: 'POST', headers: grantH(grant), body, signal }),

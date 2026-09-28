@@ -30,6 +30,7 @@ import { HARD_MAX_SHARE_BYTES } from '../public/js/files.js';
 import { normalizeUrlRules, upgradeUrlRules, DEFAULT_URL_RULES } from '../public/js/sharetypes.js';
 import { publicStatement } from '../public/js/a11ystatement.js';
 import { ACTIONS, quotaCovers, shareAction, kindWhat } from '../public/js/quotakinds.js';
+import { KIND_OPTIONS, KIND_PLURALS, KIND_ACTIONS, RECEIVE_KINDS, isKind } from '../public/js/receivekinds.js';
 import {
   deriveKek, deriveUserKey, deriveFieldKey, keyFingerprint, keyCheckValue, saltCheckValue, sameCheck, sealSubMek, openSubMek,
   newMekId, newKey, newSalt, KEY_RE, MEK_ID_RE, effectiveAt, mekStatus, checkTimeline,
@@ -270,6 +271,11 @@ const MIGRATIONS = [
     }
     materializeDefaultRole(m.sql);
   },
+  // 18: what Receive links may be sent (docs/REVERSE.md §3.1): the role
+  // options reverseFiles, reverseText, reverseUrl and reverseSecret join the
+  // Default role (files and notes on, links and credentials off). Links made
+  // before keep accepting files only (their limits have no `accept`).
+  (m) => materializeDefaultRole(m.sql),
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -347,6 +353,8 @@ const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
 /** What the activity log may name when a reverse share's details change (the names only, never a value). */
 const REVERSE_DETAIL = ['password=set', 'password=removed', 'note=set', 'note=removed', 'limits'];
+/** What a changed Receive link accepts, as its log entry says it ("accept=files,note"): known kinds only. */
+const ACCEPT_DETAIL_RE = /^accept=(?:files|note|url|secret)(?:,(?:files|note|url|secret)){0,3}$/;
 /** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
 const PENDING_REVERSE_SEC = 600;
 /**
@@ -449,9 +457,10 @@ const expiryFilter = (expiry) => (expiry === 'none' ? ' AND expires >= ?' : expi
  * A reverse share's expiry and views against the resolved limits `L`:
  * `expireSec` (seconds from now; null: no expiry, reverseNoExpiry) and
  * `views` (null: unlimited, reverseAllowUnlimitedViews; else at most
- * reverseMaxViews); undefined skips a check. → { ok } or a failure.
+ * reverseMaxViews), `kinds` (what the link is made to accept, or the kinds
+ * a change adds: receiveKinds); undefined skips a check. → { ok } or a failure.
  */
-function reverseLimits(L, { expireSec, views, via = '' }) {
+function reverseLimits(L, { expireSec, views, kinds, via = '' }) {
   if (expireSec === null) {
     if (!L.reverseNoExpiry) return fail(403, 'no_expiry_disabled', `Upload links without an expiry are not allowed for this account${via}.`);
   } else if (expireSec !== undefined && L.reverseMaxExpireSec !== null && expireSec > L.reverseMaxExpireSec) {
@@ -462,7 +471,21 @@ function reverseLimits(L, { expireSec, views, via = '' }) {
   } else if (views !== undefined && L.reverseMaxViews !== null && views > L.reverseMaxViews) {
     return fail(403, 'too_many_views', `An upload link may have at most ${L.reverseMaxViews} views${via}.`, { max: L.reverseMaxViews });
   }
-  return { ok: true };
+  return receiveKinds(L, kinds, via);
+}
+
+/**
+ * The kinds a link is made to accept, or added to one (`kinds`; undefined:
+ * no check), against the role options reverseFiles, reverseText, reverseUrl
+ * and reverseSecret of the resolved limits `L` → { ok } or 403
+ * receive_kind_disabled naming them (`kinds`).
+ */
+function receiveKinds(L, kinds, via = '') {
+  if (kinds === undefined) return { ok: true };
+  const off = kinds.filter((k) => !isKind(k) || L[KIND_OPTIONS[k]] !== true);
+  if (!off.length) return { ok: true };
+  const words = off.map((k) => KIND_PLURALS[k] ?? String(k));
+  return fail(403, 'receive_kind_disabled', `Your role does not allow upload links to accept ${words.join(' or ')}${via}.`, { kinds: off });
 }
 
 function cleanLabel(s) {
@@ -1636,14 +1659,17 @@ export class Directory extends DurableObject {
 
   /**
    * Count one upload session through a Receive link of `uid` (the link's
-   * user, never the anonymous uploader) against the quotas of kind
-   * receive-upload and receive → { ok, refund } or 429 quota_exceeded (the
+   * user, never the anonymous uploader) of kind `kind` (files, note, url or
+   * secret: public/js/receivekinds.js) against the quotas of kind receive,
+   * receive-upload and the kind's own (receive-file, receive-note,
+   * receive-url, receive-secret) → { ok, refund } or 429 quota_exceeded (the
    * Worker tells the uploader only that the link cannot accept uploads now).
    */
-  async authorizeReceiveUpload(uid) {
+  async authorizeReceiveUpload(uid, kind = 'files') {
     const u = this.#user(uid);
     if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
-    const q = this.#chargeQuotas(uid, 'all', 'receive-upload');
+    if (!isKind(kind)) return fail(400, 'invalid', 'Unknown kind of upload.');
+    const q = this.#chargeQuotas(uid, 'all', KIND_ACTIONS[kind]);
     return q.ok ? { ok: true, refund: q.hits } : q;
   }
 
@@ -2029,7 +2055,7 @@ export class Directory extends DurableObject {
     // A reverse share's CAPTCHA (its uploaders pass it before a session starts: reverseTarget reads it here).
     if (captcha !== undefined && row.kind === 'reverse') { this.sql.exec('UPDATE shares SET captcha = ? WHERE id = ?', captcha ? 1 : 0, id); parts.push(`captcha=${captcha ? 'on' : 'off'}`); }
     // What else changed on a reverse share (names only: never a value the user typed).
-    for (const d of Array.isArray(detail) ? detail : []) if (REVERSE_DETAIL.includes(d)) parts.push(d);
+    for (const d of Array.isArray(detail) ? detail : []) if (REVERSE_DETAIL.includes(d) || (typeof d === 'string' && ACCEPT_DETAIL_RE.test(d))) parts.push(d);
     if (status !== undefined) {
       this.sql.exec("UPDATE shares SET status = ?, ended = CASE WHEN ? = 'active' THEN NULL ELSE COALESCE(ended, ?) END WHERE id = ?", status, status, now(), id);
       parts.push(`status=${status}`);
@@ -3247,10 +3273,11 @@ export class Directory extends DurableObject {
    * share.
    * `expireSec` null: no expiry (reverseNoExpiry); `views` null: unlimited
    * (reverseAllowUnlimitedViews), else at most reverseMaxViews; `password`:
-   * whether the link has one (reversePassword).
+   * whether the link has one (reversePassword); `accept`: the kinds it takes
+   * (reverseFiles, reverseText, reverseUrl, reverseSecret).
    * → { ok, maxBytes (the share's effective limit, null: none), captcha, expires }.
    */
-  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null, captcha, views = null, password = false }) {
+  async claimReverse(uid, { id, expireSec, maxBytes = null, label = '', lh = null, captcha, views = null, password = false, accept = ['files'] }) {
     if (typeof id !== 'string' || !/^r[A-Za-z0-9_-]{22}$/.test(id)) return fail(400, 'invalid', 'Invalid reverse-share id.');
     const h = await reverseIdHash(id); // before any check: nothing below awaits
     const u = this.#user(uid);
@@ -3259,7 +3286,7 @@ export class Directory extends DurableObject {
     const L = this.#effective(u).all;
     if (!L.driveEnabled) return fail(403, 'drive_disabled', 'Your role does not include a Drive.');
     if (!L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
-    const lim = reverseLimits(L, { expireSec, views });
+    const lim = reverseLimits(L, { expireSec, views, kinds: accept });
     if (!lim.ok) return lim;
     const pw = checkReversePassword(L, password === true);
     if (!pw.ok) return fail(403, pw.error, pw.message);
@@ -3297,7 +3324,10 @@ export class Directory extends DurableObject {
    * as on create — the expiry (`expires`: a time, or null for none) against
    * reverseMaxExpireSec / reverseNoExpiry, the views against reverseMaxViews /
    * reverseAllowUnlimitedViews, the byte limit against reverseMaxBytes, the
-   * CAPTCHA against reverseCaptcha, the password against reversePassword.
+   * CAPTCHA against reverseCaptcha, the password against reversePassword, the
+   * kinds a change of `accept` adds (`added`) against their role options (a
+   * kind the link already takes may stay; its uploads are refused while the
+   * role does not allow it).
    * The owner changing another user's link directly (`admin`) is held only to
    * that user's reverseNoExpiry. → { ok } or a failure.
    */
@@ -3315,7 +3345,8 @@ export class Directory extends DurableObject {
     if (!L.driveEnabled || !L.reverseEnabled) return fail(403, 'reverse_disabled', 'Your role does not allow receiving files (reverse shares).');
     const detail = Object.keys(change).some((k) => k !== 'label');
     if (detail && !L.reverseEdit) return fail(403, 'reverse_edit_disabled', `Your role does not allow changing an upload link after it is made${via}.`);
-    const lim = reverseLimits(L, { expireSec: change.expires === undefined ? undefined : change.expires === null ? null : change.expires - now(), views: change.views, via });
+    const lim = reverseLimits(L, { expireSec: change.expires === undefined ? undefined : change.expires === null ? null : change.expires - now(), views: change.views,
+      kinds: change.accept === undefined ? undefined : Array.isArray(change.added) ? change.added : change.accept, via });
     if (!lim.ok) return lim;
     // The byte limit as on create: at most the role's, which "none" means (null).
     const roleMax = L.reverseMaxBytes ?? null;
@@ -3380,6 +3411,8 @@ export class Directory extends DurableObject {
     const cap = (v) => (v === null || v === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, v));
     return {
       ok: true, uid: r.user_id, lh: r.lh, expires: r.expires, captcha: r.captcha === 1,
+      // The kinds the user's role lets links accept now (a link takes the ones it accepts among them).
+      kinds: RECEIVE_KINDS.filter((k) => L[KIND_OPTIONS[k]] === true),
       capacity: cap(L.driveMaxBytes), maxFile: cap(L.driveMaxFileBytes), roleMaxBytes: cap(L.reverseMaxBytes),
       pendingSec: this.#caps(u, L, this.#settings()).pendingSec,
     };

@@ -20,11 +20,12 @@ import { tabStorage, readPageKey, takeKey, goToCheck, loadGrant, saveGrant, CHEC
 import { humanCheck } from './turnstile.js';
 import { clearSessionKey } from './drivekeys.js';
 import { ensureTracker } from './tracker.js';
-import { renderMarkdown } from './markdown.js';
-import { looksLikeCode, highlightInto } from './highlight.js';
 import { $, showView, toast, copyText, pill, countdownSwitch } from './ui.js';
 import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError, nameEl } from './common.js';
-import { describeHost, parseSecret, parseShareUrl, ShareTypeError, totpCode } from './sharetypes.js';
+import { ShareTypeError } from './sharetypes.js';
+import { linkCard, secretCard, stopTotp, noteKind, drawNote } from './typedview.js';
+import { itemExport, KIND_LABELS } from './receivekinds.js';
+import { saveText } from './downloads.js';
 import { ShareReader, RefsReader, saveFile, saveZip, MEMORY_WARN } from './downloads.js';
 import { validateRefsManifest } from './refsmanifest.js';
 import { allowedRenderer, renderPreview } from './viewer.js';
@@ -38,7 +39,6 @@ let expiryRender = null; // …and what it re-renders
 const atTime = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 // The warning before a download window closes comes this long before (at least 20 s: WCAG 2.2.1).
 const WINDOW_WARN_MS = 5 * 60 * 1000;
-let totpTimer = null;
 let keepAlive = null;
 // This document's page key (src/index.js puts it in on a real navigation): read once, then gone from the DOM.
 const pageKey = typeof document !== 'undefined' ? readPageKey(document) : null;
@@ -351,8 +351,7 @@ function renderNote(paste, result) {
     }
   }
   $('#copy-content').hidden = false;
-  const isMarkdown = result.fmt === 'markdown';
-  const isCode = result.fmt === 'code' || (result.fmt === 'plaintext' && looksLikeCode(result.text));
+  const { markdown: isMarkdown, code: isCode } = noteKind(result.fmt, result.text);
   const pills = clear($('#paste-pills'));
   if (isMarkdown) pills.appendChild(pill('markdown'));
   else if (isCode) pills.appendChild(pill('code'));
@@ -360,112 +359,13 @@ function renderNote(paste, result) {
 
   const container = $('#paste-content');
   let raw = false;
-  const draw = () => {
-    clear(container);
-    if (isMarkdown && !raw) {
-      const div = h('div.md');
-      renderMarkdown(div, result.text);
-      container.appendChild(div);
-      return;
-    }
-    const pre = h('pre.code');
-    if (isCode) { const code = h('code'); highlightInto(code, result.text); pre.appendChild(code); } else pre.textContent = result.text;
-    container.appendChild(pre);
-  };
+  const draw = () => drawNote(container, result.text, { markdown: isMarkdown, code: isCode, raw });
   draw();
   const rawBtn = $('#toggle-raw');
   rawBtn.hidden = !isMarkdown;
   rawBtn.textContent = 'Raw';
   rawBtn.onclick = () => { raw = !raw; rawBtn.textContent = raw ? 'Rendered' : 'Raw'; draw(); };
   $('#copy-content').onclick = async () => { toast((await copyText(result.text)) ? 'copied to clipboard' : 'copy failed'); };
-}
-
-// ── link & credential cards ─────────────────────────────────────────────────
-function stopTotp() { clearInterval(totpTimer); totpTimer = null; }
-
-/**
- * A shared link: never followed automatically. The real destination (the host
- * as the browser resolves it) is shown first; opening needs a second, explicit
- * click and uses noopener/noreferrer so the destination learns nothing of this
- * page, the share id or its key.
- */
-function linkCard(text) {
-  // The sender's URL rules are not known here: any scheme that is not
-  // forbidden (javascript:, data:, file:, …) is accepted and shown as it is.
-  const u = parseShareUrl(text, { recipient: true });
-  const d = describeHost(u);
-  const warn = [];
-  if (d.external && d.openable) warn.push([`This is a ${d.scheme}: link: opening it hands it to another app on your device.`]);
-  if (!d.openable) warn.push([`This is a ${d.scheme}: link for another app. For your safety it cannot be opened from here: copy it only if you trust the sender and know what it does.`]);
-  // <bdi> isolates the Unicode form so right-to-left labels cannot reorder the sentence.
-  if (d.idn) warn.push(['This address uses international characters and is displayed as “', h('bdi', { dir: 'ltr', text: d.unicode }), '”. Such names can imitate a well-known site — check the real address above.']);
-  if (d.insecure) warn.push(['This link is not HTTPS: the connection to it is not encrypted.']);
-  let open = null;
-  if (d.openable) {
-    open = h('button.send', { type: 'button' }, h('span.send-txt', { text: 'Open link' }));
-    armConfirm(open, d.external ? `Open this ${d.scheme}: link?` : `Open ${d.ascii}?`, () => window.open(u.href, '_blank', 'noopener,noreferrer'));
-  }
-  const copy = h('button.btn', { type: 'button', text: 'Copy link', on: { click: async () => toast((await copyText(u.href)) ? 'link copied' : 'copy failed') } });
-  // The full link is always spelled out (for app links the host alone would
-  // hide the path and query that carry what the link does).
-  return h('div.link-card', {},
-    h('p.field-label', { text: d.external ? 'This share is a link' : 'This share is a link to' }),
-    h('p.link-host', { text: d.ascii }),
-    ...(u.href !== d.ascii ? [h('p.link-full', { text: u.href })] : []),
-    ...warn.map((w) => h('p.type-hint.warn', { role: 'note' }, ...w)),
-    h('div.btn-row', {}, open, copy));
-}
-
-const SECRET_LABELS = [['title', 'Title', false], ['username', 'User name', false], ['password', 'Password', true], ['url', 'Sign-in URL', false], ['totp', 'One-time-code seed', true], ['notes', 'Notes', false]];
-
-/** A credential: each field with copy; the password and seed masked until revealed; a live one-time code. */
-function secretCard(text) {
-  const sec = parseSecret(text);
-  const card = h('div.secret-card');
-  for (const [key, label, masked] of SECRET_LABELS) {
-    if (sec[key] === undefined) continue;
-    const val = h('span.secret-val', { text: masked ? '••••••••' : sec[key] });
-    if (masked) val.classList.add('masked');
-    const btns = h('div.btn-row');
-    if (masked) {
-      const reveal = h('button.btn', { type: 'button', text: 'Reveal', 'aria-pressed': 'false', 'aria-label': `Reveal ${label.toLowerCase()}` });
-      reveal.onclick = () => {
-        const show = reveal.getAttribute('aria-pressed') !== 'true';
-        val.textContent = show ? sec[key] : '••••••••';
-        val.classList.toggle('masked', !show);
-        reveal.textContent = show ? 'Hide' : 'Reveal';
-        reveal.setAttribute('aria-pressed', String(show));
-      };
-      btns.appendChild(reveal);
-    }
-    btns.appendChild(h('button.btn', { type: 'button', text: 'Copy', 'aria-label': `Copy ${label.toLowerCase()}`, on: { click: async () => toast((await copyText(sec[key])) ? `${label.toLowerCase()} copied` : 'copy failed') } }));
-    card.appendChild(h('div.secret-row', {}, h('span.field-label', { text: label }), val, btns));
-  }
-  if (sec.totp !== undefined) {
-    const code = h('span.totp-code', { text: '······' });
-    const left = h('span.mono.muted', { 'aria-live': 'off' });
-    // The seconds countdown can be stopped (WCAG 2.2.2); the code itself keeps
-    // changing when it has to (that is what it is for).
-    const totpSwitch = countdownSwitch(() => tick());
-    let current = '';
-    const copy = h('button.btn', { type: 'button', text: 'Copy code', on: { click: async () => { if (current) toast((await copyText(current)) ? 'code copied' : 'copy failed'); } } });
-    const tick = async () => {
-      try {
-        const r = await totpCode(sec.totp);
-        current = r.code;
-        code.textContent = r.code;
-        left.textContent = totpSwitch.stopped() ? `changes every ${r.period} seconds` : `changes in ${r.remaining}s`;
-      } catch (e) {
-        stopTotp();
-        code.textContent = '—';
-        left.textContent = e instanceof ShareTypeError ? e.message : 'The one-time code could not be computed.';
-      }
-    };
-    tick();
-    totpTimer = setInterval(tick, 1000);
-    card.appendChild(h('div.secret-row', {}, h('span.field-label', { text: 'One-time code' }), h('span', {}, code, ' ', left), h('div.btn-row', {}, copy, totpSwitch.el)));
-  }
-  return card;
 }
 
 // ── file rendering ───────────────────────────────────────────────────────────
@@ -594,7 +494,46 @@ function renderFiles(paste, manifest, reader, viewerCfg, grantExpires, { id, gra
   };
   $('#preview-close').onclick = closePreview;
 
+  // A note, link or credential a Drive share carries (received through a "Receive" link): its
+  // viewer, and a download as text (a credential as a plain-text export that says so).
+  const saveItem = (entry) => run(`Downloading ${basename(entry.path)}`, entry.size, async (q) => {
+    const bytes = await reader.bytes(entry, q);
+    let out;
+    try { out = itemExport(entry.item, basename(entry.path), bytes); } catch { out = null; }
+    // One that does not parse is saved as it is (never rendered).
+    if (out) saveText(out.filename, out.text); else await saveFile(reader, entry, () => {});
+  });
+  const itemButtons = (entry) => {
+    const what = KIND_LABELS[entry.item.kind].toLowerCase();
+    const openBtn = h('button.btn', {
+      type: 'button', text: 'Open', 'aria-label': `Open the ${what} ${basename(entry.path)}`,
+      on: {
+        click: () => {
+          if (busy) return undefined;
+          closePreview();
+          previewOpener = openBtn;
+          $('#preview-title').replaceChildren(nameEl(entry.path));
+          clear(previewBody);
+          preview.hidden = false;
+          preview.scrollIntoView({ block: 'nearest' });
+          return run(`Loading ${basename(entry.path)}`, entry.size, async (p) => {
+            const text = new TextDecoder('utf-8', { fatal: false }).decode(await reader.bytes(entry, p));
+            try {
+              if (entry.item.kind === 'note') drawNote(previewBody, text, noteKind(entry.item.fmt, text));
+              else previewBody.replaceChildren(entry.item.kind === 'url' ? linkCard(text, { lead: 'This item is a link to' }) : secretCard(text));
+            } catch (e) {
+              clear(previewBody).appendChild(h('p.msg.error', { text: e instanceof ShareTypeError ? `${e.message} Download it to see what it holds.` : 'This item cannot be shown.' }));
+            }
+            previewCleanup = () => { stopTotp(); clear(previewBody); };
+            $('#preview-download').onclick = () => saveItem(entry);
+          }, previewBar);
+        },
+      },
+    });
+    return [openBtn, h('button.btn', { type: 'button', text: 'Download', on: { click: () => saveItem(entry) } })];
+  };
   const fileButtons = (entry) => {
+    if (entry.item) return itemButtons(entry);
     const out = [h('button.btn', { type: 'button', text: 'Download', on: { click: () => run(`Downloading ${basename(entry.path)}`, entry.size, (p) => saveFile(reader, entry, p)) } })];
     const renderer = allowedRenderer(entry, manifest.view, viewerCfg);
     if (renderer) {

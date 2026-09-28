@@ -34,6 +34,10 @@ const OVERCLAIMS = [
   /server never sees the note\b/i,
   /link['’]s key.{0,200}?The server never sees the password/i,
   /only (?:the )?link holders? can read/i,
+  // Notes, links and credentials sent through a Receive link are Drive content: never end-to-end.
+  /(?:received|sent through a “?Receive”? link)[^.]{0,120}(?:notes?|links?|credentials?)[^.]{0,80}(?:are|is|stay|stays|remain|remains) end-to-end/i,
+  /server (?:never|cannot|can['’]t) (?:sees?|reads?|opens?|decrypts?) (?:a |the |any )?(?:received )?credentials?\b/i,
+  /credential[^.]{0,80}only the recipient can (?:read|open|decrypt)/i,
 ];
 
 /**
@@ -120,9 +124,23 @@ describe('the security statements about the Drive and reverse shares (audit B M3
     expect(read('public/js/reverse.js')).toMatch(/the server can decrypt what you send/);
     expect(d).toMatch(/A share of Drive files is not/);
     expect(d).toMatch(/“Receive” link are encrypted in their browser to a key the server keeps under your Drive keys/);
+    // A credential sent through a Receive link: the uploader page warns, on the form, that the recipient's server can decrypt it.
+    const up = read('public/js/reverse.js');
+    expect(up).toMatch(/The recipient’s server can decrypt this\. A credential sent here is encrypted in your browser, but to a key the server keeps under the recipient’s Drive keys, so it is not end-to-end encrypted/);
+    expect(up).toMatch(/id: 'reverse-sec-warning', role: 'note', text: CREDENTIAL_WARNING/);
+    expect(up).toMatch(/files with their names and types, notes, links and credentials — is encrypted in your browser[^']*the server can decrypt what you send/);
+    // The Drive's viewer of a received note, link or credential, and the Receive dialog's hint, say it too.
+    const app = read('public/dashboard/js/drive-app.js');
+    expect(app).toMatch(/received through one of your “Receive” links\. Like your other Drive files it is encrypted with keys the server holds, so it is not end-to-end encrypted/);
+    expect(read('public/dashboard/js/reverse-edit.js')).toMatch(/Senders are told that the server can decrypt it: like your Drive, it is not end-to-end encrypted/);
+    // The docs.
+    expect(read('docs/REVERSE.md')).toMatch(/### 3\.1 Notes, links and credentials[\s\S]*Like all Drive content they are \*\*not end-to-end\*\*: the server holds the keys/);
+    expect(read('SECURITY.md')).toMatch(/Like every Drive item a received credential is \*\*not\s+end-to-end encrypted\*\*: the recipient's server can decrypt it/);
+    expect(read('public/r/index.html')).toMatch(/<meta name="description" content="[^"]*the recipient’s server can decrypt\./);
     // The glossary says the same.
     const g = read('public/accessibility/index.html');
     expect(g).toMatch(/<dt>Receive \(link\)<\/dt>\s*<dd>[^<]*not end-to-end encrypted/);
+    expect(g).toMatch(/<dt>Receive \(link\)<\/dt>\s*<dd>[^<]*a note, a link or a credential\. [^<]*not end-to-end encrypted/);
     expect(g).toMatch(/<dt>Drive<\/dt>\s*<dd>[^<]*not end-to-end encrypted/);
   });
 });

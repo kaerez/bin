@@ -1,17 +1,19 @@
 // reverse-edit.js — the options of a "Receive" link (a reverse share,
 // docs/REVERSE.md §5, §8) as the user changes them after making it: My
 // shares' Edit (the Drive's Receive dialog uses the pure helpers for a new
-// link). Its expiry (extend it, give it one, or none), views, limits,
-// CAPTCHA, the uploader password and the note, each shown as the role allows
-// (profile.limits); the server checks every value again.
+// link). Its expiry (extend it, give it one, or none), views, limits, what it
+// accepts (files, notes, links, credentials), CAPTCHA, the uploader password
+// and the note, each shown as the role allows (profile.limits); the server
+// checks every value again.
 //
 // The password and the note are sealed in this browser with the link's key
 // (driveclient.js updateReverse), which the Drive's keys open: the Drive
 // client is loaded only when one of them changes. Neither is sent in clear,
 // but like the uploads to the link they are not end-to-end: the server holds
 // the keys that open the link's key. A change that weakens the link (its
-// password removed or changed, the CAPTCHA off, no expiry, unlimited views)
-// asks for the account password or a passkey, as making a link does (not
+// password removed or changed, the CAPTCHA off, no expiry, unlimited views,
+// files, links or credentials it did not accept) asks for the account
+// password or a passkey, as making a link does (not
 // while the owner acts as the user). DOM through h() only (strict CSP,
 // Trusted Types).
 
@@ -20,6 +22,7 @@ import { MAX_VIEWS, MAX_TTL } from '../../js/format.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { captchaChoice } from '../../js/captcha.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
+import { RECEIVE_KINDS, KIND_LABELS, KIND_OPTIONS, DEFAULT_ACCEPT, widening } from '../../js/receivekinds.js';
 
 const MiB = 1024 * 1024;
 const MAX_FILES = 10000;
@@ -56,6 +59,52 @@ export function reversePasswordChoice(L = {}) {
   return { show: true, checked: L.reversePasswordDefault === 'on', disabled: false, mode };
 }
 
+/**
+ * The kinds the role lets a link accept (reverseFiles, reverseText,
+ * reverseUrl, reverseSecret in profile.limits): files and notes unless the
+ * role turns them off, links and credentials only where it turns them on (as
+ * their defaults). The server decides.
+ */
+export function acceptChoice(L = {}) {
+  return RECEIVE_KINDS.filter((k) => (k === 'files' || k === 'note' ? L[KIND_OPTIONS[k]] !== false : L[KIND_OPTIONS[k]] === true));
+}
+
+const ACCEPT_HINTS = {
+  files: 'Files and folders, within the limits below.',
+  note: 'Plain text, Markdown or code, shown to you as text.',
+  url: 'One address, spelled out for you; it opens only through a confirmed click, and only when your account’s URL rules allow it.',
+  secret: 'A user name, password and the like, shown masked. Senders are told that the server can decrypt it: like your Drive, it is not end-to-end encrypted.',
+};
+
+/**
+ * "What it accepts": a checkbox per kind the role allows, and per kind the
+ * link accepts now (`current`) that the role no longer allows (it can only be
+ * turned off) → { el, value() → [kind], boxes, focus() }. Every box is
+ * labelled and has its hint; the group has a legend.
+ */
+export function acceptBox({ id, L = {}, current = null, legend = 'What senders can send' }) {
+  const allowed = acceptChoice(L);
+  const cur = Array.isArray(current) ? current : null;
+  const shown = RECEIVE_KINDS.filter((k) => allowed.includes(k) || (cur && cur.includes(k)));
+  const start = cur ?? (allowed.includes('files') ? ['files'] : allowed.slice(0, 1));
+  const boxes = new Map();
+  const rows = shown.map((k) => {
+    const locked = !allowed.includes(k);
+    const box = h('input', { type: 'checkbox', id: `${id}-${k}`, value: k, checked: start.includes(k), 'aria-describedby': `${id}-${k}-hint` });
+    if (locked) box.addEventListener('change', () => { if (!box.checked) box.disabled = true; });
+    boxes.set(k, box);
+    return h('div.accept-opt', {},
+      h('label.inline', { for: box.id }, box, ` ${KIND_LABELS[k]}`),
+      h('p.type-hint', { id: `${id}-${k}-hint`, text: locked ? `${ACCEPT_HINTS[k]} Your role no longer allows it: it can only be turned off.` : ACCEPT_HINTS[k] }));
+  });
+  const el = h('fieldset.accept-group', { id }, h('legend.field-label', { text: legend }), ...rows);
+  return {
+    el, boxes,
+    value: () => RECEIVE_KINDS.filter((k) => boxes.get(k)?.checked),
+    focus: () => [...boxes.values()].find((b) => !b.disabled)?.focus(),
+  };
+}
+
 /** A size typed in MB ('' = no limit) → bytes, null, or undefined when invalid. */
 export function mbToBytes(raw) {
   const v = String(raw ?? '').trim();
@@ -65,11 +114,12 @@ export function mbToBytes(raw) {
 }
 const mbText = (b) => (b === null || b === undefined ? '' : String(Math.round((b / MiB) * 1000) / 1000));
 const sameTypes = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+const acceptOfRow = (cur) => (Array.isArray(cur.accept) && cur.accept.length ? cur.accept : [...DEFAULT_ACCEPT]);
 
 /**
  * What the Edit form asks for, from its values and the link as it is (`cur`:
  * the Drive's row — expires (null: none), views, used, maxFiles, maxBytes,
- * maxFileBytes, types, captcha, password, note) → { patch } (only what
+ * maxFileBytes, types, accept, captcha, password, note) → { patch } (only what
  * changed; `note` / `password` / `removePassword` as driveclient.js
  * updateReverse takes them) or { error, field }.
  */
@@ -118,6 +168,16 @@ export function reverseEditPatch(v, cur, L = {}, now = Math.floor(Date.now() / 1
     types = { mode: v.typeMode, rules };
   }
   if (!sameTypes(types, cur.types)) patch.types = types;
+  // What it accepts: at least one kind; a kind the role does not allow is never added.
+  if (Array.isArray(v.accept)) {
+    if (!v.accept.length) return { error: 'Choose at least one thing the link accepts.', field: 'accept' };
+    const was = acceptOfRow(cur);
+    const added = v.accept.filter((k) => !was.includes(k));
+    const allowed = acceptChoice(L);
+    const off = added.filter((k) => !allowed.includes(k));
+    if (off.length) return { error: `Your role does not allow upload links to accept ${off.map((k) => KIND_LABELS[k].toLowerCase()).join(' or ')}.`, field: 'accept' };
+    if (v.accept.join(',') !== was.join(',')) patch.accept = [...v.accept];
+  }
   if (typeof v.captcha === 'boolean' && v.captcha !== !!cur.captcha) patch.captcha = v.captcha;
   // The password: kept, changed (or added) — typed twice —, or removed.
   if (v.password === 'change') {
@@ -139,7 +199,8 @@ export function reverseEditPatch(v, cur, L = {}, now = Math.floor(Date.now() / 1
 
 /**
  * Whether `patch` (from reverseEditPatch) weakens link `cur`: its password
- * removed or changed, its CAPTCHA turned off, no expiry, unlimited views.
+ * removed or changed, its CAPTCHA turned off, no expiry, unlimited views, or
+ * files, links or credentials it did not accept (a note does not weaken it).
  * Such a change needs the account password or a passkey (the server decides:
  * src/routes/reverse.js weakening).
  */
@@ -148,7 +209,8 @@ export function weakensLink(patch, cur) {
   return (patch.expires === null && cur.expires !== null)
     || (patch.views === null && cur.views !== null && cur.views !== undefined)
     || ((typeof patch.password === 'string' || patch.removePassword === true) && !!cur.password)
-    || (patch.captcha === false && !!cur.captcha);
+    || (patch.captcha === false && !!cur.captcha)
+    || (Array.isArray(patch.accept) && widening(acceptOfRow(cur), patch.accept).length > 0);
 }
 
 /** A radio group in a fieldset: choices [[value, text, hidden?]] → { el, value(), radios }. */
@@ -213,6 +275,8 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
   const typeBox = labelled('The file types (one per line: ext:pdf, mime:image/*)', typeRules);
   typeBox.hidden = typeMode.value === 'any';
   typeMode.addEventListener('change', () => { typeBox.hidden = typeMode.value === 'any'; });
+  // What it accepts (the role's kinds; one it no longer allows can only be turned off).
+  const accept = acceptBox({ id: id('accept'), L, current: acceptOfRow(cur), legend: 'What senders can send' });
   // The CAPTCHA, as the role says (shown while it can be chosen, or while this link has it).
   const cc = captchaChoice(profile, 'reverse');
   const capIn = h('input', { type: 'checkbox', id: id('captcha'), checked: !!cur.captcha, disabled: cc.mode === 'require' || (cc.mode === 'off' && !cur.captcha), 'aria-describedby': id('captcha-hint') });
@@ -248,11 +312,12 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
   let withPasskey = passkey === true;
   if (!impersonating && passkey === null) canUsePasskey().then((ok) => { withPasskey = !!ok; confirmText.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
   const confirmBox = h('div.dfield', { hidden: true }, confirmText, confirmIn,
-    h('p.type-hint', { id: id('confirm-hint'), text: 'This change removes a protection of the link (its password, its CAPTCHA, its expiry or its views limit), so it needs your password or a passkey, as making a link does.' }));
+    h('p.type-hint', { id: id('confirm-hint'), text: 'This change removes a protection of the link (its password, its CAPTCHA, its expiry or its views limit) or lets it accept files, links or credentials it did not, so it needs your password or a passkey, as making a link does.' }));
 
   const el = h('div.rev-edit.stack', {},
     expiry.el, expBox,
     h('div.toolbar', {}, viewsBox), viewsHint,
+    accept.el,
     h('div.drive-reverse-grid', {}, labelled('Most files (empty: no limit)', files), labelled('Most in total, MB (empty: no limit)', maxMb), labelled('Largest file, MB (empty: no limit)', fileMb)),
     labelled('File types', typeMode), typeBox,
     capBox,
@@ -260,10 +325,12 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
     note.el, noteBox,
     confirmBox);
   const fields = { expire: expN, views: viewsIn.disabled ? inf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules, pw: pw1, pw2, note: noteIn, confirm: confirmIn };
+  const acceptField = () => [...accept.boxes.values()].find((b) => !b.disabled) || null;
   const read = () => reverseEditPatch({
     expiry: expiry.value(), n: expN.value, unit: expU.value,
     views: viewsIn.value, unlimited: inf.getAttribute('aria-pressed') === 'true',
     maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value,
+    accept: accept.value(),
     captcha: capBox ? capIn.checked : undefined,
     password: password.value(), pw1: pw1.value, pw2: pw2.value,
     note: note.value(), noteText: noteIn.value,
@@ -276,7 +343,7 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
   return {
     el,
     focus: () => expiry.radios[0].focus(),
-    field: (k) => (k === 'views' ? (viewsIn.disabled ? inf : viewsIn) : fields[k] || null),
+    field: (k) => (k === 'views' ? (viewsIn.disabled ? inf : viewsIn) : k === 'accept' ? acceptField() : fields[k] || null),
     read,
     needsStepUp,
     /** The confirmation `patch` needs: {} when it weakens nothing, else { current } or { reauth } (throws with a reason). */

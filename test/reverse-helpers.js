@@ -13,6 +13,7 @@ import { sealLinkKey, openLinkKey } from '../public/js/drivekeys.js';
 import { hkdf32 } from '../public/js/crypto.js';
 import { randomBytes, utf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, encryptChunk, importFileKey } from '../public/js/files.js';
+import { encodeItem, KIND_LABELS } from '../public/js/receivekinds.js';
 
 // Argon2id stand-in (workerd cannot compile WebAssembly; the server never runs it).
 setReverseStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('test-stretch')));
@@ -67,14 +68,15 @@ export function rv(id, path, { method = 'POST', headers = {}, body, ip } = {}) {
   return fetchJson(`/api/reverse/${id}${path}`, { method, body, headers: { ...intent, ...headers }, ip });
 }
 export const openLink = async (r, ip, pub = r.pub) => rv(r.id, '/open', { headers: { 'x-link-proof': await linkProof(pub) }, ip });
-export async function begin(r, { password, ip, token, pub = r.pub } = {}) {
+/** Start an upload session; `type`: what it sends (files, note, url, secret), declared in a JSON body (none: files, as older clients). */
+export async function begin(r, { password, ip, token, pub = r.pub, type } = {}) {
   const headers = { 'x-link-proof': await linkProof(pub) };
   if (password) {
     const head = await (await openLink(r, ip)).json();
     headers['x-key-proof'] = await passwordProof(password, head.password.salt, head.password.t, r.pub);
   }
   if (token) headers['x-secbin-turnstile'] = token;
-  return rv(r.id, '/begin', { headers, ip });
+  return rv(r.id, '/begin', { headers, ip, ...(type !== undefined ? { body: { type } } : {}) });
 }
 export async function grantOf(r, opts) {
   const res = await begin(r, opts);
@@ -85,11 +87,11 @@ export const putChunk = (id, node, i, bytes, token, ip) => SELF.fetch(`${ORIGIN}
   method: 'PUT', headers: { 'content-type': 'application/octet-stream', 'x-upload-token': token, ...(ip ? { 'cf-connecting-ip': ip } : {}) }, body: bytes,
 });
 
-/** Encrypt + reserve one file (no chunks yet) → { res, node, fk, data }. */
-export async function reserve(r, grant, { path = 'a.txt', bytes = utf8('hello world'), type = 'text/plain', types, size, ip } = {}) {
+/** Encrypt + reserve one file (no chunks yet) → { res, node, fk, data }. `item`: a note, link or credential's kind marker (sealed in its metadata). */
+export async function reserve(r, grant, { path = 'a.txt', bytes = utf8('hello world'), type = 'text/plain', types, size, ip, item = null } = {}) {
   const nodeId = newNodeId();
   const fk = randomBytes(32);
-  const sealed = await sealUpload(r.pub, r.id, nodeId, fk, { path, type, mtime: 1700000000000, size: bytes.length });
+  const sealed = await sealUpload(r.pub, r.id, nodeId, fk, { path, type, mtime: 1700000000000, size: bytes.length, item });
   const body = { id: nodeId, ...sealed, size: size ?? bytes.length };
   if (types) body.types = types;
   const res = await rv(r.id, '/files', { headers: { 'x-reverse-grant': grant }, body, ip });
@@ -109,6 +111,24 @@ export async function send(r, grant, opts = {}) {
   const fin = await rv(r.id, `/files/${f.node}/finalize`, { headers: { 'x-reverse-grant': grant, 'x-upload-token': f.data.uploadToken }, ip: opts.ip });
   if (fin.status !== 200) throw new Error(`finalize: ${fin.status} ${await fin.text()}`);
   return f;
+}
+/**
+ * Send a note, link or credential as the uploader's page does (receivekinds.js
+ * encodeItem, then one item in the session `grant` began with its `type`) → the send().
+ */
+export async function sendItem(r, grant, kind, values, opts = {}) {
+  const enc = encodeItem(kind, values);
+  return send(r, grant, { ...opts, path: KIND_LABELS[kind], bytes: enc.bytes, type: enc.type, item: enc.meta });
+}
+/** A whole session of `kind`: begin (declaring it), send one item, done → { grant, sent }. */
+export async function itemSession(r, kind, values, { ip, password } = {}) {
+  const b = await begin(r, { ip, password, type: kind });
+  if (b.status !== 200) throw new Error(`begin ${kind}: ${b.status} ${await b.text()}`);
+  const { grant } = await b.json();
+  const sent = await sendItem(r, grant, kind, values, { ip });
+  const d = await rv(r.id, '/done', { headers: { 'x-reverse-grant': grant }, ip });
+  if (d.status !== 200) throw new Error(`done: ${d.status}`);
+  return { grant, sent };
 }
 export const received = async (cookie, query = '') => (await fetchJson(`/api/private/drive/received${query}`, { cookie })).json();
 /** What the received files not yet taken in add to the Drive's use: their sealed path, metadata and wrap (as stored, at rest). */

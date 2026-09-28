@@ -1316,9 +1316,35 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   under `/api/reverse/<id>/` are anonymous and exempt (they read no session); the link proof, the
   session grant, the upload token, Turnstile, the password lockout and the Guard guard them (see
   "CSRF" above).
+- **Notes, links and credentials** (docs/REVERSE.md §3.1). A link may accept, besides files, the
+  types regular shares carry — a note, a link, a credential — as the user chooses per link and
+  the role allows (`reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret`; links and
+  credentials off in the Default role). Each is one item of its own upload session, encrypted in
+  the uploader's browser exactly like a file, with its kind inside the metadata sealed to the
+  link's key. The uploader's browser **declares the kind of each session** at `begin`: the server
+  sees that kind (it checks it against the link and the user's role as it is at that moment, and
+  again at every reservation; it counts it in the quotas; it keeps it with the session until the
+  session ends) and each item's ciphertext size, never its text, URL, fields, title or format, and
+  a stored item carries no plaintext kind. Like every Drive item a received credential is **not
+  end-to-end encrypted**: the recipient's server can decrypt it, and the uploader page says so on
+  the credential form ("The recipient's server can decrypt this"). In the Drive each opens only
+  in the inert viewers of regular shares (`public/js/typedview.js`): a note as text or through
+  the safe Markdown subset, a link spelled out with its warnings and opened only through a
+  confirmed click, only for the schemes a page may open and only when the user's own URL rules
+  allow it (else Copy only, with the reason), a credential masked. A download is a text file: a
+  link as a plain `.txt` with its URL, never an Internet Shortcut (`.url`), whose target the
+  shell would follow; a credential as a plain-text export that says what it holds, after a
+  confirmation. A marker or content that does not parse is never rendered as a link or a
+  credential.
 - **Declared file types.** When the user limits a link to some file types, the uploader's
   browser declares each file's `{ extension, MIME type }`; the server checks it against the
-  link's rules and does not store it (as for file shares: a modified client could lie).
+  link's rules and does not store it (as for file shares: a modified client could lie). Unlike a
+  file share, the declarer is the anonymous party the rules restrain, so the **user's browser
+  enforces them on what really arrived** when it takes an item in: the real, decrypted name and
+  type against the link's file types, a file's size against its largest file, and the item's
+  kind (a file, or a note, link or credential) against what the link accepts. A mismatch is
+  never added to the Drive: it is recorded as failed (`type`, `size`, `kind`) and listed, to
+  delete.
 - **Taking files in.** The user's browser opens each received file with the link's private key
   and seals its name, metadata and file key (its DEK) under the user's current KEK, like a new
   Drive file (checked by the Worker); the content chunks are not re-encrypted. From then on it is
@@ -1368,8 +1394,11 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   `reverseNoExpiry` allows it), views, files, total bytes, largest file, file types; per role:
   `reverseEnabled` (with `driveEnabled`), `reverseMaxActive`, `reverseMaxBytes`,
   `reverseMaxExpireSec`, `reverseNoExpiry`, `reverseMaxViews`, `reverseAllowUnlimitedViews`,
-  `reversePassword`, `reverseEdit`, `reverseCaptcha`; always the Drive's capacity and largest
-  file. The server checks every one on create and on every change (for an API key, with the
+  `reversePassword`, `reverseEdit`, `reverseCaptcha`, and the kinds a link may accept
+  (`reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret`, checked on create, on each kind a
+  change adds, and at every upload with the role as it is then); always the Drive's capacity and
+  largest file. A note, link or credential session reserves one item of bounded size (a note
+  2 MiB, a link 2048 characters, a credential the regular credential's fields). The server checks every one on create and on every change (for an API key, with the
   role's API limits on top); the pages only reflect them. The role's current
   `reverseMaxBytes` applies to existing links too: a link is held to the smaller of its own
   byte limit and the role's (lowering the role's cap takes effect at once; raising it does not
@@ -1412,7 +1441,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   is sent in plain text, but like the uploads to the link they are not end-to-end (the server
   holds the keys that open the link's key, so it can read the note and test guesses at the
   password; a copy of the Drive object alone cannot). A change that weakens the link — its
-  password removed or changed, its CAPTCHA turned off, no expiry, unlimited views — needs the
+  password removed or changed, its CAPTCHA turned off, no expiry, unlimited views, or accepting
+  files, links or credentials it did not (each a new way for an anonymous sender to reach the
+  user: a file of any type, a link to follow, a secret entrusted to a channel that is not
+  end-to-end; a note is plain text shown inertly, so adding one is not weakening) — needs the
   account password or a passkey, as creating a link does (a stolen session alone cannot turn a
   link into an open, lasting upload channel), and is refused for API keys even with `manage`
   (`403 step_up_required`); the owner acting as the user confirms nothing. Tightening a link
@@ -1423,9 +1455,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   password, the note, the limits and the CAPTCHA are the user's. Changes are refused on revoked,
   ended or locked links, and need the CSRF token and the role checks like every change. The
   activity log names what changed (`share.updated`: expiry, views, CAPTCHA, `password=set` /
-  `removed`, `note=set` / `removed`, `limits`), never a value.
+  `removed`, `note=set` / `removed`, `limits`, `accept=<kinds>`), never a value.
 - **Quotas on Receive.** The owner can cap, per role, the upload sessions a user's links receive
-  (`receive-upload`, and `receive` with new links) in a fixed window. A session is counted for
+  (`receive-upload`, and `receive` with new links; and by what a session sends: `receive-file`,
+  `receive-note`, `receive-url`, `receive-secret`) in a fixed window. A session is counted for
   the user when it starts (before the password is checked), atomically in the Directory, and
   given back when it does not start or ends having sent no file. At the quota `begin` answers
   `429 not_accepting` ("This link can’t accept more uploads right now. Try again later."): the
@@ -1464,7 +1497,8 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - **Quotas** (role option lists; public/js/quotakinds.js) are checked and counted in one
   synchronous Directory step, so concurrent creations cannot pass a quota: outgoing shares
   (every share, or by type), Drive uploads (`drive-upload`, each file, at the upload's start) and
-  Receive (`receive-link`, `receive-upload`). An API-only quota narrows API creations only; the
+  Receive (`receive-link`, `receive-upload`, and `receive-file`, `receive-note`, `receive-url`,
+  `receive-secret` by what an upload session sends). An API-only quota narrows API creations only; the
   Drive and Receive have no API channel. The public account's quotas count per anonymous
   subject and take only the kinds it can use. The owner is never counted.
 - Reads that spend views need custom headers (non-simple): ambient GETs never consume anything.

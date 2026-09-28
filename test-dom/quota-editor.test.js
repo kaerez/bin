@@ -85,7 +85,8 @@ describe('Admin → Roles → Quotas: the kinds', () => {
     expect(groupsOf(kindOf(recv))).toEqual([
       ['OPTGROUP', 'Outgoing shares', OUTGOING],
       ['OPTGROUP', 'Drive', [['drive-upload', 'Files uploaded']]],
-      ['OPTGROUP', 'Receive', [['receive', 'All receive'], ['receive-link', 'New links'], ['receive-upload', 'Uploads received']]],
+      ['OPTGROUP', 'Receive', [['receive', 'All receive'], ['receive-link', 'New links'], ['receive-upload', 'Uploads received'],
+        ['receive-file', 'Uploads with files'], ['receive-note', 'Notes received'], ['receive-url', 'Links received'], ['receive-secret', 'Credentials received']]],
     ]);
     expect(kindOf(recv).value).toBe('receive-upload');
     expect(kindOf(api).value).toBe('note');
@@ -94,7 +95,8 @@ describe('Admin → Roles → Quotas: the kinds', () => {
     // The help says what the groups count.
     const help = [...detail().querySelectorAll('p.mono.muted')].map((p) => p.textContent).join(' ');
     expect(help).toMatch(/"All outgoing shares" counts every note, link, credential, file share and Drive share \(never Drive uploads or Receive\)/);
-    expect(help).toMatch(/"Uploads received" counts each upload session that sends files through one of the user's links/);
+    expect(help).toMatch(/"Uploads received" counts each upload session that sends files through one of the user's links, or a note, link or credential/);
+    expect(help).toMatch(/"Uploads with files", "Notes received", "Links received" and "Credentials received" count those sessions by what they send/);
   }, T);
 
   it('a kind used only in the web app takes no "API only" channel', async () => {

@@ -12,13 +12,18 @@
 //   Drive — `drive-upload`: each file added to the Drive by an upload (a
 //     folder upload counts each file); files taken in from Receive links are
 //     not counted here.
-//   Receive — `receive` (both below), `receive-link` (a new Receive link),
-//     `receive-upload` (an upload session that sends files through one of the
-//     user's links, counted for the user, never the anonymous uploader).
+//   Receive — `receive` (every receive action), `receive-link` (a new Receive
+//     link), `receive-upload` (an upload session through one of the user's
+//     links, of any kind — counted for the user, never the anonymous
+//     uploader), and one kind per kind of send, as the session declares it
+//     (public/js/receivekinds.js): `receive-file` (a session that sends
+//     files), `receive-note`, `receive-url`, `receive-secret`.
 // `all` never covers Drive uploads or Receive.
 
+/** The actions of an upload session through a Receive link, one per kind of send. */
+export const RECEIVE_UPLOAD_ACTIONS = ['receive-file', 'receive-note', 'receive-url', 'receive-secret'];
 /** Every counted action. */
-export const ACTIONS = ['note', 'url', 'secret', 'file', 'drive', 'drive-upload', 'receive-link', 'receive-upload'];
+export const ACTIONS = ['note', 'url', 'secret', 'file', 'drive', 'drive-upload', 'receive-link', ...RECEIVE_UPLOAD_ACTIONS];
 
 /**
  * Each kind: `label` (the editor, the account page), `what` (in a sentence:
@@ -36,16 +41,20 @@ export const KINDS = Object.freeze({
   file: { label: 'File shares', what: 'file shares', covers: ['file'] },
   drive: { label: 'Drive shares', what: 'Drive shares', covers: ['drive'], gui: true },
   'drive-upload': { label: 'Files uploaded', what: 'files uploaded to the Drive', covers: ['drive-upload'], gui: true },
-  receive: { label: 'All receive', what: 'Receive links and uploads received', covers: ['receive-link', 'receive-upload'], gui: true },
+  receive: { label: 'All receive', what: 'Receive links and uploads received', covers: ['receive-link', ...RECEIVE_UPLOAD_ACTIONS], gui: true },
   'receive-link': { label: 'New links', what: 'new Receive links', covers: ['receive-link'], gui: true },
-  'receive-upload': { label: 'Uploads received', what: 'uploads received', covers: ['receive-upload'], gui: true },
+  'receive-upload': { label: 'Uploads received', what: 'uploads received', covers: [...RECEIVE_UPLOAD_ACTIONS], gui: true },
+  'receive-file': { label: 'Uploads with files', what: 'uploads with files received', covers: ['receive-file'], gui: true },
+  'receive-note': { label: 'Notes received', what: 'notes received', covers: ['receive-note'], gui: true },
+  'receive-url': { label: 'Links received', what: 'links received', covers: ['receive-url'], gui: true },
+  'receive-secret': { label: 'Credentials received', what: 'credentials received', covers: ['receive-secret'], gui: true },
 });
 
 /** The editor's groups (an <optgroup> each), in order. */
 export const QUOTA_GROUPS = Object.freeze([
   { label: 'Outgoing shares', kinds: ['all', 'text', 'note', 'url', 'secret', 'files', 'file', 'drive'] },
   { label: 'Drive', kinds: ['drive-upload'] },
-  { label: 'Receive', kinds: ['receive', 'receive-link', 'receive-upload'] },
+  { label: 'Receive', kinds: ['receive', 'receive-link', 'receive-upload', 'receive-file', 'receive-note', 'receive-url', 'receive-secret'] },
 ]);
 
 /** Every kind a quota may have. */

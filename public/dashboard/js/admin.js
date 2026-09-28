@@ -103,7 +103,11 @@ const LIMIT_SECTIONS = [
     ['reverseNoExpiry', 'Receive: links with no expiry allowed (they take files until revoked)', 'bool'],
     ['reverseMaxViews', 'Receive: most views per link (a view: one visit that starts sending files)', 'int'],
     ['reverseAllowUnlimitedViews', 'Receive: unlimited views allowed', 'bool'],
-    ['reverseEdit', 'Receive: users may change a link after making it (expiry, views, limits, CAPTCHA, password, note)', 'bool'],
+    ['reverseEdit', 'Receive: users may change a link after making it (expiry, views, limits, what it accepts, CAPTCHA, password, note)', 'bool'],
+    ['reverseFiles', 'Receive: links may accept files and folders', 'bool'],
+    ['reverseText', 'Receive: links may accept notes (plain text, Markdown, code)', 'bool'],
+    ['reverseUrl', 'Receive: links may accept links (shown spelled out; the user’s URL rules decide what opens)', 'bool'],
+    ['reverseSecret', 'Receive: links may accept credentials (not end-to-end: the server can decrypt them, as all Drive content)', 'bool'],
     // Shown while the role can use the Drive and reverse shares.
     ['reversePassword', 'Uploader password on Receive links', 'captcha', { which: 'password', defKey: 'reversePasswordDefault', needs: ['driveEnabled', 'reverseEnabled'] }],
     ['reverseCaptcha', 'CAPTCHA on reverse shares (Receive)', 'captcha', { which: 'reverse', defKey: 'reverseCaptchaDefault', needs: ['driveEnabled', 'reverseEnabled'] }],
@@ -112,7 +116,8 @@ const LIMIT_SECTIONS = [
 const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
 // As API_LIMIT_KEYS (src/lib/settings.js): an API key with "manage" reaches reverse shares too.
 const API_KEYS = ['text', 'files', 'url', 'secret', 'openerDelete', 'maxViews', 'allowUnlimitedViews', 'maxExpireSec', 'maxFilesPerShare', 'maxShareBytes', 'maxFileBytes', 'maxFolderDepth',
-  'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reverseEdit'];
+  'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reverseEdit',
+  'reverseFiles', 'reverseText', 'reverseUrl', 'reverseSecret'];
 const RULES_HINT = 'One per line: ext:pdf, mime:image/png or mime:image/*. Prefer ext: rules — senders can edit a file’s MIME type, so mime: rules are advisory. The mode and the list apply together: set both at the same level. File types are declared by the sender’s browser or CLI, so this stops honest mistakes, not a modified client.';
 const VIEWER_PRESETS = {
   'Any file as plain text': [{ match: 'any', value: '', renderer: 'text' }],
@@ -539,7 +544,7 @@ function quotasEditor(scope, list, { publicAccount = false } = {}) {
 // What each group of kinds counts (Admin → Roles → Quotas).
 const QUOTA_HELP = {
   outgoing: 'Outgoing shares: "All outgoing shares" counts every note, link, credential, file share and Drive share (never Drive uploads or Receive). "Notes, links and credentials" and "File and Drive shares" count those together; the other kinds count one type each (a note is plain text, Markdown or code).',
-  webOnly: 'Drive: "Files uploaded" counts each file uploaded to the Drive (a folder upload counts every file; files taken in from Receive links do not count), given back when the upload does not complete. Receive: "New links" counts each Receive link created; "Uploads received" counts each upload session that sends files through one of the user\'s links (counted for the user, never the sender); "All receive" counts both. Drive shares, the Drive and Receive are used in the web app only, so their quotas are GUI + API.',
+  webOnly: 'Drive: "Files uploaded" counts each file uploaded to the Drive (a folder upload counts every file; files taken in from Receive links do not count), given back when the upload does not complete. Receive: "New links" counts each Receive link created; "Uploads received" counts each upload session that sends files through one of the user\'s links, or a note, link or credential (counted for the user, never the sender); "Uploads with files", "Notes received", "Links received" and "Credentials received" count those sessions by what they send (each session sends one kind); "All receive" counts new links and every upload session. Drive shares, the Drive and Receive are used in the web app only, so their quotas are GUI + API.',
 };
 
 function rulesEditor(scope, list, { withPresets = true } = {}) {
@@ -840,7 +845,7 @@ async function ownerRole(box) {
   box.append(h('h2.section-title', { text: 'Owner role' }),
     h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
     h('p.mono.muted', { id: 'owner-captcha', text: `CAPTCHA: allowed on shares and on reverse shares — you choose for each one (the box starts off for shares and on for reverse shares).${overview.turnstile ? '' : ' Not active until Turnstile is configured (Security → CAPTCHA).'}` }),
-    h('p.mono.muted', { id: 'owner-reverse', text: 'Receive links: any expiry up to 365 days, or none; any number of views, or unlimited; an uploader password if you want one (the box starts off); and you can change a link after making it.' }),
+    h('p.mono.muted', { id: 'owner-reverse', text: 'Receive links: any expiry up to 365 days, or none; any number of views, or unlimited; an uploader password if you want one (the box starts off); files, notes, links and credentials, as you choose per link; and you can change a link after making it.' }),
     h('div.card.stack', {},
       h('h3.field-label', { text: 'Your sessions' }), dur('session.idleSec', 'Sign out after being idle for'), dur('session.absSec', 'Sign out in any case after'),
       h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
@@ -1155,6 +1160,7 @@ const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation',
   'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec',
   'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes', 'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes',
   'reverseMaxExpireSec', 'reverseNoExpiry', 'reverseMaxViews', 'reverseAllowUnlimitedViews', 'reversePassword', 'reversePasswordDefault', 'reverseEdit',
+  'reverseFiles', 'reverseText', 'reverseUrl', 'reverseSecret',
   'shareCaptcha', 'shareCaptchaDefault', 'reverseCaptcha', 'reverseCaptchaDefault'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],

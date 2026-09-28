@@ -15,6 +15,12 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Take-in holds received items to their link's rules** (audit A-3): the uploader's browser only
+  declares a file's type and a send's kind to the server, so the user's browser now checks the
+  real, decrypted name and type against the link's file types, a file's size against its largest
+  file, and each item's kind against what the link accepts. A mismatch is never added to the
+  Drive: it is recorded as failed (new reasons `type`, `size`, `kind`) and listed, to delete.
+
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left
   empty, a fresh passkey assertion (`POST /api/private/me/reauth`, then `{ reauth }`), verified
@@ -460,6 +466,38 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - a warning is logged when only one Turnstile key is set.
 
 ### Added
+
+- **"Receive" links take what regular shares carry** (docs/REVERSE.md §3.1): besides files, a
+  link may accept a **note** (plain text, Markdown or code, with an optional title), a **link**
+  and a **credential** (the regular credential's fields), as the user chooses when making it
+  ("What senders can send") or later (Edit). Links made before accept files only.
+  - Role options `reverseFiles`, `reverseText`, `reverseUrl`, `reverseSecret` (Default: files and
+    notes on, links and credentials off, as for regular shares; the Owner: all; not for the public
+    account; restrictable for API keys; in import / export like every role option). Directory
+    migration 18 gives the Default role their values. The server checks them on create, on each
+    kind an Edit adds, and at every upload — `open`, `begin` and each reservation — with the role
+    as it is then.
+  - The uploader page offers the accepted kinds as tabs, with the composer's note formats, the link
+    field (destination spelled out) and the credential form, under the warning that the
+    recipient's server can decrypt it. Each send is one upload session of one kind, declared at
+    `begin` (`{ type }`; `403 kind_not_accepted`): one view, counted under `receive`,
+    `receive-upload` and a new quota kind per kind of send — `receive-file`, `receive-note`,
+    `receive-url`, `receive-secret` — given back as before when it sends nothing. A note, link or
+    credential session carries one item (`409 one_item`) of bounded size (`413 item_too_large`);
+    the file types and the largest file apply to files only; the password and the CAPTCHA gate
+    every kind.
+  - Taken in, each becomes a Drive item of its own kind (its kind in the sealed metadata; the
+    server sees the kind of a send, never its content), in the link's folder, named after a note's
+    title or "Note / Link / Credential from <date>". The Drive lists it with an icon and a label
+    and opens it with the regular shares' viewers (`public/js/typedview.js`, shared with the share
+    page): a note rendered, a link under the user's URL rules, a credential masked. Download saves
+    text (`.md` / `.txt`; a link as `.txt`, never a `.url` shortcut; a credential as a plain-text
+    export after a confirmation); Share… carries them as what they are (the manifest's `item`),
+    where the account may share links and credentials.
+  - Adding files, links or credentials to what a link accepts weakens it: it needs the account
+    password or a passkey, and an API key cannot do it (`403 step_up_required`, `weakens:
+    ["accept"]`). Adding a note does not.
+  - The CLI does not send to Receive links; it is unchanged.
 
 - **Admin → Import / export → Drive keys: Verify** (docs/DRIVE.md §3.2): a saved Drive keys
   export is decrypted in the browser and checked against this server, read-only, after the

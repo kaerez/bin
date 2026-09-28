@@ -147,6 +147,11 @@ function memorySink() {
   return { parts, write: async (b) => { parts.push(b.slice()); }, close: async () => {}, abort: async () => {} };
 }
 
+/** Save `text` as a UTF-8 text file named `filename` (a note, link or credential export: small, in memory). */
+export function saveText(filename, text) {
+  triggerDownload(new Blob([text], { type: 'text/plain;charset=utf-8' }), filename);
+}
+
 /** Save one file (raw, not zipped). */
 export async function saveFile(reader, entry, onBytes) {
   const name = basename(entry.path);
