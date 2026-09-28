@@ -23,13 +23,14 @@
 // X-Secbin-Human; without a valid one they answer 403 captcha_required,
 // which is not counted as an invalid fetch.
 //
-// The same derived key also makes the per-navigation page key (pageKey): the
-// Worker writes it into the recipient's page only on a real navigation, and
-// the page uses it to seal the link's key in sessionStorage while the check
-// page (which runs Cloudflare's script) is open. See SECURITY.md.
+// The recipient's page seals the link's key in sessionStorage under a random,
+// cookie-bound page key (below) while the check page, which runs Cloudflare's
+// script, is open. See SECURITY.md.
 
 import { sessionKeys } from './config.js';
 import { HttpError } from './http.js';
+import { rateLimit, recordFailure, CAPTCHA_VERIFY } from './guard.js';
+import { requireTurnstile } from './turnstile.js';
 import { b64urlFromBytes, bytesFromB64url, utf8, fromUtf8, randomBytes } from '../../public/js/bytes.js';
 
 export const SHARE_GRANT_SEC = 600;
@@ -37,7 +38,6 @@ export const SHARE_GRANT_CAP_SEC = 12 * 3600;
 export const REVERSE_GRANT_SEC = 600;
 export const HUMAN_HEADER = 'x-secbin-human';
 const MAX_GRANT = 512;
-const ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
 const B64_RE = /^[A-Za-z0-9_-]+$/;
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -111,19 +111,63 @@ export async function renewGrant(env, claims) {
   return { grant: await seal(env, next), expires: exp, claims: next };
 }
 
+/**
+ * Verify the request's Turnstile token for `action`, for an anonymous caller
+ * (the grant routes and a reverse session start): at most CAPTCHA_VERIFY
+ * checks per network and window reach Cloudflare's siteverify (`429
+ * rate_limited` beyond), and a missing or failed token counts as an invalid
+ * request in the Guard, like a wrong link. `g` is the caller's ipContext.
+ */
+export async function verifyCaptcha(env, g, request, action) {
+  const rl = await rateLimit(env, g, 'captcha-verify', CAPTCHA_VERIFY);
+  if (!rl.ok) {
+    throw new HttpError(429, 'rate_limited', 'Too many CAPTCHA checks from your network. Try again later.', rl.until ? { until: rl.until } : undefined, { 'retry-after': '600' });
+  }
+  try {
+    await requireTurnstile(env, request, action);
+  } catch (e) {
+    if (e instanceof HttpError && (e.code === 'turnstile_failed' || e.code === 'turnstile_required')) {
+      const b = await recordFailure(env, g, 'invalid');
+      if (b.newlyBlocked) throw new HttpError(429, 'blocked', 'Too many invalid requests from your network. Try again later.', { until: b.until });
+    }
+    throw e;
+  }
+}
+
 /** The refusal a content route gives without a valid grant (never counted as an invalid fetch). */
 export const captchaRequired = (reverse = false) => new HttpError(403, 'captcha_required', reverse
   ? 'This link requires a CAPTCHA; open it in a browser.'
   : 'This share requires a CAPTCHA; open it in a browser.');
 
 // ── the page key (see public/js/pagekey.js) ─────────────────────────────────
+//
+// A random key, never derived from anything a page can read: 32 random bytes
+// and a nonce `n` (16 bytes) made on each strict navigation to /p/<id> or
+// /r/<id>. The Worker writes `n.key` into that document and into an HttpOnly,
+// Secure, SameSite=Strict cookie scoped to the share's own path. On the return
+// from the check page (/p/<id>?n=<n>) the key is written into the document
+// again only when that cookie comes with the navigation and names the same
+// nonce, and the cookie is cleared in the same response: one round trip, one
+// use. A client outside the browser has no cookie; a script in the browser
+// cannot read it (HttpOnly) and its fetch() is not a document navigation.
 
-/** A fresh nonce for a page key. */
-export const pageNonce = () => b64urlFromBytes(randomBytes(16));
+export const PAGE_KEY_COOKIE = '__Secure-secbin_pk';
+export const PAGE_KEY_MAX_AGE = 15 * 60;
 export const PAGE_NONCE_RE = /^[A-Za-z0-9_-]{22}$/;
+const PAGE_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
 
-/** The page key for share page `kind` ('p' | 'r'), share `id` and nonce `n` (32 bytes, base64url). */
-export async function pageKey(env, kind, id, n) {
-  if (!ID_RE.test(String(id)) || !PAGE_NONCE_RE.test(String(n))) throw new Error('bad page key input');
-  return b64urlFromBytes(await mac(env, 'page-key', `${kind}\0${id}\0${n}`));
+/** A new page key → { n, key } (base64url; 16 and 32 random bytes). */
+export const newPageKey = () => ({ n: b64urlFromBytes(randomBytes(16)), key: b64urlFromBytes(randomBytes(32)) });
+
+/** The page key held in the cookie value `n.key`, or null. */
+export function parsePageKey(value) {
+  if (typeof value !== 'string' || value.length > 80) return null;
+  const [n, key, extra] = value.split('.');
+  return extra === undefined && PAGE_NONCE_RE.test(n || '') && PAGE_KEY_RE.test(key || '') ? { n, key } : null;
+}
+
+/** Set-Cookie for page key `pk` on `path` (/p/<id> or /r/<id>), or its removal when `pk` is null. */
+export function pageKeyCookie(path, pk) {
+  const value = pk ? `${pk.n}.${pk.key}` : '';
+  return `${PAGE_KEY_COOKIE}=${value}; Path=${path}; HttpOnly; Secure; SameSite=Strict; Max-Age=${pk ? PAGE_KEY_MAX_AGE : 0}`;
 }

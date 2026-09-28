@@ -224,7 +224,9 @@ admin locked it),
 `403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 captcha_required`, `403 turnstile_*`, `413 file_too_large` /
 `share_full` / `drive_full`, `409 too_many_files` (none left: `open` shows `filesLeft: 0`),
 `400 declaration_required` / `403 file_type_not_allowed`, `429 busy` (too many open sessions from
-this network, or on the link), `429 password_locked`, `429 blocked`.
+this network, or on the link), `429 password_locked`, `429 rate_limited` (more than 30 CAPTCHA
+checks from this network within 10 minutes, on `human` or a `begin` with a token; a failed token
+counts as an invalid request), `429 blocked`.
 
 ### 6.3 The owner acting as the user ("Log in as")
 
@@ -274,8 +276,9 @@ many files arrive.
   the limits, a password field when needed, a file picker, a folder picker, drag and drop of
   files and folders, and progress. DOM only through `h()`; always the strict CSP (no third-party
   script, whatever the server's Turnstile keys), never cached by the service worker.
-- **A link with the CAPTCHA:** the uploader page takes the key out of the address bar, seals it
-  for this tab and goes to the link's check page (`/r/<id>?check`, `public/js/check.js`,
+- **A link with the CAPTCHA:** the uploader page takes the key out of the address bar, removes
+  the tab's Drive keys, seals the link's key alone for this tab under a random page key held in
+  an HttpOnly cookie, and goes to the link's check page (`/r/<id>?check`, `public/js/check.js`,
   "Complete the CAPTCHA to send files", the Turnstile CSP); Continue there stays disabled until
   the CAPTCHA passes, gets a grant and returns to the uploader page, which opens the key again
   (SECURITY.md, *CAPTCHA on shares*). Each send uses the grant; after it, or after a wrong

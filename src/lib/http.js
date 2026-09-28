@@ -42,6 +42,10 @@ export const TURNSTILE_CSP = CSP_DIRECTIVES.map((d) => {
   if (d.startsWith('frame-src ')) return `frame-src ${TURNSTILE_ORIGIN}`;
   return d;
 }).join('; ');
+// A share's CAPTCHA page (/p|r/<id>?check): the Turnstile policy, and no
+// worker of any kind (no service worker registration, no Worker), so a script
+// there cannot leave code behind that outlives the page.
+export const CHECK_CSP = TURNSTILE_CSP.split('; ').map((d) => (d.startsWith('worker-src ') ? "worker-src 'none'" : d)).join('; ');
 
 // Every powerful browser feature is off; the few the app itself uses (copy
 // buttons, media preview fullscreen / picture-in-picture) are same-origin only.
@@ -91,13 +95,17 @@ export const notFound = () => err(404, 'not_found', 'Not found.');
 export const methodNotAllowed = (allow) => json({ error: 'method_not_allowed', message: 'Method not allowed' }, 405, { allow });
 
 /** Re-emit an asset response with the security headers and no-store (`turnstile`: see TURNSTILE_CSP). */
-export function withSecurityHeaders(res, { noStore = true, turnstile = false } = {}) {
+export function withSecurityHeaders(res, { noStore = true, turnstile = false, check = false } = {}) {
   const out = new Response(res.body, res);
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
-  if (turnstile) {
-    out.headers.set('content-security-policy', TURNSTILE_CSP);
+  if (turnstile || check) {
+    out.headers.set('content-security-policy', check ? CHECK_CSP : TURNSTILE_CSP);
     out.headers.delete('cross-origin-embedder-policy');
   }
+  // The check page may open popups (Cloudflare's links), but a popup it opens
+  // to a strict page (COOP same-origin with COEP) lands in another browsing
+  // context group: the check page gets no handle to read it.
+  if (check) out.headers.set('cross-origin-opener-policy', 'same-origin-allow-popups');
   if (noStore) out.headers.set('cache-control', 'no-store');
   return out;
 }

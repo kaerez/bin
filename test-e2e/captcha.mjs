@@ -19,6 +19,8 @@
 import { chromium } from 'playwright-core';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { webcrypto } from 'node:crypto';
+import http from 'node:http';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
@@ -226,6 +228,99 @@ try {
   check('API: a recipient without a grant gets 403 captcha_required, "open it in a browser"', api.status === 403 && apiBody.error === 'captcha_required' && apiBody.message === 'This share requires a CAPTCHA; open it in a browser.', JSON.stringify(apiBody));
   const hr = await fetch(`${BASE}/api/paste/${idOf(protUrl)}/human`, { method: 'POST', headers: { 'x-secbin-intent': '1' } });
   check('API: a grant needs a Turnstile token (403 turnstile_required)', hr.status === 403 && (await hr.json()).error === 'turnstile_required');
+
+  // ── the page key: the audit's proofs of concept, as regressions (F1) ──────
+  // A tab that holds Drive keys (synthetic) opens the protected note: on the
+  // check page there is no Drive key, the sealed record holds the link's key
+  // alone, and the page key is in an HttpOnly cookie a script cannot read.
+  {
+    const ctx = await b.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
+    const p = await ctx.newPage(); // not watched: the probes below provoke CSP refusals on purpose
+    await p.goto(`${BASE}/accessibility/`);
+    await p.evaluate(() => { sessionStorage.setItem('secbin_dk', 'SYNTHETIC-DRIVE-KEY'); sessionStorage.setItem('secbin_dk_uid', 'u-synthetic'); });
+    await p.goto(protUrl);
+    await p.waitForURL((u) => u.search === '?check', { timeout: 30000 });
+    await p.waitForSelector('#check-continue');
+    const id = idOf(protUrl);
+    const seen = await p.evaluate((sid) => ({ keys: Object.keys(sessionStorage), rec: sessionStorage.getItem(`secbin_pk:p:${sid}`), cookie: document.cookie }), id);
+    check('check page: the tab holds no Drive key (removed, never sealed)', !seen.keys.some((k) => k.startsWith('secbin_dk')) && !JSON.stringify(seen).includes('SYNTHETIC-DRIVE-KEY'), seen.keys.join(','));
+    check('check page: the page key is not readable by its scripts (HttpOnly cookie)', !seen.cookie.includes('secbin_pk'), seen.cookie);
+    const { n, iv, ct } = JSON.parse(seen.rec);
+    // PoC F1: an outside client with the navigation's Fetch Metadata, but no cookie, gets no page key.
+    const raw = (u, headers) => new Promise((res, rej) => http.get(u, { headers }, (x) => { let d = ''; x.on('data', (c) => { d += c; }); x.on('end', () => res({ body: d, cookie: x.headers['set-cookie'] || null })); }).on('error', rej));
+    const nav = { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin' };
+    const forged = await raw(`${BASE}/p/${id}?n=${n}`, nav);
+    check('PoC F1: forged navigation headers without the cookie get no page key (and no cookie)', !/secbin-page-key/.test(forged.body) && forged.cookie === null);
+    // PoC F1: a same-origin fetch() from the check document (it sends the cookie) gets no key either.
+    const fetched = await p.evaluate(async (u) => (await (await fetch(u, { credentials: 'same-origin' })).text()).includes('secbin-page-key'), `/p/${id}?n=${n}`);
+    check('PoC F1: fetch() from the check document gets no page key', fetched === false);
+    // What the record holds (opened here with the browser's own cookie, as only the strict page could).
+    const pk = (await ctx.cookies(BASE)).find((c) => c.name === '__Secure-secbin_pk');
+    check('the page key cookie: HttpOnly, Secure, SameSite=Strict, scoped to the share\'s path, 15 minutes',
+      pk && pk.httpOnly && pk.secure && pk.sameSite === 'Strict' && pk.path === `/p/${id}` && pk.expires > Date.now() / 1000 && pk.expires <= Date.now() / 1000 + 900 + 5, JSON.stringify(pk));
+    const [cn, ckey] = pk.value.split('.');
+    const b64 = (x) => Buffer.from(x.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    const aesKey = await webcrypto.subtle.importKey('raw', b64(ckey), { name: 'AES-GCM' }, false, ['decrypt']);
+    const plain = JSON.parse(new TextDecoder().decode(await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(iv), additionalData: new TextEncoder().encode(`secbin-page/v1\np\n${id}\n${n}\n`) }, aesKey, b64(ct))));
+    check('the sealed record holds the link\'s key and nothing else', cn === n && JSON.stringify(Object.keys(plain)) === '["k"]' && plain.k === K, JSON.stringify(Object.keys(plain)));
+    // Framing and popups from the check document.
+    const probe = await p.evaluate(async (sid) => {
+      const w = window.open(`/p/${sid}`, '_blank');
+      await new Promise((res) => setTimeout(res, 3000));
+      let popupReadable;
+      try { popupReadable = !!(w && w.document && w.document.body); } catch { popupReadable = false; }
+      const f = document.createElement('iframe');
+      f.src = `/p/${sid}`;
+      document.body.append(f);
+      await new Promise((res) => setTimeout(res, 2000));
+      let frameReadable;
+      try { frameReadable = !!(f.contentDocument && f.contentDocument.querySelector('script[src="/js/view.js"]')); } catch { frameReadable = false; }
+      let swRegistered = true;
+      try { await navigator.serviceWorker.register('/sw.js'); } catch { swRegistered = false; }
+      return { popupHandle: !!w, popupClosed: !w || w.closed, popupReadable, frameReadable, swRegistered };
+    }, id);
+    check('check page: a popup it opens to the strict page gives it no readable handle (another browsing context group)', probe.popupClosed && !probe.popupReadable, JSON.stringify(probe));
+    check('check page: the strict page cannot be framed there', !probe.frameReadable, JSON.stringify(probe));
+    check('check page: no service worker can be registered from it (worker-src \'none\')', !probe.swRegistered, JSON.stringify(probe));
+    for (const pg of ctx.pages()) if (pg !== p) await pg.close();
+    // A cross-origin page cannot frame the strict page either (frame-ancestors 'none').
+    const fp = await ctx.newPage();
+    await fp.setContent(`<iframe src="${BASE}/p/${id}"></iframe>`);
+    await fp.waitForTimeout(2000);
+    const child = fp.frames().find((f) => f !== fp.mainFrame());
+    let framed = false;
+    try { framed = !!child && await child.evaluate(() => !!document.querySelector('script[src="/js/view.js"]')); } catch { framed = false; }
+    check('the strict page refuses to be framed (frame-ancestors \'none\')', !framed);
+    await ctx.close();
+  }
+  // The app's own service worker still registers from normal pages.
+  {
+    const ctx = await b.newContext();
+    const p = await ctx.newPage();
+    watch(p);
+    await p.goto(`${BASE}/`);
+    const sw = await p.evaluate(async () => {
+      const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((res) => setTimeout(() => res(null), 15000))]);
+      return reg && reg.active ? new URL(reg.active.scriptURL).pathname : null;
+    });
+    check('the app\'s service worker still registers from normal pages (/sw.js)', sw === '/sw.js', String(sw));
+    await ctx.close();
+  }
+  // Opened from another site: that navigation gets no page key, so the page reloads itself once (?pk) and goes on.
+  {
+    r = await recipient();
+    const other = BASE.replace('//localhost', '//127.0.0.1');
+    await r.p.goto(`${other}/accessibility/`);
+    await r.p.evaluate((u) => { const a = document.createElement('a'); a.href = u; a.id = 'x-link'; a.textContent = 'the link'; document.body.append(a); }, protUrl);
+    await r.p.click('#x-link');
+    await r.p.waitForURL((u) => u.search === '?check', { timeout: 30000 });
+    const first = r.nav.find((x) => new URL(x.url).host === new URL(BASE).host);
+    check('opened from another site: the page reloads itself once for a page key, then the check page', !!first && r.nav.some((x) => hasParam(x.url, 'pk')), r.nav.map((x) => x.url).join(' → '));
+    await passCheck(r.p);
+    await r.p.waitForFunction(() => document.querySelector('#paste-content')?.textContent.includes('a note behind a CAPTCHA'), null, { timeout: 60000 });
+    check('opened from another site: the note decrypts after the CAPTCHA', new URL(r.p.url()).hash === `#${K}`);
+    await r.ctx.close();
+  }
 
   // ── a file share ──────────────────────────────────────────────────────────
   await op.goto(`${BASE}/dashboard/`);

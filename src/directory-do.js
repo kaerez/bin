@@ -2312,12 +2312,15 @@ export class Directory extends DurableObject {
   }
 
   /**
-   * Whether the active share `id` has the CAPTCHA (for the page the Worker
-   * serves: /p/<id>?check and /r/<id>?check get the Turnstile CSP only then).
+   * The CAPTCHA standing of share `id` for a request without a grant:
+   * 'captcha' (active, with the CAPTCHA), 'open' (active, without it) or
+   * 'none' (unknown, or no longer active) — the Worker answers 'none' exactly
+   * as 'captcha', so the check says nothing about an id.
    */
-  async shareCaptcha(id) {
+  async shareCaptchaState(id) {
     const r = typeof id === 'string' ? this.sql.exec("SELECT captcha FROM shares WHERE id = ? AND status = 'active'", id).toArray()[0] : null;
-    return !!r && r.captcha === 1;
+    if (!r) return 'none';
+    return r.captcha === 1 ? 'captcha' : 'open';
   }
 
   /** The user a share belongs to (the Worker needs it to reach a reverse share's Drive). */

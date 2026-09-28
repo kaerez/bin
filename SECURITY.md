@@ -293,9 +293,12 @@ CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
     uses it there;
   - on the home page, what an anonymous sender types and the link, with its key, that it
     produces;
-  - on a share's CAPTCHA page, the share's id, the link key sealed under a key that page cannot
-    get (*CAPTCHA on shares*), and the grant the page itself obtains: never the link key, the
-    content or the files being sent.
+  - on a share's CAPTCHA page, the share's id, the link key sealed under a random key held in
+    an HttpOnly cookie that page cannot read (*CAPTCHA on shares*), and the grant the page itself
+    obtains: never the link key, the tab's Drive keys (they are removed before the page is
+    reached), the content or the files being sent. That page is on the app's origin, so while it
+    runs such a script could also call the APIs of a signed-in user of that tab with the session
+    cookie, as on Account (*CAPTCHA on shares*, "Same origin").
 
   Recipients' pages (`/p/<id>`), uploaders' pages (`/r/<id>`) and signed-in composers never load
   it. secbin already runs on
@@ -339,45 +342,95 @@ the Turnstile check above — before anything of it is served. It is a role opti
   `POST /api/(paste|file)/<id>/human` with a Turnstile token for the action `share-open`; that
   call looks nothing up and spends nothing. Views are spent only by the open that follows.
   API and CLI recipients cannot pass it.
+- **Nothing about an id before the check.** While Turnstile is on, a request without a grant
+  gets exactly the same `403 captcha_required` for a well-formed id whose share does not exist
+  or has ended (expired, used up, revoked, deleted) as for a protected share, on every route
+  above and for every kind (KV notes, burn notes, file shares, Drive shares). The Guard still
+  counts it as before (an id that was never a share, or a wrong link for an ended one, is an
+  invalid request). With a grant the true answer follows (`404` / `410`). A live share without
+  the CAPTCHA answers as it always did: it is open by design. Reverse links are the exception:
+  their `open` (with the link proof) tells a link's state and its note before any check, by
+  design (docs/REVERSE.md §6.2), so their routes answer `404` for an unknown id as before.
+- **Metering.** The grant routes (`…/(paste|file)/<id>/human`, `/api/reverse/<id>/human`) and a
+  reverse session start with a Turnstile token call Cloudflare's siteverify. At most 30 such
+  checks per network (the Guard's key) per 10 minutes reach it; beyond that `429 rate_limited`
+  for 10 minutes, before any call to Cloudflare. A missing or failed token counts as an invalid
+  request, like a wrong link. Renewing a grant (an HMAC check) is not limited. The check page
+  is behind the Guard's block and at most 60 loads per network per 10 minutes (`429`), and looks
+  nothing up. The owner sees and lifts these blocks with the others (scopes `captcha-verify`,
+  `captcha-page`).
 - **Grants** (`src/lib/human.js`): `h1.<claims>.<HMAC-SHA-256>` under a key derived from `SIG`;
   claims: the kind (share or reverse), the share id, a keyed hash of the caller's network (the
   Guard's key: an IPv4 address or an IPv6 prefix), when the check passed and when the grant
   lapses. A share grant lasts 10 minutes and slides while it is used (each call that passes
   renews it in `X-Secbin-Human`; the recipient's page renews it every 4 minutes while it is open),
-  never more than 12 hours after the check. It opens only its share, from its network (a
-  mobile network that changes address needs the check again). Stateless: it cannot be revoked
-  before it lapses, but it gives nothing without the link's key.
+  never more than 12 hours after the check. It opens only its share, from its network.
+  Stateless: it cannot be revoked before it lapses, but it gives nothing without the link's key.
+  - **The network binding is coarse, both ways.** Everyone behind one IPv4 address (a NAT, a
+    corporate proxy) or in one IPv6 prefix (`guard.v6Prefix`, a /64 by default) counts as one
+    network, so a grant copied to another device there works until it lapses. A client whose
+    address changes (a mobile network, a VPN) needs the check again.
+  - A share grant can be used any number of times while it lasts. A reverse grant starts one
+    session (below).
 - **Reverse shares:** when the link has the flag, starting an upload session (`…/begin`) needs a
   grant from `POST /api/reverse/<id>/human` (a token for `reverse-upload`) or, as before, a
   Turnstile token itself, checked before the password. A reverse grant has a random id that the
   session start spends in the user's Drive whatever the answer (a wrong password included), so
   each session start — each password guess — costs one CAPTCHA, as each needed one token
-  before. Links without the flag have no check.
+  before. Links without the flag have no check. `open` is not behind the CAPTCHA: a caller with
+  the link proof gets the sealed note, the password's salt and cost, the lock state and the
+  limits first, because the page needs them to show the link (the password proof itself is
+  never returned, so the salt gives no offline test).
 - **The key never meets the third-party script.** The link's key is in the address bar
   (`#fragment`), and Turnstile's script would run in the page that loads it. So:
-  - `/p/<id>` and `/r/<id>` always get the strict CSP, where no third-party script can load.
-  - On a real navigation to them (`Sec-Fetch-Dest: document` and `Sec-Fetch-Mode: navigate`,
-    which a script cannot send with `fetch()`), the Worker writes a page key into the page: a
-    nonce `n` and `HMAC(key derived from SIG, kind ‖ id ‖ n)`.
+  - `/p/<id>` and `/r/<id>` always get the strict CSP, where no third-party script can load,
+    with `Cross-Origin-Opener-Policy: same-origin`, COEP `require-corp` and `frame-ancestors
+    'none'` (with `X-Frame-Options: DENY`): no other page can frame them or keep a handle to them.
+  - **A random, cookie-bound page key.** A strict navigation to them (`Sec-Fetch-Dest:
+    document`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Site: none` or `same-origin`) gets a new
+    page key: a nonce `n` (16 random bytes) and 32 random bytes, written into that document and
+    into a cookie `__Secure-secbin_pk` (HttpOnly, Secure, SameSite=Strict, `Path=/p/<id>` or
+    `/r/<id>`, 15 minutes). Nothing about it can be derived from the id, the nonce or anything
+    else a page can read. A cross-site navigation, a frame, a `fetch()` and a HEAD get none and
+    set none.
   - When the share answers `captcha_required`, the page takes the key out of the address bar
-    (`history.replaceState`), seals it with the page key (AES-256-GCM, bound to the share and
-    `n`) together with this tab's Drive keys (which leave `sessionStorage` too), keeps only the
-    sealed record in `sessionStorage` (this tab only), and replaces itself with the check page.
-  - The check page (`/p/<id>?check`, `public/js/check.js`; the Turnstile CSP only while the
-    share has the flag and the server has keys, else a redirect back) holds the widget and the
-    sealed record, never the page key: it cannot get one (a `fetch()` of the page carries none,
-    it cannot frame the page, and a window it opens is in another browsing context group).
-    Continue stays disabled until the CAPTCHA passes, redeems the token for the grant, keeps
-    the grant for the tab and returns to `/p/<id>?n=<n>`.
-  - That navigation gets the page key for `n` again; the strict page opens the sealed record,
-    removes it, puts the Drive keys and the link's key back (the key into the address bar) and
-    opens the share with the grant.
-  - Without `sessionStorage` (a restricted window, storage off) or without a page key (a
+    (`history.replaceState`), removes the tab's Drive keys from `sessionStorage` (they are never
+    sealed or carried through the check: the Drive asks to be unlocked again afterwards), seals
+    the link's key alone with the page key (AES-256-GCM, bound to the share and `n`), keeps only
+    the sealed record in `sessionStorage` (this tab only), and replaces itself with the check
+    page. A page opened from another site (whose navigation got no key), or whose key was
+    already used, first reloads itself once as a same-origin navigation (`?pk`, the key kept
+    after `#`) to get one.
+  - The check page (`/p/<id>?check`, `public/js/check.js`) is served for any well-formed id while
+    the server has Turnstile keys, else a redirect back. Its CSP is the Turnstile one with
+    `worker-src 'none'` (no service worker, no Worker) and no COEP; its COOP is
+    `same-origin-allow-popups`, so a popup it opens to a strict page lands in another browsing
+    context group and gives it no handle. It never gets a page key. Opened with a `#key` in its
+    address, it sends the key to the strict page before any widget code loads. Continue stays
+    disabled until the CAPTCHA passes, redeems the token for the grant, keeps the grant for the
+    tab and returns to `/p/<id>?n=<n>`.
+  - **One use.** That return gets the page key again only when the navigation carries the cookie
+    for `n`; the same response clears the cookie, and no new key is issued on a return. The
+    strict page opens the sealed record, removes it, puts the link's key back into the address
+    bar and opens the share with the grant.
+  - Why the check page cannot open the record: a client outside the browser can send the Fetch
+    Metadata of a navigation but has no cookie; a script in the browser cannot read the cookie
+    (HttpOnly), its `fetch()` of the page is not a document navigation, it cannot frame the page,
+    and a window it opens is in another browsing context group.
+  - Without `sessionStorage` (a restricted window, storage off) or still without a page key (a
     browser that sends no Fetch Metadata) a protected share is not opened, and the page says
     why. `/check/` itself is not served.
 - **What a compromised Turnstile script could still do** on the check page: obtain a grant
-  (it runs the check), see the share's id and the sealed record, and navigate the tab. It
-  cannot open the record, and a grant opens nothing without the key.
+  (it runs the check), see the share's id and the sealed record, delete the record or navigate
+  the tab (a denial of service). It cannot open the record, and a grant opens nothing without
+  the key.
+- **Same origin (residual risk).** The check page is on the app's own origin (the maintainer's
+  decision; a separate hostname would remove this). While a script there runs, it has the
+  reach of a script on the Account page: it can call the API as the tab's signed-in user with
+  the session cookie (SameSite=Strict does not stop a same-origin request), and read or write
+  this origin's `sessionStorage` and `localStorage` for the tab. The tab's Drive keys are not
+  there, and the page registers no service worker. Recipients who are not signed in expose no
+  account. Every recipient of a protected share visits this page.
 
 ### Accessibility widget and statement
 
@@ -752,9 +805,9 @@ stores only ciphertext, the tree's shape and sizes, and **wraps** of DK that it 
     back only when the server has no human check; otherwise they are gone when the page is left
     (the Drive page asks to unlock again);
   - the sign-in page and the home page's public composer clear them before the script loads;
-  - a share's CAPTCHA page never has them: the share's page seals them with the link's key
-    (*CAPTCHA on shares*) and removes them from `sessionStorage` before it goes there, and puts
-    them back when the tab returns.
+  - a share's CAPTCHA page never has them: the share's page removes them from
+    `sessionStorage` before it goes there, and does not seal or carry them (*CAPTCHA on
+    shares*); after the check the Drive asks to be unlocked again.
 
   What remains: the sign-in unlocks the Drive on the login page and stores DK when it
   succeeds, and a change on Account that re-wraps DK (a password change, a passkey, new

@@ -428,8 +428,10 @@ describe('the uploader', () => {
       expect(await on.text()).toContain('/js/reverse.js');
       const check = await tsFetch(`/r/${r.id}?check`);
       expect(check.status).toBe(200);
-      expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP);
+      // The Turnstile policy with no workers at all (no service worker registration from the check page).
+      expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP.replace("worker-src 'self'", "worker-src 'none'"));
       expect(check.headers.get('cross-origin-embedder-policy')).toBeNull();
+      expect(check.headers.get('cross-origin-opener-policy')).toBe('same-origin-allow-popups');
       expect(check.headers.get('cache-control')).toBe('no-store');
       const html = await check.text();
       expect(html).toContain('/js/check.js');

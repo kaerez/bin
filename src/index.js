@@ -17,11 +17,11 @@
 // expiry and brute-force protection. It never sees a decryption key, a password,
 // a file name or a file type. See SPEC.md §10 and SECURITY.md.
 
-import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, SECURITY_HEADERS } from './lib/http.js';
+import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, getCookie, SECURITY_HEADERS } from './lib/http.js';
 import { readSession, logoutCookie, SESSION_COOKIE } from './lib/auth.js';
-import { ipContext, cachedSettings, directory } from './lib/guard.js';
+import { ipContext, cachedSettings, isBlocked, rateLimit, CAPTCHA_PAGE } from './lib/guard.js';
 import { turnstileKeys } from './lib/turnstile.js';
-import { pageKey, pageNonce, PAGE_NONCE_RE } from './lib/human.js';
+import { newPageKey, parsePageKey, pageKeyCookie, PAGE_KEY_COOKIE } from './lib/human.js';
 import { parseId } from './lib/ids.js';
 import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
@@ -117,17 +117,23 @@ const pageNotFound = () => withSecurityHeaders(new Response('Not found', { statu
  * readable where Cloudflare's script runs (docs: SECURITY.md, "CAPTCHA on
  * shares"):
  *   • /p/<id> and /r/<id> — the recipient's page and the uploader's page —
- *     always get the strict CSP. On a real navigation (Sec-Fetch-Dest:
- *     document, Sec-Fetch-Mode: navigate, which a script cannot send with
- *     fetch) the page also gets a page key: a meta tag with a nonce `n` and
- *     HMAC(SIG-derived key, kind ‖ id ‖ n). When the share needs the CAPTCHA,
- *     the page seals the link's key with it in sessionStorage, takes it out
- *     of the address bar and goes to the check page.
- *   • /p/<id>?check and /r/<id>?check — the check page (public/check/): the
- *     Turnstile CSP, only when the share has the CAPTCHA and the server has
- *     Turnstile keys (else a redirect back). It holds only the sealed key;
- *     after the check it returns to /p/<id>?n=<n>, whose navigation gets the
- *     page key for that nonce again, and that strict page opens the key.
+ *     always get the strict CSP (COOP same-origin, COEP, frame-ancestors
+ *     'none'). A strict navigation (Sec-Fetch-Dest: document, Sec-Fetch-Mode:
+ *     navigate, Sec-Fetch-Site: none or same-origin) gets a new random page
+ *     key: `n.key` in a meta tag and in an HttpOnly, Secure, SameSite=Strict
+ *     cookie scoped to the share's path, for 15 minutes. When the share needs
+ *     the CAPTCHA, the page seals the link's key (only that) with it in
+ *     sessionStorage, takes it out of the address bar and goes to the check
+ *     page.
+ *   • /p/<id>?n=<n> — the return from the check: the key is written into the
+ *     page again only when the navigation carries the cookie for that nonce,
+ *     and the cookie is cleared in the same response (single use). No new key
+ *     is issued there.
+ *   • /p/<id>?check and /r/<id>?check — the check page (public/check/), for
+ *     any well-formed id while the server has Turnstile keys (else a redirect
+ *     back), so it says nothing about the share; behind the Guard's block and
+ *     a per-network rate limit, with no share lookup. Its CSP adds Turnstile
+ *     and forbids workers; COOP same-origin-allow-popups. It never gets a key.
  * Never stored. Any other /p/ or /r/ path is not found.
  */
 async function sharePage(request, env, url, kind) {
@@ -142,19 +148,36 @@ async function sharePage(request, env, url, kind) {
   const asset = (path) => env.ASSETS.fetch(new Request(new URL(path, url), { method: request.method, headers: request.headers }));
   const home = `/${kind}/${m[1]}`;
   if (url.searchParams.has('check')) {
-    const on = valid && !!(await turnstileKeys(env)) && (await directory(env).shareCaptcha(id));
-    if (!on) return withSecurityHeaders(redirect(home, 302));
-    return withSecurityHeaders(await asset('/check/'), { turnstile: true });
+    if (!valid || !(await turnstileKeys(env))) return withSecurityHeaders(redirect(home, 302));
+    const g = await ipContext(env, request);
+    const b = await isBlocked(env, g, 'invalid');
+    const rl = b.blocked ? { ok: false } : await rateLimit(env, g, 'captcha-page', CAPTCHA_PAGE);
+    if (!rl.ok) {
+      return withSecurityHeaders(new Response('Too many requests from your network. Try again later.', { status: 429, headers: { 'content-type': 'text/plain; charset=utf-8', 'retry-after': '600' } }));
+    }
+    return withSecurityHeaders(await asset('/check/'), { check: true });
   }
   const page = withSecurityHeaders(await asset(kind === 'r' ? '/r/' : '/'));
-  const nav = (request.headers.get('sec-fetch-dest') || '') === 'document' && (request.headers.get('sec-fetch-mode') || '') === 'navigate';
+  const h = (k) => request.headers.get(k) || '';
+  const nav = h('sec-fetch-dest') === 'document' && h('sec-fetch-mode') === 'navigate'
+    && (h('sec-fetch-site') === 'none' || h('sec-fetch-site') === 'same-origin');
   const Rewriter = globalThis.HTMLRewriter; // the Workers runtime's streaming HTML rewriter
-  if (!valid || !nav || request.method !== 'GET' || !page.ok || typeof Rewriter !== 'function') return page;
-  const asked = url.searchParams.get('n');
-  const n = asked && PAGE_NONCE_RE.test(asked) ? asked : pageNonce();
-  const key = await pageKey(env, kind, id, n);
+  // The cookie's path must be the path the browser asked for, character for character.
+  if (!valid || m[1] !== id || !nav || request.method !== 'GET' || !page.ok || typeof Rewriter !== 'function') return page;
+  const cookiePath = `/${kind}/${id}`;
+  let pk;
+  if (url.searchParams.has('n')) {
+    // The return from the check page: only the key this browser holds, once.
+    const held = parsePageKey(getCookie(request, PAGE_KEY_COOKIE));
+    if (!held || held.n !== url.searchParams.get('n')) return page;
+    pk = held;
+    page.headers.append('set-cookie', pageKeyCookie(cookiePath, null));
+  } else {
+    pk = newPageKey();
+    page.headers.append('set-cookie', pageKeyCookie(cookiePath, pk));
+  }
   return new Rewriter().on('head', {
-    element(el) { el.append(`<meta name="secbin-page-key" content="${n}.${key}">`, { html: true }); },
+    element(el) { el.append(`<meta name="secbin-page-key" content="${pk.n}.${pk.key}">`, { html: true }); },
   }).transform(page);
 }
 

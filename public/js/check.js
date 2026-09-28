@@ -41,6 +41,13 @@ export async function mountCheck(root, deps = {}) {
     root.replaceChildren(h('div.card.stack', {}, title, h('p.subtitle', { role: 'alert', text: 'This page is not part of a valid link.' })));
     return { state: 'error' };
   }
+  // A link key must never stay where Cloudflare's script runs: opened with one
+  // (someone added "?check" to a whole link), hand it to the share's strict
+  // page at once, before the widget's script is loaded.
+  if (loc.hash && loc.hash.length > 1) {
+    loc.replace(`${route.path}${loc.hash}`);
+    return { state: 'leaving' };
+  }
   if (!storage) {
     root.replaceChildren(h('div.card.stack', {}, title,
       h('p.subtitle', { role: 'alert', text: 'This browser does not let the page keep your place for this tab (site storage is off, or this is a restricted window). Allow site storage for this site, or open the link in another browser.' })));

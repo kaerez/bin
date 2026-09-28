@@ -4,7 +4,7 @@
 
 import { json, err, readJsonBody, assertIntent, methodNotAllowed } from '../lib/http.js';
 import { authenticate, issueSession, logoutCookie } from '../lib/auth.js';
-import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSettings, ipContext, recordFailure } from '../lib/guard.js';
+import { directory, guardShards, guardShardFor, invalidateGuardCaches, cachedSettings, ipContext, recordFailure, RATE_LIMIT_SCOPES } from '../lib/guard.js';
 import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
 import { GUARD_SCOPES } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
@@ -429,7 +429,7 @@ export async function handleAdmin(request, env, url) {
   if (gm) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const body = await readJsonBody(request);
-    if (!GUARD_SCOPES.includes(body.scope) || typeof body.key !== 'string' || body.key.length > 64) return err(400, 'invalid', 'scope and key are required');
+    if (![...GUARD_SCOPES, ...RATE_LIMIT_SCOPES].includes(body.scope) || typeof body.key !== 'string' || body.key.length > 64) return err(400, 'invalid', 'scope and key are required');
     const stub = guardShardFor(env, body.key);
     if (gm[1] === 'unblock') {
       await stub.unblock(body.scope, body.key);

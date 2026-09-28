@@ -5,12 +5,15 @@
 //     what each sends;
 //   - the recipient's viewer (public/js/view.js) with a share that has the
 //     CAPTCHA: the key leaves the address bar at once and is kept only sealed
-//     (with the tab's Drive keys) for the check page; the check page
+//     for the check page, alone (the tab's Drive keys are removed, never
+//     sealed, and not put back); the check page
 //     (public/js/check.js) keeps Continue disabled until the CAPTCHA passes and
 //     never holds the key; back on the strict page the key is opened, put back
 //     in the address bar, and the share opens with the grant — and that
 //     document never has Turnstile's script;
-//   - fail closed without sessionStorage or without a page key;
+//   - without a fresh page key the page reloads itself once for one, then
+//     fails closed (as without sessionStorage); a page key opens its record
+//     once; the check page never keeps a link key in its address;
 //   - the uploader page (public/js/reverse.js) of a link with the CAPTCHA: the
 //     same round trip, one grant per session start, "Complete the CAPTCHA
 //     again" after a send or a wrong password.
@@ -18,7 +21,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { captchaChoice, captchaBox, captchaValue, captchaHint } from '../public/js/captcha.js';
-import { stashKey, stashedNonce, takeKey, saveGrant, loadGrant, DRIVE_SLOTS } from '../public/js/pagekey.js';
+import { stashKey, stashedNonce, takeKey, saveGrant, loadGrant } from '../public/js/pagekey.js';
+import { bytesFromB64url, fromUtf8 } from '../public/js/bytes.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes, utf8 } from '../public/js/bytes.js';
 import { createReverseKey, fragmentOf, newReverseId, linkProof, setReverseStretcher, passwordGate } from '../public/js/reversekeys.js';
@@ -46,6 +50,13 @@ const mainOf = (p) => `${read(p).match(/<main[\s\S]*<\/main>/)[0]}<div id="toast
 const reply = (data, status = 200, headers = {}) => ({ ok: status < 400, status, type: 'basic', headers: new Headers(headers), json: async () => data, arrayBuffer: async () => new ArrayBuffer(0) });
 const allStorage = () => { const o = {}; for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i); o[k] = sessionStorage.getItem(k); } return JSON.stringify(o); };
 const pageKey = () => ({ n: b64urlFromBytes(randomBytes(16)), key: b64urlFromBytes(randomBytes(32)) });
+/** The plaintext of this tab's sealed record for (kind, id), opened with `pk` (what the strict page would see). */
+async function openRecord(kind, id, pk) {
+  const r = JSON.parse(sessionStorage.getItem(`secbin_pk:${kind}:${id}`));
+  const key = await crypto.subtle.importKey('raw', bytesFromB64url(pk.key), { name: 'AES-GCM' }, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytesFromB64url(r.iv), additionalData: utf8(`secbin-page/v1\n${kind}\n${id}\n${r.n}\n`) }, key, bytesFromB64url(r.ct));
+  return JSON.parse(fromUtf8(new Uint8Array(pt)));
+}
 function addPageKey(pk) {
   const m = document.createElement('meta');
   m.name = 'secbin-page-key';
@@ -257,8 +268,10 @@ describe('the viewer: a share with the CAPTCHA', () => {
     expect(location.href).not.toContain(K);
     expect(allStorage()).not.toContain(K);
     expect(allStorage()).not.toContain(DK_B64);
-    for (const k of DRIVE_SLOTS) expect(sessionStorage.getItem(k)).toBeNull();
+    expect(Object.keys(JSON.parse(allStorage())).filter((k) => k.startsWith('secbin_dk'))).toEqual([]);
     expect(stashedNonce({ kind: 'p', id: ID, storage: sessionStorage })).toBe(pk.n);
+    // The sealed record holds the link's key and nothing else (no Drive key, sealed or not).
+    expect(await openRecord('p', ID, pk)).toEqual({ k: K });
     expect($('meta[name="secbin-page-key"]')).toBeNull(); // read once, then gone
     expect(thirdPartyScripts()).toHaveLength(0);
 
@@ -291,8 +304,10 @@ describe('the viewer: a share with the CAPTCHA', () => {
     expect(location.hash).toBe(`#${K}`);
     expect(location.search).toBe('');
     expect(stashedNonce({ kind: 'p', id: ID, storage: sessionStorage })).toBeNull();
-    expect(sessionStorage.getItem('secbin_dk')).toBe(DK_B64); // the Drive key is back
-    expect(sessionStorage.getItem('secbin_dk_uid')).toBe('u1');
+    // The Drive keys never come back through the check: the Drive asks to be unlocked again.
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
+    expect(sessionStorage.getItem('secbin_dk_uid')).toBeNull();
+    expect(allStorage()).not.toContain(DK_B64);
     expect(requests.filter((r) => r.path.startsWith(`/api/paste/${ID}`)).every((r) => r.headers['x-secbin-human'] === GRANT)).toBe(true);
     // The decrypting document never had Turnstile's script (nor asked for its site key).
     expect(thirdPartyScripts()).toHaveLength(0);
@@ -300,15 +315,25 @@ describe('the viewer: a share with the CAPTCHA', () => {
     expect(requests.some((r) => r.path === '/api/config')).toBe(false);
   }, T);
 
-  it('fails closed without sessionStorage, and without a page key (the key still leaves the address bar)', async () => {
+  it('without a page key: one reload of its own for a fresh one, then fails closed; also without sessionStorage (the key always leaves the address bar)', async () => {
     const t = Math.floor(Date.now() / 1000);
     const enc = await encryptPaste({ text: 'x', bar: false, expire: '1h' });
     note = { body: enc.body, meta: { expire: '1h', created: t, expires: t + 3600 } };
     requests = [];
     globalThis.fetch = shareFetch;
     const replace = vi.spyOn(window.location, 'replace').mockImplementation(() => {});
+    // Opened from another site: that navigation gets no page key, so the page reloads itself (same origin) once.
+    sessionStorage.setItem('secbin_dk', DK_B64);
     await loadViewer(`https://bin.example/p/${ID}#${enc.fragment}`, null);
+    await until(() => replace.mock.calls.length);
+    expect(replace.mock.calls[0][0]).toBe(`/p/${ID}?pk#${enc.fragment}`);
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull(); // the Drive keys go before any check
+    expect(allStorage()).not.toContain(enc.fragment);
+    // That reload still without a key (a browser that sends no Fetch Metadata): no second reload, fail closed.
+    replace.mockClear();
+    await loadViewer(`https://bin.example/p/${ID}?pk#${enc.fragment}`, null);
     await until(() => /cannot complete safely/.test($('#status-msg').textContent));
+    expect(location.search).toBe('');
     expect(location.hash).toBe('');
     expect(replace).not.toHaveBeenCalled();
     expect(allStorage()).not.toContain(enc.fragment);
@@ -326,6 +351,25 @@ describe('the viewer: a share with the CAPTCHA', () => {
     expect(await takeKey({ kind: 'p', id: ID, pageKey: pageKey(), storage: sessionStorage })).toBeNull();
     await stashKey({ kind: 'p', id: ID, fragment: 'K'.repeat(43), pageKey: pk, storage: sessionStorage });
     expect(await takeKey({ kind: 'p', id: ID, pageKey: pk, storage: sessionStorage })).toBe('K'.repeat(43));
+    // A page key opens its record once; the record is gone after it.
+    expect(pk.spent).toBe(true);
+    expect(await takeKey({ kind: 'p', id: ID, pageKey: pk, storage: sessionStorage })).toBeNull();
+  }, T);
+
+  it('the check page never keeps a link key in its address: it hands it to the strict page before any widget code loads', async () => {
+    const replace = vi.spyOn(window.location, 'replace').mockImplementation(() => {});
+    globalThis.fetch = vi.fn(async () => reply({ turnstile: '0x4AAAAAAAsitekey' }));
+    window.happyDOM.setURL(`https://bin.example/p/${ID}?check#${'K'.repeat(43)}`);
+    document.body.innerHTML = mainOf('public/check/index.html');
+    const w = fakeTurnstile();
+    vi.resetModules();
+    const { mountCheck } = await import('../public/js/check.js');
+    const r = await mountCheck($('#check-app'));
+    expect(r.state).toBe('leaving');
+    expect(replace).toHaveBeenCalledWith(`/p/${ID}#${'K'.repeat(43)}`);
+    expect(w.renders).toHaveLength(0);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(thirdPartyScripts()).toHaveLength(0);
   }, T);
 });
 
@@ -412,7 +456,9 @@ describe('the uploader: a link with the CAPTCHA', () => {
     replace.mockClear();
     $('#reverse-recheck').click();
     await until(() => replace.mock.calls.length);
-    expect(replace).toHaveBeenCalledWith(`/r/${S.id}?check`);
+    // The page key it came back with opened its record and is spent: a fresh one first (its own reload).
+    expect(pk.spent).toBe(true);
+    expect(replace).toHaveBeenCalledWith(`/r/${S.id}?pk#${K}`);
   }, T);
 
   it('a wrong password spends the grant: "Complete the CAPTCHA again"', async () => {

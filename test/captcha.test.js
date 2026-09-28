@@ -36,11 +36,13 @@ vi.setConfig({ testTimeout: 60000 });
 
 let oc;
 let restoreSiteverify;
+let siteverifyCalls = 0; // every call that reached Cloudflare's siteverify (the fake below)
 beforeAll(async () => {
   oc = await owner();
   // Tokens "ok:<action>[#n]" pass for that action on this host, once each (as Cloudflare does).
   const seen = new Set();
   restoreSiteverify = setSiteverify(async (form) => {
+    siteverifyCalls += 1;
     const t = form.get('response');
     if (seen.has(t)) return Response.json({ success: false, 'error-codes': ['timeout-or-duplicate'] });
     seen.add(t);
@@ -564,62 +566,289 @@ describe('reverse shares: the uploader\'s session start', () => {
   });
 });
 
+// ── F2: the grant routes are metered ───────────────────────────────────────
+describe('the CAPTCHA checks are metered per network (F2)', () => {
+  const invalidCount = async (ip) => {
+    const g = await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json();
+    return g.tracking.find((t) => t.scope === 'invalid' && t.key === `${ip}/32`)?.count ?? 0;
+  };
+  const human = (path, ip, headers) => ts(path, { method: 'POST', ip, headers: { ...intent, ...headers } });
+
+  it('a missing or failed token counts as an invalid request (share and reverse grant routes)', async () => {
+    const u = await makeUser('cap-f2');
+    await driveLimits(u.id, { shareCaptcha: 'require' });
+    const s = await note({ cookie: u.cookie });
+    const r = await receiver('cap-f2-rev');
+    const link = await newReverse(r.cookie, { captcha: true });
+    for (const path of [`/api/paste/${s.id}/human`, `/api/reverse/${link.id}/human`]) {
+      const ip = freshIp();
+      expect(await invalidCount(ip)).toBe(0);
+      expect(await errorOf(await human(path, ip, { 'x-secbin-turnstile': 'nope' }))).toBe('turnstile_failed');
+      expect(await errorOf(await human(path, ip, {}))).toBe('turnstile_required');
+      expect(await errorOf(await human(path, ip, { 'x-secbin-turnstile': token('login') }))).toBe('turnstile_failed');
+      expect(await invalidCount(ip)).toBe(3);
+      // A good token is not counted.
+      expect((await human(path, ip, { 'x-secbin-turnstile': token(path.includes('reverse') ? 'reverse-upload' : 'share-open') })).status).toBe(200);
+      expect(await invalidCount(ip)).toBe(3);
+    }
+    // The reverse session start's own token path is counted the same way.
+    const ip = freshIp();
+    const res = await ts(`/api/reverse/${link.id}/begin`, { method: 'POST', ip, headers: { ...intent, 'x-link-proof': await linkProof(link.pub), 'x-secbin-turnstile': 'nope' } });
+    expect(await errorOf(res)).toBe('turnstile_failed');
+    expect(await invalidCount(ip)).toBe(1);
+  });
+
+  it(`at most 30 checks per network and window reach siteverify; then 429 rate_limited before any call to Cloudflare (renewals are not limited)`, async () => {
+    const id = `k${b64urlFromBytes(randomBytes(16))}`; // no share needed: the route looks nothing up
+    const ip = freshIp();
+    let grant;
+    for (let i = 0; i < 30; i++) {
+      const res = await human(`/api/paste/${id}/human`, ip, { 'x-secbin-turnstile': token('share-open') });
+      expect(res.status, `call ${i + 1}`).toBe(200);
+      grant = (await res.json()).grant;
+    }
+    const before = siteverifyCalls;
+    for (const path of [`/api/paste/${id}/human`, `/api/file/f${b64urlFromBytes(randomBytes(16))}/human`]) {
+      const over = await human(path, ip, { 'x-secbin-turnstile': token('share-open') });
+      expect([over.status, await errorOf(over)]).toEqual([429, 'rate_limited']);
+      expect(over.headers.get('retry-after')).toBe('600');
+    }
+    expect(siteverifyCalls).toBe(before); // refused before siteverify
+    // The keep-alive (an HMAC check, no siteverify) still works; other networks are unaffected.
+    const keep = await human(`/api/paste/${id}/human`, ip, { 'x-secbin-human': grant });
+    expect(keep.status).toBe(200);
+    expect((await human(`/api/paste/${id}/human`, freshIp(), { 'x-secbin-turnstile': token('share-open') })).status).toBe(200);
+    // The owner can lift it like any Guard block.
+    expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'captcha-verify', key: `${ip}/32` } })).status).toBe(200);
+    expect((await human(`/api/paste/${id}/human`, ip, { 'x-secbin-turnstile': token('share-open') })).status).toBe(200);
+  });
+});
+
+// ── F4: nothing about an id before the check ───────────────────────────────
+describe('a missing or ended share answers exactly as a protected one without a grant (F4)', () => {
+  const MSG_BODY = { error: 'captcha_required', message: MSG };
+  it('unknown ids of every kind, and ended shares: 403 captcha_required on head, open, "delete now" and chunks; with a grant the true answer', async () => {
+    const u = await makeUser('cap-f4');
+    await enableDrive(u.id);
+    await driveLimits(u.id, { shareCaptcha: 'allow', openerDelete: true });
+    const protectedNote = await note({ cookie: u.cookie }, { captcha: true });
+    const ended = await note({ cookie: u.cookie }, { views: 1, captcha: false });
+    const eip = freshIp();
+    expect((await openIt(ended, eip)).status).toBe(200); // its only view: now ended
+    const fakeFrag = b64urlFromBytes(randomBytes(32));
+    const fake = (id) => ({ id, adata: protectedNote.adata, fragment: fakeFrag, password: '', drive: false });
+    const cases = [
+      fake(`k${b64urlFromBytes(randomBytes(16))}`),
+      fake(`b${b64urlFromBytes(randomBytes(16))}`),
+      fake(`f${b64urlFromBytes(randomBytes(16))}`),
+      ended,
+    ];
+    const ref = async (fn) => { const r = await fn(); return [r.status, await r.json()]; };
+    const ip = freshIp();
+    const protectedHead = await ref(() => head(protectedNote, ip));
+    expect(protectedHead).toEqual([403, MSG_BODY]);
+    for (const s of cases) {
+      const ip2 = freshIp();
+      expect(await ref(() => head(s, ip2)), s.id).toEqual(protectedHead);
+      expect(await ref(() => openIt(s, ip2)), s.id).toEqual(protectedHead);
+      expect(await ref(() => expireIt(s, ip2)), s.id).toEqual(protectedHead);
+      if (s.id[0] === 'f') expect(await ref(() => chunk(s, 'G'.repeat(43), ip2)), s.id).toEqual(protectedHead);
+      // With a grant (after the check): the real answer.
+      const g = await grantFor(s.id, ip2);
+      expect([404, 410]).toContain((await head(s, ip2, g)).status);
+    }
+    // An unprotected live share still needs nothing (it is open by design).
+    const plain = await note({ cookie: u.cookie }, { captcha: false });
+    expect((await head(plain, freshIp())).status).toBe(200);
+  });
+
+  it('unknown ids are still counted as invalid requests (the Guard sees guessing as before)', async () => {
+    const ip = freshIp();
+    const invalid = async () => (await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json()).tracking.find((t) => t.scope === 'invalid' && t.key === `${ip}/32`)?.count ?? 0;
+    for (let i = 0; i < 3; i++) {
+      const res = await ts(`/api/paste/k${b64urlFromBytes(randomBytes(16))}`, { ip });
+      expect(await errorOf(res)).toBe('captcha_required');
+    }
+    expect(await invalid()).toBe(3);
+  });
+});
+
 // ── the pages ──────────────────────────────────────────────────────────────
 describe('the pages: strict where the key is, the Turnstile CSP only on the check page', () => {
   const nav = { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'none' };
+  const back = { ...nav, 'sec-fetch-site': 'same-origin' }; // the check page's return navigation
   const keyOf = (html) => /<meta name="secbin-page-key" content="([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})">/.exec(html);
-
-  it('/p/<id> and /r/<id>: always the strict CSP; a page key only on a real navigation, the same for the same nonce', async () => {
+  const cookieOf = (res) => res.headers.get('set-cookie');
+  const COOKIE_RE = (path) => new RegExp(`^__Secure-secbin_pk=([A-Za-z0-9_-]{22})\\.([A-Za-z0-9_-]{43}); Path=${path.replace(/[/]/g, '\\/')}; HttpOnly; Secure; SameSite=Strict; Max-Age=900$`);
+  const CLEAR_RE = (path) => new RegExp(`^__Secure-secbin_pk=; Path=${path.replace(/[/]/g, '\\/')}; HttpOnly; Secure; SameSite=Strict; Max-Age=0$`);
+  let paths;
+  beforeAll(async () => {
     const u = await makeUser('cap-pages');
     await driveLimits(u.id, { shareCaptcha: 'require' });
     const s = await note({ cookie: u.cookie });
     const r = await receiver('cap-pages-rev');
     const link = await newReverse(r.cookie); // Default role: required
-    for (const path of [`/p/${s.id}`, `/r/${link.id}`]) {
+    paths = [`/p/${s.id}`, `/r/${link.id}`];
+  });
+
+  it('/p/<id> and /r/<id>: the strict CSP, COOP same-origin, COEP, never framed; a random page key, in the page and in an HttpOnly cookie for its path', async () => {
+    for (const path of paths) {
       const page = await ts(path, { headers: nav });
       expect(page.status).toBe(200);
       expect(page.headers.get('content-security-policy')).toBe(CSP);
+      expect(CSP).toContain("frame-ancestors 'none'");
+      expect(CSP).toContain("worker-src 'self'"); // the app's own service worker still registers from normal pages
+      expect(page.headers.get('x-frame-options')).toBe('DENY');
+      expect(page.headers.get('cross-origin-opener-policy')).toBe('same-origin');
       expect(page.headers.get('cross-origin-embedder-policy')).toBe('require-corp');
       expect(page.headers.get('cache-control')).toBe('no-store');
       const html = await page.text();
       expect(html).not.toContain('challenges.cloudflare.com');
       const k = keyOf(html);
       expect(k).not.toBeNull();
-      // Back from the check page (?n=…): the page key for that nonce again.
-      const again = keyOf(await (await ts(`${path}?n=${k[1]}`, { headers: nav })).text());
-      expect(again.slice(1)).toEqual(k.slice(1));
-      expect(keyOf(await (await ts(path, { headers: nav })).text())[1]).not.toBe(k[1]); // a new nonce otherwise
-      // fetch() (what a script could do) gets no page key.
-      for (const h of [{}, { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors' }, { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'cors' }, { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate' }]) {
-        expect(keyOf(await (await ts(`${path}?n=${k[1]}`, { headers: h })).text())).toBeNull();
+      const c = COOKIE_RE(path).exec(cookieOf(page));
+      expect(c, cookieOf(page)).not.toBeNull();
+      expect([c[1], c[2]]).toEqual([k[1], k[2]]); // the same value, held by the browser
+      // Random: another navigation, another nonce and key (never derived from the id or the nonce).
+      const k2 = keyOf(await (await ts(path, { headers: back })).text());
+      expect(k2[1]).not.toBe(k[1]);
+      expect(k2[2]).not.toBe(k[2]);
+    }
+  });
+
+  it('PoC F1: the return (?n=) gives the key only to the browser holding its cookie — forged navigation headers without it get none', async () => {
+    for (const path of paths) {
+      const first = await ts(path, { headers: nav });
+      const [, n, key] = keyOf(await first.text());
+      const cookie = cookieOf(first).split(';')[0];
+      // An outside client (curl) sends the Fetch Metadata of a navigation, but has no cookie: no key, nothing set.
+      for (const headers of [nav, back, { ...back, cookie: '__Secure-secbin_pk=' }, { ...back, cookie: `__Secure-secbin_pk=${n}.${'A'.repeat(43)}x` }]) {
+        const res = await ts(`${path}?n=${n}`, { headers });
+        expect(keyOf(await res.text())).toBeNull();
+        expect(cookieOf(res)).toBeNull();
       }
-      // The check page: Turnstile's CSP (no COEP), its own script, no share code.
-      const check = await ts(`${path}?check`, { headers: nav });
-      expect(check.status).toBe(200);
-      expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP);
+      // A cookie for another nonce (another round trip, another tab): no key.
+      const other = await ts(path, { headers: nav });
+      await other.text();
+      const otherCookie = cookieOf(other).split(';')[0];
+      const mismatch = await ts(`${path}?n=${n}`, { headers: { ...back, cookie: otherCookie } });
+      expect(keyOf(await mismatch.text())).toBeNull();
+      // The browser's own return: the key, and the cookie cleared in the same response.
+      const ok = await ts(`${path}?n=${n}`, { headers: { ...back, cookie } });
+      expect(keyOf(await ok.text()).slice(1)).toEqual([n, key]);
+      expect(cookieOf(ok)).toMatch(CLEAR_RE(path));
+    }
+  });
+
+  it('PoC F1: fetch() from a page (even with the cookie), a cross-site navigation, a frame or a HEAD gets no key and sets no cookie', async () => {
+    for (const path of paths) {
+      const first = await ts(path, { headers: nav });
+      const [, n] = keyOf(await first.text());
+      const cookie = cookieOf(first).split(';')[0];
+      const tries = [
+        { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin', cookie },
+        { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'same-origin', 'sec-fetch-site': 'same-origin', cookie },
+        { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin', cookie },
+        { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin', cookie },
+        { 'sec-fetch-dest': 'embed', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin', cookie },
+        { ...nav, 'sec-fetch-site': 'cross-site', cookie },
+        { ...nav, 'sec-fetch-site': 'same-site', cookie },
+        { cookie },
+      ];
+      for (const headers of tries) {
+        for (const q of [`?n=${n}`, '']) {
+          const res = await ts(`${path}${q}`, { headers });
+          expect(keyOf(await res.text()), JSON.stringify(headers)).toBeNull();
+          expect(cookieOf(res), JSON.stringify(headers)).toBeNull();
+        }
+      }
+      const head = await ts(path, { method: 'HEAD', headers: nav });
+      expect(cookieOf(head)).toBeNull();
+      // None of those used the cookie up: the real return still works once.
+      const ok = await ts(`${path}?n=${n}`, { headers: { ...back, cookie } });
+      expect(keyOf(await ok.text())[1]).toBe(n);
+    }
+  });
+
+  it('the page key is single use: after the return that cleared it, a replayed cookie is the only way back, and no key is issued on a return', async () => {
+    for (const path of paths) {
+      const first = await ts(path, { headers: nav });
+      const [, n] = keyOf(await first.text());
+      const cookie = cookieOf(first).split(';')[0];
+      const ok = await ts(`${path}?n=${n}`, { headers: { ...back, cookie } });
+      expect(keyOf(await ok.text())[1]).toBe(n);
+      // The browser now holds no cookie for the path: the same return again gets nothing, and mints nothing.
+      const again = await ts(`${path}?n=${n}`, { headers: back });
+      expect(keyOf(await again.text())).toBeNull();
+      expect(cookieOf(again)).toBeNull();
+    }
+  });
+
+  it('the check page: the Turnstile CSP with worker-src \'none\', COOP same-origin-allow-popups, no COEP, never a key; for any well-formed id (it says nothing about the share)', async () => {
+    const plain = await note({ cookie: oc });
+    const unknown = `k${b64urlFromBytes(randomBytes(16))}`;
+    for (const path of [...paths, `/p/${plain.id}`, `/p/${unknown}`]) {
+      const check = await ts(`${path}?check`, { headers: nav, ip: freshIp() });
+      expect(check.status, path).toBe(200);
+      const csp = check.headers.get('content-security-policy');
+      expect(csp).toBe(TURNSTILE_CSP.replace("worker-src 'self'", "worker-src 'none'"));
+      expect(csp.split('; ')).toContain("worker-src 'none'");
+      expect(csp.split('; ')).toContain("frame-ancestors 'none'");
+      expect(check.headers.get('cross-origin-opener-policy')).toBe('same-origin-allow-popups');
       expect(check.headers.get('cross-origin-embedder-policy')).toBeNull();
       expect(check.headers.get('cache-control')).toBe('no-store');
+      expect(cookieOf(check)).toBeNull();
       const ch = await check.text();
       expect(ch).toContain('/js/check.js');
-      expect(ch).not.toMatch(/\/js\/(view|reverse)\.js/);
+      expect(ch).not.toMatch(/\/js\/(view|reverse|pwa)\.js/);
       expect(keyOf(ch)).toBeNull();
-      // Without Turnstile keys: back to the page (no third-party script anywhere).
+    }
+    // Login and Account keep their own Turnstile CSP (workers allowed there, as before).
+    const login = await ts('/dashboard/login/', { headers: nav });
+    await login.text();
+    expect(login.headers.get('content-security-policy')).toBe(TURNSTILE_CSP);
+    // Without Turnstile keys, or for a malformed id: back to the page (no third-party script anywhere).
+    for (const path of paths) {
       const off = await SELF.fetch(`${ORIGIN}${path}?check`, { redirect: 'manual' });
       expect(off.status).toBe(302);
       expect(off.headers.get('location')).toBe(path);
     }
-    // An unprotected share (or an unknown / malformed id) never gets the check page.
-    const plain = await note({ cookie: oc });
-    for (const path of [`/p/${plain.id}`, `/p/k${'A'.repeat(22)}`, '/p/nope']) {
-      const res = await ts(`${path}?check`);
-      expect([res.status, res.headers.get('location')]).toEqual([302, path]);
-    }
+    const bad = await ts('/p/nope?check');
+    expect([bad.status, bad.headers.get('location')]).toEqual([302, '/p/nope']);
     for (const p of ['/check', '/check/', '/check/index.html']) {
       const res = await ts(p);
       expect(res.status, p).toBe(404);
       expect(res.headers.get('content-security-policy')).toBe(CSP);
       await res.text();
     }
+  });
+
+  it('F3: the check page is behind the Guard\'s block and a per-network rate limit (an unknown id is served the same: no share lookup)', async () => {
+    const ip = freshIp();
+    let status;
+    for (let i = 0; i < 60; i++) {
+      const res = await ts(`${paths[0]}?check`, { ip });
+      await res.text();
+      status = res.status;
+      if (status !== 200) break;
+    }
+    expect(status).toBe(200); // 60 in the window are served
+    const over = await ts(`${paths[0]}?check`, { ip });
+    expect([over.status, over.headers.get('retry-after')]).toEqual([429, '600']);
+    expect(over.headers.get('content-security-policy')).toBe(CSP); // no Turnstile script on the refusal
+    expect(await over.text()).not.toContain('secbin-page-key');
+    // Another network is not affected; the owner can lift the limit (a Guard scope like the others).
+    expect((await ts(`${paths[1]}?check`, { ip: freshIp() })).status).toBe(200);
+    expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'captcha-page', key: `${ip}/32` } })).status).toBe(200);
+    expect((await ts(`${paths[0]}?check`, { ip })).status).toBe(200);
+    // A network blocked for invalid requests gets no check page at all.
+    const blocked = freshIp();
+    expect((await fetchJson('/api/private/admin/guard/block', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: `${blocked}/32`, seconds: 600 } })).status).toBe(200);
+    const res = await ts(`${paths[1]}?check`, { ip: blocked });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('content-security-policy')).toBe(CSP);
+    await res.text();
+    expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: `${blocked}/32` } })).status).toBe(200);
   });
 });
 

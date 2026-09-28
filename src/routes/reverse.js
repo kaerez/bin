@@ -16,8 +16,8 @@ import { directory, ipContext, isBlocked, recordFailure } from '../lib/guard.js'
 import { genToken, hashToken } from '../lib/ids.js';
 import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
-import { requireTurnstile, turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
-import { issueGrant, readGrant, netTag, captchaRequired, HUMAN_HEADER } from '../lib/human.js';
+import { turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { issueGrant, readGrant, netTag, captchaRequired, verifyCaptcha, HUMAN_HEADER } from '../lib/human.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { expireSeconds, isProof, ARGON2, MAX_TTL } from '../../public/js/format.js';
@@ -289,7 +289,7 @@ export async function handleReversePublic(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
     if (!captcha) return json({ grant: null, expires: null });
-    await requireTurnstile(env, request, TURNSTILE_ACTIONS.reverse);
+    await verifyCaptcha(env, g, request, TURNSTILE_ACTIONS.reverse);
     const r = await issueGrant(env, { kind: 'r', id, net: await netTag(env, g.key) });
     return json({ grant: r.grant, expires: r.expires });
   }
@@ -323,7 +323,7 @@ export async function handleReversePublic(request, env, url) {
         if (!c) throw captchaRequired(true);
         human = { j: c.j, exp: c.exp };
       } else if (request.headers.get('x-secbin-turnstile')) {
-        await requireTurnstile(env, request, TURNSTILE_ACTIONS.reverse);
+        await verifyCaptcha(env, g, request, TURNSTILE_ACTIONS.reverse);
       } else throw captchaRequired(true);
     }
     const grant = genToken();

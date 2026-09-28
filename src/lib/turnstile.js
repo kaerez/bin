@@ -88,7 +88,7 @@ export async function requireTurnstile(env, request, action) {
   const cfg = await turnstileKeys(env);
   if (!cfg) return;
   const token = (request.headers.get('x-secbin-turnstile') || '').trim();
-  if (!token) throw new HttpError(403, 'turnstile_required', 'Complete the human check and try again.');
+  if (!token) throw new HttpError(403, 'turnstile_required', 'Complete the CAPTCHA and try again.');
   if (token.length > TOKEN_MAX) throw failed();
   const form = new FormData();
   form.append('secret', cfg.secret);
@@ -101,11 +101,11 @@ export async function requireTurnstile(env, request, action) {
     data = await res.json();
   } catch {
     // Fail closed: without a verdict the request is not let through.
-    throw new HttpError(503, 'turnstile_unavailable', 'The human check could not be verified right now. Try again in a moment.');
+    throw new HttpError(503, 'turnstile_unavailable', 'The CAPTCHA could not be verified right now. Try again in a moment.');
   }
   if (!data || data.success !== true) throw failed();
   if (data.metadata?.result_with_testing_key === true) return;
   if (data.hostname !== new URL(request.url).hostname || data.action !== action) throw failed();
 }
 
-const failed = () => new HttpError(403, 'turnstile_failed', 'The human check failed or expired. Try again.');
+const failed = () => new HttpError(403, 'turnstile_failed', 'The CAPTCHA failed or expired. Try again.');

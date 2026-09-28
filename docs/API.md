@@ -94,7 +94,12 @@ A share with the CAPTCHA can be opened in a browser only. Every recipient route
 from the share's CAPTCHA page, and nothing is spent: an API client or `secbin get` cannot open
 it. The grant route is `POST /api/(paste|file)/:id/human` with `X-Secbin-Intent: 1` and a
 Turnstile token (`X-Secbin-Turnstile`) for the action `share-open`, which only the page's
-widget produces.
+widget produces. At most 30 such checks per network per 10 minutes (`429 rate_limited`), and
+a failed token counts as an invalid request.
+
+While Turnstile is configured, a recipient route without a grant answers the same `403
+captcha_required` for an id whose share does not exist or has ended, so it tells nothing about
+an id before the check. A share without the CAPTCHA answers as usual.
 
 The share link is `https://<server>/p/<id>#<fragment>`, where `fragment` is the base64url
 32-byte secret your client generated. Anyone with the link (and the password, if set) can open
@@ -122,7 +127,8 @@ SPEC.md §10). The ones specific to keys and shares:
 | 403 | `bad_token` | wrong delete token |
 | 400 | `invalid_captcha` | `captcha` is not `true` or `false` |
 | 403 | `captcha_disabled` | `captcha: true` while your role has the CAPTCHA off |
-| 403 | `captcha_required` | a recipient route of a share with the CAPTCHA, without a grant (open it in a browser) |
+| 403 | `captcha_required` | a recipient route of a share with the CAPTCHA — or of a missing or ended share, while Turnstile is on — without a grant (open it in a browser) |
+| 429 | `rate_limited` | too many CAPTCHA checks from your network (30 per 10 minutes) |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
 
 ## Examples

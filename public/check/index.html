@@ -27,8 +27,7 @@
         <!-- CSP is a response header (public/_headers + the Worker). First-party only. -->
         <script defer src="/js/theme.js"></script>
         <script type="module" src="/js/check.js"></script>
-        <!-- Service worker + install banner (public/js/pwa.js). -->
-        <script type="module" src="/js/pwa.js"></script>
+        <!-- No service worker or install banner here: the check page's CSP has worker-src 'none'. -->
         <script type="module" src="/js/a11y.js"></script>
     </head>
     <body>

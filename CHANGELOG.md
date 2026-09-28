@@ -53,6 +53,20 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     Without `sessionStorage` or a page key a protected share is not opened.
   - **Inactive without Turnstile keys:** the flag is saved but not asked for; the role editor,
     the composer and the dialogs say so.
+  - **The page key is random and bound to the browser** (security audit F1): it is 32 random
+    bytes made on each strict navigation (`Sec-Fetch-Site` none or same-origin), written into
+    the page and into an HttpOnly, Secure, SameSite=Strict cookie for the share's path (15
+    minutes); the return from the check gets it again only with that cookie, which the same
+    response clears (one use). It was derived from the id and a nonce the check page could read,
+    so a script there could have had it fetched from outside the browser. The sealed record holds
+    the link's key alone: the tab's Drive keys are removed before the check and never carried
+    through it (the Drive asks to be unlocked again). The check page has `worker-src 'none'` and
+    COOP `same-origin-allow-popups` and registers no service worker; a page opened from another
+    site reloads itself once for a key.
+  - **Metering and uniform answers** (audit F2–F4): at most 30 CAPTCHA checks per network per 10
+    minutes reach siteverify (`429 rate_limited`), a failed token counts as an invalid request,
+    the check page is behind the Guard's block and a rate limit and looks nothing up, and a
+    missing or ended share answers `403 captcha_required` without a grant, like a protected one.
   - **Wording:** the UI calls the Turnstile check "CAPTCHA" everywhere (Admin → Security →
     CAPTCHA, the waiting and load-failure notes on login, Account and the home page).
 - **Reverse shares when the owner starts over** (docs/REVERSE.md §9, docs/DRIVE.md §3.2): the

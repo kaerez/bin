@@ -101,4 +101,28 @@ export async function recordFailure(env, g, scope) {
   return shard(env, g.key).fail(scope, g.key, rule);
 }
 
+/**
+ * A per-network rate limit: every call counts (not only failures) in its own
+ * Guard scope, and at `rule.max` calls within `rule.windowSec` the network is
+ * refused for `rule.blockSec` → { ok: true } or { ok: false, until }. The
+ * kill switch and allow rules apply as for the other scopes; a manual block
+ * refuses at once.
+ */
+export async function rateLimit(env, g, scope, rule) {
+  if (g.off.all || g.manual === 'allow') return { ok: true };
+  if (g.manual === 'block') return { ok: false, until: null };
+  const r = await shard(env, g.key).fail(scope, g.key, rule);
+  return r.blocked ? { ok: false, until: r.until ?? null } : { ok: true };
+}
+
+/**
+ * The limits in front of Cloudflare's siteverify and the check page (both
+ * anonymous): a network may ask for at most CAPTCHA_VERIFY.max − 1 CAPTCHA
+ * checks, and load CAPTCHA_PAGE.max − 1 check pages, per window.
+ */
+export const CAPTCHA_VERIFY = { max: 31, windowSec: 600, blockSec: 600 };
+export const CAPTCHA_PAGE = { max: 61, windowSec: 600, blockSec: 600 };
+/** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
+export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page'];
+
 export { shard as guardShardFor };
