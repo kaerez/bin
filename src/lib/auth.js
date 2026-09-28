@@ -38,12 +38,16 @@ async function sessionCookies(env, keys, claims, maxAgeSec) {
 /**
  * Mint the Set-Cookie values for a new session of `uid` (optionally
  * impersonated by `act`): the session cookie, then its CSRF token cookie.
+ * A session that replaces another one of the same sign-in (impersonation
+ * starting or ending) passes that session's `iat` and its `exp` as
+ * `notAfter`: the absolute timeout keeps counting from the sign-in and the
+ * new session never ends later than the one it replaces.
  */
-export async function issueSession(env, { uid, act = null, ver, settings, sid = genSessionId(), iat = now() }) {
+export async function issueSession(env, { uid, act = null, ver, settings, sid = genSessionId(), iat = now(), notAfter = Infinity }) {
   const keys = sessionKeys(env);
   if (!keys) throw unconfigured();
   const t = now();
-  const exp = iat + settings.absSec;
+  const exp = Math.min(iat + settings.absSec, notAfter);
   const claims = { sid, uid, ver, iat, lat: t, exp };
   if (act) claims.act = act;
   return { cookie: await sessionCookies(env, keys, claims, Math.min(exp - t, settings.idleSec)), claims };

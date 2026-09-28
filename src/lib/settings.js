@@ -149,6 +149,55 @@ export function crossCheckSettings(merged) {
   return checkStatement(merged);
 }
 
+// ── changes that weaken a security control ──────────────────────────────────
+// The owner confirms these with the password or a passkey (the step-up), so a
+// stolen owner session alone cannot quietly loosen the controls that bound it;
+// a change the other way (tightening), or to anything else, needs nothing.
+// Each entry says which way is looser:
+//   'up'   — a larger value (more attempts, longer sessions, longer IPv6 prefix);
+//   'down' — a smaller value (shorter counting window or block, less log kept);
+//   'off'  — true → false;
+//   'keep' — a retention limit where null means "keep everything": a value
+//            where there was none, or a smaller one.
+const LOOSER = { up: (a, b) => b > a, down: (a, b) => b < a, off: (a, b) => a !== false && b === false, keep: (a, b) => b !== null && (a === null || b < a) };
+const WEAKER_SETTINGS = {
+  csrfTokens: 'off',
+  'session.idleSec': 'up', 'session.absSec': 'up',
+  'lockout.max': 'up', 'lockout.windowSec': 'down', 'lockout.lockSec': 'down',
+  ...Object.fromEntries(['login', 'setup', 'invalid'].flatMap((s) => [[`guard.${s}.max`, 'up'], [`guard.${s}.windowSec`, 'down'], [`guard.${s}.blockSec`, 'down']])),
+  'guard.v6Prefix': 'up',
+  'public.newTrackersPerIp': 'up', 'public.newTrackersWindowSec': 'down',
+  'log.maxAgeSec': 'down', 'log.maxEntries': 'down', 'log.ownerMaxAgeSec': 'keep', 'log.ownerMaxEntries': 'keep',
+};
+/** The role options that weaken sign-in, sessions or the log when loosened (`rank`: passkeys, strongest last). */
+const PASSKEY_RANK = { off: 0, any: 1, second: 2 };
+const WEAKER_LIMITS = {
+  passkeys: 'rank', pwMinLength: 'down', pwUpper: 'off', pwLower: 'off', pwDigit: 'off', pwSymbol: 'off',
+  sessionIdleSec: 'up', sessionAbsSec: 'up', logMaxAgeSec: 'keep', logMaxEntries: 'keep',
+};
+/** Exported for the docs and tests: what counts as weakening. */
+export const WEAKENING_SETTINGS = Object.freeze(Object.keys(WEAKER_SETTINGS));
+export const WEAKENING_LIMITS = Object.freeze(Object.keys(WEAKER_LIMITS));
+
+/** The settings whose change from `before` to `after` (complete maps) weakens a control. */
+export function weakenedSettings(before, after) {
+  return Object.entries(WEAKER_SETTINGS).filter(([k, dir]) => LOOSER[dir](before[k], after[k])).map(([k]) => k);
+}
+
+/**
+ * The role options whose change from `before` to `after` (a role's resolved
+ * all-channel limits, resolveLimits) weakens a control. `settings`: the
+ * server-wide values a role's session timeouts fall back to (null).
+ */
+export function weakenedLimits(before, after, settings) {
+  const val = (k, v) => (k === 'sessionIdleSec' ? v ?? settings['session.idleSec'] : k === 'sessionAbsSec' ? v ?? settings['session.absSec'] : v);
+  return Object.entries(WEAKER_LIMITS).filter(([k, dir]) => {
+    const a = val(k, before[k]);
+    const b = val(k, after[k]);
+    return dir === 'rank' ? (PASSKEY_RANK[b] ?? 0) < (PASSKEY_RANK[a] ?? 0) : LOOSER[dir](a, b);
+  }).map(([k]) => k);
+}
+
 /** A setting's value as the activity log shows it: long text by its length only. */
 export function logValue(v) {
   return typeof v === 'string' && (v.length > 60 || v.includes('\n')) ? `(${v.length} characters)` : JSON.stringify(v);

@@ -9,7 +9,7 @@ import { authnToken, bfpDisabled, sessionKeys } from '../lib/config.js';
 import { GUARD_SCOPES, apiExpiry } from '../lib/settings.js';
 import { verifierFrom } from './auth.js';
 import { purgeShare, changeShare, withLiveStatus, createApiKey } from './private.js';
-import { stepUpFrom, afterRefusal } from './stepup.js';
+import { stepUpFrom, stepUpIfGiven, afterRefusal } from './stepup.js';
 import { turnstileKeys, turnstileConfig, invalidateTurnstileCache } from '../lib/turnstile.js';
 import { shareInfo } from '../lib/ids.js';
 import { MAX_SHARE_FILTER_USERS } from '../directory-do.js';
@@ -18,6 +18,10 @@ import { adminDriveRoute, syncCredentialWraps, destroyDrive, drivePasswordChange
 import { handleKeys } from './keys.js';
 
 const fromDir = (r) => err(r.status, r.error, r.message);
+/** As fromDir, with what a change weakens when it needs the step-up (400 reauth_required). */
+const fromDirWeak = (r) => err(r.status, r.error, r.message, r.weakens ? { weakens: r.weakens } : undefined);
+/** The session a new one replaces (impersonation starting or ending): revoked with it. */
+const replaced = (a) => ({ sid: a.claims.sid, exp: a.claims.exp });
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
 // Where limits, quotas and viewer rules are set: "global" (the Default role),
 // "role:<id>" (a custom role) or the public account's id.
@@ -60,9 +64,12 @@ export async function handleAdmin(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
     if (!a.actor) return err(400, 'not_impersonating', 'You are not impersonating anyone.');
-    const r = await dir.endImpersonation(a.actor.id, a.user.id);
+    // The impersonation session is revoked, and the owner's new session keeps
+    // the sign-in's absolute timeout (see issueSession): going in and out of
+    // impersonation never extends a session or leaves the old one usable.
+    const r = await dir.endImpersonation(a.actor.id, a.user.id, replaced(a));
     if (!r.ok) return fromDir(r);
-    const { cookie } = await issueSession(env, { uid: r.user.id, ver: r.ver, settings: r.settings });
+    const { cookie } = await issueSession(env, { uid: r.user.id, ver: r.ver, settings: r.settings, iat: a.claims.iat, notAfter: a.claims.exp });
     return json({ ok: true }, 200, { 'set-cookie': cookie });
   }
 
@@ -187,10 +194,13 @@ export async function handleAdmin(request, env, url) {
     if (request.method !== 'PATCH') return methodNotAllowed('PATCH');
     // Room for the whole accessibility statement (A11Y_MAX_TOTAL characters,
     // up to 4 bytes each in UTF-8) in one save.
-    const body = await readJsonBody(request, 256 * 1024);
-    const r = await dir.setSettings(body, me);
+    const { current, reauth, ...patch } = await readJsonBody(request, 256 * 1024);
+    // A change that weakens a security control needs the password or a passkey (the Directory decides).
+    const g = await ipContext(env, request);
+    const step = await stepUpIfGiven({ current, reauth }, url);
+    const r = await dir.setSettings(patch, me, { ...step, lockoutOff: g.off.all });
     invalidateGuardCaches();
-    return r.ok ? json(r) : fromDir(r);
+    return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
   }
 
   // Turnstile keys set here apply when the deployment sets none.
@@ -212,8 +222,10 @@ export async function handleAdmin(request, env, url) {
     if (request.method !== 'PATCH') return methodNotAllowed('PATCH');
     const body = await readJsonBody(request);
     if (!SCOPE_RE.test(String(body.scope))) return err(400, 'invalid_scope', SCOPE_MSG);
-    const r = await dir.setLimits(body.scope === 'global' ? '' : body.scope, body.channel, body.patch, me);
-    return r.ok ? json(r) : fromDir(r);
+    const g = await ipContext(env, request);
+    const step = await stepUpIfGiven(body, url);
+    const r = await dir.setLimits(body.scope === 'global' ? '' : body.scope, body.channel, body.patch, me, { ...step, lockoutOff: g.off.all });
+    return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
   }
 
   if (p === '/api/private/admin/quotas' || p === '/api/private/admin/viewer-rules') {
@@ -345,9 +357,10 @@ export async function handleAdmin(request, env, url) {
     if (action === 'impersonate') {
       if (request.method !== 'POST') return methodNotAllowed('POST');
       assertIntent(request);
-      const r = await dir.impersonate(me, uid);
+      // As for "Return to admin": the owner's session is revoked and the new one keeps its absolute timeout.
+      const r = await dir.impersonate(me, uid, replaced(a));
       if (!r.ok) return fromDir(r);
-      const { cookie } = await issueSession(env, { uid: r.target.id, act: me, ver: r.ver, settings: r.settings });
+      const { cookie } = await issueSession(env, { uid: r.target.id, act: me, ver: r.ver, settings: r.settings, iat: a.claims.iat, notAfter: a.claims.exp });
       return json({ ok: true, user: r.target }, 200, { 'set-cookie': cookie });
     }
     // API keys of a user: the owner creates, changes and revokes them for
@@ -397,9 +410,10 @@ export async function handleAdmin(request, env, url) {
       const body = await readJsonBody(request);
       const expires = body.expiresInSec ? now() + Number(body.expiresInSec) : null;
       const g = await ipContext(env, request);
-      const r = await dir.addIpRule({ cidr: body.cidr, action: body.action, expires, note: body.note, callerIp: g.ip }, me);
+      const step = await stepUpIfGiven(body, url);
+      const r = await dir.addIpRule({ cidr: body.cidr, action: body.action, expires, note: body.note, callerIp: g.ip }, me, { ...step, lockoutOff: g.off.all });
       invalidateGuardCaches();
-      return r.ok ? json(r, 201) : fromDir(r);
+      return r.ok ? json(r, 201) : afterRefusal(env, g, r, fromDirWeak(r));
     }
     return methodNotAllowed('GET, POST');
   }

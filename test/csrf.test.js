@@ -14,8 +14,7 @@ import { csrfTokensMatch, CSRF_COOKIE } from '../src/lib/csrf.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import {
-  ORIGIN, owner, makeUser, login, fetchJson, cookieOf, csrfFor, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16,
-} from './helpers.js';
+  ORIGIN, owner, makeUser, login, fetchJson, cookieOf, csrfFor, createNote, proofHeaders, freshIp, intent, proofFor, USER_PW, salt16, OWNER_STEP, liveCookie } from './helpers.js';
 import { driveLimits, sealed } from './drive-helpers.js';
 import { receiver, newReverse, received, sealLinkPriv } from './reverse-helpers.js';
 import { linkProof, sealUpload, newNodeId as newReverseNode } from '../public/js/reversekeys.js';
@@ -37,7 +36,7 @@ const send = (method, path, { cookie = oc, token, body, headers = {}, ip = fresh
 const setCookies = (res) => res.headers.getSetCookie();
 const csrfCookieOf = (res) => setCookies(res).find((c) => c.startsWith(`${CSRF_COOKIE}=`)) ?? null;
 const tokenOf = (res) => /^__Host-secbin_csrf=([^;]*)/.exec(csrfCookieOf(res) ?? '')?.[1] ?? null;
-const settings = (patch, cookie = oc) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie, body: patch });
+const settings = (patch, cookie = oc) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie, body: { ...patch, ...OWNER_STEP } });
 const myShares = async (cookie) => (await (await fetchJson('/api/private/shares', { cookie })).json()).total;
 const loginRes = (username, password) => fetchJson('/api/auth/login', { method: 'POST', body: { username, proof: proofFor(password) }, ip: freshIp() });
 
@@ -513,7 +512,7 @@ describe('timing-safe comparison', () => {
       // …and so does the check on a real request.
       spy.mockClear();
       const ctx = createExecutionContext();
-      const res = await worker.fetch(new Request(`${ORIGIN}/api/private/admin/settings`, { method: 'PATCH', headers: { cookie: oc, 'content-type': 'application/json', 'x-secbin-csrf': 'C'.repeat(43) }, body: '{}' }), env, ctx);
+      const res = await worker.fetch(new Request(`${ORIGIN}/api/private/admin/settings`, { method: 'PATCH', headers: { cookie: liveCookie(oc), 'content-type': 'application/json', 'x-secbin-csrf': 'C'.repeat(43) }, body: '{}' }), env, ctx);
       await waitOnExecutionContext(ctx);
       expect(await errorOf(res)).toBe('csrf_mismatch');
       expect(spy).toHaveBeenCalled();

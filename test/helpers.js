@@ -16,6 +16,8 @@ setPasswordStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('test-stretch')))
 export const salt16 = () => b64urlFromBytes(randomBytes(16));
 /** A fake client-side Argon2id output for `password` (the server never sees the password). */
 export const proofFor = (password) => b64urlFromBytes(new Uint8Array(32).map((_, i) => (password.charCodeAt(i % password.length) + i) & 0xff));
+/** The owner's step-up (the password proof), for admin changes that weaken a security control. */
+export const OWNER_STEP = Object.freeze({ current: proofFor('owner-password') });
 
 let ipCounter = 1;
 /** A fresh client IP per test file/area so Guard state never bleeds between tests. */
@@ -61,7 +63,30 @@ export async function csrfHeaders(cookie, ip) {
   return t ? { 'x-secbin-csrf': t } : {};
 }
 
-export async function fetchJson(path, { method = 'GET', body, cookie, headers = {}, ip, csrf = true } = {}) {
+// Starting an impersonation revokes the owner's session it replaces (the
+// browser holds only the new cookie from then on). The suites keep one owner
+// cookie per file for the owner's own requests, so after an impersonation the
+// helpers sign the owner in again and send that session wherever the replaced
+// cookie is passed (`alias: false` sends the replaced cookie as it is, to
+// check that it was revoked).
+const IMPERSONATE = /^\/api\/private\/admin\/users\/[A-Za-z0-9_-]{16}\/impersonate$/;
+const replacedOwner = new Map();
+const ownerNow = (cookie) => { let c = cookie; while (c && replacedOwner.has(c)) c = replacedOwner.get(c); return c; };
+/** The owner session that stands for `cookie` now (itself, unless an impersonation replaced it): for requests made without fetchJson. */
+export const liveCookie = (cookie) => ownerNow(cookie);
+
+export async function fetchJson(path, { method = 'GET', body, cookie: given, headers = {}, ip, csrf = true, alias = true } = {}) {
+  const cookie = alias ? ownerNow(given) : given;
+  const res = await send(path, { method, body, cookie, headers, ip, csrf });
+  if (alias && cookie && method === 'POST' && IMPERSONATE.test(path) && res.status === 200) {
+    const fresh = await login('owner', 'owner-password', ip);
+    replacedOwner.set(cookie, fresh);
+    if (ownerCookie === cookie) ownerCookie = fresh;
+  }
+  return res;
+}
+
+async function send(path, { method, body, cookie, headers, ip, csrf }) {
   if (ROLE_SCOPED.test(path) && body && typeof body.scope === 'string' && /^[A-Za-z0-9_-]{16}$/.test(body.scope) && body.scope !== 'public-user-0000') {
     body = { ...body, scope: `role:${await roleForUser(body.scope, cookie)}` };
   }

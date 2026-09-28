@@ -10,7 +10,7 @@
 //     global limit.
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { owner, makeUser, fetchJson, freshIp, cookieOf, proofFor, ORIGIN, intent } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, cookieOf, proofFor, ORIGIN, intent, OWNER_STEP } from './helpers.js';
 import { SoftAuthenticator } from './soft-authenticator.js';
 import { cborDecode, derToRawP256, parseAuthData } from '../src/lib/webauthn.js';
 import { normalizeRecoveryCode } from '../src/directory-do.js';
@@ -21,7 +21,7 @@ let oc;
 beforeAll(async () => { oc = await owner(); });
 
 const post = (path, body, cookie, ip = freshIp()) => fetchJson(path, { method: 'POST', body, cookie, ip });
-const limits = (uid, patch) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: uid, channel: 'all', patch } });
+const limits = (uid, patch) => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: uid, channel: 'all', patch, ...OWNER_STEP } });
 
 /** Register a passkey for `cookie` → { res, body, auth }. */
 async function register(cookie, { auth = new SoftAuthenticator(), password = PW, name = 'Laptop', knobs = {} } = {}) {
