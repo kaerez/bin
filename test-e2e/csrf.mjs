@@ -15,9 +15,10 @@
 //   • a reload in the middle of a flow;
 //   • impersonation start and end in another tab: a tab loaded before the
 //     change is refused the same way, and acts again after Reload;
-//   • Admin → Settings → CSRF tokens off and on again (the server really stops
-//     and starts requiring the header), with axe (WCAG 2.2 A/AA) on the page
-//     and on the "session changed" banner.
+//   • Admin → Settings → CSRF tokens off (with the owner's password, asked
+//     only for that) and on again (the server really stops and starts
+//     requiring the header), with axe (WCAG 2.2 A/AA) on the page and on the
+//     "session changed" banner.
 // Also: no CSP / Trusted Types violations and no page errors.
 //
 // A manual test, not run in CI. Needs a fresh `wrangler dev` (no owner yet),
@@ -359,9 +360,21 @@ try {
   check('its help text is linked to it', (await p.getAttribute('#set-csrf', 'aria-describedby')) === 'set-csrf-help'
     && /SameSite cookies, the cross-site check, and the required JSON or intent header/.test(await p.textContent('#set-csrf-help')));
   await axe(p, 'Admin → Settings (CSRF tokens on)');
+  // Turning it off weakens a control: the server asks for the owner's password (or a passkey),
+  // and only then the card shows the field (hidden before, and never for turning it on).
+  const csrfConfirm = '#set-csrf-save >> xpath=ancestor::div[contains(@class, "card")]//input[@type="password"]';
+  check('no confirmation field before a weakening change', !(await p.isVisible(csrfConfirm)));
   await p.uncheck('#set-csrf');
   await p.click('#set-csrf-save');
+  await p.waitForSelector(csrfConfirm, { state: 'visible', timeout: 15000 });
+  check('turning it off asks for the password or a passkey', await p.evaluate(() => document.activeElement?.type === 'password'
+    && /weakens a security control \(csrfTokens\)/.test(document.getElementById(document.activeElement.getAttribute('aria-describedby'))?.textContent || '')));
+  check('…and has not changed it yet', (await raw(p, 'PATCH', '/api/private/admin/settings', {})).error === 'csrf_mismatch');
+  await axe(p, 'Admin → Settings (CSRF tokens: confirm turning them off)');
+  await p.fill(csrfConfirm, PW);
+  await p.click('#set-csrf-save');
   check('turning it off: toast', await toast(p, 'CSRF tokens are off.'));
+  check('the confirmation field is hidden again', !(await p.isVisible(csrfConfirm)));
   check('off: a change without the header is accepted', (await raw(p, 'PATCH', '/api/private/admin/settings', {})).status === 200);
   // (A page cannot forge Sec-Fetch-Site; test/csrf.test.js covers the cross-site refusal with the setting off.)
   check('off: the intent header is still required', (await p.evaluate(async () => (await (await fetch('/api/private/admin/ip-rules/AAAAAAAAAAAAAAAA', { method: 'DELETE' })).json()).error)) === 'missing_intent');
@@ -373,6 +386,7 @@ try {
   await p.check('#set-csrf');
   await p.click('#set-csrf-save');
   check('turning it back on: toast', await toast(p, 'CSRF tokens are on.'));
+  check('turning it back on asked for nothing', !(await p.isVisible(csrfConfirm)));
   check('on again: a change without the header is refused at once', (await raw(p, 'PATCH', '/api/private/admin/settings', {})).error === 'csrf_mismatch');
   check('on again: the page’s own client still works', await settingsViaApi(p));
   await p.click('.tab[data-tab="audit"]');

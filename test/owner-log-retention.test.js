@@ -6,7 +6,7 @@
 // is unchanged. Also: validation, export/import and manual clearing.
 import { describe, it, expect, beforeAll } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { owner, makeUser, fetchJson, proofFor, createNote, cookieOf, intent, freshIp } from './helpers.js';
+import { owner, makeUser, fetchJson, proofFor, createNote, cookieOf, intent, freshIp, OWNER_STEP } from './helpers.js';
 
 const DAY = 86400;
 const CURRENT = proofFor('owner-password');
@@ -19,7 +19,7 @@ beforeAll(async () => {
   ownerId = users.find((x) => x.role === 'owner').id;
 });
 const dirStub = () => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
-const settings = (patch) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: patch });
+const settings = (patch) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { ...patch, ...OWNER_STEP } });
 const overview = async () => (await (await fetchJson('/api/private/admin/overview', { cookie: oc })).json());
 const audit = async (user) => (await (await fetchJson(`/api/private/admin/audit${user ? `?user=${user}` : ''}`, { cookie: oc })).json()).rows;
 /** Every activity row, straight from storage (the audit API pages at 100). */
@@ -136,7 +136,7 @@ describe('owner log pruning', () => {
     const w = await makeUser('olr-carol');
     const x = await makeUser('olr-dave');
     // Dave's role keeps at most 10 entries about him (as before this feature).
-    expect((await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: x.id, channel: 'all', patch: { logMaxEntries: 10 } } })).status).toBe(200);
+    expect((await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: x.id, channel: 'all', patch: { logMaxEntries: 10 }, ...OWNER_STEP } })).status).toBe(200);
     await insert(1200, ownerId, ownerId, 'test.owner');
     await insert(600, ownerId, w.id, 'test.admin'); // admin actions about Carol
     await insert(50, w.id, w.id, 'test.carol');

@@ -3,12 +3,12 @@
 // names lock the same way); an IP block rule cannot lock out the owner adding
 // it; the public profile answers "off" without the Directory when disabled.
 import { describe, it, expect, beforeAll } from 'vitest';
-import { owner, makeUser, fetchJson, freshIp, proofFor } from './helpers.js';
+import { owner, makeUser, fetchJson, freshIp, proofFor, OWNER_STEP } from './helpers.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
-const settings = (patch) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: patch });
+const settings = (patch) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { ...patch, ...OWNER_STEP } });
 const login = (username, pw) => fetchJson('/api/auth/login', { method: 'POST', ip: freshIp(), body: { username, proof: proofFor(pw) } });
 const recovery = (username) => fetchJson('/api/auth/recovery', { method: 'POST', ip: freshIp(), body: { username, code: 'AAAA-BBBB-CCCC-DDDD' } });
 
@@ -39,7 +39,7 @@ describe('account lockout and username enumeration', () => {
 
 describe('IP rules', () => {
   it('refuse a block rule covering the owner adding it, unless an allow rule covers them', async () => {
-    const add = (cidr, action, ip) => fetchJson('/api/private/admin/ip-rules', { method: 'POST', cookie: oc, ip, body: { cidr, action } });
+    const add = (cidr, action, ip) => fetchJson('/api/private/admin/ip-rules', { method: 'POST', cookie: oc, ip, body: { cidr, action, ...OWNER_STEP } });
     const r = await add('192.0.2.0/24', 'block', '192.0.2.77');
     expect(r.status).toBe(409);
     expect((await r.json()).error).toBe('blocks_yourself');

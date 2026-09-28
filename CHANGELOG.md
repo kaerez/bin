@@ -15,6 +15,36 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Impersonation no longer extends the owner's session.** Starting an impersonation and
+  "Return to admin" each issue a new session that keeps the absolute end of the owner's sign-in
+  (`session.absSec` counts from the sign-in, and a new session never ends later than the one it
+  replaces), and revoke the session they replace, so a copy of the old cookie stops working.
+  Cycling "Log in as" and "Return to admin" kept a stolen owner session alive indefinitely and
+  left each replaced session valid until its own timeout.
+- **Admin changes that weaken a security control need the owner's password or a passkey**:
+  turning CSRF tokens off or anonymous sharing on; loosening the account lockout, the per-IP
+  brute-force rules, the IPv6 tracking prefix, the owner's session timeouts, the
+  new-anonymous-sender allowance or the log retention (Settings, the Owner role, the Public
+  role); in a role (the public account's too, and its API restrictions), loosening passkeys,
+  the password policy, session timeouts or log retention, the CAPTCHA and uploader-password
+  options and their defaults, longer or unlimited expiry and views, links with no expiry, and
+  allowing link or credential shares, API keys, more file types or more links; and adding an
+  allow IP rule. Missing, the server answers `400 reauth_required` with what the change weakens, and
+  the admin panel then shows the confirmation field; tightening asks for nothing (SECURITY.md
+  "admin changes that weaken a control").
+- **The owner's own username changes only on Account** (with the password or a passkey):
+  `PATCH /api/private/admin/users/<owner>` with a username answers `403 use_account_page`, as
+  the owner's own password already did.
+- **Separate keys for the prelogin fake salt, the anonymous tracker's tag and the public quota
+  subjects** (HKDF-SHA-256 from the Directory's secret, one `info` each). They shared one HMAC
+  key, so a prelogin request for a crafted username returned a valid tracker tag, and anyone
+  could mint tracker ids the server accepted as its own. Tracker ids issued before this release
+  no longer verify: browsers get a new id on their next visit, and the anonymous per-id and
+  per-network counters start again.
+- **Migration 17 on a multi-version upgrade:** a Directory from before migration 16 now keeps
+  each role's `maxExpireSec` as its `reverseMaxExpireSec` (the Default role had been left at
+  "no limit"). The step is corrected in place; a Directory that already ran it is unchanged.
+- **CI:** every GitHub Action is pinned to a full commit SHA (its tag in a comment).
 - **Received names are cleaned first, then checked again (ZIP slip).** The viewer checked a
   file or Drive share's paths before removing their hidden characters and never after, so a
   modified sender could write `.`, U+200B, `.` (which becomes `..`) or a leading U+200B segment

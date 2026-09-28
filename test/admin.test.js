@@ -5,7 +5,7 @@
 // DISABLE_BFP kill switches).
 import { env } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
-import { ORIGIN, owner, login, makeUser, fetchJson, cookieOf, salt16, proofFor, USER_PW, intent, freshIp, createNote, openNote } from './helpers.js';
+import { ORIGIN, owner, login, makeUser, fetchJson, cookieOf, salt16, proofFor, USER_PW, intent, freshIp, createNote, openNote, OWNER_STEP } from './helpers.js';
 import worker from '../src/index.js';
 import { parseIp, parseCidr, cidrContains, trackingKey, normalizeRule } from '../src/lib/ip.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
@@ -163,7 +163,7 @@ describe('settings validation', () => {
 
 describe('guard: brute-force protection', () => {
   const setRule = (scope, max, windowSec, blockSec) => fetchJson('/api/private/admin/settings', {
-    method: 'PATCH', cookie: oc, body: { [`guard.${scope}.max`]: max, [`guard.${scope}.windowSec`]: windowSec, [`guard.${scope}.blockSec`]: blockSec },
+    method: 'PATCH', cookie: oc, body: { [`guard.${scope}.max`]: max, [`guard.${scope}.windowSec`]: windowSec, [`guard.${scope}.blockSec`]: blockSec, ...OWNER_STEP },
   });
 
   it('blocks an IP after X invalid fetches (wrong links included), visible + unblockable by the admin', async () => {
@@ -184,7 +184,7 @@ describe('guard: brute-force protection', () => {
   });
 
   it('login scope + account lockout (owner excluded)', async () => {
-    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'lockout.max': 2, 'lockout.windowSec': 600, 'lockout.lockSec': 600 } });
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'lockout.max': 2, 'lockout.windowSec': 600, 'lockout.lockSec': 600, ...OWNER_STEP } });
     invalidateGuardCaches();
     await makeUser('henry', 'henry-password-1');
     for (let i = 0; i < 2; i++) await fetchJson('/api/auth/login', { method: 'POST', ip: freshIp(), body: { username: 'henry', proof: proofFor('bad') } });
@@ -201,7 +201,7 @@ describe('guard: brute-force protection', () => {
   });
 
   it('manual IP rules: block CIDRs (v4 + v6), allow beats block, DISABLE_BFP bypasses', async () => {
-    const add = (cidr, action) => fetchJson('/api/private/admin/ip-rules', { method: 'POST', cookie: oc, body: { cidr, action, note: 'test' } });
+    const add = (cidr, action) => fetchJson('/api/private/admin/ip-rules', { method: 'POST', cookie: oc, body: { cidr, action, note: 'test', ...OWNER_STEP } });
     expect((await add('203.0.113.0/24', 'block')).status).toBe(201);
     expect((await add('2001:db8::/32', 'block')).status).toBe(201);
     expect((await add('not-an-ip', 'block')).status).toBe(400);

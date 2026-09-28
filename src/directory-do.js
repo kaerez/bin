@@ -21,7 +21,7 @@ import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES, MAX_REVERSE_ACTIVE,
-  CAPTCHA_KEYS, resolveCaptcha, REVERSE_KEYS, NO_EXPIRY, checkReversePassword,
+  CAPTCHA_KEYS, resolveCaptcha, REVERSE_KEYS, NO_EXPIRY, checkReversePassword, weakenedSettings, weakenedLimits,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT
 // release. SCHEMA above always describes the latest shape (fresh instances need
 // nothing); each step only adds what an older instance lacks, and the applied
 // version is recorded in meta so a step runs at most once. Never edit a
-// shipped step — append a new one.
+// shipped step — append a new one — unless the edit only corrects what the
+// step does when older steps run before it in the same upgrade, and changes
+// nothing for a Directory that runs that step alone (step 17).
 const MIGRATIONS = [
   // 1: activity.imp (impersonation flag)
   (m) => m.addColumn('activity', 'imp', 'INTEGER NOT NULL DEFAULT 0'),
@@ -263,10 +265,16 @@ const MIGRATIONS = [
   // the Default role gets a value for every new option. shares.ended: when a
   // share stopped being active (an indefinite one is pruned from the index
   // 30 days after it ended, as the others are after their expiry).
+  // The bound is written over any reverseMaxExpireSec already there: no
+  // release before this step knew the option, so a value present now was
+  // written earlier in this same run (materializeDefaultRole in steps 10–15,
+  // with today's defaults: no limit), never by the owner. Only the jump from
+  // 15 or older runs into this; 16 → 17 finds no such row either way.
   (m) => {
     m.addColumn('shares', 'ended', 'INTEGER');
     for (const r of m.sql.exec("SELECT user_id, channel, value FROM limits WHERE key = 'maxExpireSec' AND (user_id = '' OR user_id LIKE 'r:%')").toArray()) {
-      m.sql.exec("INSERT OR IGNORE INTO limits (user_id, channel, key, value) VALUES (?, ?, 'reverseMaxExpireSec', ?)", r.user_id, r.channel, r.value);
+      m.sql.exec("INSERT INTO limits (user_id, channel, key, value) VALUES (?, ?, 'reverseMaxExpireSec', ?) ON CONFLICT(user_id, channel, key) DO UPDATE SET value = excluded.value",
+        r.user_id, r.channel, r.value);
     }
     materializeDefaultRole(m.sql);
   },
@@ -337,6 +345,16 @@ export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'rece
   'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes',
   ...REVERSE_KEYS, ...CAPTCHA_KEYS]);
 const PUBLIC_NAME = '(public)';
+/**
+ * HKDF `info` of the keys derived from the Directory's secret (#purposeKey),
+ * one per use. Changing one invalidates what it made: tracker ids and
+ * subjects made under an older key are simply re-issued / counted afresh.
+ */
+const KEY_INFO = Object.freeze({
+  prelogin: 'secbin-directory/prelogin-salt/v1',
+  trackerTag: 'secbin-directory/tracker-tag/v1',
+  subject: 'secbin-directory/public-subject/v1',
+});
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
 const TRACKER_RE = /^[A-Za-z0-9_-]{32}$/;
@@ -712,10 +730,28 @@ export class Directory extends DurableObject {
     const u = this.#loginUser(username);
     if (u) return { salt: u.pw_salt, t: u.pw_t };
     // Unknown user: a stable, secret-keyed fake salt, so the response does not
-    // reveal whether the account exists.
-    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(String(username).toLowerCase())));
+    // reveal whether the account exists. Anyone may ask for one for any name,
+    // so its key serves this alone (#purposeKey).
+    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', await this.#purposeKey(KEY_INFO.prelogin), utf8(String(username).toLowerCase())));
     return { salt: b64urlFromBytes(mac.subarray(0, 16)), t: ARGON2.tDefault };
+  }
+
+  /**
+   * The HMAC key of one use of the Directory's secret, derived with
+   * HKDF-SHA-256 and that use's `info` (KEY_INFO): the prelogin fake salt, the
+   * anonymous tracker's tag and the public quota subjects each have their own
+   * key, so an output of one (such as the fake salt, which anyone may ask for)
+   * reveals nothing about another and cannot stand in for it.
+   */
+  async #purposeKey(info) {
+    this.purposeKeys ??= new Map();
+    let key = this.purposeKeys.get(info);
+    if (!key) {
+      const ikm = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), 'HKDF', false, ['deriveKey']);
+      key = await crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: utf8(info) }, ikm, { name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign']);
+      this.purposeKeys.set(info, key);
+    }
+    return key;
   }
 
   async login({ username, verifier, lockoutOff = false }) {
@@ -825,21 +861,36 @@ export class Directory extends DurableObject {
     if (subjectId) this.#log(actorId, subjectId, 'logout');
   }
 
-  async impersonate(ownerId, targetId) {
+  /**
+   * Start impersonating `targetId`. `replaced` ({ sid, exp }) is the owner's
+   * session that the impersonation session replaces: it is revoked here, so a
+   * copy of the old cookie stops working (the Worker gives the new session the
+   * old one's absolute timeout).
+   */
+  async impersonate(ownerId, targetId, replaced = null) {
     const o = this.#user(ownerId);
     const t = this.#user(targetId);
     if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Only the owner can impersonate.');
     if (!t || t.id === o.id || t.role === 'public') return fail(404, 'not_found', 'User not found.');
     if (t.disabled) return fail(409, 'account_disabled', 'That account is disabled.');
+    this.#revokeReplaced(replaced);
     this.#log(o.id, t.id, 'impersonate.start', `as=${t.username}`);
     return { ok: true, target: this.#publicUser(t), ver: o.sess_ver, settings: this.#sessionSettings() };
   }
 
-  async endImpersonation(ownerId, targetId) {
+  /** "Return to admin": `replaced` is the impersonation session, revoked as above. */
+  async endImpersonation(ownerId, targetId, replaced = null) {
     const o = this.#user(ownerId);
     if (!o || o.role !== 'owner' || o.disabled) return fail(403, 'forbidden', 'Not impersonating.');
+    this.#revokeReplaced(replaced);
     this.#log(o.id, targetId, 'impersonate.end');
     return { ok: true, user: this.#publicUser(o), ver: o.sess_ver, settings: this.#sessionSettings() };
+  }
+
+  /** Revoke the session a new one replaces (kept on the revoked list until it would have expired). */
+  #revokeReplaced(replaced) {
+    if (!replaced || typeof replaced.sid !== 'string' || !Number.isSafeInteger(replaced.exp)) return;
+    this.sql.exec('INSERT OR REPLACE INTO revoked_sessions (sid, exp) VALUES (?, ?)', replaced.sid, replaced.exp);
   }
 
   // ── the signed-in user ───────────────────────────────────────────────────
@@ -1681,7 +1732,7 @@ export class Directory extends DurableObject {
   }
 
   async #subjectHash(kind, value) {
-    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const key = await this.#purposeKey(KEY_INFO.subject);
     return b64urlFromBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(`secbin-public/${kind}:${value}`))).subarray(0, 18));
   }
 
@@ -1691,8 +1742,7 @@ export class Directory extends DurableObject {
   }
 
   async #hmacTag(data) {
-    const key = await crypto.subtle.importKey('raw', utf8(this.#meta('secret')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    return new Uint8Array(await crypto.subtle.sign('HMAC', key, data)).subarray(0, 8);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', await this.#purposeKey(KEY_INFO.trackerTag), data)).subarray(0, 8);
   }
 
   /** A fresh, stateless tracker id (nothing is stored until it creates a share). */
@@ -3606,6 +3656,10 @@ export class Directory extends DurableObject {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in: turn public access on or off in its settings.');
+    // The owner renames their own account from Account, which asks for the
+    // password or a passkey (as for the owner's password, setPassword below):
+    // this route has no confirmation, so it never changes the owner's sign-in name.
+    if (u.role === 'owner' && username !== undefined) return fail(403, 'use_account_page', 'Change your own username from Account, with your password or a passkey.');
     if (disabled !== undefined) {
       if (typeof disabled !== 'boolean') return fail(400, 'invalid', 'disabled must be true or false');
       if (u.role === 'owner' && disabled) return fail(403, 'forbidden', 'The owner cannot be disabled.');
@@ -3744,7 +3798,37 @@ export class Directory extends DurableObject {
     return fail(404, 'not_found', 'Not found.');
   }
 
-  async setLimits(scopeIn, channel, patch, actorId) {
+  /**
+   * The owner's confirmation for an admin change that weakens a security
+   * control (`weak`: what it weakens, see weakenedSettings / weakenedLimits
+   * in settings.js; [] for none): the password or a passkey (`step`), checked
+   * as every step-up. Missing → 400 reauth_required with the list, so the
+   * admin panel asks for it only then. Returns null when nothing is needed or
+   * the step-up passed, else the failure to return.
+   */
+  async #confirmWeakening(actorId, weak, step) {
+    if (!weak.length) return null;
+    const actor = this.#user(actorId);
+    if (!actor || actor.role !== 'owner' || actor.disabled) return fail(403, 'forbidden', 'Only the owner can change this.');
+    if (!step || (step.current === undefined && !step.reauth)) {
+      return fail(400, 'reauth_required', `This change weakens a security control (${weak.join(', ')}): confirm with your password or a passkey.`, { weakens: weak });
+    }
+    return this.#stepUp(actor, step, step.lockoutOff === true);
+  }
+
+  /**
+   * The limits admin scope `key` resolves to on `channel`, from the scope's
+   * own rows for that channel (`rows`): the all-channel limits (the Default
+   * role's rows, then the scope's), or the API's, which only narrow them.
+   */
+  #scopeLimits(key, channel, rows) {
+    const own = channel === 'all' ? rows : this.#limitRows(key, 'all');
+    const all = key === '' ? resolveLimits(own, {}) : resolveLimits(this.#limitRows('', 'all'), own);
+    if (channel === 'all') return all;
+    return key === '' ? restrictForApi(all, rows, {}) : restrictForApi(all, this.#limitRows('', 'api'), rows);
+  }
+
+  async setLimits(scopeIn, channel, patch, actorId, step = null) {
     const sc = this.#adminScope(scopeIn);
     if (sc.ok === false) return sc;
     const scopeUserId = sc.key;
@@ -3762,6 +3846,15 @@ export class Directory extends DurableObject {
     } catch (e) {
       return fail(400, 'invalid_limit', e.message);
     }
+    // Loosening sign-in, sessions, the log, or what the role's shares, links
+    // and API keys may be (weakenedLimits) needs the owner's confirmation,
+    // compared on what the scope resolves to on this channel.
+    const rows = this.#limitRows(scopeUserId, channel);
+    const next = { ...rows };
+    for (const [k, v] of ops) { if (v === undefined) delete next[k]; else next[k] = v; }
+    const weak = weakenedLimits(this.#scopeLimits(scopeUserId, channel, rows), this.#scopeLimits(scopeUserId, channel, next), this.#settings());
+    const wrong = await this.#confirmWeakening(actorId, weak, step);
+    if (wrong) return wrong;
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) {
         if (v === undefined) this.sql.exec('DELETE FROM limits WHERE user_id = ? AND channel = ? AND key = ?', scopeUserId, channel, k);
@@ -3979,7 +4072,7 @@ export class Directory extends DurableObject {
     return this.#settings();
   }
 
-  async setSettings(patch, actorId) {
+  async setSettings(patch, actorId, step = null) {
     if (!patch || typeof patch !== 'object') return fail(400, 'invalid', 'patch must be an object');
     const ops = [];
     try {
@@ -3987,10 +4080,18 @@ export class Directory extends DurableObject {
     } catch (e) {
       return fail(400, 'invalid_setting', e.message);
     }
-    const cur = this.#settings();
+    let cur = this.#settings();
     const merged = { ...cur, ...Object.fromEntries(ops) };
     const bad = crossCheckSettings(merged);
     if (bad) return fail(400, 'invalid_setting', bad);
+    // Turning CSRF tokens off, loosening the lockout, the brute-force or rate
+    // limits, the sessions or the log retention needs the owner's confirmation.
+    const weak = weakenedSettings(cur, merged);
+    if (weak.length) {
+      const wrong = await this.#confirmWeakening(actorId, weak, step);
+      if (wrong) return wrong;
+      cur = this.#settings(); // as it is now, for the log below
+    }
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) this.sql.exec('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
     });
@@ -4034,7 +4135,7 @@ export class Directory extends DurableObject {
     return this.sql.exec('SELECT id, cidr, action, expires, note, created FROM ip_rules WHERE expires IS NULL OR expires > ? ORDER BY created DESC', ts).toArray();
   }
 
-  async addIpRule({ cidr, action, expires, note, callerIp = null }, actorId) {
+  async addIpRule({ cidr, action, expires, note, callerIp = null }, actorId, step = null) {
     const c = normalizeRule(cidr);
     if (!c) return fail(400, 'invalid_cidr', 'Enter an IPv4/IPv6 address, a CIDR block (10.0.0.0/8) or a range (10.0.0.5-10.0.0.20).');
     if (action !== 'allow' && action !== 'block') return fail(400, 'invalid_action', 'action must be allow or block');
@@ -4048,6 +4149,13 @@ export class Directory extends DurableObject {
     if (expires !== null && expires !== undefined && (!Number.isSafeInteger(expires) || expires <= now())) return fail(400, 'invalid_expiry', 'Expiry must be in the future.');
     const n = cleanLabel(note);
     if (n === null) return fail(400, 'invalid_note', 'Notes are up to 100 characters.');
+    // An allow rule exempts its addresses from every brute-force block and
+    // rate limit (src/lib/guard.js), whatever its size: it needs the owner's
+    // confirmation. A block rule only tightens.
+    if (action === 'allow') {
+      const wrong = await this.#confirmWeakening(actorId, ['ipRule.allow'], step);
+      if (wrong) return wrong;
+    }
     const id = newId();
     this.sql.exec('INSERT INTO ip_rules (id, cidr, action, expires, note, created) VALUES (?, ?, ?, ?, ?, ?)', id, c, action, expires ?? null, n, now());
     this.#log(actorId, null, 'iprule.added', `${action} ${c}${n ? ` (${n})` : ''}`);
