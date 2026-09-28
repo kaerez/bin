@@ -81,18 +81,20 @@ function keyFields(body) {
 
 /**
  * Drop the Drive wraps (of the release before: a Drive still waiting for its
- * upgrade) of passkeys and recovery codes the account no longer has. → the
- * wraps removed (a recovery code spent at sign-in comes back once, so that
- * sign-in can still open the old Drive key for the upgrade).
+ * upgrade) of passkeys and recovery codes the account no longer has: a removed
+ * passkey or replaced codes lose theirs at once, the owner's too, while Drives
+ * wait (the escrow and the owner's other sign-in methods still open the old
+ * Drive key). Only the wraps an AUTHN owner recovery kept (driveOwnerRecovered)
+ * stay while any Drive waits. → the wraps removed (a recovery code spent at
+ * sign-in comes back once, so that sign-in can still open the old Drive key
+ * for the upgrade).
  */
 export async function syncCredentialWraps(env, uid) {
   const dir = directory(env);
   const c = await dir.credentialRefs(uid);
   if (!c || !c.drive) return [];
-  // The owner's old wraps stay while any Drive waits, as after an AUTHN owner recovery (driveOwnerRecovered):
-  // the owner's old DK opens every waiting user's escrow wrap (audit v2r, the M4 leftover).
-  if (c.owner && (await dir.migrationList()).some((r) => r.state !== 'done')) return [];
-  return (await driveStub(env, uid).pruneWraps(uid, { passkey: c.passkeys, recovery: c.recovery })).wraps;
+  const held = c.owner && (await dir.migrationList()).some((r) => r.state !== 'done');
+  return (await driveStub(env, uid).pruneWraps(uid, { passkey: c.passkeys, recovery: c.recovery, held })).wraps;
 }
 
 const nodeId = (s) => (s === ROOT || NODE_ID_RE.test(s) ? s : null);
@@ -1050,6 +1052,7 @@ export async function driveOwnerRecovered(env, ownerId) {
   const dir = directory(env);
   const c = await dir.credentialRefs(ownerId);
   if (!c || !c.drive) return;
-  if ((await dir.migrationList()).some((r) => r.state !== 'done')) return;
+  // Kept, and marked so that a later passkey or code change does not prune them while a Drive waits.
+  if ((await dir.migrationList()).some((r) => r.state !== 'done')) { await driveStub(env, ownerId).holdWraps(ownerId); return; }
   await syncCredentialWraps(env, ownerId);
 }
