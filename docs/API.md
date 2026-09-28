@@ -162,7 +162,7 @@ SPEC.md §10). The ones specific to keys and shares:
 | 400 | `invalid_captcha` | `captcha` is not `true` or `false` |
 | 403 | `captcha_disabled` | `captcha: true` while your role has the CAPTCHA off |
 | 403 | `captcha_required` | a recipient route of a share with the CAPTCHA — or of a missing or ended share, while Turnstile is on — without a grant (open it in a browser) |
-| 429 | `rate_limited` | too many requests from your network: CAPTCHA checks on the share CAPTCHA routes (30 per 10 minutes) or on sign-in, account changes and anonymous creation (60 per 10 minutes), or sign-in prelogins (`POST /api/auth/prelogin`, 120 per 10 minutes); `Retry-After` says when to try again |
+| 429 | `rate_limited` | too many requests from your network: CAPTCHA checks on the share CAPTCHA routes (30 per 10 minutes); rejected CAPTCHA tokens on sign-in, account changes and anonymous creation (60 per 10 minutes; accepted tokens are never counted); sign-in prelogins (`POST /api/auth/prelogin`, 600 per 10 minutes, and 20 per username); chunk fetches of shares that have ended (600 per 10 minutes). `Retry-After` says when to try again |
 | 410 | `gone` | the share has ended (expired, used up, revoked or deleted) — also for a chunk fetch with a download grant of a share that ended during the download, which is never counted as an invalid request |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
 

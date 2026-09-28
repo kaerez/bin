@@ -131,18 +131,28 @@ export const CAPTCHA_PAGE = { max: 61, windowSec: 600, blockSec: 600 };
 export const EXTEND_DOWNLOADS = { max: 121, windowSec: 600, blockSec: 600 };
 /**
  * The CAPTCHA on sign-in, account changes and anonymous creation
- * (turnstile.js requireTurnstile): a network may send at most
- * TURNSTILE_VERIFY.max − 1 tokens to Cloudflare's siteverify per window.
+ * (turnstile.js requireTurnstile): once siteverify has rejected
+ * TURNSTILE_VERIFY.max tokens from a network within a window, that network's
+ * tokens are refused without a call for `blockSec`. Accepted tokens are never
+ * counted (each one cost a solved CAPTCHA).
  */
-export const TURNSTILE_VERIFY = { max: 61, windowSec: 600, blockSec: 600 };
+export const TURNSTILE_VERIFY = { max: 60, windowSec: 600, blockSec: 600 };
 /**
  * POST /api/auth/prelogin (anonymous; it reaches the Directory): a network may
- * ask at most PRELOGIN.max − 1 times per window. Only prelogin itself is
- * refused beyond it (the sign-in routes do not look at this scope), so it
- * never locks an account; the answer never depends on the username.
+ * ask at most PRELOGIN.max − 1 times per window, and at most
+ * PRELOGIN_USER.max − 1 times for one username. Only prelogin itself is
+ * refused beyond them (the sign-in routes do not look at these scopes), and the
+ * answer never depends on whether the account exists.
  */
-export const PRELOGIN = { max: 121, windowSec: 600, blockSec: 600 };
+export const PRELOGIN = { max: 601, windowSec: 600, blockSec: 600 };
+export const PRELOGIN_USER = { max: 21, windowSec: 600, blockSec: 600 };
+/**
+ * Chunk fetches of a share that has ended (GET /api/file/:id/chunk/…, answered
+ * 410 and never counted as invalid, public.js downloadChunk): a network may make
+ * at most ENDED_CHUNKS.max − 1 per window before `429 rate_limited`.
+ */
+export const ENDED_CHUNKS = { max: 601, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
-export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'public-trackers'];
+export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'prelogin-user', 'public-trackers', 'ended-chunks'];
 
 export { shard as guardShardFor };

@@ -9,7 +9,7 @@ import { ORIGIN, owner, makeUser, fetchJson, proofHeaders, freshIp, intent, csrf
 import { encryptPaste, openPaste } from '../public/js/crypto.js';
 import { layout, buildManifest, importFileKey, encryptChunk, decryptChunk, readStreamChunk, validateManifest, CHUNK } from '../public/js/files.js';
 import { utf8, randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
-import { invalidateGuardCaches } from '../src/lib/guard.js';
+import { invalidateGuardCaches, ENDED_CHUNKS } from '../src/lib/guard.js';
 
 let oc;
 beforeAll(async () => { oc = await owner(); });
@@ -472,4 +472,51 @@ describe('C1: chunk fetches of a share that ended are never counted as invalid',
       invalidateGuardCaches();
     }
   }, 30000);
+
+  it('expired during a download (purged by its alarm): the recipient\'s correct grant gets 410, never a block', async () => {
+    expect((await settings({ 'guard.invalid.max': 3 })).status).toBe(200);
+    invalidateGuardCaches();
+    try {
+      const recipient = freshIp();
+      const live = await upload(oc, [{ path: 'other.txt', bytes: utf8('unrelated') }], { expire: '1d' });
+      const s = await upload(oc, [{ path: 'a.txt', bytes: utf8('expires mid-download') }], { expire: '1h' });
+      const { grant } = await (await openShare(s.id, s.fragment, '', recipient)).res.json();
+      expect((await getChunk(s.id, 0, grant, recipient)).status).toBe(200);
+      vi.useFakeTimers({ now: Date.now() + 2 * 3600 * 1000, toFake: ['Date'] });
+      await runDurableObjectAlarm(env.FILESHARE.get(env.FILESHARE.idFromName(s.id)));
+      expect(await env.FILES.get(`f/${s.id}/0`)).toBeNull();
+      for (let i = 0; i < 8; i++) {
+        const r = await getChunk(s.id, 0, grant, recipient);
+        expect(r.status, `#${i}`).toBe(410);
+        await r.arrayBuffer();
+      }
+      expect((await openShare(live.id, live.fragment, '', recipient)).res.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+      await settings({ 'guard.invalid.max': 60 });
+      invalidateGuardCaches();
+    }
+  }, 30000);
+
+  it('I-1: those uncounted 410s have a generous limit of their own ("ended-chunks"), never an invalid fetch', async () => {
+    const s = await upload(oc, [{ path: 'a.txt', bytes: utf8('revoked') }]);
+    expect((await fetchJson(`/api/private/shares/${s.id}/revoke`, { method: 'POST', cookie: oc, headers: intent })).status).toBe(200);
+    const live = await upload(oc, [{ path: 'b.txt', bytes: utf8('still live') }]);
+    const ip = freshIp();
+    for (let i = 0; i < ENDED_CHUNKS.max - 1; i++) {
+      const r = await getChunk(s.id, 0, b64urlFromBytes(randomBytes(32)), ip); // any well-formed grant
+      expect(r.status, `#${i + 1}`).toBe(410);
+      await r.arrayBuffer();
+    }
+    const over = await getChunk(s.id, 0, 'A'.repeat(43), ip);
+    expect([over.status, over.headers.get('retry-after')]).toEqual([429, String(ENDED_CHUNKS.blockSec)]);
+    expect((await over.json()).error).toBe('rate_limited');
+    // Not an invalid-fetch block: the network still opens live shares; the owner sees and lifts it.
+    expect((await openShare(live.id, live.fragment, '', ip)).res.status).toBe(200);
+    const blocks = (await (await fetchJson('/api/private/admin/guard', { cookie: oc })).json()).blocks;
+    expect(blocks.some((b) => b.scope === 'ended-chunks' && b.key === `${ip}/32`)).toBe(true);
+    expect(blocks.some((b) => b.scope === 'invalid' && b.key === `${ip}/32`)).toBe(false);
+    expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'ended-chunks', key: `${ip}/32` } })).status).toBe(200);
+    expect((await getChunk(s.id, 0, 'A'.repeat(43), ip)).status).toBe(410);
+  }, 180000);
 });

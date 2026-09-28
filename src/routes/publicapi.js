@@ -124,11 +124,12 @@ export async function handlePublicApi(request, env, url) {
       if (!t.ok) return { error: err(t.status, t.error, t.message) };
       if (t.fresh) {
         fresh = t.subject;
-        // Rotating IPv6 networks inside one /48 do not multiply the allowance.
+        // Rotating IPv6 networks inside one /48 do not multiply the allowance. Only
+        // looked at here: a new id counts towards its /48 once its create succeeded
+        // (below), so refused creates from one /64 never block the rest of the /48.
         const wide = wideNetwork(g);
-        if (wide) {
-          const rl = await rateLimit(env, { ...g, key: wide }, 'public-trackers', wideRule(settings));
-          if (!rl.ok) return { error: err(429, 'tracker_rate_limited', 'Too many new anonymous senders from your network. Try again later.') };
+        if (wide && (await isBlocked(env, { ...g, key: wide }, 'public-trackers')).blocked) {
+          return { error: err(429, 'tracker_rate_limited', 'Too many new anonymous senders from your network. Try again later.') };
         }
       }
       keys.push(t.subject);
@@ -166,8 +167,13 @@ export async function handlePublicApi(request, env, url) {
       return res;
     } finally {
       // A new id is stored only once it has created a share (C6): a refused
-      // create gives its row (and the network's allowance) back.
+      // create gives its row (and the network's allowance) back; a successful
+      // one counts towards its /48.
       if (fresh && !(res && res.status === 201)) await dir.dropNewTracker(fresh);
+      else if (fresh) {
+        const wide = wideNetwork(g);
+        if (wide) await rateLimit(env, { ...g, key: wide }, 'public-trackers', wideRule(settings));
+      }
     }
   }
   const fm = p.match(/^\/api\/public\/file\/([^/]+)\/(chunk|finalize)(?:\/(\d{1,6}))?$/);
@@ -200,6 +206,10 @@ function wideNetwork(g) {
   return trackingKey(g.ip, WIDE_V6_PREFIX);
 }
 const WIDE_V6_PREFIX = 48;
-/** A /48 may store WIDE_FACTOR times a network's allowance of new ids per window. */
+/**
+ * A /48 may store WIDE_FACTOR times a network's allowance of new ids per window:
+ * the count is made after each successful first create, and reaching it blocks
+ * the next ones.
+ */
 const WIDE_FACTOR = 16;
-const wideRule = (s) => ({ max: s['public.newTrackersPerIp'] * WIDE_FACTOR + 1, windowSec: s['public.newTrackersWindowSec'], blockSec: s['public.newTrackersWindowSec'] });
+const wideRule = (s) => ({ max: s['public.newTrackersPerIp'] * WIDE_FACTOR, windowSec: s['public.newTrackersWindowSec'], blockSec: s['public.newTrackersWindowSec'] });

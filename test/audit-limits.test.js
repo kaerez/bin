@@ -1,21 +1,25 @@
-// audit-limits.test.js — per-network limits from the security audit of main:
-//   C3  every Turnstile token that reaches siteverify (sign-in, account
-//       changes, anonymous creation) counts towards "turnstile-verify";
-//       beyond it `429 rate_limited` without a siteverify call, per network,
-//       liftable by the owner; a cross-site request is refused uncounted;
-//   C4  POST /api/auth/prelogin counts towards "prelogin" per network: the
-//       refusal is the same for every username, only prelogin is refused (the
-//       account still signs in, from that network too), and another site's
-//       requests are refused uncounted;
+// audit-limits.test.js — per-network limits from the security audit of main
+// (and its review, R1–R3):
+//   C3  tokens siteverify rejects (sign-in, account changes, anonymous
+//       creation) count towards "turnstile-verify"; once a network reached it,
+//       its tokens get `429 rate_limited` without a call, until the owner
+//       lifts it; accepted tokens are never counted; a missing token and a
+//       cross-site request are refused uncounted;
+//   C4  POST /api/auth/prelogin is limited per network ("prelogin") and per
+//       network and username ("prelogin-user", a keyed hash of the name): the
+//       refusal is the same for every username, passkeys and the sign-in
+//       routes never look at these scopes, and another site's requests are
+//       refused uncounted;
 //   C6  the anonymous tracker table: a refused create gives its new row (and
-//       the network's allowance) back, new ids are also counted per IPv6 /48,
-//       and a full table makes room from the least recently seen rows (never
-//       a blocked one) instead of refusing every new sender.
+//       the network's allowance) back and never counts towards the /48, new
+//       ids are counted per IPv6 /48 once they created a share, and a full
+//       table makes room from the least recently seen rows (never a blocked
+//       one) instead of refusing every new sender.
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { env, createExecutionContext, waitOnExecutionContext, runInDurableObject } from 'cloudflare:test';
 import worker from '../src/index.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
-import { TURNSTILE_VERIFY, PRELOGIN } from '../src/lib/guard.js';
+import { TURNSTILE_VERIFY, PRELOGIN, PRELOGIN_USER } from '../src/lib/guard.js';
 import { MAX_TRACKERS, TRACKER_EVICT } from '../src/directory-do.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { owner, makeUser, fetchJson, freshIp, proofFor, ORIGIN, USER_PW } from './helpers.js';
@@ -40,36 +44,61 @@ async function tsFetch(path, { body, ip, token, headers = {} } = {}) {
   return res;
 }
 
-describe('C3: siteverify is behind a per-network limit', () => {
+describe('C3 / R1: tokens siteverify rejects are limited per network; accepted ones never are', () => {
+  const HOST = new URL(ORIGIN).hostname;
   let calls = 0;
   let prev;
-  beforeAll(() => { prev = setSiteverify(async () => { calls++; return Response.json({ success: false, 'error-codes': ['invalid-input-response'] }); }); });
+  // "ok:<action>#n" passes for that action on this host (each token once); anything else is rejected.
+  beforeAll(() => {
+    const seen = new Set();
+    prev = setSiteverify(async (form) => {
+      calls++;
+      const t = form.get('response');
+      const m = /^ok:([^#]+)/.exec(t);
+      if (!m || seen.has(t)) return Response.json({ success: false, 'error-codes': ['invalid-input-response'] });
+      seen.add(t);
+      return Response.json({ success: true, hostname: HOST, action: m[1] });
+    });
+  });
   afterEach(() => { calls = 0; });
+  afterAll(() => setSiteverify(prev));
+  const login = (from, token, username = 'nobody-here', pw = 'x') => tsFetch('/api/auth/login', { ip: from, token, body: { username, proof: proofFor(pw) } });
 
-  it('junk tokens: at most TURNSTILE_VERIFY.max − 1 reach siteverify per network, then 429 without a call; another network is not affected; the owner lifts it', async () => {
+  it('rejected tokens: TURNSTILE_VERIFY.max reach siteverify, then 429 without a call; another network is not affected; the owner lifts it', async () => {
     const ip = freshIp();
-    const login = (from, token = 'junk-token') => tsFetch('/api/auth/login', { ip: from, token, body: { username: 'nobody-here', proof: proofFor('x') } });
-    for (let i = 0; i < TURNSTILE_VERIFY.max - 1; i++) {
-      const r = await login(ip);
+    for (let i = 0; i < TURNSTILE_VERIFY.max; i++) {
+      const r = await login(ip, 'junk-token');
       expect(r.status).toBe(403);
       expect((await r.json()).error).toBe('turnstile_failed');
     }
-    expect(calls).toBe(TURNSTILE_VERIFY.max - 1);
-    const over = await login(ip);
+    expect(calls).toBe(TURNSTILE_VERIFY.max);
+    const over = await login(ip, 'junk-token');
     expect([over.status, over.headers.get('retry-after')]).toEqual([429, String(TURNSTILE_VERIFY.blockSec)]);
     expect((await over.json()).error).toBe('rate_limited');
-    // The other routes behind the CAPTCHA share the scope (here the recovery-code sign-in).
-    const pub = await tsFetch('/api/auth/recovery', { ip, token: 'junk-token', body: { username: 'nobody-here', code: 'x' } });
-    expect(pub.status).toBe(429);
-    expect(calls).toBe(TURNSTILE_VERIFY.max - 1); // the refusals made no subrequest
+    // Once blocked, the other routes behind the CAPTCHA share the scope (here the recovery-code sign-in).
+    expect((await tsFetch('/api/auth/recovery', { ip, token: 'junk-token', body: { username: 'nobody-here', code: 'x' } })).status).toBe(429);
+    expect(calls).toBe(TURNSTILE_VERIFY.max); // the refusals made no subrequest
     // Another network still reaches siteverify.
-    expect((await login(freshIp())).status).toBe(403);
-    expect(calls).toBe(TURNSTILE_VERIFY.max);
+    expect((await login(freshIp(), 'junk-token')).status).toBe(403);
+    expect(calls).toBe(TURNSTILE_VERIFY.max + 1);
     // The owner sees the block and can lift it like the other scopes.
     expect((await guardBlocks()).some((b) => b.scope === 'turnstile-verify' && b.key === `${ip}/32`)).toBe(true);
     expect((await unblock('turnstile-verify', `${ip}/32`)).status).toBe(200);
-    expect((await login(ip)).status).toBe(403);
+    expect((await login(ip, 'junk-token')).status).toBe(403);
   }, 60000);
+
+  it('accepted tokens are never counted: a busy network signs in far more than TURNSTILE_VERIFY.max times', async () => {
+    await makeUser('ts-busy-nat');
+    const ip = freshIp();
+    for (let i = 0; i < TURNSTILE_VERIFY.max + 30; i++) {
+      const r = await login(ip, `ok:login#${ip}-${i}`, 'ts-busy-nat', USER_PW);
+      expect(r.status, `sign-in #${i + 1}`).toBe(200);
+    }
+    // Rejected tokens from that network are still counted from zero.
+    for (let i = 0; i < TURNSTILE_VERIFY.max; i++) expect((await login(ip, 'junk-token')).status).toBe(403);
+    expect((await login(ip, `ok:login#${ip}-last`, 'ts-busy-nat', USER_PW)).status).toBe(429);
+    expect((await unblock('turnstile-verify', `${ip}/32`)).status).toBe(200);
+  }, 120000);
 
   it('a missing token and a cross-site request are refused before anything is counted or sent', async () => {
     const ip = freshIp();
@@ -81,38 +110,59 @@ describe('C3: siteverify is behind a per-network limit', () => {
       expect((await cross.json()).error).toBe('cross_site');
     }
     expect(calls).toBe(0);
-    expect((await tsFetch('/api/auth/login', { ip, token: 'junk-token', body: { username: 'u', proof: proofFor('x') } })).status).toBe(403); // still within the limit
+    expect((await login(ip, 'junk-token')).status).toBe(403); // still within the limit
   }, 60000);
-
-  afterAll(() => setSiteverify(prev));
 });
 
-describe('C4: prelogin is behind a per-network limit that locks out no one', () => {
-  it('beyond PRELOGIN.max − 1 per window: 429 for any username, the account still signs in, the owner lifts it', async () => {
-    const u = await makeUser('prelogin-limit');
+describe('C4 / R2: prelogin is limited per network and per username, and says nothing about accounts', () => {
+  const pre = (username, ip, headers) => fetchJson('/api/auth/prelogin', { method: 'POST', ip, body: { username }, headers });
+
+  it('per username: PRELOGIN_USER.max − 1 per network, the same refusal for a real and a made-up name; other names, other networks, passkeys and direct sign-in unaffected; the owner lifts it', async () => {
+    await makeUser('prelogin-limit');
     const ip = freshIp();
-    const pre = (username, from = ip, headers) => fetchJson('/api/auth/prelogin', { method: 'POST', ip: from, body: { username }, headers });
     // Another site's requests are refused before they are counted.
-    for (let i = 0; i < 10; i++) expect((await pre('prelogin-limit', ip, { 'sec-fetch-site': 'cross-site' })).status).toBe(403);
-    const real = await (await pre('prelogin-limit')).json();
-    const fake = await (await pre('no-such-user-here')).json();
+    for (let i = 0; i < 30; i++) expect((await pre('prelogin-limit', ip, { 'sec-fetch-site': 'cross-site' })).status).toBe(403);
+    const real = await (await pre('prelogin-limit', ip)).json();
+    const fake = await (await pre('no-such-user-here', ip)).json();
     expect(Object.keys(fake).sort()).toEqual(Object.keys(real).sort()); // the fake salt, as before
-    for (let i = 2; i < PRELOGIN.max - 1; i++) expect((await pre(i % 2 ? 'prelogin-limit' : `nobody-${i}`)).status).toBe(200);
-    const a = await pre('prelogin-limit');
-    const b = await pre('no-such-user-here');
+    for (let i = 1; i < PRELOGIN_USER.max - 1; i++) {
+      expect((await pre('prelogin-limit', ip)).status).toBe(200);
+      expect((await pre('No-Such-User-Here', ip)).status).toBe(200); // the name is counted lowercased
+    }
+    const a = await pre('Prelogin-Limit', ip);
+    const b = await pre('no-such-user-here', ip);
     expect([a.status, b.status]).toEqual([429, 429]);
-    const [ja, jb] = [await a.json(), await b.json()];
-    expect(ja.error).toBe('rate_limited');
-    expect({ ...ja, until: 0 }).toEqual({ ...jb, until: 0 }); // says nothing about accounts
-    expect(a.headers.get('retry-after')).toBe(String(PRELOGIN.blockSec));
-    // Nobody is locked out: the account signs in, from this network too, and prelogin works elsewhere.
-    expect((await fetchJson('/api/auth/login', { method: 'POST', ip, body: { username: 'prelogin-limit', proof: proofFor(USER_PW) } })).status).toBe(200);
+    expect([a.headers.get('retry-after'), b.headers.get('retry-after')]).toEqual([String(PRELOGIN.blockSec), String(PRELOGIN.blockSec)]);
+    expect(await a.json()).toEqual(await b.json()); // identical: it says nothing about accounts
+    // Another username from this network, and this username from another network, still get their salt.
+    expect((await pre('someone-else', ip)).status).toBe(200);
     expect((await pre('prelogin-limit', freshIp())).status).toBe(200);
-    expect(u.id).toBeTruthy();
-    expect((await guardBlocks()).some((x) => x.scope === 'prelogin' && x.key === `${ip}/32`)).toBe(true);
-    expect((await unblock('prelogin', `${ip}/32`)).status).toBe(200);
-    expect((await pre('prelogin-limit')).status).toBe(200);
+    // Passkeys, recovery codes and the sign-in itself never look at these scopes.
+    expect((await fetchJson('/api/auth/passkey/options', { method: 'POST', ip, body: {} })).status).toBe(200);
+    expect((await fetchJson('/api/auth/login', { method: 'POST', ip, body: { username: 'prelogin-limit', proof: proofFor(USER_PW) } })).status).toBe(200);
+    // The owner sees the block (a keyed hash of the name, never the name) and lifts it.
+    const block = (await guardBlocks()).find((x) => x.scope === 'prelogin-user' && x.key.startsWith(`${ip}/32#`));
+    expect(block).toBeTruthy();
+    expect(block.key).toMatch(/#[0-9a-f]{16}$/);
+    expect(block.key).not.toContain('prelogin-limit');
+    expect((await unblock('prelogin-user', block.key)).status).toBe(200);
+    expect((await pre('prelogin-limit', ip)).status).toBe(200);
   }, 60000);
+
+  it('per network: PRELOGIN.max − 1 per window whatever the names, then 429 for every name; passkeys unaffected; the owner lifts it', async () => {
+    const ip = freshIp();
+    for (let i = 0; i < PRELOGIN.max - 1; i++) {
+      const r = await pre(`name-${i % 40}`, ip); // 15 per name, under the per-username limit
+      expect(r.status, `prelogin #${i + 1}`).toBe(200);
+      await r.arrayBuffer();
+    }
+    const over = await pre('a-fresh-name', ip);
+    expect([over.status, (await over.json()).error]).toEqual([429, 'rate_limited']);
+    expect((await fetchJson('/api/auth/passkey/options', { method: 'POST', ip, body: {} })).status).toBe(200);
+    expect((await pre('a-fresh-name', freshIp())).status).toBe(200);
+    expect((await unblock('prelogin', `${ip}/32`)).status).toBe(200);
+    expect((await pre('a-fresh-name', ip)).status).toBe(200);
+  }, 120000);
 });
 
 describe('C6: the anonymous tracker table cannot be filled', () => {
@@ -171,6 +221,24 @@ describe('C6: the anonymous tracker table cannot be filled', () => {
     expect((await note('2001:db8:4c6:99::7', await tracker('2001:db8:4c6:99::7'))).status).toBe(201);
     await settings({ 'public.newTrackersPerIp': 2 });
   }, 60000);
+
+  it('R3: refused creates from one /64 never count towards its /48: a neighbouring /64 still starts sharing', async () => {
+    await settings({ 'public.newTrackersPerIp': 1 });
+    try {
+      const attacker = '2001:db8:5a1:1::66';
+      for (let i = 0; i < 16 * 1 * 3; i++) { // three times the /48's allowance
+        const aid = await tracker(attacker);
+        const r = await fetchJson('/api/public/paste', { method: 'POST', ip: attacker, headers: { cookie: `__Host-secbin_aid=${aid}`, 'x-secbin-aid': aid }, body: { paste: { v: 2 } } });
+        expect(r.status, `refused create #${i + 1}`).toBe(400);
+      }
+      expect((await guardBlocks()).some((b) => b.scope === 'public-trackers' && b.key.startsWith('2001:db8:5a1:'))).toBe(false);
+      // The neighbour /64 in the same /48 starts sharing with a new browser, and so does the attacker's /64 (its allowance came back).
+      expect((await note('2001:db8:5a1:2::7', await tracker('2001:db8:5a1:2::7'))).status).toBe(201);
+      expect((await note(attacker, await tracker(attacker))).status).toBe(201);
+    } finally {
+      await settings({ 'public.newTrackersPerIp': 2 });
+    }
+  }, 120000);
 
   it('a full table makes room from the least recently seen rows (never a blocked one) instead of refusing', async () => {
     const ts = Math.floor(Date.now() / 1000);
