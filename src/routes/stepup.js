@@ -26,7 +26,17 @@ export async function stepUpFrom(body, url) {
   throw new HttpError(400, 'reauth_required', 'Confirm with your password or a passkey.');
 }
 
-const COUNTED = new Set(['wrong_password', 'reauth_failed', 'session_revoked']);
+/**
+ * The confirmation in `body` when there is one, else null: for changes that
+ * need it only sometimes (an admin change that weakens a security control),
+ * where the Directory decides and answers `reauth_required` when it is missing.
+ */
+export async function stepUpIfGiven(body, url) {
+  const given = body && ((body.current !== undefined && body.current !== null && body.current !== '') || body.reauth !== undefined);
+  return given ? stepUpFrom(body, url) : null;
+}
+
+const COUNTED =new Set(['wrong_password', 'reauth_failed', 'session_revoked']);
 
 /**
  * After a Directory refusal: failed confirmations also count against the

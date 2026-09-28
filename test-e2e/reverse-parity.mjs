@@ -120,16 +120,19 @@ try {
   await noExpSel.waitFor();
   check('admin: the Default role has "no expiry" off, with its default hint', (await noExpSel.inputValue()) === 'false'
     && /default: no/.test(await noExpSel.locator('xpath=..').textContent()));
-  const roleSet = await op.evaluate(async () => {
+  const roleSet = await op.evaluate(async (pw) => {
     const H = { 'content-type': 'application/json', 'x-secbin-intent': '1', 'x-secbin-csrf': (document.cookie.match(/__Host-secbin_csrf=([^;]+)/) || [])[1] || '' };
     const role = await (await fetch('/api/private/admin/roles', { method: 'POST', headers: H, body: JSON.stringify({ name: 'Receivers' }) })).json();
+    // No expiry and no CAPTCHA widen what the role's links may be: the owner's password confirms it.
+    const { stretch } = await import('/js/pwauth.js');
+    const { salt, t } = await (await fetch('/api/auth/prelogin', { method: 'POST', headers: H, body: JSON.stringify({ username: 'owner' }) })).json();
     const lim = await fetch('/api/private/admin/limits', { method: 'PATCH', headers: H, body: JSON.stringify({ scope: `role:${role.id}`, channel: 'all',
-      patch: { driveEnabled: true, reverseEnabled: true, reverseNoExpiry: true, reverseMaxViews: 10, reverseCaptcha: 'off' } }) });
+      patch: { driveEnabled: true, reverseEnabled: true, reverseNoExpiry: true, reverseMaxViews: 10, reverseCaptcha: 'off' }, current: await stretch(pw, salt, t) }) });
     const users = (await (await fetch('/api/private/admin/users')).json()).users;
     const alice = users.find((u) => u.username === 'alice');
     const set = await fetch(`/api/private/admin/users/${alice.id}/role`, { method: 'PUT', headers: H, body: JSON.stringify({ roleId: role.id }) });
     return lim.status === 200 && set.status === 200;
-  });
+  }, PW);
   check('admin: a role with Receive links, no expiry allowed, at most 10 views, given to alice', roleSet);
 
   // ── alice: a link with no expiry, a password and 2 views ──

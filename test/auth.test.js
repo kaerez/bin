@@ -15,6 +15,9 @@ afterEach(() => { vi.useRealTimers(); });
 /** Call the Worker with a modified env (e.g. a missing secret). */
 const callWith = (overrides, path, init = {}) => worker.fetch(new Request(`${ORIGIN}${path}`, init), { ...env, ...overrides }, { waitUntil() {} });
 
+// The owner's password after the recovery below: the step-up for changes that weaken a control.
+const RECOVERED_STEP = { current: proofFor('recovered-pass') };
+
 describe('setup and recovery', () => {
   it('the setup token is single-use; reuse is refused', async () => {
     const st = await (await fetchJson('/api/auth/setup')).json();
@@ -96,7 +99,7 @@ describe('login and sessions', () => {
     vi.useFakeTimers({ now: Date.now() + 601 * 1000, toFake: ['Date'] });
     expect((await fetchJson('/api/private/me', { cookie: c })).status).toBe(401);
     vi.useRealTimers();
-    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'session.idleSec': 43200, 'session.absSec': 604800 } });
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'session.idleSec': 43200, 'session.absSec': 604800, ...RECOVERED_STEP } });
   });
 
   it('/me reports the session deadlines; "Stay signed in" (a request) never moves the end past the absolute limit and needs a live session', async () => {
@@ -128,7 +131,7 @@ describe('login and sessions', () => {
     vi.useRealTimers();
     // Without a session, nothing to extend.
     expect((await fetchJson('/api/private/me')).status).toBe(401);
-    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'session.idleSec': 43200, 'session.absSec': 604800 } });
+    await fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie: oc, body: { 'session.idleSec': 43200, 'session.absSec': 604800, ...RECOVERED_STEP } });
   });
 
   it('logout revokes the session server-side', async () => {
@@ -196,7 +199,7 @@ describe('API keys', () => {
   it('need admin permission, authenticate creation only, and die when API access is revoked', async () => {
     const u = await makeUser('api-user');
     expect((await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'cli' } })).status).toBe(403);
-    await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { apiEnabled: true, apiMaxKeys: 1 } } });
+    await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: u.id, channel: 'all', patch: { apiEnabled: true, apiMaxKeys: 1 }, ...RECOVERED_STEP } });
     const k = await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { current: proofFor(USER_PW), name: 'cli' } });
     expect(k.status).toBe(201);
     const { key } = await k.json();
