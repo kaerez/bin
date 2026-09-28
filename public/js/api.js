@@ -37,7 +37,7 @@ export const humanGrantOf = (id) => humanGrants.get(id) ?? null;
 export const setHumanGrantListener = (fn) => { onHumanGrant = typeof fn === 'function' ? fn : () => {}; };
 const humanHeaders = (id) => (humanGrants.has(id) ? { 'x-secbin-human': humanGrants.get(id) } : {});
 function renewedHuman(id, res) {
-  const g = res.headers.get('x-secbin-human');
+  const g = res.headers && typeof res.headers.get === 'function' ? res.headers.get('x-secbin-human') : null;
   if (id && g && /^h1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(g)) { humanGrants.set(id, g); onHumanGrant(id, g); }
 }
 

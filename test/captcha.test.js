@@ -31,6 +31,9 @@ const HOST = new URL(ORIGIN).hostname;
 const PUBLIC_ID = 'public-user-0000';
 const MSG = 'This share requires a CAPTCHA; open it in a browser.';
 
+// Some tests create dozens of shares (every create path, every kind): more time than the default 5 s.
+vi.setConfig({ testTimeout: 60000 });
+
 let oc;
 let restoreSiteverify;
 beforeAll(async () => {

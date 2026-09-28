@@ -48,7 +48,8 @@ export async function mountCheck(root, deps = {}) {
   }
   const nonce = stashedNonce({ kind: route.page, id: route.id, storage });
   const box = h('div.turnstile', { id: 'check-widget', hidden: true });
-  const go = h('button.cta', { type: 'button', id: 'check-continue', text: 'Continue', disabled: true });
+  // Not created disabled: the gate (humanCheck) keeps it disabled until the CAPTCHA has passed.
+  const go = h('button.cta', { type: 'button', id: 'check-continue', text: 'Continue' });
   const msg = h('p.msg.error', { id: 'check-msg', role: 'alert', hidden: true });
   clear(root).append(h('div.card.stack', { id: 'check-page' },
     h('p.eyebrow', { text: 'CAPTCHA' }),
