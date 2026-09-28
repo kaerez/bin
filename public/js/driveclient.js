@@ -756,23 +756,28 @@ export class DriveClient {
   /**
    * Change reverse share `id` (PATCH /api/private/shares/<id>, docs/REVERSE.md
    * §6.1): the plain values as given (label, expires — a time or null for
-   * none —, views, maxFiles, maxBytes, maxFileBytes, types, captcha) and,
-   * sealed here with the link's key (which this session's KEK opens), the
-   * note (`note`: its text, '' to remove it) and the uploader password
-   * (`password`: the new one; `removePassword: true` to remove it). The server
-   * never sees the password or the note. → the server's answer.
+   * none —, views, maxFiles, maxBytes, maxFileBytes, types, captcha, and the
+   * step-up `current` / `reauth` a weakening change needs) and, sealed here
+   * with the link's key (which this session's KEK opens), the note (`note`:
+   * its text, '' to remove it) and the uploader password (`password`: the new
+   * one; `null` or `removePassword: true` to remove it). Neither is sent in
+   * clear; like uploads to the link they are not end-to-end (the server holds
+   * the keys that open the link's key). Refuses an empty change (it never
+   * reports success for nothing). → the server's answer.
    */
-  async updateReverse(id, { note, password = '', removePassword = false, ...plain } = {}) {
+  async updateReverse(id, { note, password, removePassword = false, ...plain } = {}) {
     const body = { ...plain };
-    if (note !== undefined || password) {
+    const newPassword = typeof password === 'string' && password !== '' ? password : null;
+    if (note !== undefined || newPassword) {
       const r = await api.reverse();
       const x = (Array.isArray(r.reverse) ? r.reverse : []).find((y) => y.id === id);
       const k = x ? await this.#linkKey(x.id, x.mek, x.priv) : null;
       if (!k) throw new Error('This link’s key does not open here, so its note and password cannot be changed now.');
       if (note !== undefined) body.note = note ? await sealNote(k.pub, id, note) : null;
-      if (password) body.password = await passwordGate(password, k.pub);
+      if (newPassword) body.password = await passwordGate(newPassword, k.pub);
     }
-    if (removePassword && !password) body.password = null;
+    if (!newPassword && (removePassword || password === null)) body.password = null;
+    if (!Object.keys(body).some((k) => k !== 'current' && k !== 'reauth')) throw new Error('Nothing to change.');
     return updateShare(id, body);
   }
 

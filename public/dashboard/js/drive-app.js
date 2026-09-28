@@ -27,7 +27,7 @@ import { normalizeRules } from '../../js/filepolicy.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { captchaBox } from '../../js/captcha.js';
-import { SESSION_CHANGED_EVENT } from '../../js/api.js';
+import { SESSION_CHANGED_EVENT, updateShare } from '../../js/api.js';
 import { reverseViews, reversePasswordChoice, reverseEditForm, saveReverseEdit } from './reverse-edit.js';
 
 export { reverseViews, reversePasswordChoice };
@@ -1096,7 +1096,7 @@ function mountApp(mount, client, deps) {
     const cap = captchaBox({ id: 'drive-rev-captcha', profile: deps.profile, which: 'reverse' });
     const form = h('div.drive-reverse-form', { id: 'drive-rev-form' },
       h('div.label-row', {}, h('label.field-label', { for: 'drive-rev-label', text: 'Label (optional, for your own reference)' }), labelIn, hint),
-      field('Note to the people who upload (optional; encrypted, only link holders can read it)', noteIn),
+      field('Note to the people who upload (optional; encrypted to the link — like the Drive, not end-to-end)', noteIn),
       h('div.drive-reverse-grid', {},
         h('div.opt', { role: 'group', 'aria-labelledby': 'drive-rev-expire-l' }, h('label.opt-label', { id: 'drive-rev-expire-l', for: 'drive-rev-expire', text: 'Accept files for' }), expN, expU),
         h('div.opt', { role: 'group', 'aria-labelledby': 'drive-rev-views-l' }, h('label.opt-label', { id: 'drive-rev-views-l', for: 'drive-rev-views', text: 'Views' }), viewsIn, viewsInf),
@@ -1193,10 +1193,11 @@ function mountApp(mount, client, deps) {
    * are sealed here with the link's key (driveclient.js updateReverse).
    */
   function editReverse(d, s, { onSaved = null } = {}) {
-    const form = reverseEditForm(s, deps.profile);
+    const acting = !!(deps.user?.impersonating || deps.profile?.impersonatedBy);
+    const form = reverseEditForm(s, deps.profile, { impersonating: acting, confirm: deps.confirm || null });
     d.clearError();
     d.setTitle(`Edit ${s.label ? `“${s.label}”` : 'this upload link'}`);
-    d.subEl.textContent = 'The password and the note are encrypted in this browser with the link’s key; the server never sees them. Files already received stay in your Drive.';
+    d.subEl.textContent = 'The password and the note are encrypted in this browser with the link’s key: they are not sent in plain text, but like uploads to this link they are not end-to-end (the server holds the keys that open the link’s key). Files already received stay in your Drive.';
     d.subEl.hidden = false;
     d.setBody(form.el);
     const save = primary('Save changes', async () => {
@@ -1204,15 +1205,25 @@ function mountApp(mount, client, deps) {
       const o = form.read();
       if (o.error) { d.error(o.error, o.field ? form.field(o.field) : null); return; }
       save.disabled = true;
+      // A change that weakens the link: the account password or a passkey first.
+      let step;
       try {
-        await saveReverseEdit(s.id, o.patch, { updateShare: (id, body) => client.updateReverse(id, body), driveClient: async () => client });
+        step = await form.stepUp(o.patch);
+      } catch (e) {
+        save.disabled = false;
+        d.error(e && e.code ? friendlyError(e) : (e && e.message) || 'Enter your account password.', form.field('confirm'));
+        return;
+      }
+      try {
+        await saveReverseEdit(s.id, { ...o.patch, ...step }, { updateShare, driveClient: async () => client });
         form.clearSecrets();
         toast('Upload link updated.');
         d.close();
         if (onSaved) onSaved();
       } catch (e) {
         save.disabled = false;
-        d.error(friendlyError(e));
+        const confirmFailed = e && ['wrong_password', 'reauth_failed', 'reauth_required', 'invalid_credential'].includes(e.code);
+        d.error(confirmFailed ? 'That did not confirm it is you — enter your account password again.' : friendlyError(e), confirmFailed ? form.field('confirm') : null);
       }
     });
     d.setActions(btn('Cancel', () => d.close(), 'modal-btn'), save);

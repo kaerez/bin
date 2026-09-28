@@ -148,6 +148,8 @@ const NOT_ARCHIVED_KEY = 'rs NOT IN (SELECT id FROM reverse WHERE agen IS NOT NU
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqualHex(a, b);
+/** The reverse columns updateReverse may change (and restoreReverse put back). */
+const REVERSE_EDITABLE = ['expires', 'views', 'ph', 'salt', 't', 'note', 'captcha', 'opts'];
 /** A reverse share's views left (null: unlimited). */
 const viewsLeft = (r) => (r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)));
 /** The smaller of two byte limits (null: none). */
@@ -1174,7 +1176,7 @@ export class Drive extends DurableObject {
     if (!r) return { status: 'gone' };
     const st = this.#reverseState(r);
     // Paused (the owner started over) is not ended: the link resumes when the archive is restored.
-    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0 };
+    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0 };
     if (st === 'paused') return { status: 'ok', paused: true, files: r.files, bytes: r.bytes, expires: r.expires, ...v };
     return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires, ...v } : { status: 'gone', state: st, files: r.files, bytes: r.bytes, ...v };
   }
@@ -1250,9 +1252,19 @@ export class Drive extends DurableObject {
     }
     // Column names come only from the fixed keys above; every value is bound.
     const cols = Object.keys(set);
+    // What they held (restoreReverse puts it back when the share index refuses the change).
+    const prev = Object.fromEntries(cols.map((c) => [c, r[c] ?? null]));
     if (cols.length) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => set[c]), id);
     const n = this.#reverse(id);
-    return { status: 'ok', expires: n.expires, views: n.views ?? null, used: n.used ?? 0, left: viewsLeft(n), captcha: n.captcha !== 0, password: !!n.ph };
+    return { status: 'ok', expires: n.expires, views: n.views ?? null, used: n.used ?? 0, left: viewsLeft(n), captcha: n.captcha !== 0, password: !!n.ph, prev };
+  }
+
+  /** Undo an updateReverse (`prev`, as it returned it): only the columns it can change. */
+  async restoreReverse(uid, id, prev = {}) {
+    this.#bind(uid);
+    const cols = Object.keys(prev).filter((c) => REVERSE_EDITABLE.includes(c));
+    if (cols.length && this.#reverse(id)) this.sql.exec(`UPDATE reverse SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => prev[c]), id);
+    return { ok: true };
   }
 
   /**

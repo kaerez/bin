@@ -473,7 +473,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - **Edit in My shares** (`PATCH /api/private/shares/:id`): the expiry (extended, made none, or
     given one), the views (raised, or lowered never below those used), the limits and file
     types, the CAPTCHA, and the password and the note (both sealed in the browser with the
-    link's key: the server never sees them). The owner can change a link's views and expiry in
+    link's key and not sent in plain text; like the uploads, not end-to-end). A change that
+    weakens a link (its password removed or changed, the CAPTCHA off, no expiry, unlimited
+    views) needs the account password or a passkey, as creating one does, and API keys cannot
+    make it (`403 step_up_required`); tightening works everywhere. The same Edit is in the Drive's
+    Receive… and Shares dialogs. The owner can change a link's views and expiry in
     Admin → Shares. The Drive's Receive… dialog offers "No expiry", views and the role's password
     mode. Links made before keep working: no views limit, their expiry and their password.
 

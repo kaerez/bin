@@ -34,7 +34,7 @@ Each key has **scopes** — give it only what it needs:
 | `files` | `POST /api/private/file`, `PUT …/chunk/:i`, `POST …/finalize` — file shares |
 | `policy` | `GET /api/private/policy` — what your client must check before creating (link rules) |
 | `read` | `GET /api/private/shares`, `GET /api/private/shares/:id`, `GET /api/private/shares/:id/opens` — your shares and their read receipts |
-| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry; a Receive link's other details too), `POST /api/private/shares/:id/revoke` |
+| `manage` | `PATCH /api/private/shares/:id` (label, views, expiry; a Receive link's other details too, except the changes that weaken it: below), `POST /api/private/shares/:id/revoke` |
 
 A key created without a choice of scopes gets `notes`, `files` and `policy` (creation only):
 `read` and `manage` must be chosen explicitly. Scopes can be changed later (Account → API keys →
@@ -563,8 +563,18 @@ Admin → Roles apply on top):
 | `views` | the new total of views (a view: one upload session granted), or `null`: unlimited. It may be raised or lowered, never below the views already used (`400`, with `used`) |
 | `maxFiles`, `maxBytes`, `maxFileBytes`, `types` | the limits, as on create (`maxBytes` at most `reverseMaxBytes`; `null` is that limit, or none) |
 | `captcha` | `true` / `false`, within `reverseCaptcha` (`403 captcha_required_by_role` / `captcha_disabled`) |
-| `password` | `{ salt, t, ph }` made in the browser from the link's key (docs/REVERSE.md §3), or `null`: none — within `reversePassword`. The server never sees the password |
-| `note` | `{ iv, ct }` sealed in the browser with the link's key, or `null`: none |
+| `password` | `{ salt, t, ph }` made in the browser from the link's key (docs/REVERSE.md §3), or `null`: none — within `reversePassword`. The password is not sent; the server, which holds the keys that open the link's key, can test guesses at it |
+| `note` | `{ iv, ct }` sealed in the browser with the link's key, or `null`: none. Not end-to-end: the server can open it, as it can the link's uploads |
+| `current` / `reauth` | the confirmation a weakening change needs (below) |
+
+A change that **weakens** a link — its password removed or changed, its CAPTCHA turned off, no
+expiry, unlimited views — needs what creating one needs: the password proof (`current`) or a
+passkey (`reauth`) in the same body (`400 reauth_required`, `403 wrong_password` /
+`reauth_failed`, counted as failed confirmations), and is refused for an API key even with
+`manage` (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing.
+Tightening needs no confirmation and works with an API key: adding a password to a link with
+none, turning the CAPTCHA on, an expiry (extended within the role, or given to a link with none),
+fewer views or more within the role's limit, tighter file limits, the label.
 
 → `{ ok, expires, views, left, used }` (`expires` `null`: none). A revoked or ended link can only
 be relabelled (`409 not_active`); a locked one not at all (`423`). The owner changing another

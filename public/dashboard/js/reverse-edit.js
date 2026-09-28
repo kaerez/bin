@@ -7,13 +7,19 @@
 //
 // The password and the note are sealed in this browser with the link's key
 // (driveclient.js updateReverse), which the Drive's keys open: the Drive
-// client is loaded only when one of them changes. The server never sees the
-// password or the note. DOM through h() only (strict CSP, Trusted Types).
+// client is loaded only when one of them changes. Neither is sent in clear,
+// but like the uploads to the link they are not end-to-end: the server holds
+// the keys that open the link's key. A change that weakens the link (its
+// password removed or changed, the CAPTCHA off, no expiry, unlimited views)
+// asks for the account password or a passkey, as making a link does (not
+// while the owner acts as the user). DOM through h() only (strict CSP,
+// Trusted Types).
 
 import { h, formatBytes, formatCoarse, DURATION_UNITS, unitSeconds } from '../../js/common.js';
 import { MAX_VIEWS, MAX_TTL } from '../../js/format.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { captchaChoice } from '../../js/captcha.js';
+import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 
 const MiB = 1024 * 1024;
 const MAX_FILES = 10000;
@@ -99,7 +105,8 @@ export function reverseEditPatch(v, cur, L = {}, now = Math.floor(Date.now() / 1
   const maxBytes = mbToBytes(v.maxMb);
   if (maxBytes === undefined) return { error: 'The total size must be a number of MB, or empty.', field: 'bytes' };
   if (roleMax !== null && maxBytes !== null && maxBytes > roleMax) return { error: `Your account allows at most ${formatBytes(roleMax)} per link.`, field: 'bytes' };
-  if ((maxBytes ?? roleMax) !== (cur.maxBytes ?? null)) patch.maxBytes = maxBytes;
+  // Both sides as they apply: "none" is the role's limit, when it has one.
+  if ((maxBytes ?? roleMax) !== (cur.maxBytes ?? roleMax)) patch.maxBytes = maxBytes;
   const fileBytes = mbToBytes(v.fileMb);
   if (fileBytes === undefined) return { error: 'The file size must be a number of MB, or empty.', field: 'file' };
   if (fileBytes !== (cur.maxFileBytes ?? null)) patch.maxFileBytes = fileBytes;
@@ -130,6 +137,20 @@ export function reverseEditPatch(v, cur, L = {}, now = Math.floor(Date.now() / 1
   return { patch };
 }
 
+/**
+ * Whether `patch` (from reverseEditPatch) weakens link `cur`: its password
+ * removed or changed, its CAPTCHA turned off, no expiry, unlimited views.
+ * Such a change needs the account password or a passkey (the server decides:
+ * src/routes/reverse.js weakening).
+ */
+export function weakensLink(patch, cur) {
+  if (!patch) return false;
+  return (patch.expires === null && cur.expires !== null)
+    || (patch.views === null && cur.views !== null && cur.views !== undefined)
+    || ((typeof patch.password === 'string' || patch.removePassword === true) && !!cur.password)
+    || (patch.captcha === false && !!cur.captcha);
+}
+
 /** A radio group in a fieldset: choices [[value, text, hidden?]] → { el, value(), radios }. */
 function choiceGroup(legend, name, choices, current) {
   const shown = choices.filter((c) => !c[2]);
@@ -142,11 +163,13 @@ function choiceGroup(legend, name, choices, current) {
 /**
  * The Edit form for reverse share `cur` (the Drive's row, as GET
  * /api/private/drive/reverse lists it): → { el, focus(), read() → the
- * reverseEditPatch result }. `profile`: /api/private/me (its limits and the
- * CAPTCHA's state). Every control has a visible label; the error line is an
- * alert, the note under each group says what it does.
+ * reverseEditPatch result, stepUp(patch) → the confirmation to send }.
+ * `profile`: /api/private/me (its limits and the CAPTCHA's state; the owner
+ * acting as the user confirms nothing). `confirm(input)`: a stand-in for
+ * confirm.js confirmStep (tests). Every control has a visible label; the
+ * error line is an alert, the note under each group says what it does.
  */
-export function reverseEditForm(cur, profile) {
+export function reverseEditForm(cur, profile, { confirm = null, passkey = null, impersonating: acting = null } = {}) {
   const n = ++seq;
   const id = (x) => `rev-edit-${n}-${x}`;
   const L = (profile && profile.limits) || {};
@@ -209,7 +232,7 @@ export function reverseEditForm(cur, profile) {
   for (const r of password.radios) r.addEventListener('change', () => { pwBox.hidden = password.value() !== 'change'; });
   const pwEl = password.radios.length > 1 ? password.el : null;
   // The note.
-  const note = choiceGroup(`Note to the people who upload — ${cur.note ? 'it has one now' : 'it has none now'} (encrypted: only link holders can read it)`, id('note-mode'), [
+  const note = choiceGroup(`Note to the people who upload — ${cur.note ? 'it has one now' : 'it has none now'} (encrypted to the link; like the Drive, not end-to-end)`, id('note-mode'), [
     ['keep', cur.note ? 'Keep it' : 'Keep it without one'],
     ['change', cur.note ? 'Replace it' : 'Add one'],
     ['remove', 'Remove it', !cur.note],
@@ -218,6 +241,15 @@ export function reverseEditForm(cur, profile) {
   const noteBox = h('div', { hidden: true }, labelled('The new note', noteIn));
   for (const r of note.radios) r.addEventListener('change', () => { noteBox.hidden = note.value() !== 'change'; });
 
+  // "Confirm it's you": shown only while the change weakens the link (and never while the owner acts as the user).
+  const impersonating = acting ?? !!(profile && (profile.impersonatedBy || profile.user?.impersonating));
+  const confirmIn = h('input.input', { id: id('confirm'), type: 'password', autocomplete: 'current-password', maxlength: '1024', spellcheck: 'false', 'aria-describedby': id('confirm-hint') });
+  const confirmText = h('label.field-label', { for: id('confirm'), text: 'Your account password (to confirm it is you)' });
+  let withPasskey = passkey === true;
+  if (!impersonating && passkey === null) canUsePasskey().then((ok) => { withPasskey = !!ok; confirmText.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
+  const confirmBox = h('div.dfield', { hidden: true }, confirmText, confirmIn,
+    h('p.type-hint', { id: id('confirm-hint'), text: 'This change removes a protection of the link (its password, its CAPTCHA, its expiry or its views limit), so it needs your password or a passkey, as making a link does.' }));
+
   const el = h('div.rev-edit.stack', {},
     expiry.el, expBox,
     h('div.toolbar', {}, viewsBox), viewsHint,
@@ -225,21 +257,35 @@ export function reverseEditForm(cur, profile) {
     labelled('File types', typeMode), typeBox,
     capBox,
     pwEl, pwBox,
-    note.el, noteBox);
-  const fields = { expire: expN, views: viewsIn.disabled ? inf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules, pw: pw1, pw2, note: noteIn };
+    note.el, noteBox,
+    confirmBox);
+  const fields = { expire: expN, views: viewsIn.disabled ? inf : viewsIn, files, bytes: maxMb, file: fileMb, types: typeRules, pw: pw1, pw2, note: noteIn, confirm: confirmIn };
+  const read = () => reverseEditPatch({
+    expiry: expiry.value(), n: expN.value, unit: expU.value,
+    views: viewsIn.value, unlimited: inf.getAttribute('aria-pressed') === 'true',
+    maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value,
+    captcha: capBox ? capIn.checked : undefined,
+    password: password.value(), pw1: pw1.value, pw2: pw2.value,
+    note: note.value(), noteText: noteIn.value,
+  }, cur, L);
+  const needsStepUp = (patch) => !impersonating && weakensLink(patch, cur);
+  const sync = () => { confirmBox.hidden = !needsStepUp(read().patch); };
+  el.addEventListener('change', sync);
+  el.addEventListener('input', (e) => { if (e.target !== confirmIn) sync(); });
+  el.addEventListener('click', (e) => { if (e.target === inf) sync(); });
   return {
     el,
     focus: () => expiry.radios[0].focus(),
     field: (k) => (k === 'views' ? (viewsIn.disabled ? inf : viewsIn) : fields[k] || null),
-    read: () => reverseEditPatch({
-      expiry: expiry.value(), n: expN.value, unit: expU.value,
-      views: viewsIn.value, unlimited: inf.getAttribute('aria-pressed') === 'true',
-      maxFiles: files.value, maxMb: maxMb.value, fileMb: fileMb.value, typeMode: typeMode.value, typeRules: typeRules.value,
-      captcha: capBox ? capIn.checked : undefined,
-      password: password.value(), pw1: pw1.value, pw2: pw2.value,
-      note: note.value(), noteText: noteIn.value,
-    }, cur, L),
-    clearSecrets: () => { pw1.value = pw2.value = ''; },
+    read,
+    needsStepUp,
+    /** The confirmation `patch` needs: {} when it weakens nothing, else { current } or { reauth } (throws with a reason). */
+    stepUp: async (patch) => {
+      if (!needsStepUp(patch)) return {};
+      confirmBox.hidden = false;
+      return (confirm || ((input) => confirmStep(input, profile?.user?.username, withPasskey)))(confirmIn);
+    },
+    clearSecrets: () => { pw1.value = pw2.value = confirmIn.value = ''; },
   };
 }
 

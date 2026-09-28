@@ -1400,12 +1400,22 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   row (label, times, status, counters) is kept while it is active and 30 days after it ended,
   and the link's key, limits and counters in the user's Drive are kept as long as the link
   exists (as for every link: until 30 days after it ended, once its received files are taken
-  in or deleted); nothing expires them on its own.
+  in or deleted); nothing expires them on its own. Turning `reverseNoExpiry` off later does not
+  end or bound the links that already have no expiry: they keep taking files until they are
+  revoked; the owner finds them with the Expiry filter ("no expiry") of Admin → Shares.
 - **Changing a link.** Where `reverseEdit` allows it, the user changes a link's expiry (as
   regular shares, only extended — or made indefinite, or given an expiry when it had none),
   views, limits, CAPTCHA (within `reverseCaptcha`), password (within `reversePassword`) and
-  note. The password and the note are made in the user's browser from the link's key: the
-  server never sees either. Changing the password keeps the link's lockout state and its
+  note. The password and the note are made in the user's browser from the link's key: neither
+  is sent in plain text, but like the uploads to the link they are not end-to-end (the server
+  holds the keys that open the link's key, so it can read the note and test guesses at the
+  password; a copy of the Drive object alone cannot). A change that weakens the link — its
+  password removed or changed, its CAPTCHA turned off, no expiry, unlimited views — needs the
+  account password or a passkey, as creating a link does (a stolen session alone cannot turn a
+  link into an open, lasting upload channel), and is refused for API keys even with `manage`
+  (`403 step_up_required`); the owner acting as the user confirms nothing. Tightening a link
+  (a password added where it had none, the CAPTCHA on, an expiry, fewer views, tighter limits)
+  and the label need no confirmation, through the API too. Changing the password keeps the link's lockout state and its
   sessions already started. The owner changing a link directly (Admin → Shares) may change its
   views and expiry only (a link with no expiry only where the user's role allows it); the
   password, the note, the limits and the CAPTCHA are the user's. Changes are refused on revoked,

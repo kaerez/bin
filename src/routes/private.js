@@ -489,7 +489,7 @@ async function updateShare(request, env, a, id, info) {
   const row = await dir.getShare(a.user.id, id);
   if (!row) return err(404, 'not_found', 'Share not found.');
   if (row.locked) return shareLocked();
-  return changeShare(env, dir, row, info, body, { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId });
+  return changeShare(env, dir, row, info, body, { uid: a.user.id, actor: actorId(a), channel: a.channel, keyId: a.keyId, request, impersonating: !!a.actor });
 }
 
 const shareLocked = () => err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
@@ -500,9 +500,9 @@ const shareLocked = () => err(423, 'share_locked', 'The administrator has locked
  * is bounded only by the hard protocol maxima and may change locked shares.
  * Views and expiry can only grow — the stores cannot shrink them safely.
  */
-export async function changeShare(env, dir, row, info, body, { uid, actor, admin = null, channel = 'all', keyId = null }) {
+export async function changeShare(env, dir, row, info, body, { uid, actor, admin = null, channel = 'all', keyId = null, request = null, impersonating = false }) {
   // A reverse share has more to change (its limits, CAPTCHA, password and note): src/routes/reverse.js.
-  if (info.reverse) return changeReverse(env, dir, row, body, { uid, actor, admin, channel, keyId });
+  if (info.reverse) return changeReverse(env, dir, row, body, { uid, actor, admin, channel, keyId, request, impersonating });
   const id = row.id;
   const patch = {};
   if (body.label !== undefined) patch.label = body.label;

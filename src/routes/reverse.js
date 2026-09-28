@@ -302,7 +302,7 @@ const now = () => Math.floor(Date.now() / 1000);
  * the note. The owner changing another user's link directly (`admin`) may
  * change the label, expiry and views only.
  */
-export async function changeReverse(env, dir, row, body, { uid, actor, admin = null, channel = 'all', keyId = null }) {
+export async function changeReverse(env, dir, row, body, { uid, actor, admin = null, channel = 'all', keyId = null, request = null, impersonating = false }) {
   const id = row.id;
   const change = {}; // the values as the role checks them
   const set = {}; // what the Drive stores
@@ -363,11 +363,38 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
   if (ok.maxBytes !== undefined) set.opts.maxBytes = ok.maxBytes; // "none" is the role's limit, when it has one
   const patch = {};
   if (change.label !== undefined) patch.label = change.label;
+  const owner = row.user_id ?? uid;
+  const drive = driveStub(env, owner);
   let r = null;
   if (detail) {
-    // The lock again, right before the Drive changes (the admin may have locked it since `row` was read).
+    // The lock first, before anything is checked or written (the admin may have locked it since `row` was read).
     if (!admin && await dir.isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
-    r = await driveStub(env, row.user_id ?? uid).updateReverse(row.user_id ?? uid, id, set);
+    // A change that weakens the link's protection — removing or changing its
+    // password, turning its CAPTCHA off, no expiry, unlimited views — needs
+    // what creating one needs: the user's password or a passkey (a stolen
+    // session alone cannot turn a link into an open, lasting upload channel).
+    // Never through an API key; the owner acting as the user, or changing it
+    // directly, confirms nothing, as for every other change to the account.
+    if (!admin) {
+      const cur = await drive.reverseStatus(owner, id);
+      if (cur.status !== 'ok') {
+        await dir.markShareEnded(id, 'ended');
+        return err(410, 'gone', 'This share no longer exists.');
+      }
+      const weak = weakening(change, cur);
+      if (weak.length) {
+        if (channel === 'api') {
+          return err(403, 'step_up_required', 'Removing or changing an upload link’s password, turning its CAPTCHA off, removing its expiry or its views limit needs your password or a passkey in the browser; an API key cannot do it.', { weakens: weak });
+        }
+        if (!impersonating) {
+          const g = await ipContext(env, request);
+          const step = await stepUpFrom(body, new URL(request.url));
+          const v = await dir.verifyCurrent(uid, step.current, { ...step, lockoutOff: g.off.all });
+          if (!v.ok) return afterRefusal(env, g, v, fromDo(v));
+        }
+      }
+    }
+    r = await drive.updateReverse(owner, id, set);
     if (r.status === 'invalid') return err(400, 'invalid', r.message, r.used !== undefined ? { used: r.used } : undefined);
     if (r.status !== 'ok') {
       await dir.markShareEnded(id, 'ended');
@@ -384,8 +411,27 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
     ];
   }
   const u = await dir.updateShare(uid, id, patch, actor, { admin, keyId });
-  if (!u.ok) return fromDo(u);
+  if (!u.ok) {
+    // The index refused (locked in the meantime): the Drive goes back to what it held, so the two never differ.
+    if (r && r.prev) await drive.restoreReverse(owner, id, r.prev);
+    return fromDo(u);
+  }
   return json(r ? { ok: true, expires: apiExpiry(r.expires), views: r.views, left: r.left, used: r.used } : { ok: true });
+}
+
+/**
+ * Which parts of `change` weaken reverse share `cur` (its state in the Drive:
+ * expires, views, password, captcha) → a list of names (empty: none). Adding
+ * a password where there is none, turning the CAPTCHA on, an expiry, fewer
+ * views or tighter limits never weaken it.
+ */
+export function weakening(change, cur) {
+  const out = [];
+  if (change.expires === null && !(cur.expires >= NO_EXPIRY)) out.push('expires');
+  if (change.views === null && cur.views !== null && cur.views !== undefined) out.push('views');
+  if (change.password !== undefined && cur.password) out.push('password');
+  if (change.captcha === false && cur.captcha) out.push('captcha');
+  return out;
 }
 
 // ── the uploader (anonymous) ─────────────────────────────────────────────────
@@ -459,6 +505,11 @@ export async function handleReversePublic(request, env, url) {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
+    // A link whose views are used up (or that ended in its Drive) takes no
+    // session: no CAPTCHA is checked and no grant is issued for it. Without a
+    // link proof here, the 410 counts in the Guard as for any ended link.
+    const o = await drive.reverseOpen(uid, id);
+    if ((o.status !== 'ok' && o.status !== 'paused') || o.usedUp) return failed(env, g, err(410, 'gone', GONE));
     if (!captcha) return json({ grant: null, expires: null });
     await verifyCaptcha(env, g, request, TURNSTILE_ACTIONS.reverse);
     const r = await issueGrant(env, { kind: 'r', id, net: await netTag(env, g.key) });

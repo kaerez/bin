@@ -7,7 +7,7 @@
 // Synthetic data only.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startDrive, reverseOptions } from '../public/dashboard/js/drive-app.js';
-import { reverseViews, reversePasswordChoice, reverseEditPatch, reverseEditForm, saveReverseEdit } from '../public/dashboard/js/reverse-edit.js';
+import { reverseViews, reversePasswordChoice, reverseEditPatch, reverseEditForm, saveReverseEdit, weakensLink } from '../public/dashboard/js/reverse-edit.js';
 import * as drive from '../public/js/driveclient.js';
 import { setReverseStretcher, createReverseKey, newReverseId, openNote, passwordProof } from '../public/js/reversekeys.js';
 import { clearSessionKey, clearImpersonationKeys, sealLinkKey } from '../public/js/drivekeys.js';
@@ -224,7 +224,14 @@ describe('Drive: Edit a link from its lists', () => {
     await until(() => dialog().querySelector('.rev-edit'));
     expect(dialog().querySelector('.modal-title').textContent).toBe('Edit “inbox”');
     const groups = dialog().querySelectorAll('fieldset.rev-edit-group');
+    const confirmBox = dialog().querySelector('input[id$="-confirm"]').closest('.dfield');
+    expect(confirmBox.hidden).toBe(true); // nothing weakens the link yet
     groups[0].querySelectorAll('input')[2].click(); // No expiry
+    groups[0].querySelectorAll('input')[2].dispatchEvent(new Event('change', { bubbles: true }));
+    // No expiry weakens it: the account password is asked for.
+    expect(confirmBox.hidden).toBe(false);
+    expect(dialog().querySelector(`label[for="${dialog().querySelector('input[id$="-confirm"]').id}"]`).textContent).toMatch(/Your account password/);
+    dialog().querySelector('input[id$="-confirm"]').value = 'my account pw';
     groups[2].querySelectorAll('input')[1].click(); // the note: Add one
     groups[2].querySelectorAll('input')[1].dispatchEvent(new Event('change'));
     dialog().querySelector('textarea[id$="-note"]').value = 'drop the scans here';
@@ -232,10 +239,57 @@ describe('Drive: Edit a link from its lists', () => {
     button(dialog(), 'Save changes').click();
     await until(() => S.patches?.length);
     const sent = S.patches.at(-1);
-    expect(sent).toMatchObject({ id, body: { expires: null, views: 1 } });
+    expect(sent).toMatchObject({ id, body: { expires: null, views: 1, current: 'proof:my account pw' } });
     expect(JSON.stringify(sent.body)).not.toContain('drop the scans');
     expect(await openNote(pub, id, sent.body.note)).toBe('drop the scans here');
     await until(() => !dialog());
+  });
+
+  it('"Remove it" (the password) is sent, with the confirmation; a tightening change asks for none (audit L1)', async () => {
+    const { id } = await seeded(profileWith({}));
+    S.reverse[0].password = { salt: 'x', t: 3, ph: 'y' };
+    const openEdit = async () => {
+      $('#drive-receive').click();
+      await until(() => $('#drive-rev-table'));
+      button($('#drive-rev-table tbody tr'), 'Edit').click();
+      await until(() => dialog().querySelector('.rev-edit'));
+    };
+    await openEdit();
+    const pwGroup = [...dialog().querySelectorAll('fieldset.rev-edit-group')].find((f) => /Uploader password/.test(f.querySelector('legend').textContent));
+    const remove = [...pwGroup.querySelectorAll('input')].find((x) => x.closest('label').textContent === 'Remove it');
+    remove.click();
+    remove.dispatchEvent(new Event('change', { bubbles: true }));
+    dialog().querySelector('input[id$="-confirm"]').value = 'acct';
+    button(dialog(), 'Save changes').click();
+    await until(() => S.patches?.length);
+    expect(S.patches.at(-1)).toEqual({ id, body: { password: null, current: 'proof:acct' } });
+    await until(() => !dialog());
+    // With more views too: both are sent (the removal is never dropped).
+    S.reverse[0].password = { salt: 'x', t: 3, ph: 'y' };
+    await openEdit();
+    const pw2 = [...dialog().querySelectorAll('fieldset.rev-edit-group')].find((f) => /Uploader password/.test(f.querySelector('legend').textContent));
+    [...pw2.querySelectorAll('input')].find((x) => x.closest('label').textContent === 'Remove it').click();
+    dialog().querySelector('input[id$="-views"]').value = '3';
+    button(dialog(), 'Save changes').click();
+    await until(() => S.patches.length === 2);
+    expect(S.patches.at(-1).body).toMatchObject({ password: null, views: 3 });
+    await until(() => !dialog());
+    // Raising the views only: tightening nothing away, no confirmation asked or sent.
+    await openEdit();
+    dialog().querySelector('input[id$="-views"]').value = '4';
+    dialog().querySelector('input[id$="-views"]').dispatchEvent(new Event('input', { bubbles: true }));
+    expect(dialog().querySelector('input[id$="-confirm"]').closest('.dfield').hidden).toBe(true);
+    button(dialog(), 'Save changes').click();
+    await until(() => S.patches.length === 3);
+    expect(S.patches.at(-1).body).toEqual({ views: 4 });
+  });
+
+  it('the Drive client refuses an empty change instead of reporting success', async () => {
+    await server();
+    const c = await drive.openDrive({ user: S.user });
+    await expect(c.updateReverse('rX', {})).rejects.toThrow(/Nothing to change/);
+    await expect(c.updateReverse('rX', { current: 'p' })).rejects.toThrow(/Nothing to change/);
+    expect(S.patches ?? []).toHaveLength(0);
   });
 
   it('a folder\'s Shares: its links with "No expiry", views and Edit; no Edit where the role does not allow it', async () => {
@@ -332,6 +386,36 @@ describe('the Edit form of a Receive link', () => {
     mount(reverseEditForm({ ...cur, password: false }, { limits: { reversePassword: 'off' } }));
     expect(document.querySelectorAll('fieldset.rev-edit-group')).toHaveLength(2);
     expect(f && g).toBeTruthy();
+  });
+
+  it('asks for the account password only when a change weakens the link; never while the owner acts as the user', async () => {
+    const link = { ...cur, views: 5, used: 1, captcha: true, password: true };
+    // weakensLink: the password removed or changed, the CAPTCHA off, no expiry, unlimited views.
+    for (const p of [{ expires: null }, { views: null }, { password: 'x' }, { removePassword: true }, { captcha: false }]) expect(weakensLink(p, link), JSON.stringify(p)).toBe(true);
+    for (const p of [{ views: 2 }, { views: 9 }, { expires: now() + 99 }, { captcha: true }, { maxFiles: 1 }, { note: 'n' }]) expect(weakensLink(p, link), JSON.stringify(p)).toBe(false);
+    expect(weakensLink({ password: 'x' }, { ...link, password: false })).toBe(false); // adding one tightens
+    expect(weakensLink({ views: null }, { ...link, views: null })).toBe(false);
+    const seen = [];
+    const f = mount(reverseEditForm(link, { limits: { reverseNoExpiry: true }, user: { username: 'u' } }, { confirm: async (input) => { seen.push(input.value); return { current: 'proof' }; }, passkey: false }));
+    const box = document.querySelector('input[id$="-confirm"]').closest('.dfield');
+    expect(box.hidden).toBe(true);
+    const capBox = document.querySelector('input[type="checkbox"][id$="-captcha"]');
+    capBox.click(); // CAPTCHA off
+    capBox.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(box.hidden).toBe(false);
+    document.querySelector('input[id$="-confirm"]').value = 'typed';
+    const o = f.read();
+    expect(o.patch).toEqual({ captcha: false });
+    expect(await f.stepUp(o.patch)).toEqual({ current: 'proof' });
+    expect(seen).toEqual(['typed']);
+    capBox.click(); // back on: nothing weakens it
+    capBox.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(box.hidden).toBe(true);
+    expect(await f.stepUp({ views: 9 })).toEqual({});
+    // The owner acting as the user: never asked.
+    const g = mount(reverseEditForm(link, { limits: {}, impersonatedBy: 'owner' }, { confirm: async () => { throw new Error('asked'); }, passkey: false }));
+    expect(await g.stepUp({ captcha: false })).toEqual({});
+    expect(document.querySelector('input[id$="-confirm"]').closest('.dfield').hidden).toBe(true);
   });
 
   it('a link with no expiry: "Give it an expiry"; the form reads what changed', () => {

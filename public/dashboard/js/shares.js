@@ -142,22 +142,35 @@ async function openReverseEdit(r, tr) {
       return;
     }
     save.disabled = true;
+    // A change that weakens the link: the account password or a passkey first.
+    let step;
     try {
-      await saveReverseEdit(r.id, o.patch, { updateShare, driveClient });
+      step = await form.stepUp(o.patch);
+    } catch (e) {
+      save.disabled = false;
+      showMsg(msg, e && e.code ? friendlyError(e) : (e && e.message) || 'Enter your account password.');
+      form.field('confirm').focus();
+      return;
+    }
+    try {
+      await saveReverseEdit(r.id, { ...o.patch, ...step }, { updateShare, driveClient });
       form.clearSecrets();
       toast('Upload link updated.');
       reload(`share:${r.id}:extend`);
     } catch (e) {
       save.disabled = false;
-      showMsg(msg, friendlyError(e));
-      toast(friendlyError(e), { error: true });
+      const confirmFailed = e && ['wrong_password', 'reauth_failed', 'reauth_required', 'invalid_credential'].includes(e.code);
+      const text = confirmFailed ? 'That did not confirm it is you — enter your account password again.' : friendlyError(e);
+      showMsg(msg, text);
+      toast(text, { error: true });
+      if (confirmFailed) form.field('confirm').focus();
     }
   };
   const cancel = h('button.btn', { type: 'button', text: 'Cancel', on: { click: () => { row.remove(); tr.querySelector('[data-focus-key$=":extend"]')?.focus(); } } });
   cell.firstChild.replaceChildren(
     h('h2.field-label', { text: `Edit ${r.label ? `“${r.label}”` : 'this upload link'}` }),
     form.el,
-    h('p.mono.muted', { text: 'The password and the note are encrypted in this browser with the link’s key; the server never sees them. Files already received stay in your Drive.' }),
+    h('p.mono.muted', { text: 'The password and the note are encrypted in this browser with the link’s key: they are not sent in plain text, but like uploads to this link they are not end-to-end (the server holds the keys that open the link’s key). Files already received stay in your Drive.' }),
     h('div.btn-row', {}, save, cancel), msg);
   form.focus();
 }

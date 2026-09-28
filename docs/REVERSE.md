@@ -29,9 +29,11 @@ Status: the contract reverse shares are built against (task #24). It builds on t
 - Visible: the reverse share's id, folder id, label, limits, times, status, counters (files and
   bytes received), each received file's ciphertext size and chunk count, the uploader's network
   address (as for every request, for the Guard), and whether a password is set.
-- Never visible: file contents, names, types, folder structure of an upload, the note to the
-  uploader, the link key (the public key, only in the URL fragment), the password, the reverse
-  share's private key, any file key.
+- Never sent in plain text: file contents, names, types, folder structure of an upload, the note
+  to the uploader, the link key (the public key, only in the URL fragment), the password, the
+  reverse share's private key, any file key. The server can still open them (all but the
+  password itself, which it can only test guesses against): the link's private key is sealed
+  under the user's KEK, which the server derives (§1, §3).
 
 ## 3. Keys (client side only)
 
@@ -63,7 +65,8 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   does not help to find ids.
 - **Note to the uploader** (optional, ≤ 1000 characters): AES-256-GCM under
   `HKDF(pub, "", "secbin-reverse/v1 note")`, AAD `secbin-reverse/v1\nnote\n<id>\n`, stored as
-  `{ iv, ct }`. Only link holders can read it.
+  `{ iv, ct }`. Link holders can read it, and so can the server (it can unseal the link's key):
+  like the Drive, it is not end-to-end.
 - **Password** (optional; added, changed or removed later from the user's browser, which
   rebuilds `pub` from the link's private key): the user's browser picks a 16-byte `salt` and Argon2id cost `t`
   (default 3, 64 MiB, p = 1, as notes). `proof = HKDF(ikm = Argon2id(NFC(password), salt, t),
@@ -235,7 +238,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 | `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
 | `DELETE /api/private/drive/nodes/<nodeId>` | discard a received file (as any Drive item) |
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares) |
-| `PATCH /api/private/shares/<id>` | change it (My shares' Edit; a session, or an API key with `manage`): `{ label?, expires? (a time, or null: none), views? (null: unlimited), maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, password? ({ salt, t, ph } or null), note? ({ iv, ct } or null) }` → `{ ok, expires, views, left, used }`. Everything but the label needs `reverseEdit` (`403 reverse_edit_disabled`) and an active link (`409 not_active`), and each value its own option (§5). **Expiry** follows the rule of regular shares — it can only be extended (`400`) — except that any link may be made indefinite (`reverseNoExpiry`) and one with no expiry may be given one. **Views** may be raised or lowered, never below the views already used (`400`, with `used`). The password and the note are made in the user's browser from the link's key (§3), which the session's KEK opens; the server never sees either. The index and the Drive change together; the index holds the CAPTCHA the uploader's `begin` checks. The owner changing a user's link directly (Admin → Shares) may change its label, expiry and views only (`403 user_only`), and a link with no expiry only where the user's role allows it. The target folder of a link does not change |
+| `PATCH /api/private/shares/<id>` | change it (My shares' Edit; a session, or an API key with `manage`): `{ label?, expires? (a time, or null: none), views? (null: unlimited), maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, password? ({ salt, t, ph } or null), note? ({ iv, ct } or null) }` → `{ ok, expires, views, left, used }`. Everything but the label needs `reverseEdit` (`403 reverse_edit_disabled`) and an active link (`409 not_active`), and each value its own option (§5). **Expiry** follows the rule of regular shares — it can only be extended (`400`) — except that any link may be made indefinite (`reverseNoExpiry`) and one with no expiry may be given one. **Views** may be raised or lowered, never below the views already used (`400`, with `used`). The password and the note are made in the user's browser from the link's key (§3), which the session's KEK opens: neither is sent in plain text, but the server, which holds the keys that open the link's key, can read the note and test guesses at the password (not end-to-end, like the uploads). A change that **weakens** the link — its password removed or changed (not added where it had none), its CAPTCHA turned off, no expiry, unlimited views — needs the password proof (`current`) or a passkey (`reauth`), as creating a link does (`400 reauth_required`, `403 wrong_password` / `reauth_failed`), and is refused for API keys (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing. Tightening needs no confirmation. The lock is checked before anything is written; the Drive is changed first and put back if the index then refuses (a lock in between), so the two never differ. The index and the Drive change together; the index holds the CAPTCHA the uploader's `begin` checks. The owner changing a user's link directly (Admin → Shares) may change its label, expiry and views only (`403 user_only`), and a link with no expiry only where the user's role allows it. The target folder of a link does not change |
 
 A row: `{ id, folder, label, created, expires (null: none), status, locked, priv, password: bool, note: bool,
 captcha: bool, views (null: unlimited), used, left, maxFiles, maxBytes, maxFileBytes, types, files, bytes, pending }` (`status` as the share index
@@ -257,7 +260,7 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 | Method and path | Headers | Purpose |
 |---|---|---|
 | `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires (null: none), captcha, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` (`captcha`: the link has the CAPTCHA and the server has Turnstile keys). Not a view; `410` once the views are used up. The views are not shown to the uploader |
-| `POST …/human` | `X-Secbin-Turnstile` (action `reverse-upload`) | a CAPTCHA grant for this link: `{ grant, expires }` (10 minutes, bound to the uploader's network; `{ grant: null }` when the link needs none). Needs no link proof and looks nothing else up |
+| `POST …/human` | `X-Secbin-Turnstile` (action `reverse-upload`) | a CAPTCHA grant for this link: `{ grant, expires }` (10 minutes, bound to the uploader's network; `{ grant: null }` when the link needs none). Needs no link proof. A link whose views are used up (or that ended) answers `410` before any CAPTCHA check, and gets no grant |
 | `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Human` (a grant) or `X-Secbin-Turnstile` (a token), when the link has the CAPTCHA | a session: `{ grant, expires }` — one view (§5): with its views used up, `410` before the CAPTCHA and the password are looked at. The CAPTCHA comes before the password: without it no guess is answered (`403 captcha_required`). A grant starts one session, whatever the answer (a wrong password spends it too). The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
 | `POST …/files` | `X-Reverse-Grant`; JSON `{ id, name, meta, size, wrap, types? }` | reserve one file → `201 { id, uploadToken, chunks }` (limits, capacity) |
 | `PUT …/files/<nodeId>/chunk/<i>` | `X-Upload-Token`; `application/octet-stream` | chunk `i`, exact size |
@@ -348,7 +351,10 @@ many files arrive.
   none —, or none), the views (raise, lower to the views used, or unlimited), the limits and
   file types, the CAPTCHA, the password (keep, change or add, remove) and the note (keep,
   replace or add, remove), each as the role allows. The password and the note are sealed in the
-  browser, which opens the Drive's keys for it only when one of them changes. The same **Edit**
+  browser, which opens the Drive's keys for it only when one of them changes. While the changes
+  weaken the link (the password removed or changed, the CAPTCHA off, no expiry, unlimited views)
+  the form shows "Your account password (to confirm it is you)" (or a passkey), as the Receive…
+  dialog does; never while the owner acts as the user. The same **Edit**
   is in the Drive, on each link of the Receive… dialog's list and of a folder's Shares dialog (the
   dialog shows the form; saving closes it). Admin → Shares changes a Receive link's views and
   expiry (or none) only.

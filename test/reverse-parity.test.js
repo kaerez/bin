@@ -8,9 +8,12 @@
 // views, limits, CAPTCHA, password, note) on the session and API paths and
 // by the owner directly, and migration 17 from the Directory the release
 // before left. Synthetic data only.
-import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
-import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW } from './helpers.js';
+import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW, cookieOf, ORIGIN } from './helpers.js';
+import worker from '../src/index.js';
+import { setSiteverify } from '../src/lib/turnstile.js';
+import { changeReverse } from '../src/routes/reverse.js';
 import { driveLimits } from './drive-helpers.js';
 import { PUBLIC_ID, SCHEMA_VERSION } from '../src/directory-do.js';
 import { NO_EXPIRY, LIMITS, UNLIMITED, API_LIMIT_KEYS } from '../src/lib/settings.js';
@@ -26,6 +29,8 @@ beforeAll(async () => { oc = await owner(); });
 afterEach(() => vi.useRealTimers());
 
 const nowSec = () => Math.floor(Date.now() / 1000);
+// The step-up a change that weakens a link needs (the user's password proof, as on create).
+const CONFIRM = { current: proofFor(USER_PW) };
 const patch = (cookie, id, body, headers = {}) => fetchJson(`/api/private/shares/${id}`, { method: 'PATCH', cookie, body, headers });
 const myRow = async (cookie, id, qs = '') => (await (await fetchJson(`/api/private/shares${qs}`, { cookie })).json()).rows.find((x) => x.id === id);
 const listed = async (cookie, id) => (await (await fetchJson('/api/private/drive/reverse', { cookie })).json()).reverse.find((x) => x.id === id);
@@ -177,7 +182,7 @@ describe('links with no expiry', () => {
     expect((await res.json()).message).toMatch(/only be extended/);
     expect((await patch(u.cookie, r.id, { expires: at + 3600 })).status).toBe(200);
     // …or made indefinite again.
-    res = await patch(u.cookie, r.id, { expires: null });
+    res = await patch(u.cookie, r.id, { expires: null, ...CONFIRM });
     expect(res.status).toBe(200);
     expect((await res.json()).expires).toBeNull();
     expect((await indexRow(r.id)).expires).toBe(NO_EXPIRY);
@@ -191,7 +196,7 @@ describe('links with no expiry', () => {
     expect((await (await fetchJson(`/api/private/shares/${r.id}`, { cookie: u.cookie })).json()).share.expires).not.toBeNull();
     // The activity log names the change without the sentinel.
     await driveLimits(u.id, { reverseNoExpiry: true });
-    await patch(u.cookie, r.id, { expires: null });
+    await patch(u.cookie, r.id, { expires: null, ...CONFIRM });
     expect((await audit(u.id)).some((e) => e.action === 'share.updated' && e.detail.includes('expires=none'))).toBe(true);
   });
 });
@@ -216,7 +221,7 @@ describe('views (a view: one upload session granted)', () => {
     expect(await errorOf((await newReverse(u.cookie, { views: null })).res)).toBe('unlimited_views_disabled');
     expect(await errorOf(await patch(u.cookie, r.id, { views: null }))).toBe('unlimited_views_disabled');
     await driveLimits(u.id, { reverseAllowUnlimitedViews: true, reverseMaxViews: null });
-    expect((await patch(u.cookie, r.id, { views: null })).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { views: null, ...CONFIRM })).status).toBe(200);
     expect(await listed(u.cookie, r.id)).toMatchObject({ views: null, left: null });
   });
 
@@ -332,11 +337,11 @@ describe('the uploader password after creation', () => {
     expect((await begin(r, { ip })).status).toBe(401);
     expect((await begin(r, { ip, password: 'first secret' })).status).toBe(200);
     // Change.
-    expect((await patch(u.cookie, r.id, { password: await passwordGate('second secret', r.pub) })).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { password: await passwordGate('second secret', r.pub), ...CONFIRM })).status).toBe(200);
     expect((await begin(r, { ip, password: 'first secret' })).status).toBe(403);
     expect((await begin(r, { ip, password: 'second secret' })).status).toBe(200);
     // Remove.
-    expect((await patch(u.cookie, r.id, { password: null })).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { password: null, ...CONFIRM })).status).toBe(200);
     expect((await listed(u.cookie, r.id)).password).toBe(false);
     expect((await (await openLink(r, ip)).json()).password).toBeNull();
     expect((await begin(r, { ip })).status).toBe(200);
@@ -357,12 +362,12 @@ describe('the uploader password after creation', () => {
     const r = await newReverse(u.cookie, { password: 'needed' });
     expect(r.res.status).toBe(201);
     expect(await errorOf(await patch(u.cookie, r.id, { password: null }))).toBe('password_required_by_role');
-    expect((await patch(u.cookie, r.id, { password: await passwordGate('another', r.pub) })).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { password: await passwordGate('another', r.pub), ...CONFIRM })).status).toBe(200);
     await driveLimits(u.id, { reversePassword: 'off' });
     expect(await errorOf((await newReverse(u.cookie, { password: 'not allowed' })).res)).toBe('password_disabled');
     expect(await errorOf(await patch(u.cookie, r.id, { password: await passwordGate('third', r.pub) }))).toBe('password_disabled');
     // Removing one is always possible under "off".
-    expect((await patch(u.cookie, r.id, { password: null })).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { password: null, ...CONFIRM })).status).toBe(200);
     expect((await newReverse(u.cookie)).res.status).toBe(201);
   });
 });
@@ -403,7 +408,7 @@ describe('changing a link after creation', () => {
     await driveLimits(u.id, { reverseCaptcha: 'require' });
     expect(await errorOf(await patch(u.cookie, r.id, { captcha: false }))).toBe('captcha_required_by_role');
     await driveLimits(u.id, { reverseCaptcha: 'off' });
-    expect((await patch(u.cookie, r.id, { captcha: false })).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { captcha: false, ...CONFIRM })).status).toBe(200);
     expect((await indexRow(r.id)).captcha).toBe(0);
     expect(await errorOf(await patch(u.cookie, r.id, { captcha: true }))).toBe('captcha_disabled');
     // The label, as for every share.
@@ -476,7 +481,7 @@ describe('changing a link after creation', () => {
     expect(await errorOf(await api(manage, { expires: nowSec() + 2 * 86400 }))).toBe('expiry_too_long');
     // The session is not held to the API's limits.
     expect((await patch(u.cookie, r.id, { views: 6 })).status).toBe(200);
-    expect((await patch(u.cookie, r.id, { expires: null })).status).toBe(200);
+    expect((await patch(u.cookie, r.id, { expires: null, ...CONFIRM })).status).toBe(200);
     expect((await limits(u.id, { reverseEdit: false }, 'api')).status).toBe(200);
     expect(await errorOf(await api(manage, { views: 5 }))).toBe('reverse_edit_disabled');
     // A password made from the link's key works through the API too; the change names the key.
@@ -485,6 +490,131 @@ describe('changing a link after creation', () => {
     expect(res.status).toBe(200);
     expect((await begin(r, { ip: freshIp(), password: 'api secret' })).status).toBe(200);
     expect((await audit(u.id)).some((e) => e.action === 'share.updated' && e.detail.includes('password=set') && e.detail.includes('apikey='))).toBe(true);
+  });
+});
+
+describe('weakening a link needs the step-up; tightening does not (audit of #74: L2, L3, I1, I2)', () => {
+  const mkKey = async (u, scopes) => (await (await fetchJson('/api/private/me/keys', { method: 'POST', cookie: u.cookie, body: { name: scopes.join('-'), scopes, current: proofFor(USER_PW) } })).json()).key;
+  const WEAK = (r) => [
+    ['no expiry', { expires: null }],
+    ['unlimited views', { views: null }],
+    ['the password changed', async () => ({ password: await passwordGate('another gate', r.pub) })],
+    ['the password removed', { password: null }],
+    ['the CAPTCHA off', { captcha: false }],
+  ];
+  const bodyOf = async (b) => (typeof b === 'function' ? b() : b);
+
+  it('a stolen session (no password, no passkey) is refused each weakening change; the password proof lets it through; nothing changes before', async () => {
+    const u = await receiver('rp-weak-session', { reverseNoExpiry: true, reverseCaptcha: 'allow' });
+    const r = await newReverse(u.cookie, { views: 2, password: 'first gate', captcha: true });
+    for (const [what, b] of WEAK(r)) {
+      const before = await driveRow(u.id, r.id);
+      const body = await bodyOf(b);
+      const res = await patch(u.cookie, r.id, body);
+      expect(res.status, what).toBe(400);
+      expect(await errorOf(res), what).toBe('reauth_required');
+      // A wrong password: refused, counted as a failed confirmation.
+      const wrong = await patch(u.cookie, r.id, { ...body, current: proofFor('not-the-password') });
+      expect(wrong.status, what).toBe(403);
+      expect(await errorOf(wrong), what).toBe('wrong_password');
+      const after = await driveRow(u.id, r.id);
+      expect([after.expires, after.views, after.ph, after.captcha], what).toEqual([before.expires, before.views, before.ph, before.captcha]);
+      expect((await indexRow(r.id)).captcha, what).toBe(before.captcha);
+    }
+    for (const [what, b] of WEAK(r)) expect((await patch(u.cookie, r.id, { ...(await bodyOf(b)), ...CONFIRM })).status, what).toBe(200);
+    const d = await driveRow(u.id, r.id);
+    expect([d.expires, d.views, d.ph, d.captcha]).toEqual([NO_EXPIRY, null, null, 0]);
+    expect((await indexRow(r.id)).captcha).toBe(0);
+    // A change that weakens nothing (already so) needs no confirmation.
+    expect((await patch(u.cookie, r.id, { expires: null, views: null, password: null, captcha: false, label: 'same' })).status).toBe(200);
+  });
+
+  it('tightening needs no confirmation: a password where there was none, the CAPTCHA on, an expiry, fewer views, tighter limits, the label', async () => {
+    const u = await receiver('rp-tighten', { reverseNoExpiry: true, reverseCaptcha: 'allow' });
+    const r = await newReverse(u.cookie, { expire: 'never', captcha: false });
+    for (const body of [{ password: await passwordGate('gate', r.pub) }, { captcha: true }, { expires: nowSec() + 86400 }, { views: 3 }, { views: 2 }, { maxFiles: 1, maxFileBytes: 10 }, { label: 'tight' }, { expires: nowSec() + 2 * 86400 }]) {
+      const res = await patch(u.cookie, r.id, body);
+      expect(res.status, JSON.stringify(Object.keys(body))).toBe(200);
+    }
+    expect(await driveRow(u.id, r.id)).toMatchObject({ captcha: 1, views: 2 });
+  });
+
+  it('an API key cannot weaken a link, even with the password proof; it can tighten it', async () => {
+    const u = await receiver('rp-weak-api', { apiEnabled: true, reverseNoExpiry: true, reverseCaptcha: 'allow' });
+    const key = await mkKey(u, ['manage', 'read']);
+    const api = (id, body) => fetchJson(`/api/private/shares/${id}`, { method: 'PATCH', body, headers: { authorization: `Bearer ${key}` } });
+    const r = await newReverse(u.cookie, { views: 2, password: 'api gate', captcha: true });
+    for (const [what, b] of WEAK(r)) {
+      const res = await api(r.id, { ...(await bodyOf(b)), ...CONFIRM });
+      expect(res.status, what).toBe(403);
+      const e = await res.json();
+      expect(e.error, what).toBe('step_up_required');
+      expect(e.weakens.length, what).toBe(1);
+    }
+    expect(await driveRow(u.id, r.id)).toMatchObject({ views: 2, captcha: 1 });
+    expect((await driveRow(u.id, r.id)).ph).toBeTruthy();
+    // Tightening through the API.
+    const open = await newReverse(u.cookie, { captcha: false });
+    for (const body of [{ password: await passwordGate('added', open.pub) }, { captcha: true }, { views: 5 }, { views: 1 }, { maxFiles: 2 }, { expires: nowSec() + 8 * 86400 }, { label: 'via api' }]) {
+      expect((await api(open.id, body)).status, JSON.stringify(Object.keys(body))).toBe(200);
+    }
+    expect(await driveRow(u.id, open.id)).toMatchObject({ captcha: 1, views: 1 });
+    expect((await driveRow(u.id, open.id)).ph).toBeTruthy();
+  });
+
+  it('the owner acting as the user confirms nothing, as for every other change to the account', async () => {
+    const u = await receiver('rp-weak-imp', { reverseNoExpiry: true, reverseCaptcha: 'allow' });
+    const r = await newReverse(u.cookie, { views: 2, password: 'imp gate', captcha: true });
+    const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
+    for (const [what, b] of WEAK(r)) expect((await patch(ic, r.id, await bodyOf(b))).status, what).toBe(200);
+    expect(await driveRow(u.id, r.id)).toMatchObject({ expires: NO_EXPIRY, views: null, ph: null, captcha: 0 });
+  });
+
+  it('…/human on a used-up link: 410 before any CAPTCHA check, no grant', async () => {
+    const u = await receiver('rp-human', { reverseCaptcha: 'require' });
+    const r = await newReverse(u.cookie, { views: 1 });
+    let calls = 0;
+    const restore = setSiteverify(async () => { calls += 1; return Response.json({ success: true, hostname: new URL(ORIGIN).hostname, action: 'reverse-upload' }); });
+    const TS = { ...env, TURNSTILE_SITEKEY: '0x4AAAAAAAtestsitekey', TURNSTILE_SECRET: '0x4AAAAAAAtestsecretvalue' };
+    const human = async () => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(`${ORIGIN}/api/reverse/${r.id}/human`, { method: 'POST', headers: { ...intent, 'x-secbin-turnstile': `ok#${Math.random()}`, 'cf-connecting-ip': freshIp() } }), TS, ctx);
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+    try {
+      const first = await human();
+      expect(first.status).toBe(200);
+      expect((await first.json()).grant).toBeTruthy();
+      expect(calls).toBe(1);
+      // Its one view used (the default role without Turnstile keys here: no CAPTCHA asked).
+      await runInDurableObject(driveOf(u.id), (i, s) => s.storage.sql.exec('UPDATE reverse SET used = views WHERE id = ?', r.id));
+      const res = await human();
+      expect(res.status).toBe(410);
+      expect(await res.json()).not.toHaveProperty('grant');
+      expect(calls).toBe(1); // no siteverify
+    } finally {
+      setSiteverify(restore);
+    }
+  });
+
+  it('a lock between the Drive and the index writes puts the Drive back: the two never differ', async () => {
+    const u = await receiver('rp-race', { reverseCaptcha: 'allow' });
+    const r = await newReverse(u.cookie, { views: 2, captcha: true });
+    const before = await driveRow(u.id, r.id);
+    const row = await dirStub().getShare(u.id, r.id);
+    // The Directory as the Worker sees it, but its index write refused (locked in between).
+    const real = dirStub();
+    const dir = new Proxy({}, { get: (t, k) => (k === 'updateShare' ? async () => ({ ok: false, status: 423, error: 'share_locked', message: 'locked' }) : (...a) => real[k](...a)) });
+    const res = await changeReverse(env, dir, row, { views: 5, maxFiles: 3, captcha: true }, { uid: u.id, actor: u.id });
+    expect(res.status).toBe(423);
+    const after = await driveRow(u.id, r.id);
+    expect([after.views, after.opts, after.captcha]).toEqual([before.views, before.opts, before.captcha]);
+    // A lock seen first: nothing is written at all.
+    expect((await fetchJson(`/api/private/admin/shares/${r.id}/lock`, { method: 'POST', cookie: oc, body: { locked: true } })).status).toBe(200);
+    const locked = await changeReverse(env, real, { ...row, locked: 0 }, { views: 7 }, { uid: u.id, actor: u.id });
+    expect(locked.status).toBe(423);
+    expect((await driveRow(u.id, r.id)).views).toBe(2);
   });
 });
 

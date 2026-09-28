@@ -178,7 +178,16 @@ try {
   await edit.locator('input[id$="-pw"]').fill(GATE2);
   await edit.locator('input[id$="-pw2"]').fill(GATE2);
   await edit.locator('input[id$="-views"]').fill('4');
+  // Changing the password weakens the link: the account password is asked for (as on create).
+  check('Edit: a new password asks for the account password', await edit.locator('input[id$="-confirm"]').isVisible());
   await audit(ap, 'My shares: Edit with a new password', { aaa: false });
+  // Without it: refused, nothing changed.
+  await ap.click('.extend-row button:has-text("Save changes")');
+  await ap.waitForFunction(() => { const m = document.querySelector('.extend-row p.msg.error'); return m && !m.hidden && m.textContent.length > 0; }, null, { timeout: 30000 });
+  check('Edit: refused without the account password', /password/i.test(await ap.textContent('.extend-row p.msg.error')), await ap.textContent('.extend-row p.msg.error'));
+  await edit.locator('input[id$="-pw"]').fill(GATE2);
+  await edit.locator('input[id$="-pw2"]').fill(GATE2);
+  await edit.locator('input[id$="-confirm"]').fill(ALICE_PW);
   await ap.click('.extend-row button:has-text("Save changes")');
   await ap.waitForFunction(() => /Upload link updated/.test(document.getElementById('toast').textContent), null, { timeout: 60000 });
   await ap.waitForFunction(() => [...document.querySelectorAll('#shares-body tr td[data-label="Views"]')].some((td) => /2 left of 4 views/.test(td.textContent)), null, { timeout: 30000 });
@@ -199,6 +208,7 @@ try {
   check('Edit: a link with no expiry offers "Give it an expiry"', await ap.locator('.extend-row label.radio-opt:has-text("Give it an expiry")').count() === 1);
   await ap.locator('.extend-row label.radio-opt:has-text("Give it an expiry") input').check();
   await ap.locator('.extend-row input[id$="-expire"]').fill('3');
+  check('Edit: giving it an expiry (tightening) asks for no password', !(await ap.locator('.extend-row input[id$="-confirm"]').isVisible()));
   await ap.click('.extend-row button:has-text("Save changes")');
   await ap.waitForFunction(() => /Upload link updated/.test(document.getElementById('toast').textContent), null, { timeout: 60000 });
   await ap.waitForFunction(() => [...document.querySelectorAll('#shares-body tr td[data-label="Expires"]')].some((td) => /^in (2d 23h|3d)/.test(td.textContent)), null, { timeout: 30000 });
@@ -229,6 +239,7 @@ try {
   check('no page errors, CSP or Trusted Types violations', errors.length === 0, errors.slice(0, 5).join(' | '));
 } catch (e) {
   console.log(`E2E ERROR ${e.stack || e}`);
+  if (errors.length) console.log(`page errors: ${errors.slice(0, 5).join(' | ')}`);
   results.push(false);
 } finally {
   await b.close();
