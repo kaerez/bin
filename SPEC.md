@@ -502,9 +502,9 @@ exact ciphertext size of every chunk: `min(CHUNK, padded − i·CHUNK) + 16`.
   for months/years); every creation counts toward all-channel quotas, API creations also toward
   API quotas. A quota's kind says what it counts (public/js/quotakinds.js): outgoing shares
   (`all`; `text` = notes, links and credentials; `files` = file and Drive shares; `note`, `url`,
-  `secret`, `file`, `drive`), Drive uploads (`drive-upload`) and Receive (`receive`,
-  `receive-link`, `receive-upload`, and by what an upload session sends: `receive-file`,
-  `receive-note`, `receive-url`, `receive-secret`).
+  `secret`, `file`, `drive`), Drive uploads (`drive-upload`: files; `drive-bytes`: their bytes)
+  and Receive (`receive`, `receive-link`, `receive-upload`, and by what an upload session sends:
+  `receive-file`, `receive-note`, `receive-url`, `receive-secret`).
 - **Guard**: per-IP (IPv6 aggregated to a configurable prefix, default /64) failure counters for
   `login`, `setup` and `invalid`; *X failures within n seconds ⇒ block for n seconds*. Manual
   IP allow/block rules as an address, a CIDR block or an inclusive range `a-b` (same family;

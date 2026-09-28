@@ -535,7 +535,7 @@ describe('take-in holds what arrives to the link\'s rules (audit A-3: the upload
     $('#drive-received-review').click();
     await until(() => dialog()?.querySelector('#drive-failed-table'));
     const reasons = [...dialog().querySelectorAll('#drive-failed-table td[data-label="Why"]')].map((td) => td.textContent);
-    expect(reasons).toEqual(expect.arrayContaining(['its real file type is one this link does not accept', 'it is larger than this link’s largest file',
+    expect(reasons).toEqual(expect.arrayContaining(['its file type is one this link does not accept, or your account does not allow in the Drive', 'it is larger than this link’s largest file, or than a note, link or credential can be',
       'it is not what its sender declared, or a kind this link (or your role, now) does not accept (a file, note, link or credential)']));
     expect(strayText()).toEqual([]);
   });

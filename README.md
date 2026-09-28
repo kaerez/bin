@@ -154,7 +154,8 @@ working.
   already exists, it *recovers* it: new username/password, all owner sessions revoked, the owner's
   passkeys and recovery codes removed. To recover later, set a **new** `AUTHN` value and visit the
   page again. The first set-up also makes the Drive keys (the root MEK and the first sub-MEK:
-  generated, or entered by hand); a recovery keeps them. Download the key kit afterwards
+  proposed by the server and shown masked until Show, with "Use these", "Generate again" and
+  "Enter manually"; nothing is stored until you choose); a recovery keeps them. Download the key kit afterwards
   (Admin → Security → Keys) and keep it offline, next to the `AUTHN` secret.
 - **Sessions** are an HttpOnly, `SameSite=Strict`, `__Host-` cookie holding a JWT that is signed
   (HS256, `SIG`) and then encrypted (A256GCM, `ENC`). Idle and absolute timeouts are set by the
@@ -206,7 +207,9 @@ working.
   secret), the upgrade of Drives made by the previous release, and the restore of a user's
   personal kit. Each user has a **personal kit** on the Account page (their salt and keys:
   download and verify; only the owner restores from one, so no user can change what opens a
-  Drive). Admin → Import / export has the Drive keys in
+  Drive). Both kit cards show the key version ("Version N, <date>", raised on every key change)
+  and both kit files hold it; after a key change, the Account and Drive pages ask a user whose
+  kit is out of date to download a new one (the card shows when they last did). Admin → Import / export has the Drive keys in
   a file of their own (the parts chosen). See [SECURITY.md](./SECURITY.md), "Drive keys", and
   [docs/DRIVE.md](./docs/DRIVE.md).
 - **Quotas** — at most N per n seconds/minutes/hours/days/months/years (fixed windows), of one
@@ -215,9 +218,12 @@ working.
     Drive share), notes, links and credentials together (`text`), file and Drive shares
     together (`files`), or one type: notes (`note`: plain text, Markdown or code), links
     (`url`), credentials (`secret`), file shares (`file`), Drive shares (`drive`);
-  - *Drive:* files uploaded (`drive-upload`: each file, a folder upload counting every file;
-    files taken in from Receive links are not counted), given back when the upload never
-    completes;
+  - *Drive:* files uploaded (`drive-upload`: each file, a folder upload counting every file)
+    and bytes uploaded (`drive-bytes`: each file's size, counted with the file when its upload
+    starts; its max is in bytes, set in MiB or GiB, and the refusal names the size, e.g. "Quota
+    reached: 1.0 GB uploaded to the Drive per 1d."); files taken in from Receive links are not
+    counted by either, and both are given back when the Drive refuses the file or the upload
+    never completes;
   - *Receive:* all receive (`receive`: everything below), new links (`receive-link`) and uploads
     received (`receive-upload`: each upload session through one of the user's links, whatever it
     sends, counted for the user; at the quota the uploader is told only that the link cannot
@@ -266,7 +272,8 @@ working.
   passkey. The `passkeys` limit (globally or per user) allows both, only the second step, or
   none. The admin can remove a user's passkeys if they lose them all.
 - **Human check (optional):** Cloudflare Turnstile on login, every change on the Account page
-  (password, username, passkeys, recovery codes, sign-in steps, API keys) and anonymous share
+  (password, username, passkeys, recovery codes, sign-in steps, API keys, the Drive personal
+  kit's Download and Verify) and anonymous share
   creation when keys are set (the deployment's, or Admin → Security). Those buttons stay
   disabled until the check has passed, and again after each use until the next one passes.
 - **CAPTCHA on shares (optional, per role):** the same check for the recipients of a share and
@@ -392,7 +399,14 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
 - **The file policy (allowed/blocked types, folder depth) works the same way:** when the
   administrator sets one for an account, that account's browser or CLI declares the file types
   and folder depth it is uploading, and the server refuses what the policy forbids. It keeps
-  honest users within the rules; it is not a guarantee against a modified client.
+  honest users within the rules; it is not a guarantee against a modified client. The same
+  rules apply to the account's **Drive**, where they are enforced by the server: an upload
+  declares its file's type, and the server checks both the declaration and the file's stored
+  (sealed) name and type, which it opens to check the seal anyway, so a modified client that
+  declares a false type is refused; the folder-depth limit is checked by the server against the Drive's
+  own tree on every upload, new folder and move (and on files taken in from Receive links, on
+  top of the link's own type rules). Files already in a Drive stay when a rule is added or
+  tightened; only new uploads, folders and moves are refused.
 
 ## Security
 

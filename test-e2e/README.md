@@ -73,6 +73,30 @@ It needs a fresh server (no owner yet):
 WT=$PWD BASE=http://localhost:8787 OUT=/tmp/keys node test-e2e/keys.mjs
 ```
 
+## `kit-fresh.mjs` — the kits' key version and the "download a new kit" notice
+
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3, §3.1), with the real Cloudflare Turnstile
+widget and Cloudflare's testing keys: the set-up page proposing the Drive keys (masked until
+Show; "Generate again", then "Use these"; the keyring is exactly that pair, version 1); alice's
+personal kit on Account (the card's CAPTCHA and a token on each request, "Version 1, <date>",
+never downloaded, then a download with its version); the owner rotating a sub-MEK (the key kit
+card's "Version 2"); alice's Account and Drive pages then showing the notice, with no key
+detail; the owner acting as alice seeing none and refused a download; alice downloading again
+and the notices going; her first kit verifying with an older key version (a warning), the new
+one with the current one; axe (WCAG 2.2 A/AA) on each new state; no page errors or CSP /
+Trusted Types violations. It needs a fresh server with Turnstile's testing keys:
+
+```sh
+rm -rf .wrangler/kf-state
+npx wrangler dev --port 9220 --persist-to .wrangler/kf-state \
+  --var TURNSTILE_SITEKEY:1x00000000000000000000AA --var TURNSTILE_SECRET:1x0000000000000000000000000000000AA
+WT=$PWD BASE=http://localhost:9220 node test-e2e/kit-fresh.mjs
+# behind an HTTPS-intercepting proxy: PROXY_SPKI=<its CA's SPKI hash> (HTTPS_PROXY is used when set)
+```
+
+Every suite that creates the owner on the set-up page generates the Drive keys there and chooses
+"Use these" (the release before, in `drive-upgrade.mjs` phase 1, has no such step).
+
 ## `port-ids.mjs` — the user id lists of the account export and import
 
 What it covers (Admin → Import / export): on export, each row's user id, the search by name and
@@ -216,4 +240,23 @@ owner yet):
 rm -rf .wrangler/rt-state
 npx wrangler dev --port 9210 --persist-to .wrangler/rt-state
 WT=$PWD BASE=http://localhost:9210 node test-e2e/receive-types.mjs
+```
+
+## `drive-rules.mjs` — the Drive's bytes quota, the role's file rules in the Drive, the footer
+
+What it covers (README "Quotas", [docs/DRIVE.md](../docs/DRIVE.md) §5): Admin → Roles → a custom
+role → Quotas — "Bytes uploaded" in the Drive group, its max in MiB or GiB (the unit shown for it
+only), no "API only", saved in bytes; the role's file rules (a blocked type, a folder-depth limit)
+set in its limits; then, as the user, a Drive upload past the bytes quota refused with the size
+("Quota reached: 1.0 KB uploaded to the Drive per 1d."), an upload of the blocked type refused
+before anything is sent, a folder nested past the limit refused in its dialog, the server asking a
+direct upload for its type declaration, and the Account page listing the quota as sizes; the
+viewer saying a note is end-to-end and a Drive share is not; the same footer ("Encrypted in your
+browser") on every page; axe (WCAG 2.2 A/AA) on every state; no page errors or CSP / Trusted
+Types violations. It needs a fresh server (no owner yet):
+
+```sh
+rm -rf .wrangler/rules-state
+npx wrangler dev --port 9241 --persist-to .wrangler/rules-state
+WT=$PWD BASE=http://localhost:9241 node test-e2e/drive-rules.mjs
 ```

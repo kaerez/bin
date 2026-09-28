@@ -86,7 +86,23 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
   deliberate, bounded leak (which *kinds* of files, never their names, count per type, or
   sizes) that exists only for accounts under a policy. Like the file-count limits, the
   declaration is not verifiable: it stops honest mistakes and makes the rule auditable, not a
-  modified client. The owner is never subject to it.
+  modified client. The owner is never subject to it. The same policy covers the account's
+  **Drive**: each upload's reservation (`POST /api/private/drive/files`) declares that file's one
+  `{extension, MIME type}` (an empty or longer list is refused, so nothing passes an allow list
+  by declaring nothing), checked in `src/lib/drivepolicy.js` and never stored. Unlike a file
+  share, the Drive's rule does not rest on the declaration alone: the Worker already opens a new
+  Drive file's sealed name and metadata to check its seal (`checkNewItem`), so it enforces the
+  rule on what is stored — the name's extension and the metadata's MIME type, with the same rule
+  function (`sealedTypeRefusal`) — and refuses a declaration that does not match them
+  (`403 file_type_not_allowed`), as well as metadata whose type cannot be checked. A modified
+  client that declares a false type is refused. The opened name and type stay in the Worker's
+  memory for that check only: they are zeroed after it, and never logged, stored or returned
+  (the refusal names neither). The folder-depth
+  limit needs no declaration there — the Drive object checks it against its own tree on an
+  upload, a new folder, a move (a folder with the folders inside it) and a take-in. A take-in
+  from a Receive link is held to the role's Drive rules as well as the link's own, so a link
+  cannot bring into the Drive a type or depth the role refuses there. Files already in a Drive
+  are never deleted by a new or tighter rule.
 - Access-proof *hashes*, delete/upload/grant/API-key *hashes*, and password verifiers
   (`SHA-256("secbin-auth/v2" ‖ Argon2id(password))`).
 
@@ -263,6 +279,8 @@ signed-in browser session makes to its own account on the Account page:
 | Create an API key | `POST /api/private/me/keys` | `account` |
 | Change an API key (name, scopes) | `PATCH /api/private/me/keys/:id` | `account` |
 | Revoke an API key | `DELETE /api/private/me/keys/:id` | `account` |
+| Download the Drive personal kit | `POST /api/private/drive/kit` | `account` |
+| Verify a Drive personal kit | `POST /api/private/drive/kit/verify` | `account` |
 
 Asking for a challenge changes nothing and needs no token: the passkey registration options
 (`POST /api/private/me/passkeys/options`) and the passkey "confirm it's you" challenge
@@ -279,7 +297,8 @@ CAPTCHA (its sender's role and choice: *CAPTCHA on shares*, below).
   the widget has issued a token, and again after each token is used (one token per call) until
   the next one arrives; if the widget cannot load they stay disabled and the page says why. On
   the Account page each card that changes something (username, password, passkeys and recovery
-  codes, API keys) has its own always-visible widget; one widget serves every button of its card,
+  codes, API keys) or hands out keys (the Drive personal kit: Download and Verify) has its own
+  always-visible widget; one widget serves every button of its card,
   including the Remove and Revoke buttons of each table row. This is a usability guard: the
   server-side check below is what enforces it.
 - **Server-side verification** (`src/lib/turnstile.js`). Each protected call must carry
@@ -1036,10 +1055,36 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   never gets a new random salt in place of a lost one). A generated key is used only for what it
   was made for (a root MEK or a sub-MEK), and an unused one is deleted after 10 minutes. Every
   keyring change, and the previews of a restore or an import, need the step-up.
+- **Set-up keys.** The set-up page shows the root MEK and first sub-MEK the server proposes,
+  masked until Show, with "Use these", "Generate again" and "Enter manually". The proposal
+  (`POST /api/auth/setup/candidate`) is made only for a request with an unspent setup token
+  (checked in constant time; wrong tokens count against the network like the set-up's own) and
+  the intent header, only while no owner exists (a spent token, or an owner: `410 token_used`)
+  and there is no keyring and never was one. A network gets at most 20 proposals per 10 minutes
+  (the Guard's `setup-candidate` scope, which the owner sees and lifts like the others). A
+  proposal is kept as two candidates (a sid no session can have) for 10 minutes and a new one
+  replaces the last; proposals are not written to the admin audit, so they cannot flood it:
+  only the pair the set-up adopts is (`keys.created`, by fingerprint). No keyring exists until
+  the set-up sends the pair's ids, checked before anything is written (`410 candidate_expired`
+  otherwise); the pair (or keys entered by hand) is then written in the same transaction as the
+  owner account, so a failure leaves neither and the set-up can be run again. Copying a key
+  (the set-up page, Security → Keys) clears the clipboard after 60 s only where the page may
+  read it back and it still holds that key; the site's Permissions-Policy denies
+  `clipboard-read`, which is kept, so in practice the page tells the owner to clear the
+  clipboard (and any clipboard history) instead.
 - **Kits.** The personal kit (every user) holds the user's salt and KEKs; the key kit (the
   owner) the root MEK, every sub-MEK and every user salt. Each is sealed in the browser under an
   optional passphrase (Argon2id, AES-256-GCM, bound to the account and the origin) and never sent
-  to the server; verify sends check values only. **Only the owner restores from a kit**, in
+  to the server; verify sends check values only. On the Account page, Download and Verify also
+  need a fresh Turnstile token (the action `account`) when Turnstile is on, checked before the
+  step-up, as every other Account change. Both kits hold the keyring's version (a counter the
+  Directory raises on every key change, never a key or a fingerprint), and Verify compares it
+  with the server's. For each account the Directory records the date and key version of its
+  last personal-kit download and which sub-MEKs that kit held (meta `ukit:<userId>`, removed
+  with the account); from that the Account and Drive pages say, with no key detail, when the
+  keys changed after that download. Only the user's own session downloads a kit and so updates
+  the record: the owner acting as the user is refused (`403 impersonating`) and cannot clear
+  the notice. **Only the owner restores from a kit**, in
   Admin → Security → Keys: the key kit, and a user's personal kit ("Restore a user's personal
   kit": the user chosen there, the kit opened in the owner's browser for that user only, the
   server refusing a kit whose id is another user's). The Account page offers Download and Verify
@@ -1565,7 +1610,8 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - Every value is re-validated server-side (formats, views, expiry, limits, quotas, settings).
 - **Quotas** (role option lists; public/js/quotakinds.js) are checked and counted in one
   synchronous Directory step, so concurrent creations cannot pass a quota: outgoing shares
-  (every share, or by type), Drive uploads (`drive-upload`, each file, at the upload's start) and
+  (every share, or by type), Drive uploads (`drive-upload`, each file, and `drive-bytes`, its
+  size, checked together in the same step at the upload's start: one refused, neither counted) and
   Receive (`receive-link`, `receive-upload`, and `receive-file`, `receive-note`, `receive-url`,
   `receive-secret` by what an upload session sends). An API-only quota narrows API creations only; the
   Drive and Receive have no API channel. The public account's quotas count per anonymous

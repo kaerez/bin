@@ -139,12 +139,17 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     (`size`). A mismatch is never
     added to the Drive: it fails as below. (A link narrowed while items wait fails those of the
     kinds it no longer accepts; widened again, **Try again** takes them in.)
+  - **The role's Drive rules** apply on top of the link's own type rules: the take-in declares
+    the file's type (as a Drive upload does; a note, link or credential by its stored name and
+    type too) and a type the role refuses in the Drive is not taken in (reason `type`); a path makes folders only down to the role's `maxFolderDepth`
+    (flattened past it), and a link folder already deeper than that takes nothing in (reason
+    `place`). docs/DRIVE.md §5.
   - **Failures:** an item that cannot be taken in (it does not open with the link's key, its name
-    or path cannot be used, the Drive refuses its place, or it breaks the link's rules) is
-    recorded on the server (`POST …/received/<id>/failed`, with a reason). It leaves the queue, so
-    it never holds up the items behind it, and the Drive lists it ("Review them": the link's
-    label, size, time and why) with **Delete** and **Try again**. A network or server error leaves
-    the item for the next time the Drive opens.
+    or path cannot be used, the Drive refuses its place, it breaks the link's rules, or the role's
+    file types refuse it) is recorded on the server (`POST …/received/<id>/failed`, with a reason).
+    It leaves the queue, so it never holds up the items behind it, and the Drive lists it ("Review
+    them": the link's label, size, time and why) with **Delete** and **Try again**. A network or
+    server error leaves the item for the next time the Drive opens.
 
 ### 3.1 Notes, links and credentials
 
@@ -310,10 +315,10 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, views?, maxFiles?, maxBytes?, maxFileBytes?, types?, accept?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha, accept }` (`expire: "never"`: no expiry, `expires: null`; `views` absent or null: unlimited; `accept` absent or null: files only; the role's options of §5 apply: `403 no_expiry_disabled`, `expiry_too_long`, `too_many_views`, `unlimited_views_disabled`, `password_required_by_role`, `password_disabled`, `receive_kind_disabled` with `kinds`; `403 folder_too_deep` with `max` when the folder is deeper than the role's `maxFolderDepth`, the root being level 0 and a folder counting at its own level). The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
+| `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, views?, maxFiles?, maxBytes?, maxFileBytes?, types?, accept?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha, accept }` (`expire: "never"`: no expiry, `expires: null`; `views` absent or null: unlimited; `accept` absent or null: files only; the role's options of §5 apply: `403 no_expiry_disabled`, `expiry_too_long`, `too_many_views`, `unlimited_views_disabled`, `password_required_by_role`, `password_disabled`, `receive_kind_disabled` with `kinds`; `403 folder_too_deep` with `max` when the folder is deeper than the role's `maxFolderDepth`, by the Drive's own depth rule (docs/DRIVE.md §5: a file at its folder's level), so nothing it received could be placed). The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
-| `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv, mek, types, maxFileBytes, accept }], more, next }` (each link's rules come with its key: the browser holds what it opens to them, §3) (an item whose field layer does not open comes with `unreadable: true` and no fields: the browser records it as failed); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
-| `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek }` (sealed under the current KEK, checked; `parent` a folder) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
+| `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created, declared }], keys: [{ id, priv, mek, types, maxFileBytes, accept }], more, next }` (`declared`: the kind the item's session declared, `files` for items from before; each link's rules come with its key, `accept` narrowed to what the user's role allows now: the browser holds what it opens to them, §3) (an item whose field layer does not open comes with `unreadable: true` and no fields: the browser records it as failed); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
+| `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek, types? }` (sealed under the current KEK, checked; `parent` a folder; `types` and the depth as for a Drive upload, docs/DRIVE.md §5) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
 | `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' \| 'type' \| 'size' \| 'kind' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
 | `DELETE /api/private/drive/nodes/<nodeId>` | discard a received file (as any Drive item) |
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares) |
@@ -369,7 +374,7 @@ for the user (never the uploader): at `begin`, before the
 password is checked. A session that does not start (wrong password, busy, paused) or that ends
 having sent no file — `done`, or lapsing — is given back; one that sent a file stays counted. A
 new link counts under `receive-link` and `receive` (given back when its creation does not
-complete). Files taken in from a link are not Drive uploads (`drive-upload`).
+complete). Files taken in from a link are not Drive uploads (`drive-upload`, `drive-bytes`).
 
 ### 6.3 The owner acting as the user ("Log in as")
 

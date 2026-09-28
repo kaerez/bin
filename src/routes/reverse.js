@@ -35,6 +35,7 @@ import { encField } from './drive.js';
 import { KEY_RE, MEK_ID_RE } from '../../public/js/drivekeys.js';
 import { userKeys, checkNewItem, checkLinkKey, fieldKeys, toRest, fromRest } from '../lib/mek.js';
 import { normalizeAccept, widening as widensKinds, isKind, KIND_ACTIONS, KIND_PLURALS, DEFAULT_ACCEPT } from '../../public/js/receivekinds.js';
+import { driveTypeRefusal, sealedTypeRefusal, typedPolicy } from '../lib/drivepolicy.js';
 
 export const REVERSE_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
 const B64_43 = /^[A-Za-z0-9_-]{43}$/;
@@ -94,9 +95,10 @@ function bound(v, max) {
  * (src/lib/auth.js checkCsrf), before the step-up and before the id is
  * claimed. Extend, revoke and lock go through the shares routes, which check
  * the same. test/csrf.test.js reads this file and fails if a route or method
- * here is missing from its sweep.
+ * here is missing from its sweep. `pol`: the Drive's policy (Directory
+ * driveAccess), whose file rules apply to a take-in.
  */
-export async function handleReverseOwner(request, env, url, a) {
+export async function handleReverseOwner(request, env, url, a, pol) {
   const p = url.pathname;
   const uid = a.user.id;
   const dir = directory(env);
@@ -123,7 +125,7 @@ export async function handleReverseOwner(request, env, url, a) {
       });
     }
     if (request.method !== 'POST') return methodNotAllowed('GET, POST');
-    return createReverse(request, env, dir, a);
+    return createReverse(request, env, dir, a, pol);
   }
 
   if (p === '/api/private/drive/received') {
@@ -197,10 +199,19 @@ export async function handleReverseOwner(request, env, url, a) {
     const meta = encField(body.meta, MAX_META_CT);
     const dek = encField(body.dek, MAX_DEK_CT);
     const kf = typeof body.ks === 'string' && KEY_RE.test(body.ks) && typeof body.mek === 'string' && MEK_ID_RE.test(body.mek) ? { ks: body.ks, mek: body.mek } : null;
-    if (!parent || !name || !meta || !dek || !kf) return invalid('Send { parent, name, meta, dek, ks, mek } (sealed fields as {iv, ct}).');
-    // Taken in: sealed under the current KEK like any Drive file (checked here).
-    const mfp = await checkNewItem(uid, await userKeys(env, uid), { kind: 'file', ...kf, name, meta, dek });
-    const r = await drive().acceptReceived(uid, node, { parent, name, meta, dek, ...kf, mfp });
+    if (!parent || !name || !meta || !dek || !kf) return invalid('Send { parent, name, meta, dek, ks, mek, types? } (sealed fields as {iv, ct}).');
+    // The role's Drive rules apply to what is taken in, on top of the link's own type rules (the
+    // uploader's page checked those): its file types (declared, as for an upload) and folder depth
+    // (the Drive checks its tree), so a Receive link is no way around the Drive's policy.
+    const typeRefused = driveTypeRefusal(pol.policy, body.types, 'added to');
+    if (typeRefused) return typeRefused;
+    // Taken in: sealed under the current KEK like any Drive file (checked here), and the type rule
+    // enforced on what is stored (the sealed name and metadata, opened in memory only).
+    let sealedRefused = null;
+    const mfp = await checkNewItem(uid, await userKeys(env, uid), { kind: 'file', ...kf, name, meta, dek },
+      typedPolicy(pol.policy) ? (n, m) => { sealedRefused = sealedTypeRefusal(pol.policy, n, m, body.types, 'added to'); } : null);
+    if (sealedRefused) return sealedRefused;
+    const r = await drive().acceptReceived(uid, node, { parent, name, meta, dek, ...kf, mfp, maxDepth: pol.policy.maxFolderDepth });
     if (!r.ok) return fromDo(r);
     await dir.setDriveUsed(uid, r.used);
     await dir.driveLog(actorId(a), uid, 'drive.received_taken_in', `id=${r.rs} files=1`);
@@ -209,7 +220,7 @@ export async function handleReverseOwner(request, env, url, a) {
   return null;
 }
 
-async function createReverse(request, env, dir, a) {
+async function createReverse(request, env, dir, a, pol) {
   const uid = a.user.id;
   const body = await readJsonBody(request);
   if (typeof body.id !== 'string' || !REVERSE_ID_RE.test(body.id)) return invalid('id must be "r" and 16 random bytes (base64url).');
@@ -265,7 +276,8 @@ async function createReverse(request, env, dir, a) {
     const stored = await toRest(await fieldKeys(env, uid), uid, 'linkKey', body.id, priv);
     r = await driveStub(env, uid).createReverse(uid, {
       id: body.id, folder, priv: stored, mek: body.mek, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl, views, captcha: claim.captcha === true,
-      opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types, accept }, maxDepth: claim.maxFolderDepth,
+      // The Drive's folder-depth rule, from the same policy the take-in holds files to.
+      opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types, accept }, maxDepth: pol?.policy?.maxFolderDepth ?? null,
     });
   } catch (e) {
     await dir.releaseReverse(uid, body.id, claim.refund); // the id is free again, and the quota

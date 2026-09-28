@@ -652,7 +652,7 @@ fieldset { min-inline-size: 0; }
    from assistive technology, until the same user signs in again. */
 .session-locked { visibility: hidden !important; }
 .api-example { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sheet-2); border-radius: 4px; padding: .6rem .8rem; font-size: .75rem; }
-.receipt-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
+.receipt-note, .e2e-note { max-width: 32rem; margin: .75rem auto 0; font-size: .72rem; line-height: 1.5; text-align: center; }
 .opens-box { padding: .5rem 0; }
 .opens-box .table { font-size: .75rem; }
 .url-rules { display: flex; flex-direction: column; gap: .4rem; min-width: 0; }

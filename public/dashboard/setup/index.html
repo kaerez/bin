@@ -233,6 +233,21 @@
                         </p>
                         <label class="inline"><input type="radio" name="setup-keys-mode" id="setup-keys-generate" value="generate" checked aria-describedby="setup-keys-help" /> Generate them securely on the server</label>
                         <label class="inline"><input type="radio" name="setup-keys-mode" id="setup-keys-manual" value="manual" aria-describedby="setup-keys-manual-help" /> Enter them manually</label>
+                        <div class="stack" id="setup-keys-gen-box">
+                            <p class="type-hint" id="setup-keys-gen-help">
+                                The server proposes a root MEK and a first sub-MEK (it needs the setup token above).
+                                They are shown here, hidden until you choose Show. Nothing is stored until you choose
+                                “Use these” and create the owner; the server forgets a proposal after 10 minutes.
+                            </p>
+                            <div class="btn-row"><button type="button" class="btn" id="setup-keys-gen" aria-describedby="setup-keys-gen-help">Generate the keys</button></div>
+                            <div class="stack" id="setup-keys-cand" hidden></div>
+                            <div class="btn-row" id="setup-keys-choice" hidden>
+                                <button type="button" class="btn" id="setup-keys-use">Use these</button>
+                                <button type="button" class="btn" id="setup-keys-again">Generate again</button>
+                                <button type="button" class="btn" id="setup-keys-to-manual">Enter manually</button>
+                            </div>
+                            <p class="type-hint" id="setup-keys-chosen" role="status"></p>
+                        </div>
                         <div class="stack" id="setup-keys-fields" hidden>
                             <p class="type-hint" id="setup-keys-manual-help">
                                 Make each key out of band, 32 random bytes as base64 or hex, for example
@@ -280,11 +295,11 @@
             </nav>
             <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
                 <span class="feat" role="listitem">Private</span>
-                <span class="feat" role="listitem">End-to-end encrypted</span>
+                <span class="feat" role="listitem">Encrypted in your browser</span>
                 <span class="feat" role="listitem">Notes &amp; files</span>
             </div>
             <p class="foot-crypto mono">
-                AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                AES-256-GCM · Argon2id · ECDH P-256 · HKDF-SHA256 · Link keys stay in the URL
                 <span class="foot-frag">#fragment</span>
             </p>
         </footer>

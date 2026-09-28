@@ -136,6 +136,8 @@
                     <dd>Data encryption key: the random key that encrypts one Drive file, in your browser. It is stored sealed under your KEK.</dd>
                     <dt>Drive</dt>
                     <dd>Your file storage in secbin, with folders. Files, their names and folders are encrypted in your browser, but the Drive is not end-to-end encrypted: the server holds the keys your Drive key is made from (the MEKs), so the server, and the administrator, can open your Drive files. A copy of the stored files alone reveals nothing.</dd>
+                    <dt>Encrypted in your browser</dt>
+                    <dd>What every page’s footer says: what you share or keep in secbin is encrypted on your device before it is sent. Notes and file shares are also end-to-end encrypted (below). The Drive, shares of Drive files and files sent to you through a “Receive” link are encrypted with keys the server holds, so the server can decrypt them.</dd>
                     <dt>End-to-end encrypted</dt>
                     <dd>Encrypted on the sender’s device and decrypted only on the recipient’s. The server stores only data it cannot read. Notes and file shares are; the Drive, shares of Drive files and anything sent to you through a “Receive” link are not.</dd>
                     <dt>Escrow key</dt>
@@ -192,11 +194,11 @@
             </nav>
             <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
                 <span class="feat" role="listitem">Private</span>
-                <span class="feat" role="listitem">End-to-end encrypted</span>
+                <span class="feat" role="listitem">Encrypted in your browser</span>
                 <span class="feat" role="listitem">Notes &amp; files</span>
             </div>
             <p class="foot-crypto mono">
-                AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                AES-256-GCM · Argon2id · ECDH P-256 · HKDF-SHA256 · Link keys stay in the URL
                 <span class="foot-frag">#fragment</span>
             </p>
         </footer>

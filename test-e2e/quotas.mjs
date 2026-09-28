@@ -89,6 +89,8 @@ try {
   watch(op, 'owner');
   await op.goto(`${BASE}/dashboard/setup/`);
   await op.fill('#setup-token', TOKEN); await op.fill('#setup-user', 'owner'); await op.fill('#setup-pass', PW); await op.fill('#setup-pass2', PW);
+  // The Drive keys the server proposes: generated, then "Use these" (the release before has no such step).
+  if (await op.$('#setup-keys-gen')) { await op.click('#setup-keys-gen'); await op.click('#setup-keys-use'); }
   await op.click('#setup-btn');
   await op.waitForFunction(() => /created/.test(document.querySelector('#setup-msg').textContent), null, { timeout: 60000 });
   await login(op, 'owner', PW);
@@ -124,7 +126,7 @@ try {
   const channel = (i) => rows.nth(i).getByLabel('Via (channel)', { exact: true });
   check('roles: the kind select has the groups Outgoing shares, Drive and Receive, every kind labelled', JSON.stringify(await groupsOf(kind(0))) === JSON.stringify([
     ['Outgoing shares', ['All outgoing shares', 'Notes, links and credentials', 'Notes', 'Links', 'Credentials', 'File and Drive shares', 'File shares', 'Drive shares']],
-    ['Drive', ['Files uploaded']],
+    ['Drive', ['Files uploaded', 'Bytes uploaded']],
     ['Receive', ['All receive', 'New links', 'Uploads received', 'Uploads with files', 'Notes received', 'Links received', 'Credentials received']],
   ]), JSON.stringify(await groupsOf(kind(0))));
   const plan = [['note', 'Notes'], ['drive-upload', 'Files uploaded'], ['receive-link', 'New links'], ['receive-upload', 'Uploads received']];

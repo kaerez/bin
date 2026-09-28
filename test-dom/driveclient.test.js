@@ -208,13 +208,16 @@ describe('the personal kit', () => {
     const env = parseDriveKit(kit.text);
     expect(env).toMatchObject({ kind: 'user', accountId: S.user.id });
     const payload = await openDriveKit(env, { kind: 'user', accountId: S.user.id, origin: location.origin, passphrase: 'kit pass' });
-    expect(payload).toMatchObject({ v: 2, id: S.user.id, username: 'alice', userSalt: S.salt, current: S.current().id });
+    expect(payload).toMatchObject({ v: 2, id: S.user.id, username: 'alice', userSalt: S.salt, current: S.current().id, keyVersion: S.keyVersion.n });
+    expect(kit.keyVersion).toBe(1);
+    expect(kit.status).toMatchObject({ version: 1, last: { version: 1 }, stale: false });
     expect(payload.keks[0].kek).toBe(b64urlFromBytes(await S.kekOf(S.current().id)));
     // Verify: nothing but check values leaves the page.
     const before = S.requests.length;
     const v = await verifyPersonalKit({ user: S.user, text: kit.text, passphrase: 'kit pass' });
     expect(v.verdict).toBe('complete');
-    expect(v.checks.map((c) => [c.id, c.status])).toEqual([['format', 'pass'], ['auth', 'pass'], ['salt', 'pass'], ['keks', 'pass'], ['date', 'pass']]);
+    expect(v.checks.map((c) => [c.id, c.status])).toEqual([['format', 'pass'], ['auth', 'pass'], ['salt', 'pass'], ['keks', 'pass'], ['date', 'pass'], ['version', 'pass']]);
+    expect(v).toMatchObject({ keyVersion: 1, version: 1 });
     const sent = JSON.stringify(S.requests.slice(before).map((r) => r.body));
     expect(sent).not.toContain(payload.keks[0].kek);
     expect(sent).not.toContain(S.salt);
@@ -223,6 +226,8 @@ describe('the personal kit', () => {
     const v2 = await verifyPersonalKit({ user: S.user, text: kit.text, passphrase: 'kit pass', date: Math.floor(Date.now() / 1000) + 40 * 86400 });
     expect(v2.atDate).toMatchObject({ mekId: later.id, inKit: false });
     expect(v2.checks.find((c) => c.id === 'date').status).toBe('warn');
+    // The keys changed after the kit (a sub-MEK added): its version is older than the server's, said as a warning.
+    expect(v2.checks.find((c) => c.id === 'version')).toMatchObject({ status: 'warn', detail: expect.stringMatching(/Version 1; the keys are now version 2/) });
     // A wrong passphrase, another account's kit: failed before anything is sent.
     expect((await verifyPersonalKit({ user: S.user, text: kit.text, passphrase: 'wrong' })).verdict).toBe('failed');
     const other = await sealDriveKit('user', { ...payload }, { accountId: 'someoneelse00000', origin: location.origin, passphrase: '' });

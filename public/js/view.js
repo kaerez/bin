@@ -230,11 +230,17 @@ async function doOpen({ id, kind, head, fragment, password }) {
   } catch { throw new DecryptError('malformed manifest'); }
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
+  // What protects these files: a file share is end-to-end; a Drive share's files are sealed in the
+  // sender's Drive under keys the server holds (docs/DRIVE.md §2).
+  $('#files-e2e').textContent = reader ? FROM_DRIVE : END_TO_END;
   if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
   renderFiles(paste, manifest, reader, viewerCfg, res.grantExpires, { id, grant: res.grant, serverNow: res.now, kinds: res.kinds });
   $('#files-delete-row').hidden = !canDeleteNow(paste.meta);
   wireDeleteNow($('#files-delete'), paste.meta, del, $('#files-msg'));
 }
+
+const END_TO_END = 'End-to-end encrypted: these files are decrypted in your browser with the key in the link. The server only ever stores them encrypted, without the key.';
+const FROM_DRIVE = 'Shared from the sender’s Drive: encrypted in the sender’s browser, but not end-to-end. The server holds the keys to the sender’s Drive and can decrypt these files.';
 
 // ── "delete now" (the sender allowed recipients to delete) ───────────────────
 const canDeleteNow = (meta) => meta.deletable === true && meta.left !== 0;

@@ -101,9 +101,9 @@
                     <p class="eyebrow">private by design</p>
                     <h1 class="title">Say it once. <span class="title-em">Sealed.</span></h1>
                     <p class="subtitle">
-                        End-to-end encrypted notes and files that self-destruct when their views or time run
-                        out. Everything — including file names and folders — is encrypted in the sender’s
-                        browser; the key lives only in the link.
+                        End-to-end encrypted notes and file shares that self-destruct when their views or time
+                        run out. Everything in them — including file names and folders — is encrypted in the
+                        sender’s browser, and the key lives only in the link.
                     </p>
                 </div>
                 <div class="stack reveal d2">
@@ -195,6 +195,7 @@
                     <button type="button" class="btn" id="toggle-raw">Raw</button>
                     <button type="button" class="btn danger" id="paste-delete" hidden>Delete now</button>
                 </div>
+                <p class="mono muted e2e-note">End-to-end encrypted: this note was decrypted in your browser with the key in its link. The server only ever stores it encrypted, without the key.</p>
                 <p class="mono muted receipt-note">This opening was recorded for the sender and the administrator: the time, and possibly your network address, approximate location, browser, system and languages.</p>
                 <p class="msg" id="paste-msg" role="status" hidden></p>
             </section>
@@ -216,6 +217,7 @@
                 </div>
                 <div id="files-progress"></div>
                 <p class="msg error" id="files-msg" role="alert" hidden></p>
+                <p class="mono muted e2e-note" id="files-e2e"></p>
                 <p class="mono muted receipt-note">This opening was recorded for the sender and the administrator: the time, and possibly your network address, approximate location, browser, system and languages.</p>
                 <div class="preview card" id="files-preview" role="region" aria-labelledby="preview-label preview-title" hidden>
                     <div class="preview-head">
@@ -294,7 +296,8 @@
                     <p class="eyebrow">private by design · no account needed</p>
                     <h1 class="title">Say it once. <span class="title-em">Sealed.</span></h1>
                     <p class="subtitle">
-                        Notes and files stay yours. They self-destruct when their views or time run out.
+                        Notes and file shares are end-to-end encrypted: encrypted in your browser, with the
+                        key only in the link. They self-destruct when their views or time run out.
                     </p>
                 </div>
 
@@ -720,11 +723,11 @@
             </nav>
             <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
                 <span class="feat" role="listitem">Private</span>
-                <span class="feat" role="listitem">End-to-end encrypted</span>
+                <span class="feat" role="listitem">Encrypted in your browser</span>
                 <span class="feat" role="listitem">Notes &amp; files</span>
             </div>
             <p class="foot-crypto mono">
-                AES-256-GCM · Argon2id · HKDF-SHA256 · Key stays in the URL
+                AES-256-GCM · Argon2id · ECDH P-256 · HKDF-SHA256 · Link keys stay in the URL
                 <span class="foot-frag">#fragment</span>
             </p>
         </footer>

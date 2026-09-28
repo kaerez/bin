@@ -76,6 +76,31 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   also saves and lists names cleaned (it kept the hidden characters on disk), reports how many
   were renamed, cleans `--path`, and refuses to write a name that still holds them.
 
+- **The Drive personal kit has the CAPTCHA, and says when it is out of date** (docs/DRIVE.md
+  §3.1). With Turnstile on, the Account page's personal kit card has its own widget: Download
+  and Verify stay disabled until it has passed, and `POST /api/private/drive/kit` and
+  `…/kit/verify` need a fresh token for `account` (checked before the step-up); without
+  Turnstile keys nothing changes. The Directory now counts every key change (the **key
+  version**: a sub-MEK added, rotated, deleted, made current or its dates edited, a root change
+  or its undo, a restore that writes a key); both kit files hold it, both kit cards show
+  "Version N, <date>", and Verify compares a file's version with the server's. Each
+  personal-kit download is recorded (its date, version and the sub-MEKs it holds; removed with
+  the account): after a key change, or once a scheduled sub-MEK the kit lacks has started, the
+  Account page and the Drive page say "Your Drive’s keys were updated. Download a new personal
+  kit and keep it safe.", with no key detail, until the user downloads a new one; the kit card
+  shows the last download. The owner acting as the user cannot download one, so cannot clear
+  the notice (`GET /api/private/drive/kit`; `kit` in `GET /api/private/drive`).
+- **Set-up proposes the Drive keys for the owner to choose.** The set-up page shows the root
+  MEK and first sub-MEK the server generated (`POST /api/auth/setup/candidate`, with the setup
+  token), masked until Show, with "Use these", "Generate again" and "Enter manually", as
+  Security → Keys' key chooser does (shared: `public/js/keychoice.js`). Nothing is stored until
+  the set-up sends the chosen pair; a pair no longer kept (10 minutes, or replaced) is refused
+  before the owner account is made. Proposals need an unspent token and no owner yet (`410
+  token_used`), are limited to 20 per network per 10 minutes, and are not logged (only the
+  adopted pair is, as `keys.created`). The chosen or entered keys are written in the same
+  transaction as the owner. Copying a key clears the clipboard after 60 s where the page may
+  read it back; this site's Permissions-Policy denies that, so the page says to clear it.
+
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left
   empty, a fresh passkey assertion (`POST /api/private/me/reauth`, then `{ reauth }`), verified
@@ -561,6 +586,30 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     ["accept"]`). Adding a note does not.
   - The CLI does not send to Receive links; it is unchanged.
 
+- **Drive quota: bytes uploaded** (`drive-bytes`, Admin → Roles → Quotas → Drive → "Bytes
+  uploaded"; README "Quotas", docs/DRIVE.md §5, docs/API.md). The bytes uploaded to the Drive
+  per period: each file's size, counted with the file (`drive-upload`, unchanged) in one atomic
+  Directory step when its upload is reserved (one refused, neither counted), and given back as
+  `drive-upload` is (the Drive refuses the file, or the upload is deleted unfinished or purged).
+  Web only, as `drive-upload`; not for the public account; files taken in from Receive links are
+  not counted. Its max is in bytes, up to 1 PiB, and the editor takes it in MiB or GiB; the
+  refusal and the Account page name a size: "Quota reached: 1.0 GB uploaded to the Drive per
+  1d."
+- **The Drive follows the role's file rules** (docs/DRIVE.md §5, SECURITY.md "File policy"):
+  the file-type rules (`fileTypeMode` / `fileTypeRules`) and the folder-depth limit
+  (`maxFolderDepth`) now apply to Drive uploads, new folders and moves, not only to Drive
+  shares. An upload declares its file's type, as a file share does (`types`, checked at the
+  reservation: `400 declaration_required`, `403 file_type_not_allowed`), and the server enforces
+  the rule from the stored metadata too: the sealed name's extension and the metadata's type,
+  which the Worker opens in memory to check the seal (never logged), must pass the rules and
+  match the declaration, so a modified client that declares a false type is refused (uploads and
+  take-ins alike); the depth is checked by
+  the Drive against its own tree (`403 folder_too_deep`). The Drive page checks both first and
+  says why (a whole batch before any of it is sent). Files taken in from a Receive link keep the
+  link's own type rules and are held to the role's Drive rules too (a refused type is recorded as
+  failed with the new reason `type`; paths are flattened to the depth limit), so a Receive link
+  cannot bring into the Drive what the role refuses there. Files already in a Drive are not
+  deleted by a new or tighter rule.
 - **Admin → Import / export: user id lists for the account export and import**, as the Drive
   keys card has had (`public/dashboard/js/id-list.js`, now shared by both cards). Export: each
   row shows the user's id; a search by user name or id, Select all / Deselect all of the rows
@@ -879,8 +928,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 - **Admin → Users:** the owner creates, edits and revokes a user's API keys (a new key is shown
   once).
 - **Signed in:** opening the home page or the login page goes straight to the dashboard.
-- **Footer:** "Private · End-to-end encrypted · Notes & files" appears once, in every page's
-  footer (it was in the page body, and differed between pages).
+- **Footer:** "Private · Encrypted in your browser · Notes & files" appears once, in every page's
+  footer, the same on every page (it was in the page body, and differed between pages). That
+  notes and file shares are end-to-end encrypted is said where it applies: the landing page, the
+  composer's introduction, the viewer (a note; a file share; a share from a Drive, which is
+  not end-to-end) and the glossary ("Encrypted in your browser", "End-to-end encrypted").
 - **Link rules editor:** the tester is always shown, including while the rules are inherited. It
   names the rule that allows a link, or says why it is refused (e.g. an incomplete `https://`),
   and flags patterns that are not anchored. A help panel explains schemes and the regex engine

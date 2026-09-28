@@ -17,7 +17,8 @@ export const AT_REST_FIELDS = ['linkKey', 'received'];
 
 /**
  * The user's KEKs → { userId, salt, current, changing, keks: Map(mekId → {
- * kek, kekOld, fp, from, until }), missing, broken }. `meks`: the sub-MEKs
+ * kek, kekOld, fp, from, until }), missing, broken, version (the keyring's
+ * version, docs/DRIVE.md §3.1) }. `meks`: the sub-MEKs
  * wanted (the current one always comes too), or `all`. HttpError when the
  * Directory has no salt or no root for them.
  */
@@ -26,7 +27,7 @@ export async function userKeys(env, uid, { meks = [], all = false, createSalt = 
   if (!r.ok) throw new HttpError(r.status, r.error, r.message);
   const keks = new Map();
   for (const k of r.keys) keks.set(k.mekId, { kek: keyBytes(k.kek), kekOld: k.kekOld ? keyBytes(k.kekOld) : null, fp: k.fp, from: k.from, until: k.until });
-  return { userId: r.userId, salt: r.salt, current: r.current, changing: r.changing, keks, missing: r.missing, broken: r.broken };
+  return { userId: r.userId, salt: r.salt, current: r.current, changing: r.changing, keks, missing: r.missing, broken: r.broken, version: r.version };
 }
 
 /** The KEKs an item sealed under `mekId` may open with: under the root now, then (during a root change) the previous one. */
@@ -94,14 +95,22 @@ export async function sealItem(uid, { kek, mek, mfp }, { name, meta = null, dek 
  * Check what a browser sealed for a new (or taken-in) item: it must open
  * under the current sub-MEK's KEK (so the server can re-seal it later), with
  * a 32-byte DEK for a file. The opened values are dropped at once.
+ * `inspect(name, meta)` (optional) sees the opened name and metadata bytes
+ * first, in memory only (the role's file-type rules: src/lib/drivepolicy.js);
+ * they are zeroed after it, whatever it does.
  */
-export async function checkNewItem(uid, keys, item) {
+export async function checkNewItem(uid, keys, item, inspect = null) {
   if (item.mek !== keys.current) throw new HttpError(409, 'mek_not_current', 'The Drive key changed: reload the page to use the current one.');
   const { kek } = currentKek(keys);
   let r;
   try { r = await openItem(uid, [kek], item); } catch { throw new HttpError(400, 'bad_seal', 'The item is not sealed under your current Drive key.'); }
-  r.name.fill(0);
-  if (r.dek) r.dek.fill(0);
+  try {
+    if (inspect) inspect(r.name, r.meta);
+  } finally {
+    r.name.fill(0);
+    if (r.meta) r.meta.fill(0);
+    if (r.dek) r.dek.fill(0);
+  }
   return keys.keks.get(keys.current).fp;
 }
 

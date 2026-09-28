@@ -19,6 +19,7 @@ const fx = vi.hoisted(() => {
     now,
     fileDoc: null,
     keys: false,
+    kitStatus: { version: 3, versionAt: null, last: null, stale: false }, // the personal kit's state (Account)
     profile: {
       user: { id: 'o'.repeat(16), username: 'owner', role: 'owner' },
       impersonatedBy: null,
@@ -28,7 +29,11 @@ const fx = vi.hoisted(() => {
       viewer: { enabled: false },
       apiKeys: { enabled: true, max: 5 },
       passkeys: { mode: 'any', count: 1, required: false, recoveryLeft: 20 },
-      quotas: [],
+      // A quota counted in bytes (the Drive's) and one counted in files.
+      quotas: [
+        { scope: 'user', channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 1024 ** 3, used: 25 * 1024 ** 2 },
+        { scope: 'user', channel: 'all', kind: 'drive-upload', n: 1, unit: 'd', max: 10, used: 3 },
+      ],
     },
   };
 });
@@ -52,7 +57,7 @@ vi.mock('../public/js/api.js', async () => {
       limits: Object.fromEntries(Object.entries(LIMITS).map(([k, v]) => [k, v.def])),
       inherited: resolveLimits({}, {}),
     },
-    quotas: [], viewerRules: [],
+    quotas: [{ id: 'q1', channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 5 * 1024 ** 3 }], viewerRules: [],
   };
   class ApiError extends Error {}
   const share = (id, extra) => ({ id, label: `label ${id}`, kind: 'text', created: fx.now - 60, expires: fx.now + 3600, views_total: 3, left: 2, status: 'active', ...extra });
@@ -67,7 +72,7 @@ vi.mock('../public/js/api.js', async () => {
       // A Receive link with no expiry (expires: null) and views.
       share('r', { kind: 'reverse', expires: null, views_total: 2, left: 1, used: 1, received: { files: 1, bytes: 5 }, captcha: true })] })),
     // The Drive's reverse shares (My shares' Edit reads a link's options here).
-    drive: { reverse: vi.fn(async () => ({ reverse: [{ id: 'r', folder: 'root', label: 'label r', created: fx.now - 60, expires: null, status: 'active', views: 2, used: 1, left: 1,
+    drive: { kitStatus: vi.fn(async () => structuredClone(fx.kitStatus)), reverse: vi.fn(async () => ({ reverse: [{ id: 'r', folder: 'root', label: 'label r', created: fx.now - 60, expires: null, status: 'active', views: 2, used: 1, left: 1,
       maxFiles: null, maxBytes: null, maxFileBytes: null, types: null, captcha: true, password: false, note: false, files: 1, bytes: 5 }] })) },
     updateShare: vi.fn(async () => ({})),
     revokeShare: vi.fn(async () => ({})),
@@ -167,6 +172,29 @@ describe('no dashboard page shows a stray "null" or "undefined"', () => {
     await settle();
     expect(document.querySelectorAll('#view-account table.table').length).toBeGreaterThan(0);
     expect(strayText()).toEqual([]);
+    // The quotas: a size for the Drive's bytes, a count for its files.
+    expect([...document.querySelectorAll('#acct-quotas p')].map((x) => x.textContent)).toEqual(['25 MB / 1.0 GB uploaded to the Drive per 1d', '3 / 10 files uploaded to the Drive per 1d']);
+  });
+
+  it('Account with the Drive personal kit: never downloaded (no date), then out of date (the notices)', async () => {
+    fx.profile.caps.driveEnabled = true;
+    try {
+      for (const st of [{ version: 3, versionAt: null, last: null, stale: false }, { version: 4, versionAt: fx.now, last: { at: fx.now - 60, version: 3 }, stale: true }]) {
+        fx.kitStatus = st;
+        vi.resetModules();
+        mountPage('public/dashboard/account/index.html');
+        await import('../public/dashboard/js/account.js');
+        // The card's modules load on demand: wait for its state.
+        for (let i = 0; i < 500 && !/^Version/.test(document.getElementById('ukit-version')?.textContent || ''); i++) await new Promise((r) => setTimeout(r, 10));
+        await settle();
+        expect(document.getElementById('ukit-version').textContent).toMatch(/^Version \d/);
+        expect(document.getElementById('ukit-stale').hidden).toBe(!st.stale);
+        expect(!!document.getElementById('acct-kit-notice')).toBe(st.stale);
+        expect(strayText()).toEqual([]);
+      }
+    } finally {
+      fx.profile.caps.driveEnabled = undefined;
+    }
   });
 
   it('Account, while the owner acts as a user', async () => {
@@ -207,6 +235,13 @@ describe('no dashboard page shows a stray "null" or "undefined"', () => {
       expect([...document.querySelectorAll('.admin-panel[data-panel="roles"] h2')].map((x) => x.textContent)).toContain(`${['Owner', 'Default', 'Public'][i]} role`);
       expect(strayText(), `role ${i}`).toEqual([]);
     }
+    // The Default role's bytes quota: its max in GiB, with its unit.
+    edits()[1].click();
+    await settle();
+    const row = document.querySelector('.admin-panel[data-panel="roles"] .quota-row');
+    expect(row.querySelector('input[aria-label="Max"]').value).toBe('5');
+    expect(row.querySelector('select[aria-label="Max unit"]').value).toBe('GiB');
+    expect(strayText(), 'bytes quota').toEqual([]);
   });
 
   it('Admin → Import / export: export, and a file open for import (no system part in it)', async () => {

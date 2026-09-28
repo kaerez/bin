@@ -374,7 +374,7 @@ function swap(mount, ...nodes) {
 
 // ── notices above the Drive ─────────────────────────────────────────────────
 
-/** The banners over an open Drive: the owner acting as its user, and the upgrade of a Drive made before the key model v2. */
+/** The banners over an open Drive: the owner acting as its user, a personal kit that is out of date, and the upgrade of a Drive made before the key model v2. */
 function banners(client, deps) {
   const out = [];
   if (deps.user && deps.user.impersonating) {
@@ -382,6 +382,13 @@ function banners(client, deps) {
     out.push(h('div.card.drive-notice.drive-imp-note', { id: 'drive-imp-note', role: 'note' },
       h('p', { text: `You are in ${who}’s Drive: browse, upload, download, move, rename, delete and share as they would.` }),
       h('p.muted', { text: `The server gave you ${who}’s Drive keys as the administrator; that is recorded in the admin audit. What you do here shows in their activity as their own, and in the admin audit as yours.` })));
+  }
+  // The user's personal kit is out of date (the keys changed after their last download): a calm
+  // notice with no key detail. Not while the owner acts as the user: the kit is the user's own.
+  if (!(deps.user && deps.user.impersonating) && client.state && client.state.kit && client.state.kit.stale === true) {
+    out.push(h('div.card.drive-notice', { id: 'drive-kit-notice', role: 'note' },
+      h('p', { text: 'Your Drive’s keys were updated. Download a new personal kit and keep it safe.' }),
+      h('p', {}, h('a', { href: '/dashboard/account/#drive-kit', text: 'Download it on your Account page' }))));
   }
   if (client.migration) out.push(upgradeBox(client, deps));
   return out;
@@ -521,6 +528,9 @@ function upgradeBox(client, deps) {
 
 function mountApp(mount, client, deps) {
   const L = (deps.profile && deps.profile.limits) || {};
+  // The role's file-type rules and folder-depth limit apply to the Drive too (checked before anything is sent, and by the server).
+  client.setPolicy(L);
+  const depthLimited = Number.isInteger(L.maxFolderDepth);
   let current = ROOT;
   // The folder being opened (current until it has loaded) and whether that open was asked to move
   // focus: a refresh in the background (received files taken in) re-lists where the person is
@@ -861,7 +871,8 @@ function mountApp(mount, client, deps) {
       d.clearError();
       const done = [];
       try {
-        for (const it of items) { await client.move(it.id, target); done.push(it.id); }
+        const level = depthLimited ? await client.levelOf(target) : undefined;
+        for (const it of items) { await client.move(it.id, target, { kind: it.kind, level }); done.push(it.id); }
         toast(`Moved ${describe(items)}.`);
         d.close();
       } catch (e) {
@@ -937,10 +948,13 @@ function mountApp(mount, client, deps) {
     let done = 0;
     const label = files.length === 1 ? `Uploading ${files[0].name}` : `Uploading ${files.length} files`;
     const ok = await transfer(label, async (progress, signal) => {
+      // The role's file policy, for every file before any is sent.
+      await client.checkUpload(target, files.map((f) => ({ path: f.name, file: f })));
+      const level = depthLimited ? await client.levelOf(target) : undefined;
       // A name already in the folder gets " (2)", " (3)"… (one read of the folder for the batch).
       const { names: taken } = await client.names(target);
       for (const f of files) {
-        await client.upload(target, f, { signal, taken, onProgress: (d) => progress(done + d, total) });
+        await client.upload(target, f, { signal, taken, level, onProgress: (d) => progress(done + d, total) });
         done += f.size;
       }
     });
@@ -1446,10 +1460,10 @@ function mountApp(mount, client, deps) {
   const FAIL_TEXT = {
     unreadable: 'does not open with this Drive’s key (damaged, or not sent for this link)',
     name: 'its name or folder path cannot be used',
-    place: 'your Drive refused it (full, or its folder is full)',
-    // What it really is breaks the link's rules (the sender's browser declared something else).
-    type: 'its real file type is one this link does not accept',
-    size: 'it is larger than this link’s largest file',
+    place: 'your Drive refused it (full, its folder is full, or nested deeper than your account allows)',
+    // What it really is breaks the link's rules or the role's (the sender's browser declared something else).
+    type: 'its file type is one this link does not accept, or your account does not allow in the Drive',
+    size: 'it is larger than this link’s largest file, or than a note, link or credential can be',
     kind: 'it is not what its sender declared, or a kind this link (or your role, now) does not accept (a file, note, link or credential)',
   };
 
