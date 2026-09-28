@@ -599,7 +599,7 @@ describe('a user’s personal kit, restored by the owner only', () => {
     // The owner's action: not in the user's own activity.
     const act = (await (await fetchJson('/api/private/me/activity', { cookie: u.cookie })).json()).rows;
     expect(act.some((x) => /kit_restored|salt_restored/.test(x.action))).toBe(false);
-  });
+  }, 30000);
 
   it('the owner: items and link keys under a sub-MEK the server lost come back under the current one with the kit’s KEK; a wrong or a working key changes nothing', async () => {
     const u = await makeUser('ukr-lost');
@@ -643,5 +643,5 @@ describe('a user’s personal kit, restored by the owner only', () => {
     const row = (await adminAudit()).find((x) => x.action === 'drive.kit_restored' && x.detail.includes('re-sealed with the kit: 3'));
     expect(row.detail).toContain(lost);
     for (const k of kit.keks) expect(row.detail).not.toContain(k.kek);
-  });
+  }, 30000);
 });

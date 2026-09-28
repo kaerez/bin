@@ -5,7 +5,9 @@
 // sub-MEK entered by hand, a re-seal with progress, deleting a sub-MEK, a
 // root change), the key kit (download with the step-up, verify with a date,
 // a wrong passphrase, a restore preview that replaces nothing), the personal
-// kit on Account (download, verify, restore), Import / export → Drive keys
+// kit on Account (download and verify; no restore there, for a user or the
+// owner, and its routes refused), the restore of a user's personal kit in
+// Admin → Security → Keys (another account's kit refused), Import / export → Drive keys
 // (parts, the user picker, the masked view, the sealed file; an import
 // previewed, then applied, that replaces nothing), a user's keys (masked,
 // Show), every Drive file still opening after each change, the admin audit
@@ -303,11 +305,40 @@ try {
   await a.waitForSelector('#ukit-verify-verdict', { timeout: 120000 });
   check('personal kit: verify — complete', (await a.getAttribute('#ukit-verify-verdict', 'data-verdict')) === 'complete', await a.textContent('#ukit-verify-out'));
   await audit(a, 'Account (personal kit verified)');
-  await a.setInputFiles('#ukit-restore-file', ukit);
-  await a.fill('#ukit-restore-pass', KIT_PASS); await a.fill('#ukit-restore-confirm', ALICE_PW);
-  await a.click('#ukit-restore');
-  await a.waitForFunction(() => /Restore done|cannot|wrong|not/.test(document.querySelector('#ukit-restore-msg').textContent) && !/Opening/.test(document.querySelector('#ukit-restore-msg').textContent), null, { timeout: 120000 });
-  check('personal kit: a restore on a working server changes nothing', /Restore done: your user salt was already there; nothing else was missing/.test(await a.textContent('#ukit-restore-msg')), await a.textContent('#ukit-restore-msg'));
+  // Only the owner restores from a personal kit: no Restore on Account (a user's or the owner's), its routes refused.
+  const noRestore = async (x) => (await x.$('#ukit-restore-set')) === null && (await x.$('#ukit-restore')) === null
+    && JSON.stringify(await x.$$eval('#drive-kit legend', (ls) => ls.map((l) => l.textContent))) === '["Download","Verify"]'
+    && !/restor/i.test(await x.textContent('#drive-kit'));
+  check('personal kit: no Restore section on alice\'s Account page (Download and Verify only)', await noRestore(a));
+  const aliceTry = await api(a, '/api/private/drive/kit/restore', { method: 'POST', body: JSON.stringify({ salt: 'A'.repeat(43), current: 'x' }) });
+  const aliceItems = await api(a, '/api/private/drive/kit/items', { method: 'PUT', body: JSON.stringify({ items: [] }) });
+  const aliceAdmin = await api(a, `/api/private/admin/keys/users/${aliceId}/kit-restore`, { method: 'POST', body: JSON.stringify({ kit: { id: aliceId, keks: [] } }) });
+  check('personal kit: alice\'s restore routes answer 403 (the Account ones owner_only, the admin one)', aliceTry.status === 403 && aliceTry.body.error === 'owner_only' && aliceItems.status === 403 && aliceItems.body.error === 'owner_only' && aliceAdmin.status === 403, JSON.stringify([aliceTry, aliceItems, aliceAdmin]));
+  await p.goto(`${BASE}/dashboard/account/#drive-kit`);
+  await p.waitForSelector('#ukit-download', { timeout: 60000 });
+  check('personal kit: no Restore section on the owner\'s own Account page either', await noRestore(p));
+  const ownTry = await api(p, '/api/private/drive/kit/restore', { method: 'POST', body: JSON.stringify({ salt: 'A'.repeat(43), current: 'x' }) });
+  check('personal kit: the owner\'s own session is refused on the Account route (403 owner_only)', ownTry.status === 403 && ownTry.body.error === 'owner_only', JSON.stringify(ownTry));
+
+  // ── Admin → Security → Keys: restore a user's personal kit (the owner only) ──
+  await keysPage(p);
+  await p.waitForSelector(`#ukr-user option[value="${aliceId}"]`, { state: 'attached', timeout: 60000 });
+  await audit(p, 'Security → Keys (restore a user\'s personal kit)');
+  // alice's kit for another user (the owner): refused in the browser, nothing restored.
+  await p.selectOption('#ukr-user', ownerId);
+  await p.setInputFiles('#ukr-file', ukit);
+  await p.fill('#ukr-pass', KIT_PASS); await p.fill('#ukr-confirm', PW);
+  await p.click('#ukr-restore');
+  await p.waitForFunction(() => /another account/.test(document.querySelector('#ukr-msg').textContent), null, { timeout: 120000 });
+  check('restore a user\'s kit: another account\'s kit is refused', true);
+  await p.selectOption('#ukr-user', aliceId);
+  await p.setInputFiles('#ukr-file', ukit);
+  await p.fill('#ukr-pass', KIT_PASS); await p.fill('#ukr-confirm', PW);
+  await p.click('#ukr-restore');
+  await p.waitForFunction(() => /Restore done|another|wrong|not|refused|password/i.test(document.querySelector('#ukr-msg').textContent) && !/Opening/.test(document.querySelector('#ukr-msg').textContent), null, { timeout: 180000 });
+  check('restore a user\'s kit: on a working server it changes nothing', (await p.textContent('#ukr-msg')) === 'Restore done for alice: the user salt was already there; nothing else was missing.', await p.textContent('#ukr-msg'));
+  await audit(p, 'Security → Keys (a user\'s personal kit restored)');
+  check('restore a user\'s kit: alice\'s files still open', await driveReads(a, 'alice-first.txt', 'alice, before any change\n'));
 
   // ── Import / export → Drive keys ──
   const before = await status(p);
@@ -379,7 +410,7 @@ try {
   info(`key actions in the admin audit: ${[...keyActs].sort().join(', ')}`);
   const auditText = JSON.stringify(rowsAudit);
   const vals = [...shown, ROOT.toString('hex'), SUB.toString('base64'), SUB3.toString('hex'), ROOT2.toString('base64')];
-  check('admin audit: the key actions are there', ['keys.created', 'keys.viewed', 'keys.rotated', 'keys.added', 'keys.removed', 'keys.kit_exported', 'keys.kit_verified', 'keys.exported', 'keys.imported', 'keys.root_changed'].every((x) => keyActs.has(x)), [...keyActs].join(','));
+  check('admin audit: the key actions are there', ['keys.created', 'keys.viewed', 'keys.rotated', 'keys.added', 'keys.removed', 'keys.kit_exported', 'keys.kit_verified', 'keys.exported', 'keys.imported', 'keys.root_changed', 'drive.kit_restored'].every((x) => keyActs.has(x)), [...keyActs].join(','));
   check('admin audit: no key value anywhere in it', !vals.some((v) => auditText.includes(v)));
   await ac.close();
   await oc.close();
