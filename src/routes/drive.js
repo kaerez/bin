@@ -29,7 +29,7 @@ import { genId, genToken, genDeleteToken, hashToken } from '../lib/ids.js';
 import { MAX_BODY, MAX_BURN_RECORD, driveStub, fileStub } from '../lib/store.js';
 import { validateCreate, FormatError, expireSeconds, MAX_VIEWS } from '../../public/js/format.js';
 import { MAX_CHUNK_CT } from '../../public/js/files.js';
-import { KEY_RE, MEK_ID_RE, keyCheckValue, saltCheckValue, sameCheck, keyBytes } from '../../public/js/drivekeys.js';
+import { KEY_RE, MEK_ID_RE, keyCheckValue, saltCheckValue, sameCheck, keyBytes, isAtRest, openAtRest, openLinkKey } from '../../public/js/drivekeys.js';
 import { b64urlFromBytes } from '../../public/js/bytes.js';
 import { binding } from '../lib/config.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
@@ -151,7 +151,7 @@ export async function handleDrive(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     await readJsonBody(request);
     const s = await drive().summary(uid);
-    const k = await userKeys(env, uid, { meks: s.meks, createSalt: s.items === 0 });
+    const k = await userKeys(env, uid, { meks: s.meks, createSalt: nothingSealed(s) });
     if (a.actor) await dir.driveKeysUsed(a.actor.id, uid, 'opened while acting as the user');
     return withAuth(a, json(keysOut(k)));
   }
@@ -171,7 +171,7 @@ export async function handleDrive(request, env, url) {
   // The upgrade of a Drive made before the key model v2, in the user's own browser.
   if (p === '/api/private/drive/migrate' || p.startsWith('/api/private/drive/migrate/')) {
     if (a.actor) return err(403, 'impersonating', 'Upgrade this user’s Drive from Admin → Security → Keys.');
-    return withAuth(a, await upgradeRoute(request, env, url, dir, uid, p.slice('/api/private/drive/migrate'.length), { owner: pol.owner, byOwner: null }));
+    return withAuth(a, await upgradeRoute(request, env, url, dir, uid, p.slice('/api/private/drive/migrate'.length), { owner: pol.owner, byOwner: null, state: pol.migration, actor: uid }));
   }
 
   if (p === '/api/private/drive/folders') {
@@ -311,6 +311,13 @@ export async function handleDrive(request, env, url) {
   return err(404, 'not_found', 'Not found.');
 }
 
+/**
+ * Nothing in this Drive is sealed under a key its user salt gives (no item,
+ * no link key): a missing salt may then be made anew. A salt that was lost
+ * while anything is sealed under it is only restored (a kit, an import).
+ */
+const nothingSealed = (s) => s.items === 0 && s.links === 0;
+
 /** A user's KEKs as a session gets them. */
 function keysOut(k) {
   const b = (x) => (x ? b64urlFromBytes(x) : undefined);
@@ -356,7 +363,7 @@ async function kitRoute(request, env, url, dir, a, driveLog) {
     const refused = await stepUp(request, env, url, dir, uid, body);
     if (refused) return refused;
     const s = await drive.summary(uid);
-    const k = await userKeys(env, uid, { meks: s.meks, createSalt: s.items === 0 });
+    const k = await userKeys(env, uid, { meks: s.meks, createSalt: nothingSealed(s) });
     await driveLog('drive.kit_exported', `sub-MEKs: ${k.keks.size}`);
     const o = keysOut(k);
     return json({ kit: { id: uid, username: a.user.username, userSalt: k.salt, current: k.current, keks: o.keys.map(({ kekOld, ...x }) => x) }, missing: k.missing, broken: k.broken }); // eslint-disable-line no-unused-vars
@@ -441,30 +448,76 @@ function parseAfter(v) {
 }
 
 /**
- * A user salt from a kit, only for an account that has none: when the Drive
- * has items, the salt must open one of them (with the KEK it derives) → the
- * outcome ('restored' | 'same' | 'kept' | 'wrong').
+ * A user salt from a kit, only for an account that has none: it must open
+ * something of the Drive's (saltCheck), unless nothing there is sealed under
+ * it → the outcome ('restored' | 'same' | 'kept' | 'wrong').
  */
 async function restoreSalt(env, dir, uid, salt) {
   const have = await dir.driveKeys(uid, {}).catch(() => null);
   if (have && have.ok) return have.salt === salt ? 'same' : 'kept';
   if (!have || have.error !== 'salt_missing') return 'kept';
-  // Try the salt on one item (the root and the sub-MEKs are the Directory's: it derives).
-  const page = await driveStub(env, uid).sealedPage(uid, { limit: 1 });
-  const item = page.items[0];
-  const r = await dir.saltRestore(uid, salt, item ? { mek: item.mek } : null);
-  if (!r.ok) return 'kept';
-  if (item && r.kek) {
-    try {
-      const got = await openItem(uid, [keyBytes(r.kek)], item);
-      got.name.fill(0);
-      if (got.dek) got.dek.fill(0);
-    } catch {
-      return 'wrong';
-    }
-  }
+  const c = await saltCheck(env, dir, uid, salt);
+  if (c === 'wrong') return 'wrong';
+  if (c !== 'ok' && c !== 'empty') return 'kept';
   const w = await dir.saltRestore(uid, salt, null, { write: true });
   return w.ok && w.written ? 'restored' : 'kept';
+}
+
+/**
+ * Does `salt` open this account's Drive? It is tried (with the KEK and the
+ * field keys it gives, under the root and during a root change the previous
+ * one) on one of each kind of thing sealed under it, in turn: an item, a link
+ * key, a received item, a link key of the release before kept at rest
+ * (`extra`: the owner's kit material, Directory saltRestore). →
+ * 'ok' | 'wrong' | 'empty' (nothing is sealed under it) | 'has' (the account
+ * has a salt: nothing to restore) | 'unknown' (no such account).
+ */
+export async function saltCheck(env, dir, uid, salt, { ownerId = null, extra = null } = {}) {
+  const drive = driveStub(env, uid);
+  const probe = async (p) => {
+    const r = await dir.saltRestore(uid, salt, p, { ownerId, extra });
+    if (!r.ok) return r.error === 'exists' ? 'has' : r.error === 'invalid' ? 'unknown' : 'wrong';
+    return r;
+  };
+  const keysOf = (r, k) => [r[k], r[`${k}Old`]].filter(Boolean).map(keyBytes);
+  const page = await drive.sealedPage(uid, { limit: 1 });
+  const item = page.items[0];
+  if (item) {
+    const r = await probe({ mek: item.mek });
+    if (typeof r === 'string') return r;
+    try { const got = await openItem(uid, keysOf(r, 'kek'), item); got.name.fill(0); if (got.dek) got.dek.fill(0); return 'ok'; } catch { return 'wrong'; }
+  }
+  const link = page.links[0];
+  if (link) {
+    const r = await probe({ mek: link.mek, field: 'linkKey' });
+    if (typeof r === 'string') return r;
+    try {
+      const fk = { cur: { linkKey: keysOf(r, 'fieldKey')[0] }, old: keysOf(r, 'fieldKey')[1] ? { linkKey: keysOf(r, 'fieldKey')[1] } : null };
+      const sealed = JSON.parse(await fromRest(fk, uid, 'linkKey', link.id, link.priv));
+      for (const kek of keysOf(r, 'kek')) {
+        try { (await openLinkKey(kek, { userId: uid, mekId: link.mek, linkId: link.id }, sealed)).fill(0); return 'ok'; } catch { /* the next one */ }
+      }
+    } catch { /* does not open */ }
+    return 'wrong';
+  }
+  // Only values the field layer seals: a received item, a link key of the release before.
+  const rest = await drive.atRestPage(uid, { after: { kind: 'n', id: '' }, limit: 1 });
+  const rec = rest.received.find((x) => isAtRest(x.name));
+  const legacy = rec ? null : (await drive.legacyPage(uid, { limit: 1 })).links.find((l) => isAtRest(l.priv));
+  if (!rec && !legacy) return 'empty';
+  const field = rec ? 'received' : 'linkKey';
+  const r = await probe({ field });
+  if (typeof r === 'string') return r;
+  for (const k of keysOf(r, 'fieldKey')) {
+    try { await openAtRest(k, { userId: uid, field, ref: rec ? `name:${rec.id}` : legacy.id }, rec ? rec.name : legacy.priv); return 'ok'; } catch { /* the next one */ }
+  }
+  return 'wrong';
+}
+
+/** An item's sealed fields as stored (`from` of GET …/kit/items: what a re-seal replaces) → { name, meta, dek } or null. */
+function storedFields(v) {
+  const ok = (x, opt) => (opt && x === null) || (typeof x === 'string' && x.length <= 2048);
+  return isObj(v) && ok(v.name, false) && ok(v.meta, true) && ok(v.dek, true) ? { name: v.name, meta: v.meta, dek: v.dek } : null;
 }
 
 /**
@@ -483,9 +536,10 @@ async function resealedFromBrowser(env, uid, body) {
     const meta = isObj(x) && x.meta ? encField(x.meta, MAX_META_CT) : null;
     const dek = isObj(x) && x.dek ? encField(x.dek, MAX_DEK_CT) : null;
     const kf = isObj(x) ? keyFields(x) : null;
-    if (!name || !kf || !NODE_ID_RE.test(x.id ?? '') || !MEK_ID_RE.test(x.fromMek ?? '') || !KEY_RE.test(x.fromKs ?? '')) throw new HttpError(400, 'invalid', 'Each item needs id, fromMek, fromKs, ks, mek, name (meta?, dek?).');
+    const from = isObj(x) ? storedFields(x.from) : null;
+    if (!name || !kf || !from || !NODE_ID_RE.test(x.id ?? '') || !MEK_ID_RE.test(x.fromMek ?? '') || !KEY_RE.test(x.fromKs ?? '')) throw new HttpError(400, 'invalid', 'Each item needs id, fromMek, fromKs, from, ks, mek, name (meta?, dek?).');
     const mfp = await checkNewItem(uid, keys, { kind: dek ? 'file' : 'dir', ...kf, name, meta, dek });
-    items.push({ id: x.id, ...kf, mfp, name, meta, dek, fromMek: x.fromMek, fromKs: x.fromKs });
+    items.push({ id: x.id, ...kf, mfp, name, meta, dek, fromMek: x.fromMek, fromKs: x.fromKs, from });
   }
   const fk = lks.length ? await fieldKeys(env, uid) : null;
   const links = [];
@@ -518,8 +572,13 @@ const LINK_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
  *   item and link key must open under the user's KEKs; after the last page
  *   the old key wraps go (the owner's own, and the escrow records, only
  *   once every Drive is upgraded). A failure starts the verification over.
+ * - `POST /retire` `{ ids, current | reauth }` — link keys of the release
+ *   before that the old Drive key does not open (the step-up): those links
+ *   end, their keys go and what they received that was not taken in is
+ *   listed as failed, so that the upgrade can finish.
+ * `state`: the Drive's upgrade state now; `actor`: who confirms a step-up.
  */
-async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner }) {
+async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner, state = null, actor }) {
   const drive = driveStub(env, uid);
   if (sub === '' && request.method === 'GET') {
     assertNotCrossSite(request);
@@ -539,12 +598,21 @@ async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner }
     const after = url.searchParams.get('after') || '';
     if (after && !NODE_ID_RE.test(after)) return invalid('after must be an item id.');
     const r = await drive.legacyPage(uid, { after });
+    // A link key kept at rest comes back as the release before sealed it (the browser opens it with the old Drive key).
+    if (r.links.length) {
+      const fk = await fieldKeys(env, uid);
+      for (const l of r.links) {
+        try { l.priv = await fromRest(fk, uid, 'linkKey', l.id, l.priv); } catch { l.priv = null; }
+      }
+    }
     return json(r);
   }
   if (sub === '') {
     if (request.method !== 'PUT') return methodNotAllowed('GET, PUT');
     assertIntent(request);
     const body = await readJsonBody(request, MAX_BODY);
+    // An upgrade that is finished stays finished (a late or repeated upload changes nothing).
+    if (state !== 'pending') return err(409, 'already_upgraded', 'This Drive is upgraded already.');
     const list = Array.isArray(body.items) ? body.items : [];
     const lks = Array.isArray(body.links) ? body.links : [];
     if (!list.length && !lks.length) return invalid('Send the upgraded items and / or link keys.');
@@ -591,6 +659,24 @@ async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner }
     const r = await finishUpgrade(env, dir, uid, { owner, byOwner });
     if (!r.ok) return fromDir(r);
     return json({ ok: true, verified: v.verified, done: true, left: r.left, cleanup: r.cleanup });
+  }
+  if (sub === '/retire') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertIntent(request);
+    const body = await readJsonBody(request);
+    const ids = Array.isArray(body.ids) ? body.ids.filter((x) => typeof x === 'string' && LINK_ID_RE.test(x)) : [];
+    if (!ids.length || ids.length !== body.ids.length || ids.length > 1000) return invalid('ids must list 1–1000 reverse-share ids.');
+    const refused = await stepUp(request, env, url, dir, actor, body);
+    if (refused) return refused;
+    const r = await drive.retireLegacyLinks(uid, ids);
+    if (r.retired.length) {
+      await dir.endDriveShares(uid, r.retired, byOwner ? { id: byOwner, adm: true } : uid, 'link retired');
+      const detail = `links=${r.retired.length} received_failed=${r.failed}`;
+      if (byOwner) await dir.driveAdminAction(byOwner, uid, 'drive.links_retired', detail);
+      else await dir.driveLog(uid, uid, 'drive.links_retired', detail);
+      await dir.migrationSet(uid, { state: 'pending', v1Items: r.v1Items, v1Links: r.v1Links });
+    }
+    return json({ ok: true, retired: r.retired, failed: r.failed, v1Items: r.v1Items, v1Links: r.v1Links });
   }
   return err(404, 'not_found', 'Not found.');
 }
@@ -643,8 +729,12 @@ async function finishUpgrade(env, dir, uid, { owner, byOwner }) {
   return { ok: true, left: m.left, cleanup };
 }
 
-/** Every Drive is upgraded: the owner's old wraps and sealed escrow keys, and the escrow records, go. */
-async function legacyCleanup(env, dir) {
+/**
+ * Every Drive is upgraded: the owner's old wraps and sealed escrow keys, and
+ * the escrow records, go (after the last upgrade, and after the last account
+ * still waiting is deleted). Nothing happens while any Drive waits.
+ */
+export async function legacyCleanup(env, dir) {
   const { ownerId } = await dir.legacyEscrow();
   if (!ownerId) return false;
   const r = await dir.migrationCleanup(ownerId);
@@ -683,30 +773,66 @@ export async function adminDriveRoute(request, env, url, ownerId) {
           console.warn('secbin: drive migration state not read', e && e.message ? e.message : e);
         }
       }
-      out.push({ id: r.id, username: r.username, role: r.role, state: r.state, ...st, updated: r.updated });
+      out.push({ id: r.id, username: r.username, role: r.role, state: r.state, disabled: !!r.disabled, ...st, updated: r.updated });
     }
-    const { escrowPub } = await dir.legacyEscrow();
-    return json({ drives: out, left: out.filter((d) => d.state !== 'done').length, legacyEscrow: !!escrowPub });
+    let { escrowPub } = await dir.legacyEscrow();
+    const left = out.filter((d) => d.state !== 'done').length;
+    // Nothing waits any more (e.g. the last waiting account was deleted): the escrow records go now.
+    if (!left && escrowPub && (await legacyCleanup(env, dir))) escrowPub = (await dir.legacyEscrow()).escrowPub;
+    return json({ drives: out, left, legacyEscrow: !!escrowPub });
   }
-  const m = p.match(/^\/api\/private\/admin\/drive\/migrate\/([A-Za-z0-9_-]{16})(\/escrow|\/items|\/finish)?$/);
+  if (p === '/api/private/admin/drive/archive') return archiveRoute(request, env, url, dir, ownerId);
+  const m = p.match(/^\/api\/private\/admin\/drive\/migrate\/([A-Za-z0-9_-]{16})(\/escrow|\/items|\/finish|\/retire)?$/);
   if (!m) return err(404, 'not_found', 'Not found.');
   const [, uid, sub = ''] = m;
   if (uid === ownerId) return err(400, 'use_own', 'Upgrade your own Drive from the Drive page.');
-  const pol = await dir.driveAccess(uid);
+  // A disabled account's Drive is upgraded too (its keys must not wait for the account).
+  const pol = await dir.driveAccess(uid, { forUpgrade: true });
   if (!pol.ok) return fromDir(pol);
   if (sub === '/escrow') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
-    await readJsonBody(request);
+    const body = await readJsonBody(request);
+    // It hands out the user's old Drive key wrap and current KEK: the step-up, as for Show.
+    const refused = await stepUp(request, env, url, dir, ownerId, body);
+    if (refused) return refused;
     const L = await driveStub(env, uid).legacyKeys(uid);
     const wrap = L.wraps.find((w) => w.kind === 'escrow') || null;
     const logged = await dir.driveAdminAction(ownerId, uid, 'drive.escrow_used', 'reason=Drive key upgrade (the old Drive key, and the current KEK to re-seal under)');
     if (!logged.ok) return fromDir(logged);
-    const k = await userKeys(env, uid, { createSalt: L.v1Items === 0 });
+    const k = await userKeys(env, uid, { createSalt: nothingSealed(await driveStub(env, uid).summary(uid)) });
     const cur = k.keks.get(k.current);
     return json({ wrap, wraps: L.wraps.length, kcv: L.kcv, v1Items: L.v1Items, v1Links: L.v1Links, current: k.current, kek: cur ? b64urlFromBytes(cur.kek) : null, fp: cur ? cur.fp : null });
   }
-  return upgradeRoute(request, env, url, dir, uid, sub, { owner: false, byOwner: ownerId });
+  return upgradeRoute(request, env, url, dir, uid, sub, { owner: false, byOwner: ownerId, state: pol.migration, actor: ownerId });
+}
+
+/**
+ * The owner's archive of the release before (a start over; docs/DRIVE.md
+ * §3.3): `GET` — what it holds (items, bytes, received files, the links it
+ * pauses); `DELETE` `{ current | reauth, confirm: <username> }` — deleted
+ * with its content, and those links end (admin audit: `drive.archive_deleted`).
+ */
+async function archiveRoute(request, env, url, dir, ownerId) {
+  const drive = driveStub(env, ownerId);
+  if (request.method === 'GET') {
+    assertNotCrossSite(request);
+    return json(await drive.archiveInfo(ownerId));
+  }
+  if (request.method !== 'DELETE') return methodNotAllowed('GET, DELETE');
+  assertIntent(request);
+  binding(env, 'FILES'); // never report a delete that left ciphertext in R2
+  const body = await readJsonBody(request);
+  const refused = await stepUp(request, env, url, dir, ownerId, body);
+  if (refused) return refused;
+  if (typeof body.confirm !== 'string' || body.confirm !== (await dir.userName(ownerId))) return err(400, 'confirm', 'Type your username to confirm.');
+  const r = await drive.deleteArchive(ownerId);
+  if (r.links.length) await dir.endDriveShares(ownerId, r.links, { id: ownerId, adm: true }, 'link retired');
+  await dir.setDriveUsed(ownerId, r.used);
+  await dir.driveAdminAction(ownerId, ownerId, 'drive.archive_deleted', `items=${r.items} bytes=${r.bytes} links_ended=${r.links.length}`);
+  const st = await dir.migrationList();
+  if (st.some((x) => x.id === ownerId && x.state !== 'done')) await dir.migrationSet(ownerId, { state: 'pending', v1Items: r.v1Items, v1Links: r.v1Links });
+  return json({ ok: true, items: r.items, bytes: r.bytes, links: r.links.length });
 }
 
 // ── upload and download ────────────────────────────────────────────────────
@@ -897,11 +1023,15 @@ export async function drivePasswordChanged(env, uid, { reset = false } = {}) {
 
 /**
  * AUTHN owner recovery (src/routes/auth.js): the owner's passkeys and recovery
- * codes are gone, so are their old Drive wraps (a Drive still waiting for its
- * upgrade). No Drive key changes.
+ * codes are gone. Their old Drive wraps (of the release before) stay while any
+ * Drive still waits for its upgrade: the owner's old Drive key opens the
+ * escrow of every user's, and a wrap may still open it (the paper recovery
+ * codes, a passkey). Once nothing waits, they go. No Drive key changes.
  */
 export async function driveOwnerRecovered(env, ownerId) {
-  const c = await directory(env).credentialRefs(ownerId);
+  const dir = directory(env);
+  const c = await dir.credentialRefs(ownerId);
   if (!c || !c.drive) return;
+  if ((await dir.migrationList()).some((r) => r.state !== 'done')) return;
   await syncCredentialWraps(env, ownerId);
 }

@@ -11,9 +11,11 @@ Status: the contract reverse shares are built against (task #24). It builds on t
   time their Drive page opens (it takes them in).
 - An optional **password** gates the anonymous uploader only. It never protects the data (always
   encrypted to the link's key) and the user never needs it.
-- An upload stays **end-to-end encrypted** to the link's key until the user's browser takes it
-  into the Drive; from then on it is a Drive file, sealed under the user's KEK, which the server
-  can open (docs/DRIVE.md §2).
+- An upload is encrypted in the uploader's browser to the link's key, until the user's browser
+  takes it into the Drive; from then on it is a Drive file, sealed under the user's KEK. It is
+  **not end-to-end against the server** at any point: the link's private key is sealed under
+  the user's KEK, which the server derives (docs/DRIVE.md §2), so the server can open an upload
+  before it is taken in too. A copy of R2 or of the Drive object alone cannot.
 - Revoking, expiring or using up a reverse share stops uploads; files already received stay in the
   Drive. Deleting the folder ends its reverse shares.
 - Reverse shares are listed in My shares and Admin → Shares with `kind = 'reverse'`, and in the

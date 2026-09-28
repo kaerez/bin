@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS reverse_ids (h TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS meks (id TEXT PRIMARY KEY, sealed TEXT NOT NULL, fp TEXT NOT NULL, from_ts INTEGER NOT NULL, until_ts INTEGER,
   created INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS user_salts (user_id TEXT PRIMARY KEY, salt TEXT NOT NULL, created INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL, purpose TEXT NOT NULL DEFAULT 'sub');
 CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, v1_items INTEGER, v1_links INTEGER, updated INTEGER NOT NULL);
 `;
 
@@ -243,7 +243,8 @@ const MIGRATIONS = [
     m.sql.exec(`CREATE TABLE IF NOT EXISTS meks (id TEXT PRIMARY KEY, sealed TEXT NOT NULL, fp TEXT NOT NULL, from_ts INTEGER NOT NULL, until_ts INTEGER,
       created INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '')`);
     m.sql.exec('CREATE TABLE IF NOT EXISTS user_salts (user_id TEXT PRIMARY KEY, salt TEXT NOT NULL, created INTEGER NOT NULL)');
-    m.sql.exec('CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL)');
+    m.sql.exec("CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL, purpose TEXT NOT NULL DEFAULT 'sub')");
+    m.addColumn('mek_candidates', 'purpose', "TEXT NOT NULL DEFAULT 'sub'");
     m.sql.exec('CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, v1_items INTEGER, v1_links INTEGER, updated INTEGER NOT NULL)');
     const ts = Math.floor(Date.now() / 1000);
     for (const u of m.sql.exec("SELECT id FROM users WHERE role IN ('owner', 'user')").toArray()) {
@@ -345,7 +346,7 @@ const SQL_BATCH = 90;
  * user's own in their activity with the real actor in the admin audit.
  */
 /** The owner's direct actions on a user's Drive keys (admin audit only; driveAdminAction). */
-const ADMIN_DRIVE_ACTIONS = ['drive.escrow_used', 'drive.migrated', 'drive.keys_viewed', 'drive.keys_imported'];
+const ADMIN_DRIVE_ACTIONS = ['drive.escrow_used', 'drive.migrated', 'drive.keys_viewed', 'drive.keys_imported', 'drive.links_retired', 'drive.archive_deleted'];
 /** A generated key candidate (Admin → Security → Keys) is kept this long for the owner's session. */
 const MEK_CANDIDATE_SEC = 600;
 /** Key kit checks per owner session and window (seconds). */
@@ -358,7 +359,7 @@ const KIT_VERIFY_SEC = 600;
 const RECEIVED_ACTIONS = ['drive.received_taken_in', 'drive.received_failed', 'drive.received_retried'];
 const DRIVE_ACTIONS = ['drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted',
   // The personal kit (the user's own), and the user's own browser upgrading their Drive.
-  'drive.kit_exported', 'drive.kit_verified', 'drive.kit_restored', 'drive.migrated',
+  'drive.kit_exported', 'drive.kit_verified', 'drive.kit_restored', 'drive.migrated', 'drive.links_retired',
   ...RECEIVED_ACTIONS];
 const RECEIVED_DETAIL_RE = /^(id=r[A-Za-z0-9_-]{22} )files=([1-9]\d{0,8})$/;
 // A user's own file reads (one row per opened file) are throttled so that they
@@ -2022,9 +2023,10 @@ export class Directory extends DurableObject {
    * enforces HARD_MAX_DRIVE_BYTES then), the upload deadline for pending
    * files, and the current sub-MEK (null before the keyring exists).
    */
-  async driveAccess(uid) {
+  async driveAccess(uid, { forUpgrade = false } = {}) {
     const u = this.#user(uid);
-    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    // The owner upgrades a disabled account's Drive too (Admin → Security → Keys): its keys must not wait for the account.
+    if (!u || (u.disabled && !forUpgrade)) return fail(403, 'forbidden', 'Account unavailable.');
     if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
     const L = this.#effective(u).all;
     const s = this.#settings();
@@ -2166,12 +2168,16 @@ export class Directory extends DurableObject {
   }
 
   /**
-   * A user salt from a personal kit, for an account that has none (a salt is
-   * never replaced). Without `write`: the KEK it gives for sub-MEK
-   * `probe.mek` (the Worker checks it opens one of the Drive's items); with
-   * it: the salt stored.
+   * A user salt from a kit, for an account that has none (a salt is never
+   * replaced). Without `write`: what that salt gives, for the Worker to check
+   * it opens something of the Drive's — the KEK for sub-MEK `probe.mek`
+   * and / or the field key for `probe.field`, under the root and (during a
+   * root change) the previous one (`kekOld`, `fieldKeyOld`); with it: the salt
+   * stored. `extra` (the owner restoring a key kit or an import, `ownerId`):
+   * the kit's own root MEK and sub-MEKs, used where this server has none (or
+   * its copy does not open), so that keys lost together are checked together.
    */
-  async saltRestore(uid, salt, probe, { write = false } = {}) {
+  async saltRestore(uid, salt, probe, { write = false, ownerId = null, extra = null } = {}) {
     const u = this.#user(uid);
     if (!u || u.role === 'public' || typeof salt !== 'string' || !KEY_RE.test(salt)) return fail(400, 'invalid', 'Invalid salt.');
     if (this.#saltOf(uid)) return fail(409, 'exists', 'This account has a user salt.');
@@ -2181,10 +2187,38 @@ export class Directory extends DurableObject {
       return { ok: true, written: !!w };
     }
     if (!probe) return { ok: true, kek: null };
-    const root = this.#keyRoot();
-    const s = root ? (await this.#openSubs(root)).get(probe.mek) : null;
-    if (!s || !s.key) return fail(409, 'unreadable', 'The sub-MEK of that item is not here.');
-    return { ok: true, kek: b64urlFromBytes(await deriveKek(root.key, s.key, salt, uid)) };
+    const x = extra && this.#isOwner(ownerId) ? extra : null;
+    const given = (v) => (typeof v === 'string' && KEY_RE.test(v) ? bytesFromB64url(v) : null);
+    const out = { ok: true, kek: null };
+    const here = this.#keyRoot();
+    // Under the root now and, during a root change, the previous one (items not re-sealed yet).
+    const roots = [[here ?? (given(x?.root) ? { key: given(x.root) } : null), ''], [this.#keyRoot('mek.rootOld'), 'Old']];
+    for (const [root, sfx] of roots) {
+      if (!root) continue;
+      if (probe.mek) {
+        const s = (await this.#openSubs(root)).get(probe.mek);
+        const sub = s && s.key ? s.key : given(x?.subs?.[probe.mek]);
+        if (sub) out[`kek${sfx}`] = b64urlFromBytes(await deriveKek(root.key, sub, salt, uid));
+      }
+      // A link key, a received item: sealed at rest under the field key that salt gives.
+      if (probe.field === 'linkKey' || probe.field === 'received') out[`fieldKey${sfx}`] = b64urlFromBytes(await deriveFieldKey(await deriveUserKey(root.key, salt, uid), probe.field));
+    }
+    if (probe.mek && !out.kek && !out.kekOld) return fail(409, 'unreadable', 'The sub-MEK of that item is not here.');
+    return out;
+  }
+
+  /**
+   * The KEK that a sub-MEK the owner restores (a key kit, an import) would
+   * give `uid` for `mekId` (the root and the user's salt here; where this
+   * server has none, the kit's own), for the Worker to check it opens
+   * something sealed under that id before it is added.
+   */
+  async probeSub(ownerId, uid, mekId, key, { root: rootKey = null, salt: saltKey = null } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const salt = this.#saltOf(uid) ?? (KEY_RE.test(saltKey ?? '') ? saltKey : null);
+    const root = this.#keyRoot()?.key ?? (KEY_RE.test(rootKey ?? '') ? bytesFromB64url(rootKey) : null);
+    if (!salt || !root || !MEK_ID_RE.test(mekId ?? '') || !KEY_RE.test(key ?? '')) return fail(409, 'unreadable', 'Nothing to check against.');
+    return { ok: true, kek: b64urlFromBytes(await deriveKek(root, bytesFromB64url(key), salt, uid)) };
   }
 
   /** The field layer's keys for `uid` → { cur: { field: key }, old: { field: key } | null } (base64url). */
@@ -2205,6 +2239,7 @@ export class Directory extends DurableObject {
 
   /** The keyring as Admin → Security → Keys shows it (fingerprints and dates, never a key). */
   async mekStatus() {
+    this.#purgeCandidates();
     const root = this.#keyRoot();
     const old = this.#keyRoot('mek.rootOld');
     const rows = this.#mekRows();
@@ -2248,25 +2283,37 @@ export class Directory extends DurableObject {
   async mekCandidate(ownerId, sid, purpose) {
     if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
     if (typeof sid !== 'string' || !sid) return fail(400, 'invalid', 'A session is needed.');
+    if (purpose !== 'root' && purpose !== 'sub') return fail(400, 'invalid', 'A candidate is for the root MEK or a sub-MEK.');
     const key = newKey();
     const fp = await keyFingerprint(key);
     const id = newId();
     const t = now();
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec('DELETE FROM mek_candidates WHERE exp <= ?', t);
+      this.#purgeCandidates();
       // At most a few per session: the oldest go.
       this.sql.exec('DELETE FROM mek_candidates WHERE sid = ? AND id NOT IN (SELECT id FROM mek_candidates WHERE sid = ? ORDER BY exp DESC LIMIT 4)', sid, sid);
-      this.sql.exec('INSERT INTO mek_candidates (id, sid, key, exp) VALUES (?, ?, ?, ?)', id, sid, b64urlFromBytes(key), t + MEK_CANDIDATE_SEC);
+      this.sql.exec('INSERT INTO mek_candidates (id, sid, key, exp, purpose) VALUES (?, ?, ?, ?, ?)', id, sid, b64urlFromBytes(key), t + MEK_CANDIDATE_SEC, purpose);
       this.#keyLog(ownerId, 'keys.candidate', `${purpose === 'root' ? 'root MEK' : 'sub-MEK'} candidate ${fp}`);
     });
     return { ok: true, id, key: b64urlFromBytes(key), fp, expires: t + MEK_CANDIDATE_SEC };
   }
 
-  /** The key a change uses: a candidate of this session (by id), or one the owner entered → { key, how } or a failure. */
-  #pickKey(sid, { candidate, key }) {
+  /** Generated keys that were never used go once their 10 minutes are over (every keyring call, and the hourly alarm). */
+  #purgeCandidates() {
+    this.sql.exec('DELETE FROM mek_candidates WHERE exp <= ?', now());
+  }
+
+  /**
+   * The key a change uses: a candidate of this session made for that
+   * `purpose` ('root' or 'sub'), or one the owner entered → { key, how } or a
+   * failure.
+   */
+  #pickKey(sid, { candidate, key }, purpose) {
+    this.#purgeCandidates();
     if (typeof candidate === 'string') {
-      const r = this.sql.exec('SELECT key FROM mek_candidates WHERE id = ? AND sid = ? AND exp > ?', candidate, String(sid ?? ''), now()).toArray()[0];
+      const r = this.sql.exec('SELECT key, purpose FROM mek_candidates WHERE id = ? AND sid = ? AND exp > ?', candidate, String(sid ?? ''), now()).toArray()[0];
       if (!r) return fail(410, 'candidate_expired', 'That generated key is no longer available (it is kept for 10 minutes): generate another.');
+      if (r.purpose !== purpose) return fail(409, 'candidate_purpose', purpose === 'root' ? 'That key was generated for a sub-MEK: generate one for the root MEK.' : 'That key was generated for the root MEK: generate one for a sub-MEK.');
       return { ok: true, key: bytesFromB64url(r.key), how: 'generated', candidate };
     }
     if (typeof key === 'string' && KEY_RE.test(key)) {
@@ -2295,7 +2342,7 @@ export class Directory extends DurableObject {
     if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
     const root = this.#keyRoot();
     if (!root) return fail(503, 'keys_missing', 'There is no root MEK: restore the keyring from the key kit first.');
-    const k = this.#pickKey(sid, { candidate, key });
+    const k = this.#pickKey(sid, { candidate, key }, 'sub');
     if (!k.ok) return k;
     const text = cleanLabel(note);
     if (text === null) return fail(400, 'invalid', 'A note is up to 100 characters.');
@@ -2423,7 +2470,7 @@ export class Directory extends DurableObject {
     if (this.#keyRoot('mek.rootOld')) return fail(409, 'root_changing', 'A root change is still being finished: let it complete first.');
     const root = this.#keyRoot();
     if (!root) return fail(503, 'keys_missing', 'There is no root MEK: restore it from the key kit first.');
-    const k = this.#pickKey(sid, { candidate, key });
+    const k = this.#pickKey(sid, { candidate, key }, 'root');
     if (!k.ok) return k;
     const fp = await keyFingerprint(k.key);
     if (fp === root.fp) return fail(409, 'same_key', 'That is the current root MEK.');
@@ -2450,6 +2497,52 @@ export class Directory extends DurableObject {
     return { ok: true, fp, old: root.fp };
   }
 
+  /**
+   * Undo a root change that cannot finish (Admin → Security → Keys, "Go back
+   * to the previous root"): the two roots swap — the sub-MEKs are sealed
+   * under the previous one again — and the re-seal job that follows moves
+   * every item back under it; then the root that was new goes as usual.
+   */
+  async mekRootSwap(ownerId) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const old = this.#keyRoot('mek.rootOld');
+    const root = this.#keyRoot();
+    if (!old || !root) return fail(409, 'not_changing', 'No root change is running.');
+    const rows = this.#mekRows();
+    const subs = await this.#openSubs(root, rows);
+    const resealed = [];
+    for (const r of rows) {
+      const k = subs.get(r.id)?.key;
+      if (!k) return fail(409, 'broken', `Sub-MEK ${r.id} does not open under the root MEK: restore it from the key kit first.`);
+      resealed.push([r.id, await sealSubMek(old.key, r.id, k)]);
+    }
+    if (this.#keyRoot()?.fp !== root.fp) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(old.key), fp: old.fp, created: old.created }));
+      this.#setMeta('mek.rootOld', JSON.stringify({ key: b64urlFromBytes(root.key), fp: root.fp, created: root.created }));
+      for (const [id, sealed] of resealed) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
+      this.#keyLog(ownerId, 'keys.root_changed', `root change undone: back to root MEK ${old.fp} (from ${root.fp}); every item is re-sealed under it`);
+    });
+    return { ok: true, fp: old.fp, old: root.fp };
+  }
+
+  /**
+   * The owner drops the previous root MEK although items still open only
+   * under it or under neither (after a root change that could not finish,
+   * with the step-up and the typed confirmation): those items stay
+   * unreadable. `items`: how many, for the audit.
+   */
+  async mekRootDropOld(ownerId, { items = 0 } = {}) {
+    if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
+    const old = this.#keyRoot('mek.rootOld');
+    if (!old) return fail(409, 'not_changing', 'No root change is running.');
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM meta WHERE k = 'mek.rootOld'");
+      this.#keyLog(ownerId, 'keys.root_old_dropped', `old root MEK ${old.fp} removed by the owner; items left unreadable: ${Number(items) || 0}`);
+    });
+    return { ok: true };
+  }
+
   /** Every item sealed under the old root is re-sealed: it goes. */
   async mekRootDone(ownerId) {
     if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
@@ -2470,9 +2563,15 @@ export class Directory extends DurableObject {
     else this.#setMeta('mek.job', JSON.stringify(job));
     return { ok: true };
   }
-  /** The accounts whose Drive may hold items (a Drive usage row), in id order. */
+  /**
+   * Every account whose Drive may hold anything sealed under a KEK or a field
+   * key (items, link keys, received items): every owner and user account with
+   * a user salt (each account gets one when it is made) or a Drive usage row,
+   * in id order. A Drive with nothing in it costs one call and changes nothing.
+   */
   async driveUsers() {
-    return this.sql.exec("SELECT d.user_id AS id FROM drive_usage d JOIN users u ON u.id = d.user_id WHERE u.role IN ('owner', 'user') ORDER BY d.user_id").toArray().map((r) => r.id);
+    return this.sql.exec(`SELECT id FROM users WHERE role IN ('owner', 'user')
+      AND (id IN (SELECT user_id FROM user_salts) OR id IN (SELECT user_id FROM drive_usage)) ORDER BY id`).toArray().map((r) => r.id);
   }
   async userName(uid) {
     return this.#user(uid)?.username ?? null;
@@ -2482,11 +2581,13 @@ export class Directory extends DurableObject {
    * The key kit (docs/DRIVE.md §3.1): the root MEK, every sub-MEK with its
    * dates and every user salt, for the owner's browser to seal under a
    * passphrase. The download is recorded ({ at, root, subs, users }: what
-   * it covers) for the fresh-kit notice. Not during a root change.
+   * it covers) for the fresh-kit notice. During a root change it also holds
+   * the previous root MEK (`rootOld`: items not re-sealed yet open under it),
+   * so that a backup can always be made.
    */
   async keyKit(ownerId) {
     if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
-    if (this.#keyRoot('mek.rootOld')) return fail(409, 'root_changing', 'Finish the root change first: then the kit covers every item.');
+    const old = this.#keyRoot('mek.rootOld');
     const root = this.#keyRoot();
     if (!root) return fail(503, 'keys_missing', 'There is no root MEK: restore it from the key kit first.');
     const rows = this.#mekRows();
@@ -2501,13 +2602,14 @@ export class Directory extends DurableObject {
     const rec = { at: t, root: root.fp, subs: rows.map((r) => r.fp), users: await this.#usersHash() };
     this.ctx.storage.transactionSync(() => {
       this.#setMeta('mek.kit', JSON.stringify(rec));
-      this.#keyLog(ownerId, 'keys.kit_exported', `root MEK ${root.fp}; sub-MEKs: ${rows.length}; user salts: ${Object.keys(salts).length}`);
+      this.#keyLog(ownerId, 'keys.kit_exported', `root MEK ${root.fp}${old ? ` (and the previous one, ${old.fp}, during the root change)` : ''}; sub-MEKs: ${rows.length}; user salts: ${Object.keys(salts).length}`);
     });
     return {
       ok: true, kit: rec,
       material: {
         made: t, current: effectiveAt(rows, t)?.id ?? null,
         root: { key: b64urlFromBytes(root.key), fp: root.fp, created: root.created },
+        ...(old ? { rootOld: { key: b64urlFromBytes(old.key), fp: old.fp, created: old.created } } : {}),
         subs: rows.map((r) => ({ id: r.id, key: b64urlFromBytes(subs.get(r.id).key), fp: r.fp, from: r.from, until: r.until, created: r.created, note: r.note })),
         salts,
       },
@@ -2571,14 +2673,22 @@ export class Directory extends DurableObject {
    * - a sub-MEK when its id is not here, or its copy here does not open and
    *   the kit's key has the recorded fingerprint;
    * - a user salt only when the account has none.
+   * The Worker proves what this object cannot (it holds no Drive): `checks`
+   * { subs: { id: 'ok' | 'unused' | 'wrong' }, salts: { uid: 'ok' | 'empty' |
+   * 'wrong' } } — a sub-MEK this server does not have is added only when an
+   * item or link key sealed under its id opens with it ('ok'); a salt only
+   * when it opens one of that account's seals ('ok'), or when that Drive
+   * holds none ('empty'). Anything else is reported, never written.
+   * During a root change it works too (a kit of either root is recognised).
    * `dryRun`: the plan only. → { root, subs: [{ id, result }], salts: { … } }.
    */
-  async keyRestore(ownerId, { root = null, subs = [], salts = {}, useRoot = false, dryRun = true } = {}) {
+  async keyRestore(ownerId, { root = null, rootOld = null, subs = [], salts = {}, useRoot = false, dryRun = true, checks = { subs: {}, salts: {} } } = {}) {
     if (!this.#isOwner(ownerId)) return fail(403, 'owner_only', 'Owner only.');
-    if (this.#keyRoot('mek.rootOld')) return fail(409, 'root_changing', 'Finish the root change first.');
+    const prev = this.#keyRoot('mek.rootOld');
+    if (prev && useRoot) return fail(409, 'root_changing', 'A root change is running: its root MEK cannot be replaced.');
     const cur = this.#keyRoot();
     const rows = this.#mekRows();
-    const out = { root: root ? 'kept' : 'absent', subs: [], salts: { restored: 0, same: 0, kept: 0, unknown: 0 } };
+    const out = { root: root ? 'kept' : 'absent', rootOld: rootOld ? 'kept' : 'absent', subs: [], salts: { restored: 0, same: 0, kept: 0, unknown: 0, wrong: 0 } };
     const t = now();
     // The root MEK first: every sub-MEK is sealed under the one that stays.
     let rootKey = cur ? cur.key : null;
@@ -2591,6 +2701,7 @@ export class Directory extends DurableObject {
       const givenOpens = [];
       for (const r of rows) { try { givenOpens.push([r.id, await openSubMek(given, r.id, r.sealed)]); } catch { /* not under it */ } }
       if (cur && fp === cur.fp) out.root = 'same';
+      else if (prev && fp === prev.fp) out.root = 'previous'; // the root being replaced: kept until the change is done
       else if (!cur || (rows.length && ![...opened.values()].some((s) => s.key) && givenOpens.length) || useRoot) {
         out.root = 'restored';
         newRoot = { key: given, fp };
@@ -2598,6 +2709,15 @@ export class Directory extends DurableObject {
         rootFp = fp;
         for (const [id, key] of givenOpens) opened.set(id, { ...opened.get(id), key });
       }
+    }
+    // A kit made during a root change holds the root being replaced too: it comes back when this server
+    // has none, alongside the kit's own root (then the root change's re-seal is run again, Admin → Keys).
+    let oldRoot = null;
+    if (rootOld && KEY_RE.test(rootOld.key ?? '') && root && (out.root === 'same' || out.root === 'restored')) {
+      const given = bytesFromB64url(rootOld.key);
+      const fp = await keyFingerprint(given);
+      if (prev) out.rootOld = prev.fp === fp ? 'same' : 'kept';
+      else if (fp !== rootFp) { out.rootOld = 'restored'; oldRoot = { key: given, fp, created: Number.isSafeInteger(rootOld.created) ? rootOld.created : t }; }
     }
     // The sub-MEKs: missing ones added, broken ones replaced (fingerprint recorded here), working ones kept.
     const reseal = [];
@@ -2611,6 +2731,9 @@ export class Directory extends DurableObject {
       if (here && here.fp !== fp) { out.subs.push({ id: s.id, result: 'conflict' }); continue; }
       if (!rootKey) { out.subs.push({ id: s.id, result: 'no_root' }); continue; }
       if (!here && rows.some((r) => r.fp === fp)) { out.subs.push({ id: s.id, result: 'kept' }); continue; }
+      // A sub-MEK this server does not have: only when it proved to open what is sealed under its id.
+      const proof = checks?.subs?.[s.id];
+      if (!here && proof !== 'ok') { out.subs.push({ id: s.id, result: proof === 'wrong' ? 'wrong (it does not open what is sealed under this id)' : 'unused (nothing here is sealed under it: add it as a new sub-MEK if you need it)' }); continue; }
       const sealed = await sealSubMek(rootKey, s.id, key);
       if (here) { reseal.push([s.id, sealed]); out.subs.push({ id: s.id, result: 'restored' }); continue; }
       // A sub-MEK this server never had (or lost): with its dates when they fit, else closed (it only opens items).
@@ -2638,13 +2761,17 @@ export class Directory extends DurableObject {
       const u = this.#user(uid);
       if (!u || u.role === 'public' || typeof salt !== 'string' || !KEY_RE.test(salt)) { out.salts.unknown++; continue; }
       const have = this.#saltOf(uid);
-      if (!have) { addSalts.push([uid, salt]); out.salts.restored++; } else if (have === salt) out.salts.same++; else out.salts.kept++;
+      if (have) { if (have === salt) out.salts.same++; else out.salts.kept++; continue; }
+      // Only a salt that opens this account's seals (or for a Drive that holds none).
+      const proof = checks?.salts?.[uid];
+      if (proof === 'ok' || proof === 'empty') { addSalts.push([uid, salt]); out.salts.restored++; } else out.salts.wrong++;
     }
-    const changed = !!newRoot || reseal.length || next.length !== rows.length || addSalts.length;
+    const changed = !!newRoot || !!oldRoot || reseal.length || next.length !== rows.length || addSalts.length;
     if (dryRun || !changed) return { ok: true, dryRun, changed: !!changed, ...out };
     if (this.#keyRoot()?.fp !== cur?.fp || this.#mekRows().length !== rows.length) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
     this.ctx.storage.transactionSync(() => {
       if (newRoot) this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(newRoot.key), fp: newRoot.fp, created: root.created ?? t }));
+      if (oldRoot) this.#setMeta('mek.rootOld', JSON.stringify({ key: b64urlFromBytes(oldRoot.key), fp: oldRoot.fp, created: oldRoot.created }));
       this.#setMeta('mek.ever', '1');
       for (const [id, sealed] of reseal) this.sql.exec('UPDATE meks SET sealed = ? WHERE id = ?', sealed, id);
       for (const r of next) {
@@ -2652,7 +2779,7 @@ export class Directory extends DurableObject {
         this.sql.exec('INSERT INTO meks (id, sealed, fp, from_ts, until_ts, created, note) VALUES (?, ?, ?, ?, ?, ?, ?)', r.id, r.sealed, r.fp, r.from, r.until, r.created, r.note);
       }
       for (const [uid, salt] of addSalts) this.sql.exec('INSERT OR IGNORE INTO user_salts (user_id, salt, created) VALUES (?, ?, ?)', uid, salt, t);
-      this.#keyLog(ownerId, 'keys.restored', `root MEK ${out.root}${newRoot ? ` (${rootFp})` : ''}; sub-MEKs ${out.subs.filter((s) => /restored|added/.test(s.result)).length} put back; user salts ${addSalts.length} put back`);
+      this.#keyLog(ownerId, 'keys.restored', `root MEK ${out.root}${newRoot ? ` (${rootFp})` : ''}${oldRoot ? `; the previous root MEK ${oldRoot.fp} put back (the root change's re-seal is to run again)` : ''}; sub-MEKs ${out.subs.filter((s) => /restored|added/.test(s.result)).length} put back; user salts ${addSalts.length} put back`);
     });
     return { ok: true, dryRun: false, changed: true, ...out };
   }
@@ -2693,12 +2820,13 @@ export class Directory extends DurableObject {
   // ── the upgrade of Drives made before the key model v2 ───────────────────
   /** Every account whose Drive was (or may be) made before it, with its state. */
   async migrationList() {
-    return this.sql.exec(`SELECT m.user_id AS id, m.state, m.v1_items AS v1Items, m.v1_links AS v1Links, m.updated, u.username, u.role
+    return this.sql.exec(`SELECT m.user_id AS id, m.state, m.v1_items AS v1Items, m.v1_links AS v1Links, m.updated, u.username, u.role, u.disabled
       FROM drive_migration m JOIN users u ON u.id = m.user_id ORDER BY u.role DESC, u.username`).toArray();
   }
+  /** A Drive's upgrade state and what is left; one that is done stays done (a late write never makes it wait again). */
   async migrationSet(uid, { state, v1Items = null, v1Links = null }) {
     if (!['pending', 'done'].includes(state)) return fail(400, 'invalid', 'Unknown state.');
-    this.sql.exec('UPDATE drive_migration SET state = ?, v1_items = ?, v1_links = ?, updated = ? WHERE user_id = ?', state, v1Items, v1Links, now(), uid);
+    this.sql.exec(`UPDATE drive_migration SET state = ?, v1_items = ?, v1_links = ?, updated = ? WHERE user_id = ?${state === 'pending' ? " AND state != 'done'" : ''}`, state, v1Items, v1Links, now(), uid);
     return { ok: true, left: this.sql.exec("SELECT COUNT(*) AS c FROM drive_migration WHERE state != 'done'").one().c };
   }
   /** The owner's escrow public key of the release before (for the upgrade's escrow path), or null. */
@@ -2832,7 +2960,8 @@ export class Directory extends DurableObject {
     for (const id of list) {
       n += this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, uid).rowsWritten;
     }
-    if (n) this.#log(actorId, uid, 'share.revoked', `${reason === 'account deleted' ? 'account deleted' : 'drive item deleted'}: ${n} share${n === 1 ? '' : 's'}`);
+    const why = reason === 'account deleted' || reason === 'link retired' ? reason : 'drive item deleted';
+    if (n) this.#log(actorId, uid, 'share.revoked', `${why}: ${n} share${n === 1 ? '' : 's'}`);
     return { ok: true, ended: n };
   }
 
@@ -4037,6 +4166,7 @@ export class Directory extends DurableObject {
     this.sql.exec('DELETE FROM revoked_sessions WHERE exp < ?', ts);
     this.sql.exec('DELETE FROM webauthn_challenges WHERE exp <= ?', ts);
     this.sql.exec('DELETE FROM webauthn_spent WHERE exp <= ?', ts);
+    this.#purgeCandidates(); // generated Drive keys never used (Admin → Security → Keys)
     this.sql.exec('DELETE FROM usage WHERE ts < ?', ts - 400 * 86400);
     // Lockout counters for usernames that do not exist, once they no longer matter.
     this.sql.exec("DELETE FROM failures WHERE user_id LIKE 'n:%' AND locked_until < ? AND start < ?", ts, ts - this.#settings()['lockout.windowSec']);

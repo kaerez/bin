@@ -10,13 +10,16 @@
 // (so the upgrade can stop at any time and resume, and a repeat changes
 // nothing). Then the server verifies that every item opens under v2, page by
 // page, and only then removes the old key wraps (the owner's own, and the
-// escrow records, once every Drive is upgraded).
+// escrow records, once every Drive is upgraded). A reverse-link key the old
+// key does not open (damaged, or sealed under an archive's key by a start
+// over of that release) holds the upgrade until its user retires that link
+// (the link ends, its key goes): the upgrade reports those links.
 
 import { drive as api, ApiError } from './api.js';
 import { keyBytes, newSalt, sealName, openName, sealDek, openDek, sealLinkKey, openLinkKey } from './drivekeys.js';
 import {
   deriveSubkeysV1, openFieldV1, openReversePrivV1, keyCheckValueV1, unlockWithPassword, unlockWithRecovery, unlockWithPrf,
-  openEscrowKey, unlockWithEscrow, escrowWrapKeyId, saveLegacyKey, loadLegacyKey, clearLegacyKey,
+  openEscrowKey, unlockWithEscrow, escrowWrapKeyId, saveLegacyKey, loadLegacyKey, clearLegacyKey, openKitV1,
 } from './drivev1.js';
 import { utf8 } from './bytes.js';
 
@@ -53,6 +56,7 @@ export async function isThisDrivesKey(dk, kcv, target = null) {
     try { await openFieldV1(sub.names, 'name', it.id, it.name); return true; } catch { /* the next */ }
   }
   for (const l of links) {
+    if (!l.priv) continue;
     try { (await openReversePrivV1(dk, l.id, l.priv)).fill(0); return true; } catch { /* the next */ }
   }
   return false;
@@ -104,6 +108,22 @@ export async function legacyUnlockAtSignIn({ user, ...creds }) {
   }
 }
 
+/**
+ * The Drive page: open the old Drive key with a recovery kit of that release
+ * (secbin-owner-kit/1 or secbin-user-kit/1: the file and its passphrase,
+ * opened here only) → true, or UpgradeBlocked 'wrong' (it is not this Drive's
+ * key); DriveKitV1Error when the file does not open.
+ */
+export async function legacyUnlockWithKit({ user, text, passphrase = '' }) {
+  const m = await api.migrate();
+  if (!m.legacy && !m.v1Items && !m.v1Links) throw new UpgradeBlocked('This Drive has nothing of the release before left to upgrade.', 'none');
+  const dk = await openKitV1(text, { accountId: user.id, origin: location.origin, passphrase });
+  if (!(await isThisDrivesKey(dk, m.kcv))) { dk.fill(0); throw new UpgradeBlocked('That kit does not hold your Drive’s old key.', 'wrong'); }
+  saveLegacyKey(dk, user.id);
+  dk.fill(0);
+  return true;
+}
+
 /** The Drive page: open the old Drive key with the account password (or a recovery code) → true, or UpgradeBlocked 'wrong'. */
 export async function legacyUnlock({ user, password, code }) {
   const m = await api.migrate();
@@ -116,22 +136,35 @@ export async function legacyUnlock({ user, password, code }) {
 
 /**
  * One Drive's items and link keys re-sealed and sent, then verified → {
- * upgraded, damaged, verified }. `dk`: its old Drive key; `uid`: its user;
- * `mek` / `kek`: the user's current sub-MEK and KEK; `target`: null (one's
- * own Drive) or the user's id (the owner, from Admin). An item the old key
- * cannot open (damaged in storage — the old key itself is checked first) is
- * sealed under v2 with a placeholder name ("damaged-<id>") and, for a file
- * whose key is lost too, a random DEK: its content was already unreadable.
+ * upgraded, damaged, verified, unopened, done, cleanup }. `dk`: its old Drive
+ * key; `uid`: its user; `mek` / `kek`: the user's current sub-MEK and KEK;
+ * `target`: null (one's own Drive) or the user's id (the owner, from Admin).
+ * An item the old key cannot open (damaged in storage — the old key itself is
+ * checked first) is sealed under v2 with a placeholder name ("damaged-<id>")
+ * and, for a file whose key is lost too, a random DEK: its content was
+ * already unreadable. A link key it cannot open is listed in `unopened` (the
+ * link ids), and the upgrade stops before the verification: the user retires
+ * those links (retireLinks), then it finishes (finishUpgrade).
  */
 async function run({ dk, uid, mek, kek, target = null, onProgress }) {
   const sub = await deriveSubkeysV1(dk);
-  const out = { upgraded: 0, damaged: 0, verified: 0 };
+  const out = { upgraded: 0, damaged: 0, verified: 0, unopened: [], done: false, cleanup: false };
   const at = (ks) => ({ userId: uid, mekId: mek, salt: ks });
   let pending = [];
   let links = [];
+  let finished = false; // upgraded elsewhere meanwhile (the other browser finished it)
   const flush = async () => {
     if (!pending.length && !links.length) return;
-    const r = await api.migratePut({ items: pending, links }, target);
+    let r;
+    try {
+      r = await api.migratePut({ items: pending, links }, target);
+    } catch (e) {
+      if (!(e instanceof ApiError && e.code === 'already_upgraded')) throw e;
+      finished = true;
+      pending = [];
+      links = [];
+      return;
+    }
     out.upgraded += r.done;
     pending = [];
     links = [];
@@ -165,7 +198,7 @@ async function run({ dk, uid, mek, kek, target = null, onProgress }) {
     }
     for (const l of page.links || []) {
       let pkcs8;
-      try { pkcs8 = await openReversePrivV1(dk, l.id, l.priv); } catch { continue; } // not this Drive's key: the link stays as it was (it shows no link)
+      try { pkcs8 = await openReversePrivV1(dk, l.id, l.priv); } catch { out.unopened.push(l.id); continue; } // the user retires it (or it stays as it was)
       const priv = await sealLinkKey(kek, { userId: uid, mekId: mek, linkId: l.id }, pkcs8);
       if (!sameBytes(await openLinkKey(kek, { userId: uid, mekId: mek, linkId: l.id }, priv), pkcs8)) throw new Error('A re-sealed link key did not open again.');
       pkcs8.fill(0);
@@ -173,17 +206,42 @@ async function run({ dk, uid, mek, kek, target = null, onProgress }) {
       if (pending.length + links.length >= PUT_BATCH) await flush();
     }
     after = page.next;
-    if (!after) break;
+    if (!after || finished) break;
   }
   await flush();
-  // The server's check that everything opens under v2 (a page per call, from where it stopped), then the old wraps go.
+  if (finished) return { ...out, done: true };
+  if (out.unopened.length) return out;
+  return { ...out, ...(await finishUpgrade({ target, onProgress, verified: out.verified })) };
+}
+
+/**
+ * The server's check that everything opens under v2 (a page per call, from
+ * where it stopped), then the old wraps go → { verified, done, cleanup }
+ * (`cleanup`: every Drive is upgraded now, and the escrow of the release
+ * before is gone).
+ */
+export async function finishUpgrade({ target = null, onProgress, verified = 0 } = {}) {
+  const out = { verified, done: false, cleanup: false };
   for (let n = 0; n < 100000; n++) {
     const r = await api.migrateFinish(target);
     out.verified += r.verified || 0;
     if (onProgress) onProgress({ phase: 'verify', done: out.verified });
-    if (r.done || !r.next) break;
+    if (r.done) { out.done = true; out.cleanup = !!r.cleanup; break; }
+    if (!r.next) break;
   }
   return out;
+}
+
+/**
+ * Retire the reverse links of the release before that the old Drive key does
+ * not open (`ids`, from the upgrade's `unopened`), with the step-up: they
+ * end, their keys go, and the files they received that were not taken in are
+ * listed as failed. Then the upgrade finishes → { retired, failed, ...finishUpgrade }.
+ */
+export async function retireLinks({ ids, step, target = null, onProgress }) {
+  const r = await api.migrateRetire(ids, step, target);
+  const f = r.v1Items || r.v1Links ? { verified: 0, done: false, cleanup: false } : await finishUpgrade({ target, onProgress });
+  return { retired: r.retired.length, failed: r.failed, ...f };
 }
 
 /**
@@ -196,8 +254,9 @@ export async function upgradeOwnDrive({ user, current, kek, onProgress }) {
   const dk = await provenLegacyKey(user.id);
   if (!dk) throw new UpgradeBlocked('The old key in this tab is not this Drive’s.', 'wrong');
   const r = await run({ dk, uid: user.id, mek: current, kek, onProgress });
+  dk.fill(0);
   // The owner keeps the old key until every Drive is upgraded (it opens users' Drives through the escrow).
-  if (user.role !== 'owner') clearLegacyKey();
+  if (r.done && (user.role !== 'owner' || r.cleanup)) clearLegacyKey();
   return r;
 }
 
@@ -208,11 +267,11 @@ export async function upgradeOwnDrive({ user, current, kek, onProgress }) {
  * wrap; the server hands the user's current KEK (both in the admin audit).
  * The user's old key is not kept. → { upgraded, damaged, verified }.
  */
-export async function upgradeUserDrive({ ownerId, userId, onProgress }) {
+export async function upgradeUserDrive({ ownerId, userId, step = {}, onProgress }) {
   const own = await api.migrate();
   const ownerDk = await provenLegacyKey(ownerId, own);
   if (!ownerDk) throw new UpgradeBlocked('Your own Drive’s old key is not open in this tab: sign out and sign in again with your password, then retry.', 'locked');
-  const r = await api.migrateEscrow(userId);
+  const r = await api.migrateEscrow(userId, step);
   if (!r.kek || !r.current) throw new ApiError('The user’s Drive keys are not available.', 503, 'keys_missing');
   let dk = null;
   if (r.v1Items || r.v1Links) {
@@ -229,19 +288,16 @@ export async function upgradeUserDrive({ ownerId, userId, onProgress }) {
     if (!dk) throw new UpgradeBlocked('This Drive’s escrow wrap is for an escrow key you no longer hold: its user upgrades it at their next sign-in.', 'escrow_failed');
     if (!(await isThisDrivesKey(dk, r.kcv, userId))) throw new UpgradeBlocked('The escrow wrap did not give this Drive’s key.', 'escrow_failed');
   }
+  let out;
   try {
-    if (!dk) {
-      // Nothing sealed the old way: only the verification and the clean-up.
-      let out = { upgraded: 0, damaged: 0, verified: 0 };
-      for (let n = 0; n < 100000; n++) {
-        const f = await api.migrateFinish(userId);
-        out = { ...out, verified: out.verified + (f.verified || 0) };
-        if (f.done || !f.next) break;
-      }
-      return out;
-    }
-    return await run({ dk, uid: userId, mek: r.current, kek: keyBytes(r.kek), target: userId, onProgress });
+    // Nothing sealed the old way: only the verification and the clean-up.
+    out = dk ? await run({ dk, uid: userId, mek: r.current, kek: keyBytes(r.kek), target: userId, onProgress })
+      : { upgraded: 0, damaged: 0, unopened: [], ...(await finishUpgrade({ target: userId, onProgress })) };
   } finally {
     if (dk) dk.fill(0);
+    ownerDk.fill(0);
   }
+  // Every Drive is upgraded: the owner's old key has nothing left to open.
+  if (out.cleanup) clearLegacyKey();
+  return out;
 }

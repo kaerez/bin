@@ -251,8 +251,11 @@ describe('the keyring (Admin → Security → Keys)', () => {
     expect(mid.raw.keys.find((x) => x.mekId === mid.current).kekOld).toBe(oldKek.find((x) => x.mekId === mid.current).kek);
     const during = await mkdir(u.cookie);
     expect(during.res.status).toBe(201);
-    // The key kit waits for the end of the change.
-    expect(await errorOf(await post(`${K}/kit`, STEP))).toBe('root_changing');
+    // A key kit made meanwhile holds both roots (items not re-sealed yet open under the previous one).
+    const kit = await post(`${K}/kit`, STEP);
+    expect(kit.status).toBe(200);
+    const km = (await kit.json()).material;
+    expect([km.root.fp, km.rootOld.fp]).toEqual([c.fp, oldRoot]);
     const job = await runJob();
     expect(job).toMatchObject({ kind: 'root', finished: true, failed: 0, result: { ok: true } });
     const st = await status();
@@ -348,7 +351,10 @@ describe('the key kit (secbin-key-kit/1)', () => {
     const f = await uploadFile(u.cookie, 'root', 10);
     const m = await kitMaterial();
     const k0 = await driveKeys(u.cookie, { fresh: true });
-    const restore = (body) => post(`${K}/restore`, body);
+    const restore = (body, step = STEP) => post(`${K}/restore`, { ...body, ...step });
+    // The preview needs the step-up too (it tells which keys match this server's).
+    const noStep = await restore({ root: m.root, subs: m.subs, salts: m.salts }, {});
+    expect([noStep.status, await errorOf(noStep)]).toEqual([400, 'reauth_required']);
     // Nothing lost: nothing to do.
     expect(await (await restore({ root: m.root, subs: m.subs, salts: m.salts })).json()).toMatchObject({ changed: false, root: 'same' });
     // Working keys are kept, whatever the file holds.
@@ -368,8 +374,8 @@ describe('the key kit (secbin-key-kit/1)', () => {
     const plan = await (await restore({ root: m.root, subs: m.subs, salts: m.salts })).json();
     expect(plan).toMatchObject({ dryRun: true, changed: true, salts: { restored: 1 } });
     expect(plan.subs.find((s) => s.id === k0.current).result).toMatch(/^added/);
-    expect((await restore({ root: m.root, subs: m.subs, salts: m.salts, dryRun: false })).status).toBe(400); // the step-up
-    const done = await (await restore({ root: m.root, subs: m.subs, salts: m.salts, dryRun: false, ...STEP })).json();
+    expect((await restore({ root: m.root, subs: m.subs, salts: m.salts, dryRun: false }, {})).status).toBe(400); // the step-up
+    const done = await (await restore({ root: m.root, subs: m.subs, salts: m.salts, dryRun: false })).json();
     expect(done).toMatchObject({ dryRun: false, changed: true });
     const k1 = await driveKeys(u.cookie, { fresh: true });
     expect(k1.raw.keys.find((x) => x.mekId === k0.current).kek).toBe(k0.raw.keys.find((x) => x.mekId === k0.current).kek);
@@ -378,7 +384,7 @@ describe('the key kit (secbin-key-kit/1)', () => {
     await runInDurableObject(dirStub(), (i, s) => s.storage.sql.exec("DELETE FROM meta WHERE k = 'mek.root'"));
     expect(await status()).toMatchObject({ ready: false, lost: true });
     expect(await errorOf(await fetchJson('/api/private/drive/keys', { method: 'POST', cookie: u.cookie, body: {} }))).toBe('keys_missing');
-    expect((await (await restore({ root: m.root, dryRun: false, ...STEP })).json()).root).toBe('restored');
+    expect((await (await restore({ root: m.root, dryRun: false })).json()).root).toBe('restored');
     expect((await status()).ready).toBe(true);
     expect((await driveKeys(u.cookie, { fresh: true })).raw.keys).toEqual(k1.raw.keys);
     expect((await adminAudit()).some((r) => r.action === 'keys.restored')).toBe(true);
@@ -467,23 +473,26 @@ describe('Import / export: the keys parts (secbin-keys-export/1)', () => {
 
   it('import: a KEK only verifies; a DEK restores a broken seal after it opened the first chunk; a salt only when missing', async () => {
     const doc = (await (await post(`${K}/export`, { salts: [u.id], users: [{ id: u.id, keks: true, deks: 'all' }], ...STEP })).json()).document;
-    const imp = (body) => post(`${K}/import`, { document: doc, ...body });
+    const imp = (body, step = STEP) => post(`${K}/import`, { document: doc, ...body, ...step });
+    // The preview needs the step-up too (it checks KEKs and names users).
+    const noStep = await imp({}, {});
+    expect([noStep.status, await errorOf(noStep)]).toEqual([400, 'reauth_required']);
     let r = await (await imp({})).json();
     expect(r.users[0]).toMatchObject({ keks: { match: doc.users[0].keks.length, mismatch: 0 }, deks: { working: 1, restored: 0 } });
     expect(r.keys.salts).toMatchObject({ same: 1, restored: 0 });
     // A tampered KEK is only reported.
     const tampered = { ...doc, users: [{ ...doc.users[0], keks: doc.users[0].keks.map((x) => ({ ...x, kek: b64urlFromBytes(randomBytes(32)) })) }] };
-    r = await (await post(`${K}/import`, { document: tampered, take: { keks: true } })).json();
+    r = await (await post(`${K}/import`, { document: tampered, take: { keks: true }, ...STEP })).json();
     expect(r.users[0].keks).toMatchObject({ match: 0, mismatch: doc.users[0].keks.length });
     // A broken DEK seal (damaged in storage): the import brings it back.
     await runInDurableObject(driveOf(u.id), (i, s) => s.storage.sql.exec('UPDATE nodes SET dek = ? WHERE id = ?', JSON.stringify({ iv: 'A'.repeat(16), ct: 'B'.repeat(64) }), real.id));
     const wrong = { ...doc, users: [{ ...doc.users[0], deks: [{ id: real.id, dek: b64urlFromBytes(randomBytes(32)) }] }] };
-    expect((await (await post(`${K}/import`, { document: wrong, take: { deks: true } })).json()).users[0].deks).toMatchObject({ failed: 1, restored: 0 });
+    expect((await (await post(`${K}/import`, { document: wrong, take: { deks: true }, ...STEP })).json()).users[0].deks).toMatchObject({ failed: 1, restored: 0 });
     r = await (await imp({ take: { deks: true } })).json();
     expect(r).toMatchObject({ dryRun: true });
     expect(r.users[0].deks).toMatchObject({ restored: 1 });
-    expect((await imp({ take: { deks: true }, dryRun: false })).status).toBe(400); // the step-up
-    r = await (await imp({ take: { deks: true }, dryRun: false, ...STEP })).json();
+    expect((await imp({ take: { deks: true }, dryRun: false }, {})).status).toBe(400); // the step-up
+    r = await (await imp({ take: { deks: true }, dryRun: false })).json();
     expect(r.users[0].deks).toMatchObject({ restored: 1 });
     const n = (await (await node(u.cookie, real.id)).json()).node;
     const opened = await openStored(u.cookie, n);
@@ -492,7 +501,7 @@ describe('Import / export: the keys parts (secbin-keys-export/1)', () => {
     expect(fromUtf8(await decryptChunk(await importFileKey(b64urlFromBytes(opened.dek)), 0, 1, chunk))).toBe('the quarterly figures, synthetic');
     // A salt comes back only when the account has none.
     const other = { ...doc, salts: { [u.id]: newSalt() } };
-    expect((await (await post(`${K}/import`, { document: other, take: { salts: true } })).json()).keys.salts).toMatchObject({ kept: 1, restored: 0 });
+    expect((await (await post(`${K}/import`, { document: other, take: { salts: true }, ...STEP })).json()).keys.salts).toMatchObject({ kept: 1, restored: 0 });
     expect((await adminAudit()).some((r2) => r2.action === 'drive.keys_imported' && r2.subject_id === u.id)).toBe(true);
   });
 

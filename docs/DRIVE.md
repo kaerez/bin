@@ -30,10 +30,13 @@ of the Directory's storage** (a compromised Cloudflare account, a malicious depl
 Directory reveals nothing: file content, names, types and file keys are sealed under keys that
 exist only in the Directory (and in kits the owner or the users downloaded).
 
-Notes and file shares stay end-to-end encrypted (the key is in the link, never on the server);
-a Drive share is sealed the same way (§7). Reverse-share uploads stay end-to-end until the
-user's browser takes them into the Drive (then they are sealed under the user's KEK like any
-Drive file).
+Notes and file shares stay end-to-end encrypted (the key is in the link, never on the server).
+A Drive share's manifest is sealed the same way (§7), but its content is the Drive's
+ciphertext, whose DEK is also sealed under the user's KEK: the server can open a Drive share's
+files as it can any Drive file. Reverse-share uploads are encrypted in the uploader's browser to
+the link's key, whose private key is sealed under the user's KEK: the server can open them too,
+before and after the user's browser takes them into the Drive (then they are sealed under the
+user's KEK like any Drive file).
 
 The server also sees the tree's shape (node ids, parent ids, file/folder), each file's exact
 ciphertext size and chunk count, timestamps, and which shares reference which nodes, as before.
@@ -340,7 +343,8 @@ drive data stays) and appear in My shares and Admin → Shares with `kind = 'dri
   (`dirs` lists every folder, so empty ones survive; duplicate names get " (2)"…). `view` is the
   sender's viewer-policy snapshot as in v2 (`{ rules, maxBytes }` or null; optional on read).
   `public/js/refsmanifest.js` builds and validates it. Each `fk` is the file's DEK, opened in the
-  sender's browser: the share stays end-to-end (its key is in the link). The share id starts with `f` and its paste
+  sender's browser (the manifest's key is in the link; the same DEK stays sealed in the Drive under
+  the user's KEK, so the server can open the shared files as any Drive file). The share id starts with `f` and its paste
   has `fmt: 'files'`, like a file share, so the viewer opens it the same way.
 - Recipients open it like a file share (`POST /api/file/<id>/open`); the response adds
   `refs: [{ chunks, size }]`. Chunks: `GET /api/file/<id>/chunk/<ref>/<i>` with the download

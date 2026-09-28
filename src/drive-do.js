@@ -25,6 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { timingSafeEqualHex, utf8, b64urlFromBytes } from '../public/js/bytes.js';
 import { CHUNK, TAG } from '../public/js/files.js';
+import { chunkHash, ciphertextHash } from '../public/js/drivekeys.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, parent TEXT, kind TEXT NOT NULL CHECK(kind IN ('dir','file')),
@@ -75,8 +76,11 @@ CREATE TABLE IF NOT EXISTS rhuman (j TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 // sealed DEK of a file; nodes.ch — a hash of its ciphertext chunks
 // (upchunks.h, one per chunk, while it uploads). reverse.mek — the sub-MEK
 // its link key is sealed under (null: sealed by the release before).
+// reverse.retired: a link of the release before whose key the upgrade could
+// not open (it was ended and its key removed: docs/DRIVE.md §3.3).
 // archive_*: an owner's Drive started over in the release before; kept as it
-// is (it still takes its space), nothing opens it any more.
+// is until the owner deletes it (Admin → Security → Keys); nothing here opens
+// it, and it does not count towards the Drive's capacity.
 const COLUMNS = [
   ['nodes', 'rs', 'TEXT'], ['nodes', 'rsess', 'TEXT'], ['nodes', 'rfail', 'INTEGER'], ['nodes', 'rwhy', 'TEXT'],
   ['reverse', 'sealed', 'INTEGER NOT NULL DEFAULT 0'], ['reverse', 'pwfails', 'INTEGER NOT NULL DEFAULT 0'],
@@ -87,6 +91,7 @@ const COLUMNS = [
   ['nodes', 'ks', 'TEXT'], ['nodes', 'mek', 'TEXT'], ['nodes', 'mfp', 'TEXT'], ['nodes', 'dek', 'TEXT'], ['nodes', 'ch', 'TEXT'],
   ['upchunks', 'h', 'TEXT'], ['reverse', 'mek', 'TEXT'],
   ['reverse', 'captcha', 'INTEGER NOT NULL DEFAULT 1'],
+  ['reverse', 'retired', 'INTEGER'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
 const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify'];
@@ -150,20 +155,10 @@ export const driveChunkKey = (uid, node, i) => `${driveKey(uid, node)}/${i}`;
 
 const fail = (status, error, message, extra) => ({ ok: false, status, error, message, ...(extra || {}) });
 
-/** One ciphertext chunk's SHA-256, base64url. */
-export async function chunkHash(bytes) {
-  return b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
-}
-/**
- * A file's ciphertext hash (nodes.ch): SHA-256 over "secbin-ch/v1", the chunk
- * count and each chunk's SHA-256 in order — of what is stored, never of the
- * plaintext (a plaintext hash would tell when two users hold the same file).
- */
-export async function ciphertextHash(n, hashOf) {
-  const parts = [];
-  for (let i = 0; i < n; i++) parts.push(hashOf(i) ?? '');
-  return b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(`secbin-ch/v1\n${n}\n${parts.join('\n')}`))));
-}
+// A file's ciphertext hash (nodes.ch) and its chunks' (public/js/drivekeys.js:
+// the browser checks it on download): of what is stored, never of the
+// plaintext (a plaintext hash would tell when two users hold the same file).
+export { chunkHash, ciphertextHash };
 
 export class Drive extends DurableObject {
   constructor(ctx, env) {
@@ -222,8 +217,7 @@ export class Drive extends DurableObject {
       + COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0)`;
     // The sealed DEK and the salt count too (docs/DRIVE.md §10).
     const keys = 'COALESCE(SUM(COALESCE(LENGTH(dek), 0) + COALESCE(LENGTH(ks), 0)), 0)';
-    // An archived Drive (the owner's, after a start over in the release before) still takes its space.
-    return this.sql.exec(`SELECT ${bytes} + ${keys} AS s FROM nodes WHERE id != ?`, ROOT).one().s + this.sql.exec(`SELECT ${bytes} AS s FROM archive_nodes`).one().s;
+    return this.sql.exec(`SELECT ${bytes} + ${keys} AS s FROM nodes WHERE id != ?`, ROOT).one().s;
   }
   /** Refused when `extra` more bytes would not fit in `capacity` (null: no check). */
   #fits(extra, capacity) {
@@ -361,6 +355,8 @@ export class Drive extends DurableObject {
     return {
       used: this.#used(),
       items: this.#count() - 1,
+      // Reverse-share link keys held here (sealed under a KEK and the field layer).
+      links: this.sql.exec("SELECT COUNT(*) AS c FROM reverse WHERE priv != ''").one().c,
       content: this.#hasContent(),
       received: this.#receivedCount(),
       receivedFailed: this.#receivedFailedCount(),
@@ -395,7 +391,8 @@ export class Drive extends DurableObject {
   #migrationState() {
     return {
       v1Items: this.sql.exec('SELECT COUNT(*) AS c FROM nodes WHERE id != ? AND mek IS NULL AND rs IS NULL', ROOT).one().c,
-      v1Links: this.sql.exec('SELECT COUNT(*) AS c FROM reverse WHERE mek IS NULL').one().c,
+      // A link the upgrade could not open and the user retired no longer counts.
+      v1Links: this.sql.exec('SELECT COUNT(*) AS c FROM reverse WHERE mek IS NULL AND retired IS NULL').one().c,
       wraps: this.sql.exec('SELECT COUNT(*) AS c FROM wraps').one().c,
       archived: this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes').one().c,
     };
@@ -427,7 +424,7 @@ export class Drive extends DurableObject {
     const lim = Math.max(1, Math.min(KEYS_PAGE, limit | 0));
     const rows = this.sql.exec('SELECT id, kind, name, meta, fk, size FROM nodes WHERE id != ? AND mek IS NULL AND rs IS NULL AND id > ? ORDER BY id LIMIT ?', ROOT, after, lim).toArray();
     const parse = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
-    const links = after ? [] : this.sql.exec('SELECT id, priv FROM reverse WHERE mek IS NULL ORDER BY id').toArray().map((r) => ({ id: r.id, priv: r.priv }));
+    const links = after ? [] : this.sql.exec('SELECT id, priv FROM reverse WHERE mek IS NULL AND retired IS NULL ORDER BY id').toArray().map((r) => ({ id: r.id, priv: r.priv }));
     return {
       ok: true,
       items: rows.map((r) => ({ id: r.id, kind: r.kind, name: parse(r.name), meta: parse(r.meta), fk: parse(r.fk), size: r.size })),
@@ -494,7 +491,9 @@ export class Drive extends DurableObject {
   /**
    * A page of what is sealed under the sub-MEKs in `meks` (null: under any)
    * for a re-seal: items (their salt, mek and sealed fields) and link keys,
-   * in id order after `after` ({ kind: 'n' | 'r', id }).
+   * in id order after `after` ({ kind: 'n' | 'r', id }). Each item also
+   * carries `from`: its sealed fields exactly as stored, for the
+   * compare-and-set of applySealed.
    */
   async sealedPage(uid, { meks = null, after = null, limit = KEYS_PAGE } = {}) {
     this.#bind(uid);
@@ -505,7 +504,7 @@ export class Drive extends DurableObject {
     const parse = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
     if (!after || after.kind === 'n') {
       const rows = this.sql.exec(`SELECT id, kind, ks, mek, name, meta, dek FROM nodes WHERE id != ? ${inMeks} AND id > ? ORDER BY id LIMIT ?`, ROOT, ...(list || []), after?.id ?? '', lim).toArray();
-      out.items = rows.map((r) => ({ id: r.id, kind: r.kind, ks: r.ks, mek: r.mek, name: parse(r.name), meta: parse(r.meta), dek: parse(r.dek) }));
+      out.items = rows.map((r) => ({ id: r.id, kind: r.kind, ks: r.ks, mek: r.mek, name: parse(r.name), meta: parse(r.meta), dek: parse(r.dek), from: { name: r.name, meta: r.meta, dek: r.dek } }));
       if (rows.length === lim) { out.next = { kind: 'n', id: rows[rows.length - 1].id }; return out; }
     }
     const rows = this.sql.exec(`SELECT id, mek, priv FROM reverse WHERE 1 = 1 ${inMeks} AND id > ? ORDER BY id LIMIT ?`, ...(list || []), after?.kind === 'r' ? after.id : '', lim).toArray();
@@ -517,9 +516,10 @@ export class Drive extends DurableObject {
   /**
    * Re-sealed items and link keys (the Worker opened each under the old KEK
    * and sealed it under the new one): written only where the row is still
-   * as read (same mek and salt; a link: same mek and sealed key), so a change
-   * made meanwhile is never overwritten (it is picked up by the next pass).
-   * → { done, skipped }.
+   * as read (an item: same mek and salt, and the same sealed name, metadata
+   * and DEK as `from` — a rename meanwhile is not reverted; a link: same mek
+   * and sealed key), so a change made meanwhile is never overwritten (it is
+   * picked up by the next pass). → { done, skipped }.
    */
   async applySealed(uid, { items = [], links = [] } = {}) {
     this.#bind(uid);
@@ -527,8 +527,10 @@ export class Drive extends DurableObject {
     let skipped = 0;
     this.ctx.storage.transactionSync(() => {
       for (const x of items) {
-        const w = this.sql.exec('UPDATE nodes SET ks = ?, mek = ?, mfp = ?, name = ?, meta = ?, dek = ? WHERE id = ? AND mek = ? AND ks = ?',
-          x.ks, x.mek, x.mfp, x.name, x.meta ?? null, x.dek ?? null, x.id, x.fromMek, x.fromKs).rowsWritten;
+        const f = x.from;
+        if (!f || typeof f.name !== 'string') { skipped++; continue; }
+        const w = this.sql.exec('UPDATE nodes SET ks = ?, mek = ?, mfp = ?, name = ?, meta = ?, dek = ? WHERE id = ? AND mek = ? AND ks = ? AND name = ? AND meta IS ? AND dek IS ?',
+          x.ks, x.mek, x.mfp, x.name, x.meta ?? null, x.dek ?? null, x.id, x.fromMek, x.fromKs, f.name, f.meta ?? null, f.dek ?? null).rowsWritten;
         if (w) done++; else skipped++;
       }
       for (const l of links) {
@@ -548,7 +550,8 @@ export class Drive extends DurableObject {
     const lim = Math.max(1, Math.min(KEYS_PAGE, limit | 0));
     const out = { ok: true, links: [], received: [], next: null };
     if (!after || after.kind === 'r') {
-      const rows = this.sql.exec('SELECT id, priv FROM reverse WHERE id > ? ORDER BY id LIMIT ?', after?.id ?? '', lim).toArray();
+      // Link keys of the release before (mek null) are the upgrade's: a root change leaves them as they are.
+      const rows = this.sql.exec('SELECT id, priv FROM reverse WHERE mek IS NOT NULL AND id > ? ORDER BY id LIMIT ?', after?.id ?? '', lim).toArray();
       out.links = rows.map((r) => ({ id: r.id, priv: r.priv }));
       if (rows.length === lim) { out.next = { kind: 'r', id: rows[rows.length - 1].id }; return out; }
     }
@@ -575,12 +578,14 @@ export class Drive extends DurableObject {
   /**
    * An item whose DEK seal is missing or does not open (a keys import, the
    * Worker checked the DEK against the file's first chunk): its fields as
-   * re-sealed by the Worker, for this one item.
+   * re-sealed by the Worker, for this one item, only while it is as read
+   * (`from`: mek, salt and sealed fields).
    */
   async restoreItem(uid, x) {
     this.#bind(uid);
-    const w = this.sql.exec("UPDATE nodes SET ks = ?, mek = ?, mfp = ?, name = ?, meta = ?, dek = ?, fk = NULL WHERE id = ? AND kind = 'file' AND rs IS NULL AND (mek IS ? AND ks IS ?)",
-      x.ks, x.mek, x.mfp, x.name, x.meta, x.dek, x.id, x.fromMek, x.fromKs).rowsWritten;
+    const f = x.from || {};
+    const w = this.sql.exec("UPDATE nodes SET ks = ?, mek = ?, mfp = ?, name = ?, meta = ?, dek = ?, fk = NULL WHERE id = ? AND kind = 'file' AND rs IS NULL AND mek IS ? AND ks IS ? AND name IS ? AND meta IS ? AND dek IS ?",
+      x.ks, x.mek, x.mfp, x.name, x.meta, x.dek, x.id, x.fromMek, x.fromKs, f.name ?? null, f.meta ?? null, f.dek ?? null).rowsWritten;
     return w ? { ok: true } : fail(409, 'changed', 'The item changed meanwhile.');
   }
 
@@ -590,7 +595,7 @@ export class Drive extends DurableObject {
     const n = this.#node(id);
     if (!n || n.id === ROOT || n.rs) return fail(404, 'not_found', 'No such item.');
     const parse = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
-    return { ok: true, item: { id: n.id, kind: n.kind, ks: n.ks, mek: n.mek, name: parse(n.name), meta: parse(n.meta), dek: parse(n.dek), size: n.size, chunks: n.chunks, state: n.state } };
+    return { ok: true, item: { id: n.id, kind: n.kind, ks: n.ks, mek: n.mek, name: parse(n.name), meta: parse(n.meta), dek: parse(n.dek), size: n.size, chunks: n.chunks, state: n.state, from: { name: n.name, meta: n.meta, dek: n.dek } } };
   }
 
   /**
@@ -621,6 +626,71 @@ export class Drive extends DurableObject {
       if (!keep[w.kind].has(w.ref)) { this.sql.exec('DELETE FROM wraps WHERE kind = ? AND ref = ?', w.kind, w.ref); gone.push({ kind: w.kind, ref: w.ref, data: w.data }); }
     }
     return { ok: true, removed: gone.length, wraps: gone };
+  }
+
+  /**
+   * Links of the release before that the upgrade cannot open (the user, or
+   * the owner through Admin, chose to retire them): each ends (no more
+   * uploads; unfinished ones are deleted), its key is removed, and the files
+   * it received that were not taken in are listed as failed (`unreadable`),
+   * to be deleted. Only links still sealed the old way. → { retired, failed }.
+   */
+  async retireLegacyLinks(uid, ids = []) {
+    this.#bind(uid);
+    const want = [...new Set((Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string'))].slice(0, MAX_REVERSE);
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const rows = want.map((id) => this.#reverse(id)).filter((r) => r && r.mek === null && r.retired === null);
+      if (!rows.length) return { ok: true, retired: [], failed: 0, ...this.#migrationState() };
+      const pending = [];
+      for (const r of rows) pending.push(...this.sql.exec("SELECT id, chunks, size, rs FROM nodes WHERE rs = ? AND state = 'pending'", r.id).toArray());
+      await this.#deleteObjects(uid, pending);
+      const t = nowSec();
+      let failed = 0;
+      this.ctx.storage.transactionSync(() => {
+        for (const f of pending) this.#dropPending(f);
+        for (const r of rows) {
+          this.sql.exec("UPDATE reverse SET status = CASE WHEN status IN ('active', 'paused') THEN 'revoked' ELSE status END, ended = COALESCE(ended, ?), priv = '', agen = NULL, retired = ? WHERE id = ?", t, t, r.id);
+          this.sql.exec('DELETE FROM rsessions WHERE rid = ?', r.id);
+          failed += this.sql.exec("UPDATE nodes SET rfail = ?, rwhy = 'unreadable' WHERE rs = ? AND state = 'ready' AND rfail IS NULL", t, r.id).rowsWritten;
+        }
+      });
+      if (pending.length) await this.#reportUsage();
+      return { ok: true, retired: rows.map((r) => r.id), failed, used: this.#used(), ...this.#migrationState() };
+    });
+  }
+
+  /** The owner's archive of the release before (a start over): what it holds, and the links it pauses. */
+  async archiveInfo(uid) {
+    this.#bind(uid);
+    const n = this.sql.exec("SELECT COUNT(*) AS c, COALESCE(SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END), 0) AS b, COALESCE(SUM(CASE WHEN rs IS NOT NULL THEN 1 ELSE 0 END), 0) AS r FROM archive_nodes").one();
+    const links = this.sql.exec('SELECT id FROM reverse WHERE agen IS NOT NULL AND retired IS NULL').toArray().map((r) => r.id);
+    return { ok: true, items: n.c, bytes: n.b, received: n.r, links };
+  }
+
+  /**
+   * Delete that archive: its content in R2 and its rows, and the links it
+   * paused end (their keys were sealed under the archived Drive key: they
+   * are retired as the upgrade does). → { items, bytes, links }.
+   */
+  async deleteArchive(uid) {
+    this.#bind(uid);
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const info = await this.archiveInfo(uid);
+      await this.#deleteObjects(uid, this.sql.exec("SELECT id, chunks FROM archive_nodes WHERE kind = 'file'").toArray());
+      const t = nowSec();
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec('DELETE FROM archive_nodes');
+        this.sql.exec('DELETE FROM archive_wraps');
+        this.sql.exec('DELETE FROM archive_meta');
+        for (const id of info.links) {
+          this.sql.exec("UPDATE reverse SET status = CASE WHEN status IN ('active', 'paused') THEN 'revoked' ELSE status END, ended = COALESCE(ended, ?), priv = '', agen = NULL, retired = ? WHERE id = ? AND mek IS NULL", t, t, id);
+          this.sql.exec('DELETE FROM rsessions WHERE rid = ?', id);
+          this.sql.exec("UPDATE nodes SET rfail = ?, rwhy = 'unreadable' WHERE rs = ? AND state = 'ready' AND rfail IS NULL", t, id);
+        }
+      });
+      this.#dropEndedReverse();
+      return { ok: true, items: info.items, bytes: info.bytes, links: info.links, used: this.#used(), ...this.#migrationState() };
+    });
   }
 
   /**

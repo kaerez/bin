@@ -28,8 +28,17 @@
 // "per-DEK salt"; folders have one too, for their names). No item id is bound
 // into a key or an AAD (docs/DRIVE.md §9 says what that means).
 //
-// The tab's copy of the keys the server handed out (the KEKs) lives in
-// sessionStorage until sign-out or the tab closes, as the Drive key did.
+// The KEKs the server hands out are kept in the page's memory only (the
+// DriveClient), never in browser storage, and fetched again on every page
+// load. The one Drive key a tab may keep in sessionStorage is the old Drive
+// key of the release before, while its Drive waits for its upgrade
+// (drivev1.js), and only until the upgrade is done.
+//
+// A file's ciphertext hash (nodes.ch, docs/DRIVE.md §3): SHA-256 over
+// "secbin-ch/v1\n<n>\n" and each chunk's SHA-256 (base64url) in order, one
+// per line — of the stored ciphertext, never the plaintext. The server keeps
+// it; the browser recomputes it while it downloads a file and refuses a file
+// whose chunks do not give it.
 
 import { randomBytes, utf8, b64urlFromBytes, bytesFromB64url, timingSafeEqualHex } from './bytes.js';
 import { hkdf32, DecryptError } from './crypto.js';
@@ -216,6 +225,17 @@ export async function openSubMek(root, id, data) {
   const sub = await open(await subSealKey(root), utf8(`secbin-mek/v1\n${id}`), { iv: p[1], ct: p[2] });
   if (!isKey(sub)) throw new DecryptError('invalid sub-MEK');
   return sub;
+}
+
+/** One ciphertext chunk's SHA-256, base64url. */
+export async function chunkHash(bytes) {
+  return b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+}
+/** A file's ciphertext hash from its `n` chunks' hashes (`hashOf(i)`), base64url. */
+export async function ciphertextHash(n, hashOf) {
+  const parts = [];
+  for (let i = 0; i < n; i++) parts.push(hashOf(i) ?? '');
+  return b64urlFromBytes(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(`secbin-ch/v1\n${n}\n${parts.join('\n')}`))));
 }
 
 /** Whether a stored value is sealed at rest (the field layer): "a1.<iv>.<ct>". */

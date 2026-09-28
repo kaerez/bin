@@ -14,7 +14,7 @@
 import { drive as api, session, ApiError } from './api.js';
 import {
   keyBytes, newKey, newSalt, sealDek, openDek, sealName, openName, sealLinkKey, openLinkKey, keyCheckValue, saltCheckValue,
-  purgeStaleSlots, effectiveAt,
+  purgeStaleSlots, effectiveAt, chunkHash, ciphertextHash,
 } from './drivekeys.js';
 import { encryptPaste } from './crypto.js';
 import { utf8, fromUtf8, b64urlFromBytes, bytesFromB64url, randomBytes } from './bytes.js';
@@ -25,7 +25,7 @@ import { RefsReader, saveFile, saveZip } from './downloads.js';
 import { buildRefsManifest, refChunks } from './refsmanifest.js';
 import { declare, refusedTypes, uncheckableExt, describeType } from './filepolicy.js';
 import { createReverseKey, linkHash, passwordGate, sealNote, fragmentOf, openUpload, newReverseId, pubOfPrivate } from './reversekeys.js';
-import { deriveSubkeysV1, openFieldV1, openReversePrivV1 } from './drivev1.js';
+import { deriveSubkeysV1, openFieldV1, openReversePrivV1, clearLegacyKey } from './drivev1.js';
 import { provenLegacyKey } from './driveupgrade.js';
 
 /** The account's role has no Drive. */
@@ -165,7 +165,22 @@ export async function openDrive({ user } = {}) {
   const keys = await fetchKeys(u);
   // The old Drive key (a Drive waiting for its upgrade): only once proven to be this Drive's.
   const legacy = u.impersonating || !st.migration ? null : await provenLegacyKey(u.id).catch(() => null);
+  if (!u.impersonating && !st.migration) await dropLegacyKey(u);
   return new DriveClient(keys, u, st, legacy);
+}
+
+/**
+ * Nothing waits for the upgrade here any more (it was done in another tab, or
+ * by the owner through the escrow): the tab's old Drive key goes. The owner's
+ * stays while it still opens users' Drives (until the clean-up removed the
+ * owner's old wraps: GET …/migrate says `legacy: false`).
+ */
+async function dropLegacyKey(u) {
+  if (u.role === 'owner') {
+    const m = await api.migrate().catch(() => null);
+    if (!m || m.legacy) return;
+  }
+  clearLegacyKey();
 }
 
 // ── the client ─────────────────────────────────────────────────────────────
@@ -185,6 +200,20 @@ export class DriveClient {
   /** The KEKs again (after the server answered that the current sub-MEK changed). */
   async refreshKeys() {
     this.keys = await fetchKeys(this.user);
+  }
+
+  /**
+   * The page no longer acts for this session (another tab signed in as
+   * someone else, or started or ended impersonation): every key this client
+   * holds is overwritten and dropped; nothing here opens anything any more.
+   */
+  forget() {
+    for (const list of this.keys?.keks?.values() ?? []) for (const k of list) k.fill(0);
+    if (this.legacy) this.legacy.fill(0);
+    this.keys = { userId: this.user.id, current: null, changing: false, keks: new Map(), list: [] };
+    this.legacy = null;
+    this.legacyKeys = null;
+    this.forgotten = true;
   }
 
   #where(mekId, salt) {
@@ -492,13 +521,33 @@ export class DriveClient {
   async #fileEntry(raw, path) {
     const d = await this.decode(raw);
     if (d.kind !== 'file' || d.unreadable) throw new Error(d.upgrading ? 'This file waits for the Drive upgrade.' : 'This file cannot be read.');
-    return { path: path ?? d.name, size: d.size, type: d.type, mtime: d.mtime, fk: await this.#fileKey(raw), node: d.id, chunks: d.chunks };
+    return { path: path ?? d.name, size: d.size, type: d.type, mtime: d.mtime, fk: await this.#fileKey(raw), node: d.id, chunks: d.chunks, ch: typeof raw.ch === 'string' ? raw.ch : null };
   }
 
+  /**
+   * A reader of Drive files: each file's chunks are checked against its
+   * ciphertext hash (`ch`, when the server has one) as they arrive — the last
+   * chunk is not handed over unless every chunk gives the recorded hash
+   * (AES-GCM checks each chunk under the file's DEK as well).
+   */
   #reader(entries, total) {
+    const seen = new Map(); // node → chunk hashes so far
     return new RefsReader({
       manifest: { v: 3, entries, total, view: null },
-      fetch: (entry, i) => api.chunk(entry.node, i),
+      fetch: async (entry, i) => {
+        const ct = await api.chunk(entry.node, i);
+        if (typeof entry.ch !== 'string' || !entry.ch || !entry.chunks) return ct;
+        const hs = i === 0 ? [] : seen.get(entry.node) || [];
+        hs[i] = await chunkHash(ct instanceof Uint8Array ? ct : new Uint8Array(ct));
+        seen.set(entry.node, hs);
+        if (i === entry.chunks - 1) {
+          seen.delete(entry.node);
+          if (hs.length !== entry.chunks || (await ciphertextHash(entry.chunks, (k) => hs[k])) !== entry.ch) {
+            throw new Error('This file’s stored content does not match the hash recorded when it was uploaded: it was not saved. Report this to the administrator.');
+          }
+        }
+        return ct;
+      },
       refs: entries.filter((e) => !e.dir).map((e) => ({ chunks: e.chunks })),
     });
   }
@@ -593,8 +642,11 @@ export class DriveClient {
    * applies the administrator's file-type and folder-depth policy here, as the
    * composer does; `view` is the viewer snapshot ({ rules, maxBytes } or null).
    * The manifest (v3: paths, sizes, types and each file's DEK) is sealed with
-   * a fresh link key and optional password exactly like a file share's: the
-   * share stays end-to-end (its key is in the link).
+   * a fresh link key and optional password exactly like a file share's (its
+   * key is in the link). The content is the Drive's ciphertext, and its DEK is
+   * sealed in the Drive under the user's KEK, which the server derives: the
+   * server can open a Drive share's files as it can any Drive file (SECURITY.md,
+   * "Drive keys").
    * `captcha`: true / false (the role allows a choice), undefined (its default).
    */
   async share(nodeIds, { views = null, expire, password = '', deletable = false, label = '', limits = null, view = null, captcha } = {}) {
@@ -971,7 +1023,7 @@ export async function restorePersonalKit({ user, text, passphrase = '', step, on
             const ks = newSalt();
             const to = { userId: u.id, mekId: cur.mek, salt: ks };
             items.push({
-              id: it.id, fromMek: mek, fromKs: it.ks, ks, mek: cur.mek, name: await sealName(cur.kek, to, 'name', name),
+              id: it.id, fromMek: mek, fromKs: it.ks, from: it.from, ks, mek: cur.mek, name: await sealName(cur.kek, to, 'name', name),
               ...(meta ? { meta: await sealName(cur.kek, to, 'meta', meta) } : {}), ...(dek ? { dek: await sealDek(cur.kek, to, dek) } : {}),
             });
             if (dek) dek.fill(0);

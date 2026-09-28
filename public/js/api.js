@@ -105,12 +105,22 @@ export function forgetSession() { page = { ended: true }; }
 /** `fn()` runs when the page finds that the browser is now signed in as someone else. */
 export function onSessionChanged(fn) { sessionChangedHandler = typeof fn === 'function' ? fn : () => {}; }
 
+/** The page found out by itself (e.g. when its tab is shown again) that the browser is now signed in as someone else. */
+export function noteSessionChanged() {
+  sessionChanged();
+}
+
 /** The error for a page whose session is gone (the message pages show, with a Reload button). */
 export const isSessionChanged = (e) => e instanceof ApiError && e.extra.sessionChanged === true;
+/** The event a page's other modules listen for (the Drive drops its keys): `secbin:session-changed` on window. */
+export const SESSION_CHANGED_EVENT = 'secbin:session-changed';
 function sessionChanged() {
   const first = !page?.ended;
   forgetSession();
-  if (first) { try { sessionChangedHandler(); } catch { /* the error below still reaches the page */ } }
+  if (first) {
+    try { sessionChangedHandler(); } catch { /* the error below still reaches the page */ }
+    try { globalThis.dispatchEvent?.(new Event(SESSION_CHANGED_EVENT)); } catch { /* no window (a worker, a test) */ }
+  }
   return new ApiError(SESSION_CHANGED, 403, 'csrf_mismatch', { sessionChanged: true });
 }
 
@@ -355,8 +365,13 @@ export const drive = {
   migrateItems: (after = null, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/items${after ? `?after=${enc(after)}` : ''}`),
   migratePut: (body, uid = null) => request(uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`, { method: 'PUT', headers: INTENT, body }),
   migrateFinish: (uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/finish`, { method: 'POST', headers: INTENT, body: {} }),
-  migrateEscrow: (uid) => request(`${A}/drive/migrate/${enc(uid)}/escrow`, { method: 'POST', headers: INTENT, body: {} }),
+  migrateEscrow: (uid, step) => request(`${A}/drive/migrate/${enc(uid)}/escrow`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  // Links of the release before that the old key does not open: ended, their keys removed (the step-up).
+  migrateRetire: (ids, step, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/retire`, { method: 'POST', headers: INTENT, body: { ids, ...step } }),
   migration: () => request(`${A}/drive/migration`),
+  // The owner's archive of the release before (a start over): what it holds; deleted (the step-up, the username typed).
+  archive: () => request(`${A}/drive/archive`),
+  deleteArchive: (body) => request(`${A}/drive/archive`, { method: 'DELETE', headers: INTENT, body }),
 };
 
 // ── the Drive keyring (Admin → Security → Keys; docs/DRIVE.md §3, §3.1) ───────
@@ -373,7 +388,10 @@ export const keysApi = {
   changeRoot: (body) => request(`${K}/root`, { method: 'POST', headers: INTENT, body }),
   startJob: (body) => request(`${K}/jobs`, { method: 'POST', headers: INTENT, body }),
   stepJob: () => request(`${K}/jobs/step`, { method: 'POST', headers: INTENT, body: {} }),
-  cancelJob: () => request(`${K}/jobs`, { method: 'DELETE', headers: INTENT, body: {} }),
+  cancelJob: (step) => request(`${K}/jobs`, { method: 'DELETE', headers: INTENT, body: { ...step } }),
+  // A root change that could not finish: go back to the previous root, or drop it (the typed fingerprint).
+  undoRoot: (step) => request(`${K}/root/undo`, { method: 'POST', headers: INTENT, body: { ...step } }),
+  dropOldRoot: (body) => request(`${K}/root/drop-old`, { method: 'POST', headers: INTENT, body }),
   kit: (step) => request(`${K}/kit`, { method: 'POST', headers: INTENT, body: { ...step } }),
   verify: (body) => request(`${K}/verify`, { method: 'POST', headers: INTENT, body }),
   restore: (body) => request(`${K}/restore`, { method: 'POST', headers: INTENT, body }),

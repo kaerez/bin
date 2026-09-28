@@ -4,8 +4,9 @@
 // the password (Argon2id), a recovery code, a passkey's PRF output, or the
 // owner's escrow key — and the fields DK sealed (names, metadata, file keys,
 // reverse-link keys), so that driveupgrade.js can re-seal them under the
-// user's KEK. Once every Drive is upgraded the server has none of this left
-// and this module has nothing to open.
+// user's KEK; and a recovery kit of that release (openKitV1), when no wrap
+// opens any more. Once every Drive is upgraded the server has none of this
+// left and this module has nothing to open.
 //
 // The old formats (docs/DRIVE.md of that release): sub-keys HKDF(DK, "",
 // "secbin-drive/v1 names" | "… files"); a sealed field { iv, ct } with AAD
@@ -209,6 +210,56 @@ export async function unlockWithEscrow(privateKey, wrap) {
 export async function openReversePrivV1(dk, id, value) {
   const { files } = await deriveSubkeysV1(dk);
   return openFieldV1(files, 'reversePriv', id, value);
+}
+
+// ── the recovery kits of that release (open only) ───────────────────────────
+// "secbin-owner-kit/1" { format, ownerId, salt, t, m, iv, ct } and
+// "secbin-user-kit/1" { format, userId, … }: Argon2id(UTF8(NFC(passphrase)),
+// salt16, m = 64 MiB, t = 3, p = 1) → AES-256-GCM over the JSON payload
+// ({ v: 1, dk, … }), with AAD "<format>\nargon2id\nm=65536\nt=3\np=1\n
+// salt=<b64url>\niv=<b64url>\n<owner|user>=<account id>\norigin=<origin>\n".
+// Only the DK is taken from it (the escrow key snapshot of an owner kit is
+// not needed: the server still has the sealed escrow keys while a Drive waits).
+const KITS_V1 = Object.freeze({ 'secbin-owner-kit/1': ['owner', 'ownerId'], 'secbin-user-kit/1': ['user', 'userId'] });
+const NO_PASSPHRASE = Uint8Array.of(0xff); // as the export's: no UTF-8 text is this byte
+
+/** A kit file of that release could not be opened: `check` 'format' | 'owner' | 'auth' | 'payload'. */
+export class DriveKitV1Error extends Error {
+  constructor(message, check) { super(message); this.name = 'DriveKitV1Error'; this.check = check; }
+}
+
+/**
+ * Open a recovery kit of the release before (its text, untrusted) for
+ * `accountId` on `origin` → the old DK (32 bytes). Nothing is sent anywhere.
+ */
+export async function openKitV1(text, { accountId, origin, passphrase = '' }) {
+  let env;
+  try { env = JSON.parse(text); } catch { env = null; }
+  const kind = env && typeof env === 'object' && !Array.isArray(env) ? KITS_V1[env.format] : null;
+  const B64 = /^[A-Za-z0-9_-]+$/;
+  const ok = !!kind && env.t === DRIVE_ARGON2.t && env.m === DRIVE_ARGON2.mKiB
+    && Object.keys(env).sort().join() === ['ct', 'format', 'iv', 'm', kind[1], 'salt', 't'].sort().join()
+    && typeof env.salt === 'string' && env.salt.length === 22 && B64.test(env.salt)
+    && typeof env.iv === 'string' && env.iv.length === 16 && B64.test(env.iv)
+    && typeof env.ct === 'string' && env.ct.length >= 24 && env.ct.length <= 200000 && B64.test(env.ct);
+  if (!ok) throw new DriveKitV1Error('This is not a recovery kit of the previous release.', 'format');
+  if (env[kind[1]] !== accountId) throw new DriveKitV1Error('This kit belongs to another account.', 'owner');
+  const { argon2idRaw } = await import('./kdf.js');
+  const pw = String(passphrase ?? '').normalize('NFC');
+  const raw = await argon2idRaw(pw === '' ? NO_PASSPHRASE : utf8(pw), bytesFromB64url(env.salt), { t: DRIVE_ARGON2.t, mKiB: DRIVE_ARGON2.mKiB, p: DRIVE_ARGON2.p });
+  const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt']);
+  raw.fill(0);
+  const ad = utf8(`${env.format}\nargon2id\nm=${env.m}\nt=${env.t}\np=1\nsalt=${env.salt}\niv=${env.iv}\n${kind[0]}=${accountId}\norigin=${origin}\n`);
+  let pt;
+  try { pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytesFromB64url(env.iv), additionalData: ad, tagLength: 128 }, key, bytesFromB64url(env.ct))); } catch {
+    throw new DriveKitV1Error('Wrong passphrase, or the kit was made on another server or has been changed.', 'auth');
+  }
+  let p = null;
+  try { p = JSON.parse(new TextDecoder().decode(pt)); } catch { /* below */ } finally { pt.fill(0); }
+  let dk;
+  try { dk = p && p.v === 1 && typeof p.dk === 'string' ? bytesFromB64url(p.dk) : null; } catch { dk = null; }
+  if (!isDk(dk)) throw new DriveKitV1Error('The kit opened, but its content is not valid.', 'payload');
+  return dk;
 }
 
 // ── the tab's copy of the old DK (only while a Drive waits for its upgrade) ─

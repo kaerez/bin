@@ -9,9 +9,12 @@
 // (the field layer) — and checks only what it can see: the link proof, the
 // password proof (both as SHA-256 hashes), the human check, sizes and counts
 // against the share's limits and the Drive's capacity, and exact chunk sizes.
-// The password only gates the uploader. An upload stays end-to-end encrypted
-// to the link's key until the user's browser takes it into the Drive (then it
-// is sealed under the user's KEK like any Drive file).
+// The password only gates the uploader. An upload is encrypted in the
+// uploader's browser to the link's key until the user's browser takes it into
+// the Drive (then it is sealed under the user's KEK like any Drive file). The
+// link's private key is sealed under the user's KEK, which the server derives:
+// the server can open an upload before it is taken in, as it can any Drive file
+// (SECURITY.md, "Drive keys"); a copy of R2 or of the Drive object alone cannot.
 
 import { json, err, readJsonBody, readCappedBody, assertIntent, assertNotCrossSite, decodePathSegment, methodNotAllowed } from '../lib/http.js';
 import { actorId } from '../lib/auth.js';

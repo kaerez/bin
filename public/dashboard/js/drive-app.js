@@ -27,6 +27,7 @@ import { normalizeRules } from '../../js/filepolicy.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
 import { cleanName } from '../../js/files.js';
 import { captchaBox } from '../../js/captcha.js';
+import { SESSION_CHANGED_EVENT } from '../../js/api.js';
 
 export const ROOT = 'root';
 const ROOT_NAME = 'My Drive';
@@ -320,8 +321,10 @@ function banners(client, deps) {
  * A Drive made before the key model v2 (docs/DRIVE.md §3.3): its items are
  * re-sealed under the new keys here, with the progress shown. The old key
  * opened at sign-in is used when this tab has it; otherwise the account
- * password (or a recovery code) opens it once. The owner acting as a user
- * upgrades that Drive from Admin → Security → Keys instead.
+ * password (or a recovery code), or a recovery kit of that release, opens it
+ * once. Reverse links whose key the old key does not open are listed, to be
+ * retired (with the step-up) so that the upgrade can finish. The owner acting
+ * as a user upgrades that Drive from Admin → Security → Keys instead.
  */
 function upgradeBox(client, deps) {
   const m = client.migration;
@@ -336,28 +339,61 @@ function upgradeBox(client, deps) {
     bar.hide();
     return box;
   }
+  const loadUpgrade = async () => deps.upgrade || import('../../js/driveupgrade.js');
+  const progress = (p) => bar.set(p.phase === 'verify' ? `Checking… ${p.done} verified` : `Upgrading… ${p.done} done, ${p.left} left`, p.phase === 'verify' ? 0.95 : toFraction(p.done, p.done + (p.left || 0)));
+  const finished = (r) => {
+    bar.done('Upgrade: done');
+    box.replaceChildren(h('h2.section-title', { text: 'Your Drive is upgraded' }),
+      h('p', { text: `Every item now uses the new Drive keys${r.damaged ? `; ${r.damaged} item${r.damaged === 1 ? '' : 's'} could not be opened with the old keys either and ${r.damaged === 1 ? 'was' : 'were'} kept as “damaged”` : ''}${r.retired ? `; ${r.retired} link${r.retired === 1 ? '' : 's'} whose key did not open ${r.retired === 1 ? 'was' : 'were'} ended` : ''}.` }));
+    client.migration = null;
+    if (deps.onUpgraded) deps.onUpgraded(r);
+  };
   const run = async () => {
     msg.hidden = true;
     bar.set('Upgrading…', 0);
     try {
-      const upgrade = deps.upgrade || await import('../../js/driveupgrade.js');
+      const upgrade = await loadUpgrade();
       const cur = client.keys.current;
-      const r = await upgrade.upgradeOwnDrive({
-        user: deps.user, current: cur, kek: client.keys.keks.get(cur)[0],
-        onProgress: (p) => bar.set(p.phase === 'verify' ? `Checking… ${p.done} verified` : `Upgrading… ${p.done} done, ${p.left} left`, p.phase === 'verify' ? 0.95 : toFraction(p.done, p.done + (p.left || 0))),
-      });
-      bar.done('Upgrade: done');
-      box.replaceChildren(h('h2.section-title', { text: 'Your Drive is upgraded' }),
-        h('p', { text: `Every item now uses the new Drive keys${r.damaged ? `; ${r.damaged} item${r.damaged === 1 ? '' : 's'} could not be opened with the old keys either and ${r.damaged === 1 ? 'was' : 'were'} kept as “damaged”` : ''}.` }));
-      client.migration = null;
-      if (deps.onUpgraded) deps.onUpgraded(r);
+      const r = await upgrade.upgradeOwnDrive({ user: deps.user, current: cur, kek: client.keys.keks.get(cur)[0], onProgress: progress });
+      if (r.unopened && r.unopened.length) { bar.hide(); box.append(retireForm(r)); return; }
+      finished(r);
     } catch (e) {
       bar.hide();
       if (e && e.name === 'UpgradeBlocked' && (e.reason === 'locked' || e.reason === 'wrong')) { box.append(unlockForm()); return; } // no old key in the tab, or not this Drive's (removed)
       showMsg(msg, `The upgrade stopped: ${friendlyError(e)} It carries on where it stopped the next time this page opens.`);
     }
   };
-  // The old key, when the sign-in could not open it (e.g. a passkey without PRF): the password once.
+  // Links of the previous release whose key the old key does not open: they hold the upgrade until retired.
+  const retireForm = (r) => {
+    const n = r.unopened.length;
+    const pw = h('input.input', { id: 'drive-retire-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024' });
+    const label = h('label.field-label', { for: 'drive-retire-pw', text: 'Your password, to confirm' });
+    canUsePasskey().then((ok) => { label.textContent = confirmLabel('Your password, to confirm', ok); }).catch(() => {});
+    const go = h('button.btn.danger', { type: 'submit', id: 'drive-retire-btn', text: `Retire ${n === 1 ? 'this link' : 'these links'}` });
+    const form = h('form.form.drive-unlock-form', { id: 'drive-retire-form', novalidate: true },
+      h('p', { text: `${n} “Receive files” link${n === 1 ? '' : 's'} of the previous release could not be opened with your Drive’s old key (${n === 1 ? 'its' : 'their'} key is damaged, or was sealed under a Drive you started over). The upgrade finishes once ${n === 1 ? 'it is' : 'they are'} retired: ${n === 1 ? 'the link ends, its key is removed' : 'the links end, their keys are removed'}, and files received but not taken in are listed as failed, to be deleted. Files already in your Drive are not affected.` }),
+      h('ul.plan-list.mono', {}, ...r.unopened.map((id) => h('li', { text: id }))),
+      h('div.dfield', {}, label, pw), go);
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      go.disabled = true;
+      try {
+        const step = await confirmStep(pw, deps.user.username ?? deps.profile?.user?.username, !pw.value && await canUsePasskey());
+        const upgrade = await loadUpgrade();
+        bar.set('Finishing…', 0.9);
+        const x = await upgrade.retireLinks({ ids: r.unopened, step, onProgress: progress });
+        form.remove();
+        if (x.done) finished({ ...r, retired: x.retired });
+        else await run();
+      } catch (err) {
+        go.disabled = false;
+        bar.hide();
+        showMsg(msg, friendlyError(err));
+      }
+    });
+    return form;
+  };
+  // The old key, when the sign-in could not open it (e.g. a passkey without PRF): the password once, or a recovery kit of that release.
   const unlockForm = () => {
     const pw = h('input.input', { id: 'drive-upgrade-pw', type: 'password', autocomplete: 'current-password', maxlength: '1024' });
     const go = h('button.btn', { type: 'submit', id: 'drive-upgrade-btn', text: 'Upgrade now' });
@@ -367,18 +403,42 @@ function upgradeBox(client, deps) {
       if (!pw.value) { showMsg(msg, 'Enter your password.'); pw.focus(); return; }
       go.disabled = true;
       try {
-        const upgrade = deps.upgrade || await import('../../js/driveupgrade.js');
+        const upgrade = await loadUpgrade();
         const v = pw.value.trim();
         pw.value = '';
         await upgrade.legacyUnlock({ user: deps.user, ...(/^[0-9A-Za-z]{4}(-?[0-9A-Za-z]{4}){3}$/.test(v) ? { code: v, password: v } : { password: v }) });
-        form.remove();
+        wrap.remove();
         await run();
       } catch (err) {
         go.disabled = false;
         showMsg(msg, friendlyError(err));
       }
     });
-    return form;
+    const kitFile = h('input.input', { id: 'drive-upgrade-kit', type: 'file', accept: '.json,application/json' });
+    const kitPass = h('input.input', { id: 'drive-upgrade-kit-pass', type: 'password', autocomplete: 'off', maxlength: '1024' });
+    const kitGo = h('button.btn', { type: 'submit', id: 'drive-upgrade-kit-btn', text: 'Open with the kit' });
+    const kitForm = h('form.form.drive-unlock-form', { id: 'drive-upgrade-kit-form', novalidate: true },
+      h('p.type-hint', { text: 'No password, code or passkey opens the old keys any more? A Drive recovery kit you downloaded before this release does (the file never leaves this browser).' }),
+      field('Recovery kit file of the previous release', kitFile), field('Its passphrase', kitPass), kitGo);
+    kitForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = kitFile.files && kitFile.files[0];
+      if (!f) { showMsg(msg, 'Choose the kit file.'); kitFile.focus(); return; }
+      kitGo.disabled = true;
+      try {
+        const upgrade = await loadUpgrade();
+        const passphrase = kitPass.value;
+        kitPass.value = '';
+        await upgrade.legacyUnlockWithKit({ user: deps.user, text: await f.text(), passphrase });
+        wrap.remove();
+        await run();
+      } catch (err) {
+        kitGo.disabled = false;
+        showMsg(msg, friendlyError(err));
+      }
+    });
+    const wrap = h('div.stack', { id: 'drive-upgrade-unlock' }, form, h('details', {}, h('summary', { text: 'Use a recovery kit of the previous release' }), kitForm));
+    return wrap;
   };
   // At most once per page: it resumes where it stopped.
   queueMicrotask(run);
@@ -499,6 +559,16 @@ function mountApp(mount, client, deps) {
   // Once upgraded (a Drive of the previous release), the folder shows its items again.
   const withRefresh = { ...deps, onUpgraded: () => { refresh(); if (deps.onUpgraded) deps.onUpgraded(); } };
   mount.replaceChildren(h('div.drive', { id: 'drive-app' }, ...banners(client, withRefresh), cap, toolbar, fileIn, folderIn, transferBox, msg, receivedMsg, layout));
+
+  // The browser is now signed in as someone else (another tab; impersonation started or ended):
+  // this page's Drive keys are dropped at once, and nothing of the Drive stays on the page.
+  addEventListener(SESSION_CHANGED_EVENT, () => {
+    client.forget();
+    recent.clear();
+    mount.replaceChildren(h('div.card.drive-notice', { id: 'drive-ended', role: 'alert' },
+      h('h2.section-title', { text: 'This page no longer shows your Drive' }),
+      h('p', { text: 'The browser is now signed in as someone else, so this page dropped its Drive keys. Reload to open the Drive of the account signed in now.' })));
+  }, { once: true });
 
   // drag and drop onto the right pane
   pane.addEventListener('dragover', (e) => { if (!busy) { e.preventDefault(); pane.classList.add('over'); } });
@@ -933,7 +1003,7 @@ function mountApp(mount, client, deps) {
       h('div.dfield', { hidden: impersonating }, confirmText, confirmIn));
     const d = openDialog({
       title: `Receive files into “${folder.name}”`,
-      sub: 'Anyone with the link can upload files and folders into this folder, without an account. They are encrypted in the uploader’s browser to this link’s key; the next time your Drive opens they are taken in and sealed like your other files. Uploads count towards your Drive’s storage.',
+      sub: 'Anyone with the link can upload files and folders into this folder, without an account. They are encrypted in the uploader’s browser to this link’s key, which the server keeps under your Drive keys (so the server can open them, as it can your other Drive files); the next time your Drive opens they are taken in and sealed like your other files. Uploads count towards your Drive’s storage.',
       body: [form, listBox],
       wide: true,
       fallback: focusPane,

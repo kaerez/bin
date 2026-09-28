@@ -8,7 +8,9 @@
 // each file exactly like a Drive file (a random file key fk), its relative
 // path and metadata with a random metadata key mk, and wraps fk ‖ mk to the
 // public key (ECDH with an ephemeral key → HKDF → AES-GCM). The server stores
-// ciphertext it cannot open. The optional password only gates the uploader:
+// that ciphertext; it can open it with the link's private key, which it can
+// unseal (the KEK is server-derived: SECURITY.md, "Drive keys"). A copy of R2
+// or of the Drive object alone cannot. The optional password only gates the uploader:
 // the server keeps the SHA-256 of an Argon2id-derived proof bound to the
 // public key, which it never sees.
 

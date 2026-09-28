@@ -61,7 +61,7 @@ flowchart TD
 | Optional password | Argon2id (64 MiB, t=3). Checked by the server via a proof before any view is spent. |
 | Recipient downloads | Folder tree on the left (collapsed by default; **+** opens a folder's sub-folders), the selected folder's files and folders on the right: download any file raw, any folder/sub-folder as a ZIP, or everything at once. The composer's file list uses the same tree. |
 | Drive | If the role allows it: **Dashboard → Drive**, a private folder tree (collapsed by default, content in a right pane) within a role capacity, encrypted in the browser under keys the server derives (**not end-to-end**: the server can decrypt Drive files; see SECURITY.md, "Drive keys") — upload files and folders (pickers or drag and drop), new folder, rename, move, delete, download (files raw, folders as ZIP), and **Share…** any files or folders with the usual share options; each item lists its shares with revoke. It opens right after sign-in, with no unlock step. See [`docs/DRIVE.md`](./docs/DRIVE.md). |
-| Receive files (reverse shares) | If the role allows it: **Drive → Receive files…** on a folder makes an upload link (`/r/<id>#<key>`, with copy and QR) that lets anyone, without an account, send files and folders into that folder — drag and drop, progress, and a CAPTCHA when the link has one (the role requires it by default, or lets the user choose). Options: expiry, maximum files, total size and file size, allowed file types, a label, an encrypted note to the uploader, and an optional password that only gates the uploader; creating a link is confirmed with the account password or a passkey. Files are encrypted in the uploader's browser to the link's key (end-to-end until taken in); the user's browser takes them into the Drive when it opens. Listed in My shares (type "receive") and Admin → Shares; revoking stops uploads, received files stay. See [`docs/REVERSE.md`](./docs/REVERSE.md). |
+| Receive files (reverse shares) | If the role allows it: **Drive → Receive files…** on a folder makes an upload link (`/r/<id>#<key>`, with copy and QR) that lets anyone, without an account, send files and folders into that folder — drag and drop, progress, and a CAPTCHA when the link has one (the role requires it by default, or lets the user choose). Options: expiry, maximum files, total size and file size, allowed file types, a label, an encrypted note to the uploader, and an optional password that only gates the uploader; creating a link is confirmed with the account password or a passkey. Files are encrypted in the uploader's browser to the link's key, whose private key the server keeps sealed under the user's Drive keys (so, like Drive files, not end-to-end: the server can open them); the user's browser takes them into the Drive when it opens. Listed in My shares (type "receive") and Admin → Shares; revoking stops uploads, received files stay. See [`docs/REVERSE.md`](./docs/REVERSE.md). |
 | Safe in-browser viewer | Optional, admin-governed: text, Markdown, code, images, PDF (hardened pdf.js, no PDF scripting), audio/video. Nothing executes. |
 | Accounts | Built-in login; one owner/admin; users with one role each (capabilities, limits, quotas, password policy, passkeys, sessions) and API keys. |
 | Drive | If the user's role allows it: a private folder tree within a role capacity (Dashboard → Drive), encrypted in the browser under keys the server holds (not end-to-end). Any file or folder can be shared any number of times, with the usual share options; when a share ends only the share goes. See [docs/DRIVE.md](./docs/DRIVE.md). |
@@ -191,9 +191,11 @@ working.
   user's key (KEK), which the server derives from keys it keeps (the root MEK and the sub-MEKs,
   in the Directory). **Drive files are therefore not end-to-end encrypted:** the server, and
   anyone with a copy of the Directory's storage, can decrypt every Drive file; a leak of R2 or of
-  a Drive object without the Directory reveals nothing. Notes and file shares stay end-to-end,
-  and so does a Drive share (its keys travel in the link) and a reverse-share upload until it is
-  taken into the Drive. Drive shares are file shares that reference the Drive's ciphertext
+  a Drive object without the Directory reveals nothing. Notes and file shares stay end-to-end.
+  A Drive share is not end-to-end against the server (its content is the Drive's ciphertext,
+  whose DEK is also sealed in the Drive under the user's KEK), and neither is a reverse-share
+  upload (it is encrypted to the link's key, whose private key is sealed under the user's KEK).
+  Drive shares are file shares that reference the Drive's ciphertext
   (nothing is copied): same options, limits and quotas, kind "drive" in My shares; deleting a
   Drive item ends its shares. Admin → Users shows each user's usage; there is no admin file
   browser. While logged in as a user, the owner has the user's whole Drive (the use of the
@@ -342,7 +344,9 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
 
 - **Not metadata-free.** The server sees IPs, timing, total (padded) ciphertext size, view and
   expiry settings, which account created which share, and share labels (labels are *not*
-  encrypted). It cannot read content, names, folders or types ([`SECURITY.md`](./SECURITY.md) §3).
+  encrypted). It cannot read the content, names, folders or types of notes and file shares
+  ([`SECURITY.md`](./SECURITY.md) §3); Drive files, Drive shares and reverse-share uploads it can
+  open (SECURITY.md, "Drive keys").
 - **No protection from a compromised deployment.** Decryption runs in JavaScript the server
   delivers; a malicious deployment could serve code that leaks keys ([`SECURITY.md`](./SECURITY.md) §4).
 - **Lose the link, lose the share.** Keys are never stored server-side.

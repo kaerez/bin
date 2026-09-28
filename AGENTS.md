@@ -108,10 +108,12 @@ never committed) and `node_modules`.
   from keys it keeps (the root MEK and the sub-MEKs in the Directory, with the user salt), so the
   server, the owner, and anyone with a copy of the Directory's storage can decrypt every Drive
   file (docs/DRIVE.md §2, SECURITY.md "Drive keys"). A leak of R2 or of a Drive object without the
-  Directory reveals nothing. Notes, file shares, Drive shares (the keys travel in the link) and
-  reverse-share uploads until they are taken in stay end-to-end. Every other control stays: the
-  step-up for every key action, keys in the admin audit by fingerprint only, never a key in a
-  log, and the Worker opening DEKs and names only in memory.
+  Directory reveals nothing. Notes and file shares stay end-to-end. Drive shares (their content
+  is Drive ciphertext whose DEK is also sealed under the KEK) and reverse-share uploads (the
+  link's private key is sealed under the KEK) are not end-to-end against the server, like the
+  Drive itself. Every other control stays: the step-up for every key action, keys in the admin
+  audit by fingerprint only, never a key in a log, and the Worker opening DEKs and names only in
+  memory.
 - **The Drive keys never change** on a password change, an admin reset or an AUTHN owner
   recovery: they are not tied to any credential. Only the owner changes them (Admin → Security →
   Keys), and restores and imports never replace a working key.

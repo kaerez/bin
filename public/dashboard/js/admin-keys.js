@@ -8,7 +8,7 @@
 // help sits next to every action. DOM through h() only (strict CSP).
 
 import { keysApi, drive as driveApi, admin } from '../../js/api.js';
-import { h, clear, showMsg, formatDate, friendlyError, armConfirm } from '../../js/common.js';
+import { h, clear, showMsg, formatDate, formatBytes, friendlyError, armConfirm } from '../../js/common.js';
 import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { progressBar } from '../../js/progress.js';
 import { parseManualKey } from '../../js/drivekeys.js';
@@ -193,9 +193,11 @@ function keyringCard(st, profile, { loud, changed }) {
   });
   card.append(h('div.stack', { id: 'keys-root' },
     h('h4.field-label', { text: 'Root MEK' }),
-    h('p', {}, 'Fingerprint ', h('span.mono', { text: fpText(r?.fp) }), ` · created ${formatDate(r?.created)}`, r?.changing ? ` · being changed (the old root ${fpText(r.oldFp)} stays until every item is re-sealed)` : ''),
+    h('p', {}, 'Fingerprint ', h('span.mono', { text: fpText(r?.fp) }), ` · created ${formatDate(r?.created)}`, r?.changing ? ` · being changed (the old root ${fpText(r.oldFp)} stays until every item is re-sealed and checked)` : ''),
     h('p.type-hint', { id: 'keys-root-help', text: HELP.root }),
     h('div.btn-row', {}, showRoot, change)));
+  // A root change whose re-seal ended with items that do not open under the new root: the three ways on.
+  if (r?.changing && (!st.job || (st.job.finished && st.job.kind === 'root' && !st.job.result?.ok))) card.append(stuckRoot(st, { act, work, changed }));
   // The sub-MEKs.
   const usage = new Map();
   const tbody = h('tbody');
@@ -281,6 +283,33 @@ function keyringCard(st, profile, { loud, changed }) {
   return card;
 }
 
+/**
+ * A root change that could not finish (docs/DRIVE.md §3): the items listed
+ * open under neither root, or only under the previous one. Run the re-seal
+ * again (after putting them right: a kit, an import), go back to the previous
+ * root (everything is re-sealed under it again), or remove the previous root
+ * and leave those items unreadable (its fingerprint typed to confirm).
+ */
+function stuckRoot(st, { act, work, changed }) {
+  const job = st.job;
+  const ids = job?.failedIds || [];
+  const retry = h('button.btn', { type: 'button', id: 'keys-root-retry', text: 'Run the re-seal again' });
+  retry.addEventListener('click', async () => { if (await act((step) => keysApi.startJob({ kind: 'root', ...step }))) { await runJob(work); changed(); } });
+  const undo = h('button.btn', { type: 'button', id: 'keys-root-undo', text: 'Go back to the previous root' });
+  armConfirm(undo, 'Re-seal every item under the previous root?', async () => { if (await act((step) => keysApi.undoRoot(step), 'Going back to the previous root: every item is being re-sealed under it.')) { await runJob(work); changed(); } });
+  const typed = h('input.input', { id: 'keys-root-drop-confirm', autocomplete: 'off', spellcheck: 'false', maxlength: '40' });
+  const drop = h('button.btn.danger', { type: 'button', id: 'keys-root-drop', text: 'Remove the previous root' });
+  drop.addEventListener('click', async () => {
+    if (await act((step) => keysApi.dropOldRoot({ confirm: typed.value.trim(), ...step }), 'The previous root MEK was removed.')) changed();
+  });
+  return h('div.card.stack.drive-notice', { id: 'keys-root-stuck', role: 'alert' },
+    h('h4.field-label', { text: 'The root change could not finish' }),
+    h('p', { text: job ? `${job.failed} item(s) do not open under the new root MEK${ids.length ? ` (${ids.join(', ')}${job.failed > ids.length ? ', …' : ''})` : ''}. The previous root MEK is kept for them, and every session still gets both keys.` : 'The previous root MEK is still here, with no re-seal running: run it again to finish the change.' }),
+    h('p.type-hint', { text: 'Run the re-seal again once those items are put right (a key kit or an import brings back what is missing). Or go back to the previous root: every item is re-sealed under it again, then the new one goes. Or remove the previous root: the items that open only under it, or under neither, stay unreadable for good.' }),
+    h('div.btn-row', {}, retry, undo),
+    field(`To remove the previous root, type its fingerprint (${fpText(st.root.oldFp)})`, typed), h('div.btn-row', {}, drop));
+}
+
 /** Drive the re-seal job to its end, with its progress → its result. */
 async function runJob(box) {
   const bar = progressBar();
@@ -296,13 +325,15 @@ async function runJob(box) {
       return null;
     }
     if (!job) break;
-    text.textContent = `${job.kind === 'root' ? 'Root change' : `Sub-MEK ${job.from}`}: Drive ${job.drive} of ${job.drives}${job.phase === 'atrest' ? ' (link keys)' : ''}, ${job.done} re-sealed${job.failed ? `, ${job.failed} could not be opened` : ''}${job.pass > 1 ? ` (pass ${job.pass})` : ''}.`;
+    text.textContent = job.verifying
+      ? `Root change: checking Drive ${job.drive} of ${job.drives}${job.phase === 'verifyrest' ? ' (link keys)' : ''}, ${job.failed ? `${job.failed} do not open under the new root` : 'everything opens under the new root so far'}.`
+      : `${job.kind === 'root' ? 'Root change' : `Sub-MEK ${job.from}`}: Drive ${job.drive} of ${job.drives}${job.phase === 'atrest' ? ' (link keys)' : ''}, ${job.done} re-sealed${job.failed ? `, ${job.failed} could not be opened` : ''}${job.pass > 1 ? ` (pass ${job.pass})` : ''}.`;
     bar.set('Re-sealing…', job.drives ? Math.min(1, (job.drive - 1) / job.drives) : 1);
     if (job.finished) break;
   }
   if (job && job.result) {
     bar.done('Re-seal: done');
-    text.textContent = job.result.message;
+    text.textContent = `${job.result.message}${!job.result.ok && job.failedIds?.length ? ` Items: ${job.failedIds.join(', ')}${job.failed > job.failedIds.length ? ', …' : ''}.` : ''}`;
     toast(job.result.message, job.result.ok ? {} : { error: true });
   }
   return job;
@@ -385,8 +416,9 @@ function keyKitCard(st, profile, refreshed) {
   const show = (r) => {
     const subs = (r.subs || []).map((s) => `${s.id}: ${s.result}`);
     plan.replaceChildren(h('ul.plan-list', {},
-      h('li', { text: `Root MEK: ${r.root}` }), h('li', { text: `Sub-MEKs: ${subs.join(', ') || 'none in the file'}` }),
-      h('li', { text: `User salts: ${r.salts.restored} put back, ${r.salts.same} already here, ${r.salts.kept} kept (the server’s differ), ${r.salts.unknown} for no account here` })),
+      h('li', { text: `Root MEK: ${r.root}` }), r.rootOld && r.rootOld !== 'absent' ? h('li', { text: `The previous root MEK (the kit was made during a root change): ${r.rootOld}${r.rootOld === 'restored' ? ' — then run the root change’s re-seal again (above)' : ''}` }) : null,
+      h('li', { text: `Sub-MEKs: ${subs.join(', ') || 'none in the file'}` }),
+      h('li', { text: `User salts: ${r.salts.restored} put back, ${r.salts.same} already here, ${r.salts.kept} kept (the server’s differ), ${r.salts.wrong ?? 0} left out (they do not open that user’s Drive), ${r.salts.unknown} for no account here` })),
     h('p.type-hint', { text: r.changed ? (r.dryRun ? 'Nothing changed yet: restore to apply.' : 'Restored.') : 'Nothing to restore: everything in the kit is already here (working keys are never replaced).' }));
   };
   preview.addEventListener('click', async () => {
@@ -395,7 +427,9 @@ function keyKitCard(st, profile, refreshed) {
     showMsg(rmsg, 'Opening the kit…', false);
     const { text, passphrase } = await takeFile(rfile, rpass, rsync);
     try {
-      const r = await restoreKeyKit({ ownerId, text, passphrase, dryRun: true, useRoot: useRoot.checked });
+      // The preview too needs the step-up: it tells which of the kit's keys match this server's.
+      const step = await stepFrom(rmine, profile);
+      const r = await restoreKeyKit({ ownerId, text, passphrase, dryRun: true, useRoot: useRoot.checked, step });
       kitSucceeded();
       held = { text, passphrase };
       rmsg.hidden = true;
@@ -426,7 +460,8 @@ function keyKitCard(st, profile, refreshed) {
     field('Key kit file to restore from', rfile), field('Its passphrase', rpass),
     h('label.inline', {}, useRoot, h('span', { text: ' Use the kit’s root MEK (only on an empty instance: no Drive item yet)' })),
     h('p.type-hint', { text: 'Only what this server lost comes back: the root MEK when there is none (or none of the sub-MEKs opens under the one here), sub-MEKs that are missing or do not open, and user salts of accounts that have none. Working keys are never replaced.' }),
-    h('div.btn-row', {}, preview), plan, field('Your password (or leave it empty to confirm with a passkey)', rmine), h('div.btn-row', {}, apply), rmsg);
+    field('Your password, for the preview and again for the restore (or leave it empty to confirm with a passkey)', rmine),
+    h('div.btn-row', {}, preview), plan, h('div.btn-row', {}, apply), rmsg);
   const last = st.kit ? `Latest key kit: ${formatDate(st.kit.at)}${st.kitFresh ? ' (it covers every key and user)' : ' (older than the latest change)'}.` : 'No key kit downloaded yet.';
   return h('div.card.stack', { id: 'keys-kit', 'aria-labelledby': 'keys-kit-title' },
     h('h3.section-title', { id: 'keys-kit-title', text: 'Key kit' }), h('p.subtitle', { text: HELP.kit }), h('p.mono', { id: 'keys-kit-last', text: last }),
@@ -434,25 +469,42 @@ function keyKitCard(st, profile, refreshed) {
 }
 
 // ── the upgrade of Drives made before the key model v2 ────────────────────
+/**
+ * The Drives still waiting, each with "Upgrade now" through the escrow of
+ * that release (the step-up: the password, once for "Upgrade every waiting
+ * Drive"), disabled accounts included; links a Drive's old key does not open
+ * are listed with "Retire these links". The owner's archive of that release
+ * (a start over) shows below it when there is one.
+ */
 function upgradeCard(profile) {
   const card = h('div.card.stack', { id: 'keys-upgrade', 'aria-labelledby': 'keys-upgrade-title', hidden: true },
     h('h3.section-title', { id: 'keys-upgrade-title', text: 'Drive upgrade' }));
+  const confirmIn = secret('keys-upgrade-confirm', 'current-password');
   const draw = async () => {
     let r;
     try { r = await driveApi.migration(); } catch { card.hidden = true; return; }
     const drives = r.drives || [];
-    if (!drives.length || (!r.left && !r.legacyEscrow)) { card.hidden = true; return; }
+    const archive = await driveApi.archive().catch(() => null);
+    const hasArchive = !!archive && (archive.items > 0 || archive.links.length > 0);
+    if ((!drives.length || (!r.left && !r.legacyEscrow)) && !hasArchive) { card.hidden = true; return; }
     card.hidden = false;
     const tbody = h('tbody');
     const all = h('button.btn', { type: 'button', id: 'keys-upgrade-all', text: 'Upgrade every waiting Drive' });
     const bar = progressBar();
     const msg = h('p.msg', { id: 'keys-upgrade-msg', role: 'status', hidden: true });
-    const one = async (d, btn) => {
+    const extra = h('div', { id: 'keys-upgrade-links' });
+    const one = async (d, btn, step) => {
       btn.disabled = true;
       bar.set(`Upgrading ${d.username}…`, 0);
+      const onProgress = (p) => bar.set(`${d.username}: ${p.phase === 'verify' ? `${p.done} verified` : `${p.done} done, ${p.left} left`}`, p.phase === 'verify' ? 0.95 : p.done / Math.max(1, p.done + (p.left || 0)));
       try {
-        const { upgradeUserDrive } = await import('../../js/driveupgrade.js');
-        const x = await upgradeUserDrive({ ownerId: profile.user.id, userId: d.id, onProgress: (p) => bar.set(`${d.username}: ${p.phase === 'verify' ? `${p.done} verified` : `${p.done} done, ${p.left} left`}`, p.phase === 'verify' ? 0.95 : p.done / Math.max(1, p.done + (p.left || 0))) });
+        const up = await import('../../js/driveupgrade.js');
+        const x = await up.upgradeUserDrive({ ownerId: profile.user.id, userId: d.id, step, onProgress });
+        if (x.unopened && x.unopened.length) {
+          bar.hide();
+          extra.replaceChildren(retireBox(d, x.unopened, up, onProgress));
+          return false;
+        }
         bar.done(`${d.username}: done`);
         toast(`${d.username}’s Drive is upgraded${x.damaged ? ` (${x.damaged} damaged item${x.damaged === 1 ? '' : 's'} kept)` : ''}.`);
         return true;
@@ -463,32 +515,95 @@ function upgradeCard(profile) {
         return false;
       }
     };
+    // A Drive's links that its old key does not open: they end (their keys go) so that its upgrade finishes.
+    const retireBox = (d, ids, up, onProgress) => {
+      const pw = secret('keys-retire-confirm', 'current-password');
+      const go = h('button.btn.danger', { type: 'button', id: 'keys-retire', text: `Retire ${ids.length === 1 ? 'this link' : 'these links'}` });
+      go.addEventListener('click', async () => {
+        go.disabled = true;
+        try {
+          const x = await up.retireLinks({ ids, step: await stepFrom(pw, profile), target: d.id, onProgress });
+          extra.replaceChildren();
+          toast(`${d.username}: ${x.retired} link${x.retired === 1 ? '' : 's'} retired${x.done ? '; the Drive is upgraded' : ''}.`);
+          draw();
+        } catch (e) {
+          go.disabled = false;
+          showMsg(msg, `${d.username}: ${friendlyError(e)}`);
+        }
+      });
+      return h('div.card.stack', { role: 'group', 'aria-label': `${d.username}’s links that do not open` },
+        h('p', { text: `${d.username}’s Drive has ${ids.length} “Receive files” link${ids.length === 1 ? '' : 's'} whose key the old Drive key does not open. Retiring ends ${ids.length === 1 ? 'it' : 'them'} and removes ${ids.length === 1 ? 'its key' : 'their keys'}; files received but not taken in are listed as failed in that Drive. Then the upgrade finishes.` }),
+        h('ul.plan-list.mono', {}, ...ids.map((id) => h('li', { text: id }))),
+        field('Your password (or leave it empty to confirm with a passkey)', pw), h('div.btn-row', {}, go));
+    };
     for (const d of drives) {
       const btn = h('button.btn.mini', { type: 'button', text: d.id === profile.user.id ? 'On your Drive page' : 'Upgrade now', disabled: d.state === 'done' || d.id === profile.user.id, 'aria-label': `Upgrade ${d.username}’s Drive` });
-      btn.addEventListener('click', async () => { if (await one(d, btn)) draw(); });
+      btn.addEventListener('click', async () => {
+        msg.hidden = true;
+        let step;
+        try { step = await stepFrom(confirmIn, profile); } catch (e) { showMsg(msg, friendlyError(e)); return; }
+        if (await one(d, btn, step)) draw();
+      });
       tbody.appendChild(h('tr', { dataset: { id: d.id, state: d.state } },
-        h('td', { dataset: { label: 'User' }, text: d.id === profile.user.id ? `${d.username} (you)` : d.username }),
+        h('td', { dataset: { label: 'User' }, text: `${d.id === profile.user.id ? `${d.username} (you)` : d.username}${d.disabled ? ' (disabled)' : ''}` }),
         h('td', { dataset: { label: 'State' }, text: d.state === 'done' ? 'upgraded' : 'waiting' }),
         h('td.mono', { dataset: { label: 'Items left' }, text: d.state === 'done' ? '0' : String((d.v1Items ?? 0) + (d.v1Links ?? 0)) }),
         h('td.cell-actions', {}, btn)));
     }
     all.addEventListener('click', async () => {
+      msg.hidden = true;
       all.disabled = true;
+      // One confirmation for the whole run (a password is asked once; a passkey check serves one Drive).
+      let step;
+      try { step = await stepFrom(confirmIn, profile); } catch (e) { showMsg(msg, friendlyError(e)); all.disabled = false; return; }
       for (const d of drives.filter((x) => x.state !== 'done' && x.id !== profile.user.id)) {
         const btn = tbody.querySelector(`tr[data-id="${d.id}"] button`);
-        if (!(await one(d, btn || all))) break;
+        if (!(await one(d, btn || all, step))) break;
       }
       draw();
     });
+    const upgrading = drives.length && (r.left || r.legacyEscrow);
     card.replaceChildren(...[h('h3.section-title', { id: 'keys-upgrade-title', text: 'Drive upgrade' }),
-      h('p.subtitle', { text: 'Drives made before this release use the old Drive keys until they are upgraded: each item is sealed again under its user’s new key and checked, then the old keys (and, once every Drive is upgraded, your escrow keys) are removed. A user’s own Drive page does it after their next sign-in; you can do it here, through your escrow key of that release, for users who have not signed in. Your own old Drive key must be open in this tab: it is when you signed in with your password.' }),
-      h('div.table-wrap', {}, h('table.table', { id: 'keys-upgrade-table' }, h('caption.sr-only', { text: 'Drives and their upgrade' }),
+      upgrading ? h('p.subtitle', { text: 'Drives made before this release use the old Drive keys until they are upgraded: each item is sealed again under its user’s new key and checked, then the old keys (and, once every Drive is upgraded, your escrow keys) are removed. A user’s own Drive page does it after their next sign-in; you can do it here, through your escrow key of that release, for users who have not signed in (disabled accounts too). Your own old Drive key must be open in this tab: it is when you signed in with your password. The root MEK cannot be changed while a Drive waits.' }) : null,
+      upgrading ? h('div.table-wrap', {}, h('table.table', { id: 'keys-upgrade-table' }, h('caption.sr-only', { text: 'Drives and their upgrade' }),
         h('thead', {}, h('tr', {}, ...['User', 'State', 'Items left'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
-        tbody)),
-      r.left > 1 ? h('div.btn-row', {}, all) : null, bar.el, msg].filter(Boolean));
+        tbody)) : null,
+      upgrading ? field('Your password, to confirm “Upgrade now” (or leave it empty to confirm with a passkey)', confirmIn) : null,
+      upgrading && r.left > 1 ? h('div.btn-row', {}, all) : null, bar.el, msg, extra,
+      hasArchive ? archiveBox(archive, profile, draw) : null].filter(Boolean));
   };
   draw();
   return card;
+}
+
+/**
+ * The owner's Drive archive of the release before (a start over): kept as it
+ * was, opened by nothing here. Deleting it removes its content and ends the
+ * links it paused (the step-up, the username typed; admin audit).
+ */
+function archiveBox(a, profile, redraw) {
+  const typed = h('input.input', { id: 'keys-archive-confirm', autocomplete: 'off', spellcheck: 'false', maxlength: '64' });
+  const pw = secret('keys-archive-pw', 'current-password');
+  const go = h('button.btn.danger', { type: 'button', id: 'keys-archive-delete', text: 'Delete the archive' });
+  const msg = h('p.msg', { role: 'status', hidden: true });
+  go.addEventListener('click', async () => {
+    msg.hidden = true;
+    go.disabled = true;
+    try {
+      const r = await driveApi.deleteArchive({ confirm: typed.value.trim(), ...(await stepFrom(pw, profile)) });
+      toast(`The archive was deleted (${r.items} item${r.items === 1 ? '' : 's'}${r.links ? `; ${r.links} paused link${r.links === 1 ? '' : 's'} ended` : ''}).`);
+      redraw();
+    } catch (e) {
+      go.disabled = false;
+      showMsg(msg, friendlyError(e));
+    }
+  });
+  return h('div.card.stack', { id: 'keys-archive', role: 'group', 'aria-labelledby': 'keys-archive-title' },
+    h('h4.field-label', { id: 'keys-archive-title', text: 'Your Drive archive of the previous release' }),
+    h('p', { text: `When you started your Drive over in the previous release, its items were kept as an archive: ${a.items} item${a.items === 1 ? '' : 's'} (${formatBytes(a.bytes)}${a.received ? `, of which ${a.received} received through “Receive files” links` : ''}), sealed under that release’s key, and ${a.links.length} link${a.links.length === 1 ? '' : 's'} paused with it. Nothing here opens it any more, and it does not count towards your Drive’s storage.` }),
+    h('p.type-hint', { text: 'Deleting it removes its content from storage for good and ends the paused links; files received through them and not yet taken in are listed as failed. A recovery kit of that release can open the archive offline only as long as its content exists.' }),
+    field(`Type your username (${profile.user.username}) to confirm`, typed), field('Your password (or leave it empty to confirm with a passkey)', pw),
+    h('div.btn-row', {}, go), msg);
 }
 
 // ── one user's keys ─────────────────────────────────────────────────────────

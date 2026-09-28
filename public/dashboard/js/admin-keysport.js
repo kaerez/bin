@@ -264,7 +264,7 @@ function renderImport(out, doc, profile) {
       li.push(`Root MEK: ${r.keys.root}`);
       if (r.keys.subs.length) li.push(`Sub-MEKs: ${r.keys.subs.map((s) => `${s.id} ${s.result}`).join(', ')}`);
       const s = r.keys.salts;
-      li.push(`User salts: ${s.restored} put back, ${s.same} already here, ${s.kept} kept (the server’s differ), ${s.unknown} for no account here`);
+      li.push(`User salts: ${s.restored} put back, ${s.same} already here, ${s.kept} kept (the server’s differ), ${s.wrong ?? 0} left out (they do not open that user’s Drive), ${s.unknown} for no account here`);
     }
     for (const u of r.users) {
       const bits = [];
@@ -280,7 +280,8 @@ function renderImport(out, doc, profile) {
     showMsg(msg, 'Checking…', false);
     try {
       const c = chosen();
-      const r = await importKeys({ doc, ...c, dryRun: true });
+      // The preview too needs the step-up: it checks the file's KEKs and names the users.
+      const r = await importKeys({ doc, ...c, dryRun: true, step: await stepFrom(mine, profile) });
       show(r);
       previewed = JSON.stringify(c);
       apply.disabled = false;
@@ -312,8 +313,8 @@ function renderImport(out, doc, profile) {
     h('details', {}, h('summary', { text: 'What the file holds (masked)' }), docView(doc)),
     h('fieldset.range', {}, h('legend', { text: 'Parts to import' }), ...boxes,
       has.root ? h('label.inline', {}, useRoot, h('span', { text: ' Replace the root MEK here with the file’s (only on an empty instance: no Drive item yet)' })) : null),
+    field('Your password, for the preview and again for the import (or leave it empty to confirm with a passkey)', mine),
     h('div.btn-row', {}, preview), plan,
-    field('Your password (or leave it empty to confirm with a passkey)', mine),
     h('div.btn-row', {}, apply), msg);
 }
 

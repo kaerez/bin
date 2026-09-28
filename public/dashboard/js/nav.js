@@ -4,7 +4,7 @@
 // impersonation banner with "Return to admin", log-out, and the "session
 // changed" banner. Every dashboard page awaits `ready`.
 
-import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, SESSION_CHANGED } from '../../js/api.js';
+import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, noteSessionChanged, SESSION_CHANGED } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError, h } from '../../js/common.js';
 import { clearSessionKey, clearImpersonationKeys, purgeStaleSlots } from '../../js/drivekeys.js';
@@ -107,4 +107,18 @@ addEventListener('pageshow', async (ev) => {
   let now;
   try { was = await ready; now = await loadMe(); } catch { return; /* offline: the next request says so */ }
   if (now.user.id !== was.user.id || (now.impersonatedBy ?? null) !== (was.impersonatedBy ?? null)) location.reload();
+});
+
+// A tab shown again: if the browser is now signed in as someone else (another
+// tab signed in, or started or ended impersonation), this page stops acting for
+// anyone at once — the Drive drops its keys (api.js, `secbin:session-changed`)
+// — without waiting for its next change. At most one check every few seconds.
+let lastCheck = 0;
+addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || Date.now() - lastCheck < 5000) return;
+  lastCheck = Date.now();
+  let was;
+  let now;
+  try { was = await ready; now = await loadMe(); } catch { return; /* offline: the next request says so */ }
+  if (now.user.id !== was.user.id || (now.impersonatedBy ?? null) !== (was.impersonatedBy ?? null)) noteSessionChanged();
 });

@@ -97,8 +97,10 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
   user salts in the Directory): Drive files are not end-to-end encrypted.
 - **Reverse shares** (see "Reverse shares" below): which folder a link targets, its limits,
   label, times and counters, whether it has a password, and each received file's exact size,
-  chunk count and time — never the link key, the note to the uploader, the password, the files'
-  names, types, folders or contents.
+  chunk count and time. The link's private key is stored sealed under the user's KEK, which the
+  server derives (like every Drive key: "Drive keys"), so the server can open the files'
+  names, types, folders and contents, before and after they are taken in; a copy of R2 or of the
+  Drive object alone cannot. The note to the uploader and the password are never seen.
 
 Tokens (delete, upload, download grant) and proofs travel in request **headers**, never URLs,
 so they do not land in logged request URLs.
@@ -764,8 +766,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     (`403 impersonating`).
 - **Admin share management**: the owner sees every user's shares and can change a share's label, views
   and expiry, revoke it, or **lock** it.
-  - **Only metadata:** it never gains access to share content, which stays end-to-end
-    encrypted.
+  - **Only metadata:** share management never gains access to share content (notes and file
+    shares stay end-to-end; a Drive share's files open with the Drive keys, as any Drive file:
+    "Drive keys").
   - **Bounds:** admin changes are increase-only and bounded by the protocol maxima, not by the
     user's limits.
   - **Logging:** they are recorded in the audit log as direct admin actions, and they do not
@@ -926,9 +929,12 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
 - **What a leak of the Drive's own storage reveals.** R2 and the user's Drive Durable Object hold
   ciphertext, seals, per-item salts and the ciphertext hash only: **without the Directory they
   reveal nothing** (sizes, times and the tree's shape as before, §3).
-- **What stays end-to-end.** Notes and file shares (the key is in the link); a Drive share's
-  manifest, sealed like a file share (the recipient gets the DEKs from the link, never from the
-  server); reverse-share uploads until the user's browser takes them into the Drive.
+- **What stays end-to-end.** Notes and file shares (the key is in the link). **Not** a Drive
+  share: its manifest is sealed like a file share's (the recipient gets the DEKs from the link),
+  but its content is the Drive's ciphertext and each DEK is also sealed in the Drive under the
+  user's KEK, so the server can open it as any Drive file. **Not** a reverse-share upload: it is
+  encrypted in the uploader's browser to the link's key, whose private key is sealed under the
+  user's KEK, so the server can open it before it is taken into the Drive as well as after.
 - **Seals.** Each seal is AES-256-GCM under a key derived from the KEK with the item's 32-byte
   random salt, with AAD naming the user, the sub-MEK and the field; the item id is not in the AAD
   (DRIVE.md §9). File content keeps the file-share chunk format (index and count in the AAD), and
@@ -1196,14 +1202,17 @@ under "Drive keys" above.
 - **Drive shares** reference the Drive's ciphertext (no copy): a FileShare record with `refs`,
   authorized like a file share (limits, file-policy declarations, quotas), whose expiry,
   revocation or deletion never touches the Drive's objects. Recipients get the share's own link
-  key; each file's DEK travels inside the share's encrypted manifest, so the share stays
-  end-to-end.
+  key; each file's DEK travels inside the share's encrypted manifest, and stays sealed in the
+  Drive under the user's KEK too: a Drive share is not end-to-end against the server ("Drive
+  keys").
 - **Export.** The account export carries the Drive role options (with the roles), never Drive
   content or keys. The Drive keys have a file of their own (Import / export → Drive keys), the
   parts the owner picks, sealed in the browser; the key kit is another file.
 - **Archives** the owner's Drive kept after starting over in the release before stay in the
-  owner's Drive object as they were (sealed under that release's key), counted in the capacity;
-  no route opens or restores them any more.
+  owner's Drive object as they were (sealed under that release's key, uploads received through
+  reverse shares included), not counted in the capacity; no route opens or restores them any
+  more. The owner deletes one in Admin → Security → Keys (the step-up and the username typed;
+  its R2 objects go, the links it paused end; admin audit `drive.archive_deleted`).
 
 ### Reverse shares ("Receive files")
 
@@ -1214,9 +1223,9 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   sealed under `HKDF(KEK, "reverse-link")` (bound to the user, the sub-MEK and the share id) and,
   at rest, under the user's field key: like every Drive key it opens with keys the server holds,
   so the server (and the owner) can open it; it is checked to open under the user's current KEK
-  when the link is created. The uploads themselves stay end-to-end until they are taken in: the
-  server does not keep the link's private key in the clear, and a leak of the Drive object alone
-  opens nothing.
+  when the link is created. The uploads are therefore **not end-to-end against the server**,
+  before or after they are taken in: the server does not keep the link's private key in the
+  clear, but it can unseal it; a leak of R2 or of the Drive object alone opens nothing.
 - **The owner acting as the user** can do everything the user can, reverse shares included (the
   maintainer's rule), and the owner acting as the user, or anyone holding that impersonation
   session, can create through the API a link in the user's name whose private key they also keep:

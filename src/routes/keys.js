@@ -15,9 +15,9 @@ import { json, err, readJsonBody, assertIntent, methodNotAllowed, HttpError } fr
 import { directory } from '../lib/guard.js';
 import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
-import { stepUp } from './drive.js';
+import { stepUp, saltCheck } from './drive.js';
 import { NODE_ID_RE, driveChunkKey } from '../drive-do.js';
-import { parseManualKey, isAtRest, keyCheckValue, sameCheck, KEY_RE, MEK_ID_RE, keyBytes, openDek } from '../../public/js/drivekeys.js';
+import { parseManualKey, isAtRest, keyCheckValue, sameCheck, KEY_RE, MEK_ID_RE, keyBytes, openDek, openLinkKey } from '../../public/js/drivekeys.js';
 import { b64urlFromBytes } from '../../public/js/bytes.js';
 import { importFileKey, decryptChunk } from '../../public/js/files.js';
 import { userKeys, keksOf, currentKek, openItem, sealItem, openLink, resealLink, fieldKeys, toRest, fromRest } from '../lib/mek.js';
@@ -62,6 +62,23 @@ async function usage(env, dir) {
   }
   return { counts, v1, drives: users.length };
 }
+
+/**
+ * Drives still waiting for their upgrade with something of the release
+ * before left in them (docs/DRIVE.md §3.3) → [{ id, username, v1Items,
+ * v1Links }]. A root change waits for them: the upgrade re-seals those items
+ * under the KEK the root gives.
+ */
+async function waitingDrives(env, dir) {
+  const out = [];
+  for (const r of await dir.migrationList()) {
+    if (r.state === 'done') continue;
+    const s = await driveStub(env, r.id).summary(r.id);
+    if (s.migration.v1Items || s.migration.v1Links) out.push({ id: r.id, username: r.username, v1Items: s.migration.v1Items, v1Links: s.migration.v1Links });
+  }
+  return out;
+}
+const migrationPending = (list) => err(409, 'migration_pending', `${list.length} Drive(s) still wait for their upgrade to the new Drive keys: upgrade them first (below), then change the root.`, { drives: list.slice(0, 50) });
 
 export async function handleKeys(request, env, url, a) {
   const p = url.pathname;
@@ -128,6 +145,8 @@ export async function handleKeys(request, env, url, a) {
     const refused = await needStep(body);
     if (refused) return refused;
     if (!choice) return done(await dir.mekShow(me, { root: true }));
+    const waiting = await waitingDrives(env, dir);
+    if (waiting.length) return migrationPending(waiting);
     const r = await dir.mekChangeRoot(me, { sid, ...choice });
     if (!r.ok) return fromDir(r);
     // Every KEK changes with the root: every item is re-sealed (a job the owner's browser drives).
@@ -135,14 +154,58 @@ export async function handleKeys(request, env, url, a) {
     return json({ ok: true, fp: r.fp, job });
   }
 
+  // A root change that could not finish (items opened under neither root):
+  // go back to the previous root (every item is re-sealed under it again), or
+  // drop the previous one and leave those items unreadable (typed confirmation).
+  if (p === '/api/private/admin/keys/root/undo') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    const refused = await needStep(body);
+    if (refused) return refused;
+    const cur = await dir.mekJob();
+    if (cur && !cur.finished && cur.kind !== 'root') return err(409, 'job_running', 'A re-seal is running: let it finish (or cancel it) first.');
+    const r = await dir.mekRootSwap(me);
+    if (!r.ok) return fromDir(r);
+    return json({ ok: true, fp: r.fp, job: await newJob(dir, me, { kind: 'root', from: null }) });
+  }
+  if (p === '/api/private/admin/keys/root/drop-old') {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    const refused = await needStep(body);
+    if (refused) return refused;
+    const status = await dir.mekStatus();
+    if (!status.root || !status.root.changing) return err(409, 'not_changing', 'No root change is running.');
+    const cur = await dir.mekJob();
+    if (cur && !cur.finished) return err(409, 'job_running', 'The root change is still running: let it finish first.');
+    const typed = typeof body.confirm === 'string' ? body.confirm.replace(/[^A-Za-z0-9_-]/g, '') : '';
+    if (typed !== status.root.oldFp) return err(400, 'confirm', 'Type the previous root MEK’s fingerprint to confirm.');
+    const lost = cur && cur.kind === 'root' ? cur.failed : 0;
+    const r = await dir.mekRootDropOld(me, { items: lost });
+    if (!r.ok) return fromDir(r);
+    if (cur && cur.kind === 'root') await dir.mekJobSet(me, { ...cur, result: { ok: true, dropped: true, message: `The previous root MEK was removed; ${lost} item(s) that opened only under it, or under neither, stay unreadable.` } });
+    return json({ ok: true, lost });
+  }
+
   if (p === '/api/private/admin/keys/jobs') {
     if (request.method === 'DELETE') {
+      const refused = await needStep(body);
+      if (refused) return refused;
       const job = await dir.mekJob();
-      if (job && job.kind === 'root') return err(409, 'root_job', 'A root change is completed, not cancelled: keep it running.');
+      if (job && job.kind === 'root' && !job.finished) return err(409, 'root_job', 'A root change is completed, not cancelled: keep it running (or go back to the previous root).');
       await dir.mekJobSet(me, null);
       return json({ ok: true });
     }
     if (request.method !== 'POST') return methodNotAllowed('POST, DELETE');
+    if (body.kind === 'root') {
+      // Run the root change's re-seal again (after items that did not open were put right).
+      const status = await dir.mekStatus();
+      if (!status.root || !status.root.changing) return err(409, 'not_changing', 'No root change is running.');
+      const cur = await dir.mekJob();
+      if (cur && !cur.finished) return err(409, 'job_running', 'A re-seal is already running: let it finish first.');
+      const refused = await needStep(body);
+      if (refused) return refused;
+      const waiting = await waitingDrives(env, dir);
+      if (waiting.length) return migrationPending(waiting);
+      return json({ ok: true, job: await newJob(dir, me, { kind: 'root', from: null }) });
+    }
     const status = await dir.mekStatus();
     if (typeof body.from !== 'string' || !status.subs.some((s) => s.id === body.from)) return invalid('from must be one of the sub-MEKs.');
     if (body.from === status.current) return invalid('Items sealed under the current sub-MEK stay under it: choose an older one.');
@@ -172,15 +235,14 @@ export async function handleKeys(request, env, url, a) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const dryRun = body.dryRun !== false;
     const parts = restoreParts(body);
-    if (!dryRun) {
-      const refused = await needStep(body);
-      if (refused) return refused;
-    }
+    // The preview too: it tells which of the file's keys match this server's.
+    const refused = await needStep(body);
+    if (refused) return refused;
     if (parts.useRoot) {
       const u = await usage(env, dir);
       if (Object.values(u.counts).some((n) => n > 0) || u.v1) return err(409, 'in_use', 'Items are sealed under the keys here: an imported root MEK replaces the root only on an empty instance.');
     }
-    return done(await dir.keyRestore(me, { ...parts, dryRun }));
+    return done(await dir.keyRestore(me, { ...parts, dryRun, checks: await restoreChecks(env, dir, me, parts) }));
   }
   if (p === '/api/private/admin/keys/export') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -191,10 +253,9 @@ export async function handleKeys(request, env, url, a) {
   if (p === '/api/private/admin/keys/import') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const dryRun = body.dryRun !== false;
-    if (!dryRun) {
-      const refused = await needStep(body);
-      if (refused) return refused;
-    }
+    // The preview too: it checks the file's KEKs against the users' and names them.
+    const refused = await needStep(body);
+    if (refused) return refused;
     return keysImport(env, dir, me, body, dryRun);
   }
   const um = p.match(/^\/api\/private\/admin\/keys\/users\/([A-Za-z0-9_-]{16})\/view$/);
@@ -207,12 +268,80 @@ export async function handleKeys(request, env, url, a) {
   return err(404, 'not_found', 'Not found.');
 }
 
+/**
+ * What a restore or an import must prove before the Directory adds it
+ * (docs/DRIVE.md §3.1): each sub-MEK this server does not have opens an
+ * item or a link key sealed under its id here ('ok'; 'unused' when nothing
+ * is, 'wrong' when it does not open), and each user salt for an account with
+ * none opens something of that Drive's (saltCheck) → { subs, salts }.
+ */
+async function restoreChecks(env, dir, me, parts) {
+  const checks = { subs: {}, salts: {} };
+  const status = await dir.mekStatus();
+  const here = new Set(status.subs.map((x) => x.id));
+  const unknown = parts.subs.filter((x) => typeof x.id === 'string' && MEK_ID_RE.test(x.id) && !here.has(x.id) && typeof x.key === 'string' && KEY_RE.test(x.key));
+  if (unknown.length) {
+    const where = new Map(); // mek id → a Drive that holds something sealed under it
+    for (const uid of await dir.driveUsers()) {
+      const u = await driveStub(env, uid).mekUsage(uid);
+      for (const [k, n] of Object.entries(u.counts)) if (n && !where.has(k)) where.set(k, uid);
+    }
+    for (const x of unknown) {
+      const uid = where.get(x.id);
+      checks.subs[x.id] = uid ? ((await subOpens(env, dir, me, uid, x.id, x.key, { root: parts.root?.key, salt: saltOf(parts.salts[uid]) })) ? 'ok' : 'wrong') : 'unused';
+    }
+  }
+  // Keys lost together are checked together: the file's root and sub-MEKs stand in for those this server lacks.
+  const extra = { root: parts.root?.key ?? null, subs: Object.fromEntries(parts.subs.filter((x) => typeof x.id === 'string' && typeof x.key === 'string').map((x) => [x.id, x.key])) };
+  for (const [uid, v] of Object.entries(parts.salts).slice(0, 5000)) {
+    const salt = saltOf(v);
+    if (!UID_RE.test(uid) || !salt) continue;
+    checks.salts[uid] = await saltCheck(env, dir, uid, salt, { ownerId: me, extra });
+  }
+  return checks;
+}
+/** A salt as a kit or an export holds it (the text, or { salt, username }). */
+const saltOf = (v) => {
+  const x = isObj(v) ? v.salt : v;
+  return typeof x === 'string' && KEY_RE.test(x) ? x : null;
+};
+
+/** Does sub-MEK `key` (as `mekId`) open the first item, or link key, `uid`'s Drive holds under that id? */
+async function subOpens(env, dir, me, uid, mekId, key, extra) {
+  const r = await dir.probeSub(me, uid, mekId, key, extra);
+  if (!r.ok) return false;
+  const kek = keyBytes(r.kek);
+  const page = await driveStub(env, uid).sealedPage(uid, { meks: [mekId], limit: 1 });
+  try {
+    if (page.items[0]) {
+      const got = await openItem(uid, [kek], page.items[0]);
+      got.name.fill(0);
+      if (got.dek) got.dek.fill(0);
+      return true;
+    }
+    const l = page.links[0];
+    if (!l) return false;
+    const sealed = JSON.parse(await fromRest(await fieldKeys(env, uid), uid, 'linkKey', l.id, l.priv));
+    (await openLinkKey(kek, { userId: uid, mekId, linkId: l.id }, sealed)).fill(0);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    kek.fill(0);
+  }
+}
+
 /** The root MEK, sub-MEKs and user salts a restore or an import brings (validated). */
 function restoreParts(body) {
-  const out = { root: null, subs: [], salts: {}, useRoot: body.useRoot === true };
+  const out = { root: null, rootOld: null, subs: [], salts: {}, useRoot: body.useRoot === true };
   if (body.root !== undefined && body.root !== null) {
     if (!isObj(body.root) || !KEY_RE.test(body.root.key ?? '')) throw new HttpError(400, 'invalid', 'root must be { key }.');
     out.root = { key: body.root.key, created: Number.isSafeInteger(body.root.created) ? body.root.created : null };
+  }
+  // A key kit made during a root change: the root being replaced.
+  if (body.rootOld !== undefined && body.rootOld !== null) {
+    if (!isObj(body.rootOld) || !KEY_RE.test(body.rootOld.key ?? '')) throw new HttpError(400, 'invalid', 'rootOld must be { key }.');
+    out.rootOld = { key: body.rootOld.key, created: Number.isSafeInteger(body.rootOld.created) ? body.rootOld.created : null };
   }
   if (body.subs !== undefined) {
     if (!Array.isArray(body.subs) || body.subs.length > 500) throw new HttpError(400, 'invalid', 'subs must be a list (at most 500).');
@@ -230,15 +359,25 @@ function restoreParts(body) {
  * A new job over every Drive: `reseal` moves everything sealed under sub-MEK
  * `from` to the current one (and, with `remove`, deletes `from` once nothing
  * is left under it); `root` re-seals everything under the new root MEK (the
- * sub-MEKs stay), and the field layer too, then drops the old root.
+ * sub-MEKs stay), and the field layer too, then checks every Drive once more
+ * and drops the old root only when everything opens under the new one.
  */
 async function newJob(dir, me, { kind, from, remove = false }) {
-  const job = { kind, from, remove, users: await dir.driveUsers(), u: 0, after: null, phase: 'items', done: 0, skipped: 0, failed: 0, failedIds: [], pass: 1, started: Math.floor(Date.now() / 1000), finished: false };
+  const job = { kind, from, remove, users: await dir.driveUsers(), u: 0, after: null, phase: 'items', done: 0, skipped: 0, failed: 0, failedIds: [], pass: 1, verify: false, started: Math.floor(Date.now() / 1000), finished: false };
   await dir.mekJobSet(me, job);
   return jobView(job);
 }
-const jobView = (j) => (j ? { kind: j.kind, from: j.from, remove: !!j.remove, drives: j.users.length, drive: Math.min(j.u + 1, j.users.length), phase: j.phase, done: j.done, failed: j.failed, failedIds: j.failedIds, pass: j.pass, finished: !!j.finished, result: j.result ?? null } : null);
+const jobView = (j) => (j ? { kind: j.kind, from: j.from, remove: !!j.remove, drives: j.users.length, drive: Math.min(j.u + 1, j.users.length), phase: j.phase, done: j.done, failed: j.failed, failedIds: j.failedIds, pass: j.pass, verifying: !!j.verify, finished: !!j.finished, result: j.result ?? null } : null);
 const cursor = (n) => (n ? { kind: n.kind, id: n.id } : null);
+const failOf = (job) => (id) => { job.failed++; if (job.failedIds.length < 20) job.failedIds.push(id); };
+/** What each phase does with one page of one Drive, and the phase after it on the same Drive (root jobs). */
+const PHASES = {
+  items: (env, uid, job) => sealStep(env, uid, job),
+  atrest: (env, uid, job) => atRestStep(env, uid, job),
+  verify: (env, uid, job) => verifyStep(env, uid, job),
+  verifyrest: (env, uid, job) => verifyRestStep(env, uid, job),
+};
+const NEXT_PHASE = { items: 'atrest', verify: 'verifyrest' };
 
 /** Run the job for a few seconds → its progress; finished jobs record their result. */
 async function jobStep(env, dir, me) {
@@ -251,24 +390,26 @@ async function jobStep(env, dir, me) {
     const uid = job.users[job.u];
     let next = null;
     try {
-      next = job.phase === 'atrest' ? await atRestStep(env, uid, job) : await sealStep(env, uid, job);
+      next = await PHASES[job.phase](env, uid, job);
     } catch (e) {
       if (!(e instanceof HttpError)) throw e;
       // A Drive whose keys the Directory cannot give (no salt): counted, and left as it is.
-      job.failed++;
-      if (job.failedIds.length < 20) job.failedIds.push(`user:${uid}`);
+      failOf(job)(`user:${uid}`);
     }
     pages++;
     if (next) { job.after = next; continue; }
     job.after = null;
-    if (job.kind === 'root' && job.phase === 'items') { job.phase = 'atrest'; continue; }
-    job.phase = 'items';
+    if (job.kind === 'root' && NEXT_PHASE[job.phase]) { job.phase = NEXT_PHASE[job.phase]; continue; }
+    job.phase = job.verify ? 'verify' : 'items';
     job.u++;
   }
   if (job.u >= job.users.length) {
-    if (job.skipped > 0 && job.pass < 3) {
+    if (!job.verify && job.skipped > 0 && job.pass < 3) {
       // Items changed while the pass ran (a compare-and-set missed): one more pass picks them up.
       Object.assign(job, { u: 0, after: null, phase: 'items', skipped: 0, pass: job.pass + 1 });
+    } else if (job.kind === 'root' && !job.verify) {
+      // Every Drive once more (those made meanwhile too): everything must open under the new root only.
+      Object.assign(job, { verify: true, users: await dir.driveUsers(), u: 0, after: null, phase: 'verify', sealFailed: job.failed, failed: 0, failedIds: [] });
     } else {
       job.finished = true;
       job.result = await jobFinish(env, dir, me, job);
@@ -280,10 +421,11 @@ async function jobStep(env, dir, me) {
 
 async function jobFinish(env, dir, me, job) {
   if (job.kind === 'root') {
-    if (job.failed) return { ok: false, message: `${job.failed} item(s) opened under neither root MEK: the old root MEK is kept for them.` };
+    if (job.failed) return { ok: false, message: `${job.failed} item(s) do not open under the new root MEK: the old root MEK is kept for them. Run the re-seal again, go back to the previous root, or remove it and leave those items unreadable.` };
     await dir.mekRootDone(me);
-    return { ok: true, message: 'Every item is re-sealed under the new root MEK; the old one was removed.' };
+    return { ok: true, message: 'Every item is re-sealed under the new root MEK and was checked; the old one was removed.' };
   }
+  // Every Drive that can hold anything sealed under it (Directory driveUsers) is counted again.
   const u = await usage(env, dir);
   const left = u.counts[job.from] || 0;
   if (left) return { ok: false, left, message: `${left} item(s) are still sealed under ${job.from}${job.failed ? ` (${job.failed} could not be opened)` : ''}.` };
@@ -302,19 +444,18 @@ async function sealStep(env, uid, job) {
   const cur = currentKek(keys);
   const items = [];
   const links = [];
-  const fail = (id) => { job.failed++; if (job.failedIds.length < 20) job.failedIds.push(id); };
+  const fail = failOf(job);
   for (const it of page.items) {
     const k = keys.keks.get(it.mek);
     if (!k) { fail(it.id); continue; }
     let got;
     try {
       if (job.kind === 'root') {
-        // Already under the new root (made after the change): nothing to do.
-        try { const r = await openItem(uid, [k.kek], it); r.name.fill(0); if (r.dek) r.dek.fill(0); continue; } catch { /* under the old root */ }
-        got = await openItem(uid, k.kekOld ? [k.kekOld] : [], it);
-      } else {
-        got = await openItem(uid, keksOf(keys, it.mek), it);
+        // Already under the new root, every field (made or re-sealed after the change): nothing to do.
+        try { const r = await openItem(uid, [k.kek], it); r.name.fill(0); if (r.dek) r.dek.fill(0); if (r.meta) r.meta.fill(0); continue; } catch { /* a field under the old root */ }
       }
+      // Each field under either root (a rename during the change seals the name under the new one only).
+      got = await openItem(uid, keksOf(keys, it.mek), it);
     } catch {
       fail(it.id);
       continue;
@@ -324,7 +465,7 @@ async function sealStep(env, uid, job) {
     const s = await sealItem(uid, to, { name: got.name, meta: got.meta, dek: got.dek });
     got.name.fill(0);
     if (got.dek) got.dek.fill(0);
-    items.push({ id: it.id, ...s, fromMek: it.mek, fromKs: it.ks });
+    items.push({ id: it.id, ...s, fromMek: it.mek, fromKs: it.ks, from: it.from });
   }
   const fk = page.links.length ? await fieldKeys(env, uid) : null;
   for (const l of page.links) {
@@ -333,7 +474,9 @@ async function sealStep(env, uid, job) {
       const k = keys.keks.get(l.mek);
       let opened;
       if (job.kind === 'root') {
-        try { (await openLink(uid, { keks: new Map([[l.mek, { kek: k.kek }]]) }, l.id, l.mek, sealed)).pkcs8.fill(0); continue; } catch { /* under the old root */ }
+        let fresh = false;
+        try { (await openLink(uid, { keks: new Map([[l.mek, { kek: k.kek }]]) }, l.id, l.mek, sealed)).pkcs8.fill(0); fresh = true; } catch { /* under the old root */ }
+        if (fresh) continue;
         opened = await openLink(uid, { keks: new Map([[l.mek, { kek: k.kekOld }]]) }, l.id, l.mek, sealed);
       } else {
         opened = await openLink(uid, keys, l.id, l.mek, sealed);
@@ -354,7 +497,11 @@ async function sealStep(env, uid, job) {
   return page.next;
 }
 
-/** One page of one Drive's field-layer values (a root change): re-sealed under the new field keys. */
+/**
+ * One page of one Drive's field-layer values (a root change): re-sealed under
+ * the new field keys. Link keys of the release before (their Drive waits for
+ * its upgrade) are not listed: they stay as that release sealed them.
+ */
 async function atRestStep(env, uid, job) {
   const drive = driveStub(env, uid);
   const page = await drive.atRestPage(uid, { after: cursor(job.after) });
@@ -369,8 +516,9 @@ async function atRestStep(env, uid, job) {
   };
   const links = [];
   const received = [];
+  const fail = failOf(job);
   for (const l of page.links) {
-    try { const priv = await fresh('linkKey', l.id, l.priv); if (priv) links.push({ id: l.id, priv, from: l.priv }); } catch { job.failed++; }
+    try { const priv = await fresh('linkKey', l.id, l.priv); if (priv) links.push({ id: l.id, priv, from: l.priv }); } catch { fail(l.id); }
   }
   for (const r of page.received) {
     try {
@@ -379,10 +527,74 @@ async function atRestStep(env, uid, job) {
       const wrap = await fresh('received', `wrap:${r.id}`, r.fk);
       if (name || meta || wrap) received.push({ id: r.id, name: name ?? r.name, meta: meta ?? r.meta, fk: wrap ?? r.fk, from: { name: r.name, meta: r.meta, fk: r.fk } });
     } catch {
-      job.failed++;
+      fail(r.id);
     }
   }
-  if (links.length || received.length) job.done += (await drive.applyAtRest(uid, { links, received })).done;
+  if (links.length || received.length) {
+    const r = await drive.applyAtRest(uid, { links, received });
+    job.done += r.done;
+    // A value that changed meanwhile is checked (and counted) by the verification that follows.
+  }
+  return page.next;
+}
+
+/**
+ * The root change's check (after every Drive was re-sealed): one page of one
+ * Drive's items and link keys must open under the KEK of the new root only.
+ */
+async function verifyStep(env, uid, job) {
+  const page = await driveStub(env, uid).sealedPage(uid, { after: cursor(job.after) });
+  if (!page.items.length && !page.links.length) return null;
+  const meks = [...new Set([...page.items.map((i) => i.mek), ...page.links.map((l) => l.mek)])];
+  const keys = await userKeys(env, uid, { meks });
+  const fail = failOf(job);
+  for (const it of page.items) {
+    const k = keys.keks.get(it.mek);
+    try {
+      if (!k) throw new Error('no key');
+      const r = await openItem(uid, [k.kek], it);
+      r.name.fill(0);
+      if (r.meta) r.meta.fill(0);
+      if (r.dek) r.dek.fill(0);
+    } catch {
+      fail(it.id);
+    }
+  }
+  const fk = page.links.length ? await fieldKeys(env, uid) : null;
+  for (const l of page.links) {
+    const k = keys.keks.get(l.mek);
+    try {
+      if (!k) throw new Error('no key');
+      const sealed = JSON.parse(await fromRest({ cur: fk.cur, old: null }, uid, 'linkKey', l.id, l.priv));
+      (await openLinkKey(k.kek, { userId: uid, mekId: l.mek, linkId: l.id }, sealed)).fill(0);
+    } catch {
+      fail(l.id);
+    }
+  }
+  return page.next;
+}
+
+/** The same for the field layer: every value it seals opens under the new field keys only. */
+async function verifyRestStep(env, uid, job) {
+  const page = await driveStub(env, uid).atRestPage(uid, { after: cursor(job.after) });
+  if (!page.links.length && !page.received.length) return null;
+  const fk = await fieldKeys(env, uid);
+  const only = { cur: fk.cur, old: null };
+  const fail = failOf(job);
+  // A value stored before the field layer (plain) needs no root; a sealed one must open under the new one.
+  const check = async (field, ref, v) => { if (v && isAtRest(v)) await fromRest(only, uid, field, ref, v); };
+  for (const l of page.links) {
+    try { await check('linkKey', l.id, l.priv); } catch { fail(l.id); }
+  }
+  for (const r of page.received) {
+    try {
+      await check('received', `name:${r.id}`, r.name);
+      await check('received', `meta:${r.id}`, r.meta);
+      await check('received', `wrap:${r.id}`, r.fk);
+    } catch {
+      fail(r.id);
+    }
+  }
   return page.next;
 }
 
@@ -464,9 +676,9 @@ async function keysImport(env, dir, me, body, dryRun) {
       const u = await usage(env, dir);
       if (Object.values(u.counts).some((n) => n > 0) || u.v1) return err(409, 'in_use', 'Items are sealed under the keys here: an imported root MEK replaces the root only on an empty instance.');
     }
-    const r = await dir.keyRestore(me, { ...parts, dryRun });
+    const r = await dir.keyRestore(me, { ...parts, dryRun, checks: await restoreChecks(env, dir, me, parts) });
     if (!r.ok) return fromDir(r);
-    out.keys = { root: r.root, subs: r.subs, salts: r.salts };
+    out.keys = { root: r.root, rootOld: r.rootOld, subs: r.subs, salts: r.salts };
   }
   if (FILES_NEEDED(take, doc)) binding(env, 'FILES');
   for (const x of Array.isArray(doc.users) ? doc.users.slice(0, 5000) : []) {
@@ -540,7 +752,7 @@ async function restoreDek(env, uid, keys, d, dryRun) {
   meta ??= new TextEncoder().encode(JSON.stringify({ type: 'application/octet-stream', mtime: 0, size: item.size }));
   const s = await sealItem(uid, currentKek(keys), { name, meta, dek });
   dek.fill(0);
-  const w = await drive.restoreItem(uid, { id: d.id, ...s, fromMek: item.mek ?? null, fromKs: item.ks ?? null });
+  const w = await drive.restoreItem(uid, { id: d.id, ...s, fromMek: item.mek ?? null, fromKs: item.ks ?? null, from: item.from });
   return w.ok ? 'restored' : 'failed';
 }
 

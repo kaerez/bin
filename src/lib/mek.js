@@ -46,24 +46,33 @@ export function currentKek(keys) {
 const parsed = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
 
 /**
- * Open an item's sealed fields ({ kind, ks, mek, name, meta, dek }) with one
- * of `keks` → { kek (the one that opened it), name, meta, dek } (bytes; meta
- * null when there is none, dek for files only). Throws when none opens.
+ * Open an item's sealed fields ({ kind, ks, mek, name, meta, dek }) with
+ * `keks` → { kek (the one that opened its name), name, meta, dek } (bytes;
+ * meta null when there is none, dek for files only). Each field may open
+ * under a different one of `keks` (during a root change an item can hold a
+ * name sealed under the new root and a DEK still under the old one); with one
+ * KEK, every field must open under it. Throws when a field opens under none.
  */
 export async function openItem(uid, keks, item) {
-  let last;
-  for (const kek of keks) {
-    try {
-      const at = { userId: uid, mekId: item.mek, salt: item.ks };
-      const name = await openName(kek, at, 'name', parsed(item.name));
-      const meta = item.meta ? await openName(kek, at, 'meta', parsed(item.meta)) : null;
-      const dek = item.kind === 'file' ? await openDek(kek, at, parsed(item.dek)) : null;
-      return { kek, name, meta, dek };
-    } catch (e) {
-      last = e;
+  const at = { userId: uid, mekId: item.mek, salt: item.ks };
+  const first = async (fn) => {
+    let last;
+    for (const kek of keks) {
+      try { return { kek, v: await fn(kek) }; } catch (e) { last = e; }
     }
+    throw last || new Error('no key');
+  };
+  const name = await first((kek) => openName(kek, at, 'name', parsed(item.name)));
+  let meta = null;
+  try {
+    meta = item.meta ? (await first((kek) => openName(kek, at, 'meta', parsed(item.meta)))).v : null;
+    const dek = item.kind === 'file' ? (await first((kek) => openDek(kek, at, parsed(item.dek)))).v : null;
+    return { kek: name.kek, name: name.v, meta, dek };
+  } catch (e) {
+    name.v.fill(0);
+    if (meta) meta.fill(0);
+    throw e;
   }
-  throw last || new Error('no key');
 }
 
 /**
@@ -96,10 +105,23 @@ export async function checkNewItem(uid, keys, item) {
   return keys.keks.get(keys.current).fp;
 }
 
-/** Check an item's new name or metadata, sealed under its own mek and salt (a rename). */
+/**
+ * Check an item's new name or metadata, sealed under its own mek and salt (a
+ * rename): only under the KEK of the root MEK now. One sealed under the
+ * previous root (a page that fetched its keys before a root change) is
+ * refused with `409 stale_keys`, so the browser fetches its keys and seals
+ * again: nothing new is ever stored under a root that is going.
+ */
 export async function checkField(uid, keys, { mek, ks }, field, value) {
-  for (const kek of keksOf(keys, mek)) {
-    try { (await openName(kek, { userId: uid, mekId: mek, salt: ks }, field, value)).fill(0); return; } catch { /* the next one */ }
+  const k = keys.keks.get(mek);
+  const at = { userId: uid, mekId: mek, salt: ks };
+  if (k) {
+    try { (await openName(k.kek, at, field, value)).fill(0); return; } catch { /* not under the root now */ }
+    if (k.kekOld) {
+      let old = false;
+      try { (await openName(k.kekOld, at, field, value)).fill(0); old = true; } catch { /* not under the previous root either */ }
+      if (old) throw new HttpError(409, 'stale_keys', 'The Drive keys changed: reload the page to use the current ones.');
+    }
   }
   throw new HttpError(400, 'bad_seal', 'The name is not sealed under this item’s key.');
 }

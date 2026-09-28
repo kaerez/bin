@@ -85,7 +85,8 @@ export async function verifyKeyKit({ ownerId, text, passphrase = '', date = null
 /** Restore from a key kit (a dry run by default): only what this server lost comes back. → the server's plan / result. */
 export async function restoreKeyKit({ ownerId, text, passphrase = '', step = {}, dryRun = true, useRoot = false } = {}) {
   const kit = await readKeyKit(text, passphrase, ownerId);
-  return keysApi.restore({ root: kit.root, subs: kit.subs, salts: kit.salts, useRoot, dryRun, ...step });
+  // A kit made during a root change also holds the root being replaced (`rootOld`).
+  return keysApi.restore({ root: kit.root, ...(kit.rootOld ? { rootOld: kit.rootOld } : {}), subs: kit.subs, salts: kit.salts, useRoot, dryRun, ...step });
 }
 
 // ── Import / export: the keys parts ────────────────────────────────────────
