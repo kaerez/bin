@@ -130,13 +130,16 @@ a { color: var(--ink); text-decoration: none; transition: color .14s ease; }
 @media (max-width: 768px) { .wrap { padding: 1rem 1rem 2rem; } }
 
 /* ── entrance: one quiet rise, two layers max ────────────────────────────── */
-@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-.reveal { opacity: 0; animation: rise .45s var(--ease) forwards; }
+/* Motion only, never a fade: text part-way transparent has less contrast than the palette gives
+   it (WCAG 1.4.3 / 1.4.6 hold in every frame). The same for every animation and transition in
+   this sheet: none changes the opacity of anything with text (test-dom/wcag22.test.js). */
+@keyframes rise { from { transform: translateY(6px); } to { transform: translateY(0); } }
+.reveal { animation: rise .45s var(--ease) backwards; }
 .reveal.d2, .reveal.d3, .reveal.d4 { animation-delay: .08s; }
 /* The one exit: a view steps aside as the next takes over, used for the
    create→success hand-off (see `.send.sending` and leaveCreate in dashboard/js/create.js).
    Views are re-shown by toggling [hidden], so `rise` restarts on its own. */
-@keyframes viewOut { to { opacity: 0; transform: translateX(-10px); } }
+@keyframes viewOut { to { transform: translateX(-10px); } }
 .view-leaving { animation: viewOut .17s var(--ease) forwards; pointer-events: none; }
 
 /* ── theme flip: repaint, don't replace ──────────────────────────────────── */
@@ -159,8 +162,10 @@ a { color: var(--ink); text-decoration: none; transition: color .14s ease; }
    new palette is simply there. -webkit- pairs for Chromium 111–119, which had
    View Transitions before unprefixed masks. */
 ::view-transition-new(root) {
-  mask-image: linear-gradient(to bottom left, #000 0 46%, transparent 56%);
-  -webkit-mask-image: linear-gradient(to bottom left, #000 0 46%, transparent 56%);
+  /* A hard edge: every pixel shows the old palette or the new one, never a blend of the two
+     (a soft band mixed light text into a dark page: low contrast inside the wave). */
+  mask-image: linear-gradient(to bottom left, #000 0 51%, transparent 51%);
+  -webkit-mask-image: linear-gradient(to bottom left, #000 0 51%, transparent 51%);
   mask-size: 300% 300%; -webkit-mask-size: 300% 300%;
   mask-repeat: no-repeat; -webkit-mask-repeat: no-repeat;
   mask-position: 100% 0%; -webkit-mask-position: 100% 0%;
@@ -187,17 +192,9 @@ html:active-view-transition *,
 html:active-view-transition *::before,
 html:active-view-transition *::after { transition: none !important; }
 
-/* Fallback without View Transitions: interpolate the colours in place — same
-   repaint, just everywhere at once instead of as a wave (that needs snapshots).
-   `!important` to outrank each component's own shorter transition for the length
-   of the flip; theme.js drops the class afterwards. No transform here either — one
-   on the page would reparent the fixed watermark and toast. */
-html.theming, html.theming *, html.theming *::before, html.theming *::after {
-  transition: background-color 520ms var(--ease-io), background-image 520ms var(--ease-io),
-    color 520ms var(--ease-io), border-color 520ms var(--ease-io), box-shadow 520ms var(--ease-io),
-    fill 520ms var(--ease-io), stroke 520ms var(--ease-io), outline-color 520ms var(--ease-io),
-    text-decoration-color 520ms var(--ease-io) !important;
-}
+/* Fallback without View Transitions: the new palette at once. Interpolating text and background
+   colours together would pass through grey on grey (both halfway between the themes), far below
+   any contrast minimum; theme.js still sets and drops `html.theming`, which now changes nothing. */
 
 /* ── guilloché watermark (landing ambience; pure ornament) ───────────────── */
 .watermark { position: fixed; z-index: 0; top: calc(-120px + env(safe-area-inset-top, 0px)); right: calc(-140px + env(safe-area-inset-right, 0px)); width: 460px; height: 460px;
@@ -374,8 +371,9 @@ html.dark .theme-toggle .ico-moon { display: block; }
 .modal-scrim { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
   padding: max(1.5rem, env(safe-area-inset-top, 0px)) max(1.5rem, env(safe-area-inset-right, 0px)) max(1.5rem, env(safe-area-inset-bottom, 0px)) max(1.5rem, env(safe-area-inset-left, 0px));
   background: rgba(4, 8, 12, .62); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); animation: scrimIn .2s var(--ease); }
-@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes modalRise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+/* The scrim darkens in (its colour, not its opacity: the dialog inside it is at full contrast from the first frame). */
+@keyframes scrimIn { from { background-color: rgba(4, 8, 12, 0); } }
+@keyframes modalRise { from { transform: translateY(8px); } to { transform: translateY(0); } }
 .modal:focus { outline: none; }
 .modal { width: 100%; max-width: 420px; max-height: 100%; overflow-y: auto; overscroll-behavior: contain;
   background: var(--sheet); border: 1px solid var(--rule-2); border-radius: 6px; padding: 1.5rem;
@@ -408,7 +406,7 @@ html.dark .theme-toggle .ico-moon { display: block; }
   .seal-glyph :nth-child(7) { animation-delay: .4s; }
   .seal-glyph :nth-child(8) { animation-delay: .46s; }
   .seal-glyph :nth-child(9) { animation-delay: .55s; }
-  .seal-label { opacity: 0; animation: rise .45s var(--ease) .5s forwards; }
+  .seal-label { animation: rise .45s var(--ease) .5s backwards; }
 }
 @keyframes sealDraw { to { stroke-dashoffset: 0; } }
 
@@ -475,8 +473,9 @@ html.dark .theme-toggle .ico-moon { display: block; }
   background: color-mix(in oklab, var(--paper), var(--seal) 5%); }
 .status-timer-label { position: relative; top: 2px; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
 .status-timer-clock { font-size: .8rem; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: .04em; color: var(--seal); }
-.status-timer.ending .status-timer-clock { animation: timerPulse 1s var(--ease) infinite; }
-@keyframes timerPulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+/* The last minutes: bolder, not pulsing (a pulse to half opacity halved the clock's contrast every
+   second, 1.4.3, and ran on with no end, 2.2.2). */
+.status-timer.ending .status-timer-clock { font-weight: 700; }
 
 /* ── messages / toast / footer ───────────────────────────────────────────── */
 .human-wait { margin: .4rem 0 0; font-size: .78rem; text-align: center; }
@@ -893,8 +892,8 @@ html.pwa-banner-open.pwa-banner-top body { padding-bottom: 0; padding-top: calc(
   .pwa-banner { animation: pwaIn .32s var(--ease) both; }
   .pwa-banner[data-pos="top"] { animation-name: pwaInTop; }
 }
-@keyframes pwaIn { from { opacity: 0; transform: translateY(14px); } }
-@keyframes pwaInTop { from { opacity: 0; transform: translateY(-14px); } }
+@keyframes pwaIn { from { transform: translateY(14px); } }
+@keyframes pwaInTop { from { transform: translateY(-14px); } }
 
 /* ── slow key derivation (public/js/kdf-progress.js) ─────────────────────────
    Only when WebAssembly is off (e.g. Lockdown Mode) and Argon2id runs in plain

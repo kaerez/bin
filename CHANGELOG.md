@@ -483,6 +483,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   - a Drive dialog opening puts away a toast from before it, and received files taken in while a
     dialog is open raise none (the Drive's status line says it), so nothing outside the modal
     dialog is shown or read.
+  - contrast in every frame: entrances, dialogs, the view exit and the install banner move without
+    fading; the countdown's last minutes are bold instead of pulsing to half opacity; the theme
+    flip's wave has a hard edge and the fallback switches palettes at once (1.4.3, 2.2.2);
   - buttons (`.cta`, `.send`) and the toast no longer fade their opacity: a button enabled (the
     CAPTCHA passed, files chosen) was drawn part-way transparent for 0.2 s, 2.24:1 on "Send
     files" in the light theme (1.4.3); the CAPTCHA check page (`/check/`, from `main`) has every

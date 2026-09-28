@@ -315,6 +315,15 @@ Level A and AA failures (all fixed):
   transparent (reproduced deterministically: opacity 0.57 and 2.24:1, 40 ms after enabling, light
   theme) → no opacity transition on `.cta`, `.send` or the toast (`public/css/styles.css`;
   `test-dom/wcag22.test.js`), so an enabled control is at full contrast at once.
+- **1.4.3 / 1.4.6 in every frame** (the same kind of failure, elsewhere in the style sheet): the
+  entrances (`.reveal`, the dialogs and their scrim, the seal label, the install banner) and the
+  view exit faded text in or out through opacity; the countdown's last minutes pulsed the clock
+  to half opacity every second, with no end (2.2.2 too); the theme flip's wave had a soft band
+  where the two palettes blended, and without View Transitions the fallback interpolated text and
+  background colours together (grey on grey half-way). Now: motion without fading, the scrim
+  darkening by its colour, the clock bold instead of pulsing, the wave with a hard edge, and the
+  fallback switching palettes at once (`public/css/styles.css`; `test-dom/wcag22.test.js`: no
+  `@keyframes` or transition changes opacity).
 - **1.3.1, 3.2.3** (the CAPTCHA check page from `main`): its footer was inside `<main>` with the
   old link texts and no glossary link → every page's footer, after `<main>`.
 - **2.4.7** (the CAPTCHA, found with Turnstile's testing keys) focus inside Cloudflare's widget

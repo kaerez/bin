@@ -473,18 +473,33 @@ describe('humanCheck help', () => {
 });
 
 // ── 1.4.3 / 1.4.6 / 1.4.11: the palette ──────────────────────────────────────
-// A control that becomes enabled (the CAPTCHA passed, files chosen) or a toast that appears must
-// meet contrast at once: a transition on opacity from a disabled .45 (or a hidden 0) passes through
-// low contrast (reproduced: 2.24:1 on "Send files" 40 ms after it was enabled, light theme).
-describe('no opacity transitions on buttons or the toast', () => {
+// Contrast in every frame (WCAG 1.4.3 / 1.4.6): nothing with text is ever drawn part-way
+// transparent or in a blend of the two themes. A control that becomes enabled (the CAPTCHA passed,
+// files chosen) or a toast that appears is at full contrast at once: a transition on opacity from a
+// disabled .45 (or a hidden 0) passed through low contrast (reproduced: 2.24:1 on "Send files" 40 ms
+// after it was enabled, light theme). The same for entrances, dialogs, the countdown and the theme flip.
+describe('no animation or transition passes through low contrast', () => {
+  const css = readFileSync(join(ROOT, 'public/css/styles.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
   it('.cta, .send and #toast do not transition opacity', () => {
-    const css = readFileSync(join(ROOT, 'public/css/styles.css'), 'utf8');
     for (const sel of ['.cta', '.send', '#toast']) {
       const rule = new RegExp(`(^|\\n)${sel.replace('.', '\\.')} \\{([^}]*)\\}`).exec(css);
       expect(rule, sel).not.toBeNull();
       const tr = /transition:\s*([^;]*)/.exec(rule[2]);
       expect(tr ? tr[1] : '', sel).not.toMatch(/opacity|\ball\b/);
     }
+  });
+  it('no @keyframes changes opacity, and no transition lists opacity or all', () => {
+    const frames = [...css.matchAll(/@keyframes\s+([\w-]+)\s*\{((?:[^{}]*\{[^{}]*\})*[^{}]*)\}/g)];
+    expect(frames.length).toBeGreaterThan(5);
+    for (const [, name, body] of frames) expect(body, name).not.toMatch(/opacity/);
+    for (const [decl] of css.matchAll(/transition:[^;}]*/g)) expect(decl).not.toMatch(/opacity|\ball\b/);
+  });
+  it('the theme flip: the wave has a hard edge (old or new palette, never a blend); the fallback does not interpolate colours', () => {
+    const mask = /::view-transition-new\(root\)\s*\{[^}]*?\bmask-image:\s*linear-gradient\(([^;]*)\);/.exec(css);
+    expect(mask).not.toBeNull();
+    const stops = [...mask[1].matchAll(/(\d+)%/g)].map((m) => Number(m[1]));
+    expect(stops.at(-1)).toBe(stops.at(-2)); // the transparent stop starts where the opaque one ends
+    expect(css).not.toMatch(/html\.theming[^{]*\{[^}]*transition/);
   });
 });
 
