@@ -689,6 +689,11 @@ function rotateTool(client, deps) {
 function mountApp(mount, client, deps) {
   const L = (deps.profile && deps.profile.limits) || {};
   let current = ROOT;
+  // The folder being opened (current until it has loaded) and whether that open was asked to move
+  // focus: a refresh in the background (received files taken in) re-lists where the person is
+  // going, not where they were, and a superseded open's focus is not lost (WCAG 3.2.5, 2.4.3).
+  let target = ROOT;
+  let focusDue = false;
   let listing = null;
   let busy = false;
   let openSeq = 0;
@@ -835,12 +840,16 @@ function mountApp(mount, client, deps) {
   // ── listing ────────────────────────────────────────────────────────────
   async function open(id, { focus = false } = {}) {
     const n = ++openSeq;
+    target = id;
+    if (focus) focusDue = true;
     paneMsg.hidden = true;
     let r;
     try {
       r = await fetchList(id);
     } catch (e) {
       if (n !== openSeq) return false;
+      target = current; // nothing opened: a refresh stays where the person is
+      focusDue = false;
       // The tab's key does not open this Drive (the client dropped it): ask again.
       if (deps.drive.DriveLocked && e instanceof deps.drive.DriveLocked) {
         if (deps.user && deps.user.impersonating) mount.replaceChildren(impersonatingNotice('escrow_failed', deps));
@@ -859,7 +868,7 @@ function mountApp(mount, client, deps) {
     if (tree.has(id)) tree.setChildren(id, dirsOf(r));
     await tree.reveal(path.map((p) => p.id));
     render();
-    if (focus) title.focus();
+    if (focusDue) { focusDue = false; title.focus(); }
     return true;
   }
 
@@ -925,7 +934,7 @@ function mountApp(mount, client, deps) {
   /** Re-read the shown folder (and `also` folders in the tree) after a change. */
   async function refresh(also = []) {
     recent.clear();
-    await open(current);
+    await open(target);
     for (const id of also) if (id !== current) await tree.refresh(id);
     refreshUsage();
   }

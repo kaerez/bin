@@ -321,6 +321,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     words in its name (2.5.3), "Accept files for" is no longer cut off with text spacing (1.4.12),
     and "Show more" in the review keeps focus (2.4.3); the human check's container draws a focus
     ring while focus is in the widget (2.4.7).
+  - the Drive: received files taken in while a folder opens no longer send it back to the folder
+    being left (the refresh re-lists the folder being opened and keeps its focus) (3.2.5, 2.4.3).
 
 
 - **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the

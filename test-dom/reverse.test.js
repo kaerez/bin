@@ -760,6 +760,18 @@ describe('WCAG 2.2: reverse shares', () => {
     expect(copy.getAttribute('aria-label')).toBe('Copy link old');
   });
 
+  it('a refresh in the background (received files taken in) while a folder opens: the Drive ends in that folder, with focus on its heading', async () => {
+    await server();
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const opening = r.app.open(ids.get('Documents'), { focus: true });
+    await r.app.refresh(); // as takeInReceived does after adding files
+    await opening;
+    expect(r.app.current).toBe(ids.get('Documents'));
+    expect($('#drive-pane-title').textContent).toBe('Documents');
+    expect(document.activeElement.id).toBe('drive-pane-title');
+  });
+
   it('received files: the Drive\'s status line is there before it says anything; while locked, the page\'s status line says how many are waiting', async () => {
     await server();
     const rs = await existingReverse('root');

@@ -180,7 +180,7 @@ does not have 2.4.11, 2.5.7, 2.5.8 or 3.3.8. The 4.1.1 row below was verified al
 | 3.1.4 Abbreviations | AAA | Supports | **Added:** the glossary expands every abbreviation the interface uses (AES-256-GCM, API, CIDR, CLI, HKDF, IP, KB/MB/GB, m/h/d, PDF, QR, TOTP, URL, WCAG). | All |
 | 3.1.5 Reading Level | AAA | Does not support | The interface text is short and plain, but its subject (encryption, access keys, administration) needs words beyond lower-secondary reading level, and there is no simplified version. The glossary explains the terms. Shared notes are the senders' own text. | All |
 | 3.1.6 Pronunciation | AAA | Not applicable | No words whose meaning depends on their pronunciation in context. | — |
-| 3.2.5 Change on Request | AAA | Supports | Nothing changes page on its own. **Fixed:** when a session ends the page no longer depends on a redirect: the dialog offers "Sign in again" (2.2.5); links that open a new tab say so (2.4.9). | All |
+| 3.2.5 Change on Request | AAA | Supports | Nothing changes page on its own. **Fixed:** when a session ends the page no longer depends on a redirect: the dialog offers "Sign in again" (2.2.5); links that open a new tab say so (2.4.9). **Fixed** (found by the accessibility-tree suite on the reverse shares' states): when received files were taken in just as the person opened a folder, the Drive's refresh re-listed the folder they were leaving, so the Drive stayed there and focus fell to the page; a refresh now re-lists the folder being opened and keeps its focus (`public/dashboard/js/drive-app.js` `open`, `refresh`; `test-dom/reverse.test.js`). | All |
 | 3.3.5 Help | AAA | Supports | Instructions next to the fields that need them (password policy, link rules, file policy, expiry), help panels in the admin, the glossary and the statement's contact on every page. | All |
 | 3.3.6 Error Prevention (All) | AAA | Supports | Input is checked before it is sent; deleting asks twice; imports show a plan; a share can be deleted after creation; settings can be changed back. | All |
 | 3.3.9 Accessible Authentication (Enhanced) | 2.2 only | Supports | As 3.3.8, without relying on the object-recognition or personal-content exceptions: none of the steps uses either. The same third-party caveat applies to the human check. | Login, Acct, Drive |
@@ -301,7 +301,9 @@ Level A and AA failures (all fixed):
   it names the state; the uploader's footer was inside `<main>` with old link texts → the footer
   of every other page; the dialog's list of file types had no visible label, its "Copy link" was
   named "Copy the link …" and its "Accept files for" box was cut off with text spacing → a label,
-  the visible words, a whole row; "Show more" in the review lost focus → the first row it loaded.
+  the visible words, a whole row; "Show more" in the review lost focus → the first row it loaded;
+  a take-in of received files finishing while a folder opened sent the Drive back to the folder
+  being left, and focus to the page (3.2.5, 2.4.3) → the refresh goes to the folder being opened.
 - **2.4.7** (the human check, found with Turnstile's testing keys) focus inside Cloudflare's widget
   showed no ring on secbin's side → its container draws one.
 - **2.4.11, 2.4.12** (found on the new states that show a toast) at 320×256 a toast moved to the
