@@ -3666,9 +3666,16 @@ export class Directory extends DurableObject {
     return this.#stepUp(actor, step, step.lockoutOff === true);
   }
 
-  /** The resolved all-channel limits of admin scope `key` from its rows (`rows`: the scope's own). */
-  #scopeLimits(key, rows) {
-    return key === '' ? resolveLimits(rows, {}) : resolveLimits(this.#limitRows('', 'all'), rows);
+  /**
+   * The limits admin scope `key` resolves to on `channel`, from the scope's
+   * own rows for that channel (`rows`): the all-channel limits (the Default
+   * role's rows, then the scope's), or the API's, which only narrow them.
+   */
+  #scopeLimits(key, channel, rows) {
+    const own = channel === 'all' ? rows : this.#limitRows(key, 'all');
+    const all = key === '' ? resolveLimits(own, {}) : resolveLimits(this.#limitRows('', 'all'), own);
+    if (channel === 'all') return all;
+    return key === '' ? restrictForApi(all, rows, {}) : restrictForApi(all, this.#limitRows('', 'api'), rows);
   }
 
   async setLimits(scopeIn, channel, patch, actorId, step = null) {
@@ -3689,17 +3696,15 @@ export class Directory extends DurableObject {
     } catch (e) {
       return fail(400, 'invalid_limit', e.message);
     }
-    // Loosening the passkey mode, the password policy, the role's sessions or
-    // its log retention needs the owner's confirmation. The API channel can
-    // only narrow the all-channel limits, and holds none of these options.
-    if (channel === 'all') {
-      const rows = this.#limitRows(scopeUserId, 'all');
-      const next = { ...rows };
-      for (const [k, v] of ops) { if (v === undefined) delete next[k]; else next[k] = v; }
-      const weak = weakenedLimits(this.#scopeLimits(scopeUserId, rows), this.#scopeLimits(scopeUserId, next), this.#settings());
-      const wrong = await this.#confirmWeakening(actorId, weak, step);
-      if (wrong) return wrong;
-    }
+    // Loosening sign-in, sessions, the log, or what the role's shares, links
+    // and API keys may be (weakenedLimits) needs the owner's confirmation,
+    // compared on what the scope resolves to on this channel.
+    const rows = this.#limitRows(scopeUserId, channel);
+    const next = { ...rows };
+    for (const [k, v] of ops) { if (v === undefined) delete next[k]; else next[k] = v; }
+    const weak = weakenedLimits(this.#scopeLimits(scopeUserId, channel, rows), this.#scopeLimits(scopeUserId, channel, next), this.#settings());
+    const wrong = await this.#confirmWeakening(actorId, weak, step);
+    if (wrong) return wrong;
     this.ctx.storage.transactionSync(() => {
       for (const [k, v] of ops) {
         if (v === undefined) this.sql.exec('DELETE FROM limits WHERE user_id = ? AND channel = ? AND key = ?', scopeUserId, channel, k);

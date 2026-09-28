@@ -75,9 +75,24 @@ const ownerNow = (cookie) => { let c = cookie; while (c && replacedOwner.has(c))
 /** The owner session that stands for `cookie` now (itself, unless an impersonation replaced it): for requests made without fetchJson. */
 export const liveCookie = (cookie) => ownerNow(cookie);
 
-export async function fetchJson(path, { method = 'GET', body, cookie: given, headers = {}, ip, csrf = true, alias = true } = {}) {
-  const cookie = alias ? ownerNow(given) : given;
+// Admin changes that weaken a security control need the owner's step-up
+// (src/lib/settings.js weakenedSettings / weakenedLimits; an allow IP rule).
+// Suites that set such options for what they test send the owner's password
+// proof with every settings, limits and IP-rule write (it is ignored when the
+// change weakens nothing, and refused for anyone but the owner); `step:
+// false` sends the body as it is, for the tests of the step-up itself
+// (audit-auth.test.js).
+const WEAKENING_WRITE = (method, path) => (method === 'PATCH' && (path === '/api/private/admin/settings' || path === '/api/private/admin/limits'))
+  || (method === 'POST' && path === '/api/private/admin/ip-rules');
+
+export async function fetchJson(path, { method = 'GET', body: asGiven, cookie: passed, headers = {}, ip, csrf = true, alias = true, step = true } = {}) {
+  const cookie = alias ? ownerNow(passed) : passed;
+  const plain = asGiven && typeof asGiven === 'object' && !Array.isArray(asGiven);
+  const body = step && plain && WEAKENING_WRITE(method, path) && asGiven.current === undefined && asGiven.reauth === undefined ? { ...asGiven, ...OWNER_STEP } : asGiven;
   const res = await send(path, { method, body, cookie, headers, ip, csrf });
+  if (body !== asGiven && res.status === 403 && (await res.clone().json().catch(() => ({}))).error === 'wrong_password') {
+    throw new Error(`${method} ${path}: the owner's password is not "owner-password" here; send the step-up explicitly`);
+  }
   if (alias && cookie && method === 'POST' && IMPERSONATE.test(path) && res.status === 200) {
     const fresh = await login('owner', 'owner-password', ip);
     replacedOwner.set(cookie, fresh);

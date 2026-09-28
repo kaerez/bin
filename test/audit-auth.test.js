@@ -28,9 +28,10 @@ afterEach(() => { vi.useRealTimers(); });
 
 const errorOf = async (r) => (await r.clone().json()).error;
 const me = async (cookie) => fetchJson('/api/private/me', { cookie, alias: false });
-const settings = (patch, step = {}, cookie = oc) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie, body: { ...patch, ...step } });
-const limits = (scope, patch, step = {}, channel = 'all') => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope, channel, patch, ...step } });
-const ipRule = (cidr, action, step = {}) => fetchJson('/api/private/admin/ip-rules', { method: 'POST', cookie: oc, body: { cidr, action, note: 'audit-auth', ...step } });
+// These send exactly the confirmation given (`step: false`: none added by the helpers).
+const settings = (patch, step = {}, cookie = oc) => fetchJson('/api/private/admin/settings', { method: 'PATCH', cookie, body: { ...patch, ...step }, step: false });
+const limits = (scope, patch, step = {}, channel = 'all') => fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope, channel, patch, ...step }, step: false });
+const ipRule = (cidr, action, step = {}) => fetchJson('/api/private/admin/ip-rules', { method: 'POST', cookie: oc, body: { cidr, action, note: 'audit-auth', ...step }, step: false });
 const overview = async () => (await fetchJson('/api/private/admin/overview', { cookie: oc })).json();
 /** Start impersonating `uid` with `cookie` (the replaced cookie is sent as it is) → the impersonation cookie. */
 const impersonate = async (cookie, uid) => {
@@ -143,7 +144,7 @@ describe('F-3: separate keys for the prelogin fake salt, the tracker tag and the
   });
 
   it('a tracker id forged from a prelogin salt is not accepted (the audit\'s PoC); server-issued ids still are', async () => {
-    expect((await settings({ 'public.enabled': true, 'public.tracking': 'tracker' })).status).toBe(200);
+    expect((await settings({ 'public.enabled': true, 'public.tracking': 'tracker' }, OWNER_STEP)).status).toBe(200);
     try {
       // A body whose base64url has no upper-case letter (prelogin lower-cases the name), issued a minute ago.
       const lead = bytesFromB64url('a'.repeat(16));
@@ -273,6 +274,62 @@ describe('F-4: weakening a security control needs the owner\'s password or a pas
     expect([d.passkeys, d.pwMinLength, d.pwDigit, d.sessionAbsSec]).toEqual(['any', 12, false, null]);
   });
 
+  it('roles: widening what shares, links and API keys may be (CAPTCHA, passwords, expiry, views, types, links, API)', async () => {
+    const role = await (await fetchJson('/api/private/admin/roles', { method: 'POST', cookie: oc, body: { name: 'aa-wide' } })).json();
+    const scope = `role:${role.id}`;
+    // Tighter than Default first: needs nothing.
+    const tight = { shareCaptcha: 'require', shareCaptchaDefault: 'on', reverseCaptcha: 'require', reverseCaptchaDefault: 'on', reversePassword: 'require', reversePasswordDefault: 'on',
+      allowUnlimitedViews: false, reverseAllowUnlimitedViews: false, maxExpireSec: 3600, maxViews: 5, reverseMaxExpireSec: 3600, reverseMaxViews: 5,
+      fileTypeMode: 'allow', fileTypeRules: ['ext:pdf'], urlRules: ['scheme:https://'] };
+    expect((await limits(scope, tight)).status).toBe(200);
+    const cases = [
+      [{ shareCaptcha: 'allow' }, ['shareCaptcha']], [{ shareCaptcha: 'off' }, ['shareCaptcha']], [{ shareCaptcha: 'inherit' }, ['shareCaptcha']],
+      [{ shareCaptchaDefault: 'off' }, ['shareCaptchaDefault']],
+      [{ reverseCaptcha: 'allow' }, ['reverseCaptcha']], [{ reverseCaptchaDefault: 'off' }, ['reverseCaptchaDefault']],
+      [{ reversePassword: 'off' }, ['reversePassword']], [{ reversePasswordDefault: 'off' }, ['reversePasswordDefault']],
+      [{ reverseNoExpiry: true }, ['reverseNoExpiry']],
+      [{ allowUnlimitedViews: true }, ['allowUnlimitedViews']], [{ reverseAllowUnlimitedViews: true }, ['reverseAllowUnlimitedViews']],
+      [{ maxExpireSec: 7200 }, ['maxExpireSec']], [{ maxExpireSec: null }, ['maxExpireSec']], [{ maxViews: 'inherit' }, ['maxViews']],
+      [{ maxViews: 6 }, ['maxViews']], [{ reverseMaxExpireSec: null }, ['reverseMaxExpireSec']], [{ reverseMaxViews: 50 }, ['reverseMaxViews']],
+      [{ url: true }, ['url']], [{ secret: true }, ['secret']], [{ apiEnabled: true }, ['apiEnabled']],
+      [{ fileTypeMode: 'block' }, ['fileTypeMode']], [{ fileTypeMode: 'any' }, ['fileTypeMode']],
+      [{ fileTypeRules: ['ext:pdf', 'ext:exe'] }, ['fileTypeRules']], // more allowed types
+      [{ urlRules: ['scheme:https://', 'scheme:tel:'] }, ['urlRules']],
+      [{ url: true, maxViews: 3, maxExpireSec: 600 }, ['url']], // tightening keys alongside are not named
+    ];
+    for (const [patch, keys] of cases) await needsStepUp(await limits(scope, patch), keys);
+    // The other way needs nothing.
+    for (const patch of [{ maxViews: 3, maxExpireSec: 600, reverseMaxViews: 1 }, { fileTypeRules: [] }, { urlRules: ['scheme:https://'] }]) {
+      expect((await limits(scope, patch)).status, JSON.stringify(patch)).toBe(200);
+    }
+    // A block list: removing a rule lets more through.
+    expect((await limits(scope, { fileTypeMode: 'block', fileTypeRules: ['ext:exe', 'ext:js'] }, OWNER_STEP)).status).toBe(200);
+    await needsStepUp(await limits(scope, { fileTypeRules: ['ext:exe'] }), ['fileTypeRules']);
+    expect((await limits(scope, { fileTypeRules: ['ext:exe', 'ext:js', 'ext:bat'] })).status).toBe(200);
+    // With the step-up, all at once.
+    expect((await limits(scope, { url: true, apiEnabled: true, maxViews: null }, OWNER_STEP)).status).toBe(200);
+    // The API channel, compared on what it resolves to: lifting an API restriction widens the API.
+    expect((await limits(scope, { url: false, maxViews: 2 }, {}, 'api')).status).toBe(200);
+    await needsStepUp(await limits(scope, { url: 'inherit' }, {}, 'api'), ['url']);
+    await needsStepUp(await limits(scope, { maxViews: 'inherit' }, {}, 'api'), ['maxViews']);
+    expect((await limits(scope, { maxViews: 1 }, {}, 'api')).status).toBe(200);
+    expect((await fetchJson(`/api/private/admin/roles/${role.id}`, { method: 'DELETE', cookie: oc, headers: intent })).status).toBe(200);
+    // The public account: what anonymous senders may do.
+    await needsStepUp(await limits('public-user-0000', { url: true }), ['url']);
+    await needsStepUp(await limits('public-user-0000', { maxViews: 20 }), ['maxViews']);
+    expect((await limits('public-user-0000', { maxViews: 5 })).status).toBe(200);
+    expect((await limits('public-user-0000', { maxViews: 10 }, OWNER_STEP)).status).toBe(200);
+  }, 60_000);
+
+  it('settings: turning anonymous sharing on; the Turnstile keys were already confirmed on every change', async () => {
+    await needsStepUp(await settings({ 'public.enabled': true }), ['public.enabled']);
+    expect((await settings({ 'public.enabled': true }, OWNER_STEP)).status).toBe(200);
+    expect((await settings({ 'public.enabled': false })).status).toBe(200);
+    const ts = (body) => fetchJson('/api/private/admin/turnstile', { method: 'PUT', cookie: oc, body });
+    expect(await errorOf(await ts({ clear: true }))).toBe('reauth_required');
+    expect(await errorOf(await ts({ sitekey: '1x00000000000000000000AA', secret: '1x0000000000000000000000000000000AA' }))).toBe('reauth_required');
+  });
+
   it('the owner acting as a user cannot reach these routes at all', async () => {
     const u = await makeUser('aa-imp-admin');
     const ic = cookieOf(await fetchJson(`/api/private/admin/users/${u.id}/impersonate`, { method: 'POST', cookie: oc, headers: intent }));
@@ -288,9 +345,19 @@ describe('F-4: weakening a security control needs the owner\'s password or a pas
     expect(weakenedSettings({ ...s, 'log.ownerMaxEntries': 5000 }, { ...s, 'log.ownerMaxEntries': null })).toEqual([]);
     expect(weakenedSettings({ ...s, 'log.ownerMaxEntries': 5000 }, { ...s, 'log.ownerMaxEntries': 4000 })).toEqual(['log.ownerMaxEntries']);
     const d = resolveLimits({}, {});
-    expect(weakenedLimits(d, { ...d, passkeysMax: 1, apiEnabled: true, maxViews: 1 }, s)).toEqual([]);
+    expect(weakenedLimits(d, { ...d, passkeysMax: 1, apiEnabled: false, maxViews: 1, maxExpireSec: 3600, url: false }, s)).toEqual([]);
     expect(weakenedLimits({ ...d, passkeys: 'second' }, { ...d, passkeys: 'off' }, s)).toEqual(['passkeys']);
     expect(weakenedLimits({ ...d, sessionIdleSec: 600 }, { ...d, sessionIdleSec: null }, s)).toEqual(['sessionIdleSec']);
     expect(weakenedLimits({ ...d, sessionIdleSec: null }, { ...d, sessionIdleSec: s['session.idleSec'] }, s)).toEqual([]);
+    // File types: read with the mode; a mode change is the mode's own entry.
+    const allow = { ...d, fileTypeMode: 'allow', fileTypeRules: ['ext:pdf'] };
+    expect(weakenedLimits(allow, { ...allow, fileTypeRules: [] }, s)).toEqual([]);
+    expect(weakenedLimits(allow, { ...allow, fileTypeRules: ['ext:pdf', 'ext:png'] }, s)).toEqual(['fileTypeRules']);
+    expect(weakenedLimits(allow, { ...allow, fileTypeMode: 'block', fileTypeRules: [] }, s)).toEqual(['fileTypeMode']);
+    const block = { ...d, fileTypeMode: 'block', fileTypeRules: ['ext:exe', 'ext:js'] };
+    expect(weakenedLimits(block, { ...block, fileTypeRules: ['ext:js'] }, s)).toEqual(['fileTypeRules']);
+    expect(weakenedLimits(block, { ...block, fileTypeMode: 'allow' }, s)).toEqual([]);
+    expect(weakenedLimits({ ...d, urlRules: ['scheme:https://'] }, { ...d, urlRules: ['scheme:http://'] }, s)).toEqual(['urlRules']);
+    expect(weakenedLimits({ ...d, urlRules: ['scheme:https://', 'scheme:http://'] }, { ...d, urlRules: ['scheme:https://'] }, s)).toEqual([]);
   });
 });

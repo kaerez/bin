@@ -22,11 +22,14 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   Cycling "Log in as" and "Return to admin" kept a stolen owner session alive indefinitely and
   left each replaced session valid until its own timeout.
 - **Admin changes that weaken a security control need the owner's password or a passkey**:
-  turning CSRF tokens off; loosening the account lockout, the per-IP brute-force rules, the IPv6
-  tracking prefix, the owner's session timeouts, the new-anonymous-sender allowance or the log
-  retention (Settings, the Owner role, the Public role); a role's passkeys option towards off,
-  a weaker password policy, longer session timeouts or less log kept; and adding an allow IP
-  rule. Missing, the server answers `400 reauth_required` with what the change weakens, and
+  turning CSRF tokens off or anonymous sharing on; loosening the account lockout, the per-IP
+  brute-force rules, the IPv6 tracking prefix, the owner's session timeouts, the
+  new-anonymous-sender allowance or the log retention (Settings, the Owner role, the Public
+  role); in a role (the public account's too, and its API restrictions), loosening passkeys,
+  the password policy, session timeouts or log retention, the CAPTCHA and uploader-password
+  options and their defaults, longer or unlimited expiry and views, links with no expiry, and
+  allowing link or credential shares, API keys, more file types or more links; and adding an
+  allow IP rule. Missing, the server answers `400 reauth_required` with what the change weakens, and
   the admin panel then shows the confirmation field; tightening asks for nothing (SECURITY.md
   "admin changes that weaken a control").
 - **The owner's own username changes only on Account** (with the password or a passkey):

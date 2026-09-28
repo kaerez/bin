@@ -146,9 +146,10 @@ const guard = async (fn, okText) => {
 
 /**
  * "Confirm it's you" for a save that may weaken a security control (turning
- * CSRF tokens off; loosening the lockout, the brute-force or rate limits, the
- * sessions, the log retention, a role's passkeys or password policy; an allow
- * IP rule). Hidden until the server answers that this change does (400
+ * CSRF tokens off or anonymous sharing on; loosening the lockout, the
+ * brute-force or rate limits, the sessions, the log retention; a role option
+ * that loosens sign-in or widens what its shares, links and API keys may be;
+ * an allow IP rule: weakenedSettings / weakenedLimits in src/lib/settings.js). Hidden until the server answers that this change does (400
  * reauth_required, with what it weakens); then the owner's password, or a
  * passkey with the field left empty, goes with the next save. A change that
  * tightens, or weakens nothing, never asks.
@@ -1052,7 +1053,7 @@ async function renderSettings() {
   const int = (key, label, ctx = '') => { const c = numberInput(s[key], { label: ctx ? `${ctx}: ${label}` : label }); fields.push([key, () => c.read()]); return h('div.limit-row', {}, h('span.field-label', { text: label }), c, dflt(String(defs[key]))); };
   const scopeRule = (scope, label) => h('div.card.stack', {}, h('h3.field-label', { text: label }),
     int(`guard.${scope}.max`, 'Failures allowed', label.split(':')[0]), dur(`guard.${scope}.windowSec`, 'Within', label.split(':')[0]), dur(`guard.${scope}.blockSec`, 'Then block the IP for', label.split(':')[0]));
-  p.appendChild(h('p.mono.muted', { text: 'Server-wide settings only. What accounts may do (sessions, file shares, the viewer, passkeys, password policy, quotas) is set per role under Roles; the owner\'s own session timeouts and file-share windows are on the Owner role, and anonymous sharing on the Public role. Loosening a protection (CSRF tokens off, more failures allowed, a shorter window or block, longer sessions, a longer IPv6 prefix, less log kept) asks for your password or a passkey; tightening one does not.' }));
+  p.appendChild(h('p.mono.muted', { text: 'Server-wide settings only. What accounts may do (sessions, file shares, the viewer, passkeys, password policy, quotas) is set per role under Roles; the owner\'s own session timeouts and file-share windows are on the Owner role, and anonymous sharing on the Public role. Loosening a protection (CSRF tokens off, more failures allowed, a shorter window or block, longer sessions, a longer IPv6 prefix, less log kept), and in a role anything that loosens sign-in or lets its users share more, asks for your password or a passkey; tightening does not.' }));
   p.appendChild(h('div.stack', {}, h('h2.section-title', { text: 'Brute-force protection (per IP)' }),
     h('p.mono.muted', { text: 'Counts failures per network address (IPv6 per the tracking prefix below) and blocks that address for a while, whoever it is and whichever account it tries: it stops one source from guessing. Account lockout (below) is the other half: it counts wrong passwords per account, from any address, and locks only that account: it stops many sources guessing one account.' }),
     scopeRule('login', 'Login'), scopeRule('setup', 'Setup'),
@@ -1222,13 +1223,14 @@ async function renderPublic() {
   if (!overview) return;
   const on = h('input', { type: 'checkbox', checked: overview.settings['public.enabled'] });
   const save = h('button.cta', { type: 'button', text: 'Save' });
-  save.onclick = () => guard(() => admin.settings({ 'public.enabled': on.checked }), on.checked ? 'Anonymous sharing is on.' : 'Anonymous sharing is off.');
+  const reconfirm = stepUpSlot(); // turning it on asks for the password or a passkey
+  save.onclick = () => reconfirm.save((step) => admin.settings({ 'public.enabled': on.checked }, step), on.checked ? 'Anonymous sharing is on.' : 'Anonymous sharing is off.');
   const toRole = h('button.btn', { type: 'button', text: 'Edit the Public role', on: { click: () => { selectTab('roles'); renderRoles('public'); } } });
   p.appendChild(h('div.card.stack', {},
     h('h2.section-title', { text: 'Public (anonymous) sharing' }),
     h('p.subtitle', { text: 'When on, the home page offers the composer to anyone, as the built-in public account: no password, no dashboard, no API keys. What anonymous senders may do, how they are counted, the notice they see and their browser ids are set on the Public role (Roles).' }),
     h('label.inline', {}, on, ' Allow anonymous sharing'),
-    h('div.btn-row', {}, save, toRole)));
+    reconfirm.el, h('div.btn-row', {}, save, toRole)));
 }
 
 // ── security ─────────────────────────────────────────────────────────────────

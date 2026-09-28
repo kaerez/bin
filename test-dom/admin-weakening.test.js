@@ -56,6 +56,7 @@ async function adminFetch(url, init = {}) {
   if (p === '/api/private/admin/settings' && method === 'PATCH') {
     if (body.csrfTokens === false && !confirmed(body)) return weak(['csrfTokens']);
     if (body['lockout.max'] > SETTING_VALUES['lockout.max'] && !confirmed(body)) return weak(['lockout.max']);
+    if (body['public.enabled'] === true && !confirmed(body)) return weak(['public.enabled']);
     return reply({ ok: true, settings: { ...SETTING_VALUES, ...body } });
   }
   if (p === '/api/private/admin/limits' && method === 'PATCH') {
@@ -143,6 +144,26 @@ describe('Admin: the step-up only for a change that weakens a control', () => {
     expect(last['lockout.max']).toBe(50);
     expect(last.reauth).toEqual({ challengeId: expect.stringMatching(/^ch\d+$/), credential: expect.objectContaining({ id: 'cred1' }) });
   });
+
+  it('Public access: turning anonymous sharing on asks; off does not', async () => {
+    await openTab('public');
+    const p = panel('public');
+    const on = await until(() => p.querySelector('input[type="checkbox"]'));
+    const save = [...p.querySelectorAll('button')].find((b) => b.textContent === 'Save');
+    const s = slotIn(p);
+    on.checked = true;
+    save.click();
+    await until(() => !s.box.hidden);
+    expect(s.why.textContent).toMatch(/public\.enabled/);
+    s.input.value = 'owner-pw';
+    save.click();
+    await until(() => calls('/api/private/admin/settings').length === 2);
+    expect(calls('/api/private/admin/settings')[1].body).toEqual({ 'public.enabled': true, current: 'stretched:owner-pw' });
+    on.checked = false;
+    save.click();
+    await until(() => calls('/api/private/admin/settings').length === 3);
+    expect(calls('/api/private/admin/settings')[2].body).toEqual({ 'public.enabled': false });
+  }, T);
 
   it('Roles → Default: passkeys off asks for the confirmation', async () => {
     await openTab('roles');

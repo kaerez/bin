@@ -151,29 +151,60 @@ export function crossCheckSettings(merged) {
 
 // ── changes that weaken a security control ──────────────────────────────────
 // The owner confirms these with the password or a passkey (the step-up), so a
-// stolen owner session alone cannot quietly loosen the controls that bound it;
-// a change the other way (tightening), or to anything else, needs nothing.
-// Each entry says which way is looser:
-//   'up'   — a larger value (more attempts, longer sessions, longer IPv6 prefix);
-//   'down' — a smaller value (shorter counting window or block, less log kept);
-//   'off'  — true → false;
-//   'keep' — a retention limit where null means "keep everything": a value
-//            where there was none, or a smaller one.
-const LOOSER = { up: (a, b) => b > a, down: (a, b) => b < a, off: (a, b) => a !== false && b === false, keep: (a, b) => b !== null && (a === null || b < a) };
+// stolen owner session alone cannot quietly loosen the controls that bound it
+// or widen what users, anonymous senders and API keys may do; a change the
+// other way (tightening), or to anything else, needs nothing. Each entry says
+// which way is looser:
+//   'up'    — a larger value (more attempts, longer sessions, longer IPv6 prefix);
+//   'down'  — a smaller value (shorter counting window or block, less log kept);
+//   'off'   — true → false;           'on'  — false → true;
+//   'unset' — 'on' → 'off' (a CAPTCHA or password default for new links);
+//   'keep'  — a retention limit where null means "keep everything": a value
+//             where there was none, or a smaller one;
+//   'max'   — a cap where null means "no limit": raised, or removed (null);
+//   'rank'  — down the option's RANK order (strongest last);
+//   'added' — a list that gains an entry (link rules: anything more may be shared);
+//   'types' — the file-type list, read with its mode: a rule removed from a
+//             block list, or added to an allow list (a looser mode is 'rank').
+const LOOSER = {
+  up: (a, b) => b > a,
+  down: (a, b) => b < a,
+  off: (a, b) => a !== false && b === false,
+  on: (a, b) => a !== true && b === true,
+  unset: (a, b) => a === 'on' && b === 'off',
+  keep: (a, b) => b !== null && (a === null || b < a),
+  max: (a, b) => a !== null && (b === null || b > a),
+  added: (a, b) => (Array.isArray(b) ? b : []).some((x) => !(Array.isArray(a) ? a : []).includes(x)),
+};
 const WEAKER_SETTINGS = {
   csrfTokens: 'off',
   'session.idleSec': 'up', 'session.absSec': 'up',
   'lockout.max': 'up', 'lockout.windowSec': 'down', 'lockout.lockSec': 'down',
   ...Object.fromEntries(['login', 'setup', 'invalid'].flatMap((s) => [[`guard.${s}.max`, 'up'], [`guard.${s}.windowSec`, 'down'], [`guard.${s}.blockSec`, 'down']])),
   'guard.v6Prefix': 'up',
+  'public.enabled': 'on',
   'public.newTrackersPerIp': 'up', 'public.newTrackersWindowSec': 'down',
   'log.maxAgeSec': 'down', 'log.maxEntries': 'down', 'log.ownerMaxAgeSec': 'keep', 'log.ownerMaxEntries': 'keep',
 };
-/** The role options that weaken sign-in, sessions or the log when loosened (`rank`: passkeys, strongest last). */
-const PASSKEY_RANK = { off: 0, any: 1, second: 2 };
+/** Orders for 'rank' options, weakest first. */
+const MODE_RANK = { off: 0, allow: 1, require: 2 };
+const RANK = {
+  passkeys: { off: 0, any: 1, second: 2 },
+  shareCaptcha: MODE_RANK, reverseCaptcha: MODE_RANK, reversePassword: MODE_RANK,
+  fileTypeMode: { any: 0, block: 1, allow: 2 },
+};
+/** The role options that weaken sign-in, sessions, the log, or what a share or link may be, when loosened. */
 const WEAKER_LIMITS = {
   passkeys: 'rank', pwMinLength: 'down', pwUpper: 'off', pwLower: 'off', pwDigit: 'off', pwSymbol: 'off',
   sessionIdleSec: 'up', sessionAbsSec: 'up', logMaxAgeSec: 'keep', logMaxEntries: 'keep',
+  shareCaptcha: 'rank', shareCaptchaDefault: 'unset', reverseCaptcha: 'rank', reverseCaptchaDefault: 'unset',
+  reversePassword: 'rank', reversePasswordDefault: 'unset',
+  maxExpireSec: 'max', maxViews: 'max', allowUnlimitedViews: 'on',
+  reverseMaxExpireSec: 'max', reverseMaxViews: 'max', reverseNoExpiry: 'on', reverseAllowUnlimitedViews: 'on',
+  url: 'on', secret: 'on', apiEnabled: 'on',
+  // TODO(claude/receive-types): add reverseUrl: 'on' and reverseSecret: 'on' here when those
+  // role options reach main (they do not exist yet).
+  fileTypeMode: 'rank', fileTypeRules: 'types', urlRules: 'added',
 };
 /** Exported for the docs and tests: what counts as weakening. */
 export const WEAKENING_SETTINGS = Object.freeze(Object.keys(WEAKER_SETTINGS));
@@ -186,15 +217,26 @@ export function weakenedSettings(before, after) {
 
 /**
  * The role options whose change from `before` to `after` (a role's resolved
- * all-channel limits, resolveLimits) weakens a control. `settings`: the
- * server-wide values a role's session timeouts fall back to (null).
+ * limits for one channel: resolveLimits, or restrictForApi for the API)
+ * weakens a control. `settings`: the server-wide values a role's session
+ * timeouts fall back to (null).
  */
 export function weakenedLimits(before, after, settings) {
   const val = (k, v) => (k === 'sessionIdleSec' ? v ?? settings['session.idleSec'] : k === 'sessionAbsSec' ? v ?? settings['session.absSec'] : v);
+  const types = () => {
+    if (before.fileTypeMode !== after.fileTypeMode) return false; // a looser mode is fileTypeMode's own entry
+    const a = Array.isArray(before.fileTypeRules) ? before.fileTypeRules : [];
+    const b = Array.isArray(after.fileTypeRules) ? after.fileTypeRules : [];
+    if (after.fileTypeMode === 'block') return a.some((x) => !b.includes(x));
+    if (after.fileTypeMode === 'allow') return b.some((x) => !a.includes(x));
+    return false;
+  };
   return Object.entries(WEAKER_LIMITS).filter(([k, dir]) => {
     const a = val(k, before[k]);
     const b = val(k, after[k]);
-    return dir === 'rank' ? (PASSKEY_RANK[b] ?? 0) < (PASSKEY_RANK[a] ?? 0) : LOOSER[dir](a, b);
+    if (dir === 'rank') return (RANK[k][b] ?? 0) < (RANK[k][a] ?? 0);
+    if (dir === 'types') return types();
+    return LOOSER[dir](a, b);
   }).map(([k]) => k);
 }
 

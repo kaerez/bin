@@ -850,15 +850,27 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     - Settings: CSRF tokens off; a higher `lockout.max` or `guard.*.max`, a shorter
       `lockout.windowSec`, `lockout.lockSec`, `guard.*.windowSec` or `guard.*.blockSec`; a
       longer `guard.v6Prefix`; longer `session.idleSec` or `session.absSec` (the owner's own
-      sessions); a higher `public.newTrackersPerIp` or a shorter `public.newTrackersWindowSec`;
-      a shorter `log.maxAgeSec` or a smaller `log.maxEntries`; a `log.ownerMaxAgeSec` or
-      `log.ownerMaxEntries` where there was none, or a smaller one;
-    - role options (all channels; compared on what the role resolves to, so "same as Default"
-      counts too): `passkeys` towards off (second → any → off); a lower `pwMinLength`, or
-      `pwUpper` / `pwLower` / `pwDigit` / `pwSymbol` turned off; longer `sessionIdleSec` or
-      `sessionAbsSec`; a `logMaxAgeSec` or `logMaxEntries` where there was none, or a smaller
-      one. The API channel only narrows the all-channel limits and holds none of these;
+      sessions); `public.enabled` turned on; a higher `public.newTrackersPerIp` or a shorter
+      `public.newTrackersWindowSec`; a shorter `log.maxAgeSec` or a smaller `log.maxEntries`;
+      a `log.ownerMaxAgeSec` or `log.ownerMaxEntries` where there was none, or a smaller one;
+    - role options, the public account's included (each channel, compared on what the scope
+      resolves to, so "same as Default" and lifting an API restriction count too):
+      - sign-in and sessions: `passkeys` towards off (second → any → off); a lower
+        `pwMinLength`, or `pwUpper` / `pwLower` / `pwDigit` / `pwSymbol` turned off; longer
+        `sessionIdleSec` or `sessionAbsSec`; a `logMaxAgeSec` or `logMaxEntries` where there
+        was none, or a smaller one;
+      - the human check and passwords: `shareCaptcha`, `reverseCaptcha` and `reversePassword`
+        towards off (require → allow → off); `shareCaptchaDefault`, `reverseCaptchaDefault`
+        and `reversePasswordDefault` on → off;
+      - lifetimes and views: `maxExpireSec`, `reverseMaxExpireSec`, `maxViews` and
+        `reverseMaxViews` raised or removed (no limit); `allowUnlimitedViews`,
+        `reverseAllowUnlimitedViews` and `reverseNoExpiry` turned on;
+      - what may be shared: `url`, `secret` and `apiEnabled` turned on; `fileTypeMode`
+        towards any (allow → block → any), or, with the same mode, a type added to an allow
+        list or removed from a block list; `urlRules` gaining a rule;
     - IP rules: adding an allow rule.
+    The Turnstile keys (Security → CAPTCHA) need the step-up for every change, removing them
+    included.
     Imports already need the step-up for every part. The owner acting as a user cannot reach
     any admin route;
   - **password change** is never blocked by a lockout, so a stranger failing logins cannot stop
