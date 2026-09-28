@@ -22,8 +22,8 @@ users share (notes, files, PDFs, images, audio and video) is theirs, not secbin'
 covers how secbin presents it, not the content itself.
 
 **Date and build.** 2026-09-28, branch `claude/wcag-audit` after merging `main` 9d11b66 (the
-Drive, with the owner recovery kit, start over and owner-created Drives) and 3df2e6f (reverse
-shares).
+Drive, with the owner recovery kit, start over and owner-created Drives), 3df2e6f (reverse
+shares) and 5ae4f93 (CSRF tokens, with their "session changed" banner; the stray-text fix).
 
 **How it was checked** (all in Chromium, driven by Playwright, against `wrangler dev`):
 
@@ -476,6 +476,33 @@ Note anything that is not announced, announced wrongly, hard to reach or hard to
   "uploading" state, and the owner's start over in phase 2 pausing the links; the CAPTCHA with
   Cloudflare's public testing keys in a pass of its own (`REV_TS=1`, Chromium through the agent
   proxy).
+
+Results of the final run after merging `main` 5ae4f93 (the owner recovery kit, reverse shares, CSRF
+tokens), on 032c081: `npm test` 502 + 127 + 362 + 261 passed, `npm run lint` and `sync-shared --check`
+clean. End to end:
+- `wcag22 --aaa`: 28/28 in phase 1 (79 states, the kit's and the reverse shares' included), 3/3 in
+  phase 2 (10 states: AUTHN recovery, start over, the archive, the paused uploader) and 3/3 with
+  Turnstile's testing keys; 0 AAA findings, 0 A/AA findings, no CSP or Trusted Types errors;
+- `axe-audit`: 0 violations (147/147, 34/34 and 8/8 states reached in both themes at desktop and
+  phone widths);
+- `a11y`: 84/84 and 29/29;
+- the accessibility-tree suite: 344/344, 30/30 and 6/6;
+- `run`: 39/39; `drive-int`: 105/105; `owner-kit`: 33/33 and 12/12;
+- `reverse`: 41/41, and 43/43 with the testing keys.
+
+Four fixes came from this round: the light theme's danger-button contrast on its tinted fill
+(1.4.6), no take-in toast outside a modal dialog (1.3.1, 4.1.2), the CAPTCHA container's focus ring
+(2.4.7; `:focus-within` does not match inside Cloudflare's frame), and an Admin tab chosen while the
+page loads staying chosen (3.2.5). Each has a test that fails without it.
+
+The scratch suites needed two harness changes, neither of them to a check:
+- their raw requests send the session's CSRF token, which `main` now requires on every
+  signed-in change, logout included;
+- each held-back "uploading" visit comes from an uploader network of its own, as the server allows
+  5 open upload sessions per network on a link.
+
+Attempts that lost their `wrangler dev` server part-way (wrangler's dev proxy exits with "Network
+connection lost" on a loaded machine) are not counted.
 
 Results of the final run after merging the Drive integration cdcc5c7 (with `main` 6c5e2fc):
 `npm test` 393 + 116 + 246 + 261 passed, `npm run lint` and `sync-shared --check` clean; end to
