@@ -28,6 +28,8 @@ import { b64urlFromBytes, randomBytes, utf8, fromUtf8 } from '../public/js/bytes
 import { importFileKey, encryptChunk, decryptChunk } from '../public/js/files.js';
 
 const CODE = 'ABCD-EFGH-JKMN-PQRS';
+/** The owner's step-up (the escrow route hands out a user's old key wrap and KEK). */
+const STEP = { current: proofFor('owner-password') };
 let oc;
 let ownerId;
 let escrow; // the owner's escrow key pair of the release before
@@ -193,9 +195,13 @@ describe('the upgrade of Drives made before the key model v2', () => {
   it('the owner upgrades it through the escrow of that release (admin audit); every item opens under v2; then the old wraps go', async () => {
     await actAs(oc);
     clearLegacyKey();
-    await expect(upgradeUserDrive({ ownerId, userId: u.id })).rejects.toBeInstanceOf(UpgradeBlocked); // the owner's old DK is not in the tab
+    await expect(upgradeUserDrive({ ownerId, userId: u.id, step: STEP })).rejects.toBeInstanceOf(UpgradeBlocked); // the owner's old DK is not in the tab
     saveLegacyKey(ownerDk, ownerId);
-    const r = await upgradeUserDrive({ ownerId, userId: u.id });
+    // Audit B I3: the escrow route needs the step-up, like Show.
+    const noStep = await fetchJson(`/api/private/admin/drive/migrate/${u.id}/escrow`, { method: 'POST', cookie: oc, headers: intent, body: {} });
+    expect([noStep.status, (await noStep.json()).error]).toEqual([400, 'reauth_required']);
+    expect((await adminAudit(u.id)).some((x) => x.action === 'drive.escrow_used')).toBe(false);
+    const r = await upgradeUserDrive({ ownerId, userId: u.id, step: STEP });
     expect(r).toMatchObject({ upgraded: 4, damaged: 0 });
     expect(r.verified).toBeGreaterThanOrEqual(4);
     await checkUpgraded(u.cookie, u.id, d);
@@ -213,7 +219,7 @@ describe('the upgrade of Drives made before the key model v2', () => {
     expect(await dirMeta('drive.escrowPub')).not.toBeNull();
     expect((await legacyOf(ownerId)).meta.escrowPriv).toBeTruthy();
     // A repeat changes nothing.
-    const again = await upgradeUserDrive({ ownerId, userId: u.id });
+    const again = await upgradeUserDrive({ ownerId, userId: u.id, step: STEP });
     expect(again.upgraded).toBe(0);
     await checkUpgraded(u.cookie, u.id, d);
     // The Drive page's summary no longer shows an upgrade.
@@ -332,7 +338,7 @@ describe('the upgrade of Drives made before the key model v2', () => {
     await actAs(oc);
     saveLegacyKey(ownerDk, ownerId);
     const list = await (await fetchJson('/api/private/admin/drive/migration', { cookie: oc })).json();
-    for (const x of list.drives.filter((y) => y.state !== 'done' && y.id !== ownerId)) await upgradeUserDrive({ ownerId, userId: x.id });
+    for (const x of list.drives.filter((y) => y.state !== 'done' && y.id !== ownerId)) await upgradeUserDrive({ ownerId, userId: x.id, step: STEP });
     expect((await legacyOf(ownerId)).meta.escrowPriv).toBeTruthy();
     const k = await driveKeys(oc, { fresh: true });
     const r = await upgradeOwnDrive({ user: { id: ownerId, role: 'owner' }, current: k.current, kek: k.keks.get(k.current) });

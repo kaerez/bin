@@ -221,8 +221,12 @@ describe('the Drive API: every call goes through the same token path', () => {
     migrateItems: () => api.drive.migrateItems(null, UID),
     migratePut: () => api.drive.migratePut({ items: [] }, UID),
     migrateFinish: () => api.drive.migrateFinish(UID),
-    migrateEscrow: () => api.drive.migrateEscrow(UID),
+    migrateEscrow: () => api.drive.migrateEscrow(UID, { current: 'P'.repeat(43) }),
+    migrateRetire: () => api.drive.migrateRetire(['rAAAAAAAAAAAAAAAAAAAAAA'], { current: 'P'.repeat(43) }, UID),
     migration: () => api.drive.migration(),
+    // The owner's archive of the release before: what it holds; deleted.
+    archive: () => api.drive.archive(),
+    deleteArchive: () => api.drive.deleteArchive({ confirm: 'owner', current: 'P'.repeat(43) }),
     // Reverse shares (the Drive's "Receive files"): create a link, list, and the received files.
     createReverse: () => api.drive.createReverse({ id: 'rAAAAAAAAAAAAAAAAAAAAAA', folder: 'root' }),
     reverse: () => api.drive.reverse('root'),
@@ -254,8 +258,8 @@ describe('the Drive API: every call goes through the same token path', () => {
     }
     const changes = seen.filter((c) => c.method !== 'GET');
     expect(changes.map((c) => c.name).sort()).toEqual([
-      'acceptReceived', 'createFile', 'createReverse', 'finalize', 'keys', 'kit', 'kitItemsPut', 'kitRestore', 'kitVerify',
-      'migrateEscrow', 'migrateFinish', 'migratePut', 'mkdir', 'putChunk', 'receivedFailed', 'receivedRetry', 'remove', 'share', 'update',
+      'acceptReceived', 'createFile', 'createReverse', 'deleteArchive', 'finalize', 'keys', 'kit', 'kitItemsPut', 'kitRestore', 'kitVerify',
+      'migrateEscrow', 'migrateFinish', 'migratePut', 'migrateRetire', 'mkdir', 'putChunk', 'receivedFailed', 'receivedRetry', 'remove', 'share', 'update',
     ]);
     for (const c of changes) {
       expect(c.path, c.name).toMatch(/^\/api\/private\/(drive|admin\/drive)(\/|$)/);
@@ -314,12 +318,14 @@ describe('the Drive keyring API: every call goes through the same token path', (
     changeRoot: () => api.keysApi.changeRoot({ ...STEP }),
     startJob: () => api.keysApi.startJob({ kind: 'rotate', ...STEP }),
     stepJob: () => api.keysApi.stepJob(),
-    cancelJob: () => api.keysApi.cancelJob(),
+    cancelJob: () => api.keysApi.cancelJob(STEP),
+    undoRoot: () => api.keysApi.undoRoot(STEP),
+    dropOldRoot: () => api.keysApi.dropOldRoot({ confirm: 'x', ...STEP }),
     kit: () => api.keysApi.kit(STEP),
     verify: () => api.keysApi.verify({ root: 'x' }),
     restore: () => api.keysApi.restore({ ...STEP }),
     exportKeys: () => api.keysApi.exportKeys({ ...STEP }),
-    importKeys: () => api.keysApi.importKeys({ dryRun: true }),
+    importKeys: () => api.keysApi.importKeys({ dryRun: true, ...STEP }),
     userView: () => api.keysApi.userView(UID, STEP),
   };
   beforeEach(() => { api.bindSession(profile()); });

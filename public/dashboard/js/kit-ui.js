@@ -30,6 +30,16 @@ export function holdOff(btn, msg, sync) {
   setTimeout(() => { sync(); msg.hidden = true; }, throttleWait() * 1000);
 }
 
+/**
+ * A form's message inside a status line that is in the page from the start
+ * (WCAG 4.1.3: a live region that appears together with its text is often not
+ * read) → { msg (the message: showMsg / hidden), live (what goes in the page) }.
+ */
+export function liveMsg(id = null) {
+  const msg = h('p.msg', { id, hidden: true });
+  return { msg, live: h('div.kit-live', { role: 'status' }, msg) };
+}
+
 // ── fields ──────────────────────────────────────────────────────────────────
 export const field = (label, control, hint = null) => h('label.field', {}, h('span.field-label', { text: label }), control, hint);
 export const secret = (id, autocomplete) => h('input.input', { id, type: 'password', autocomplete, maxlength: '1024', spellcheck: 'false' });
@@ -65,6 +75,8 @@ export function passphrasePair(prefix, what) {
   const sync = () => {
     const n = [...pass1.value].length;
     weak.hidden = n >= SHORT_PASSPHRASE;
+    // The warning describes the passphrase field while it shows (and only then: WCAG 1.3.1).
+    if (weak.hidden) pass1.removeAttribute('aria-describedby'); else pass1.setAttribute('aria-describedby', weak.id);
     weak.textContent = n === 0
       ? `No passphrase: the kit is still encrypted, but with a key anyone can derive. It opens ${what}: store it offline.`
       : `A short passphrase (under ${SHORT_PASSPHRASE} characters) is easy to guess offline. The kit opens ${what}: store it offline.`;

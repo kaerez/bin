@@ -18,7 +18,7 @@ import { toast, copyText, flashCopied } from '../../js/ui.js';
 import { exportKeys, openKeysExport, importKeys, fpText } from '../../js/keysclient.js';
 import { ExportCryptError } from '../../js/exportcrypt.js';
 import { confirmStep, canUsePasskey } from './confirm.js';
-import { field, secret, fileInput, saveText } from './kit-ui.js';
+import { field, secret, fileInput, saveText, liveMsg } from './kit-ui.js';
 
 const UID_RE = /^[A-Za-z0-9_-]{16}$/;
 const NODE_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -76,7 +76,7 @@ function userPicker(accounts, prefix) {
   const set = (on) => () => { for (const r of shown()) r.box.checked = on; sync(); };
   const upload = fileInput(`${prefix}-ids-file`);
   upload.accept = '.txt,.json,text/plain,application/json';
-  const umsg = h('p.msg', { role: 'status', hidden: true });
+  const { msg: umsg, live: ulive } = liveMsg();
   upload.addEventListener('change', async () => {
     const f = upload.files && upload.files[0];
     if (!f) return;
@@ -100,7 +100,7 @@ function userPicker(accounts, prefix) {
         h('button.btn.mini', { type: 'button', text: 'Select all', 'aria-label': 'Select all users shown', on: { click: set(true) } }),
         h('button.btn.mini', { type: 'button', text: 'Deselect all', 'aria-label': 'Deselect all users shown', on: { click: set(false) } }), count),
       list,
-      h('div.toolbar', {}, field('Choose from an id list (one id per line, or a JSON array)', upload), down), umsg),
+      h('div.toolbar', {}, field('Choose from an id list (one id per line, or a JSON array)', upload), down), ulive),
   };
 }
 
@@ -141,7 +141,7 @@ function exportPart(profile, accounts, subs) {
   const build = h('button.btn', { type: 'button', id: 'kx-build', text: 'Build the export' });
   const save = h('button.btn', { type: 'button', id: 'kx-save', text: 'Encrypt and download', disabled: true });
   const discard = h('button.btn', { type: 'button', text: 'Discard', disabled: true });
-  const msg = h('p.msg', { id: 'kx-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('kx-msg');
   const view = h('div', { id: 'kx-view' });
   let doc = null;
   const drop = () => { doc = null; view.replaceChildren(); save.disabled = discard.disabled = true; };
@@ -207,7 +207,7 @@ function exportPart(profile, accounts, subs) {
     field('Your password (or leave it empty to confirm with a passkey)', mine),
     h('div.btn-row', {}, build), view,
     h('div.toolbar', {}, field('Export passphrase (optional)', pass1), field('Repeat', pass2)), noPass,
-    h('div.btn-row', {}, save, discard), msg);
+    h('div.btn-row', {}, save, discard), live);
 }
 
 // ── import ──────────────────────────────────────────────────────────────────
@@ -215,7 +215,7 @@ function importPart(profile) {
   const file = fileInput('ki-file');
   const pass = secret('ki-pass', 'off');
   const open = h('button.btn', { type: 'button', id: 'ki-open', text: 'Decrypt' });
-  const msg = h('p.msg', { id: 'ki-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('ki-msg');
   const review = h('div.stack', { id: 'ki-review' });
   open.addEventListener('click', async () => {
     const f = file.files && file.files[0];
@@ -237,7 +237,7 @@ function importPart(profile) {
   });
   return h('fieldset.range', { id: 'ki-set' }, h('legend', { text: 'Import Drive keys' }),
     h('p.type-hint', { text: 'Imports never replace keys that work here. The root MEK and sub-MEKs come back only when missing or broken (or, on an empty instance, the root when you ask for it); a user salt only for an account that has none. A KEK is made by the server from the other keys, so importing one only checks it. A DEK puts back a file key whose seal is missing or broken, after it opened the file’s first chunk.' }),
-    h('div.toolbar', {}, field('Drive keys export file', file), field('Its passphrase', pass), open), msg, review);
+    h('div.toolbar', {}, field('Drive keys export file', file), field('Its passphrase', pass), open), live, review);
 }
 
 function renderImport(out, doc, profile) {
@@ -252,7 +252,7 @@ function renderImport(out, doc, profile) {
   const mine = secret('ki-confirm', 'current-password');
   const preview = h('button.btn', { type: 'button', id: 'ki-preview', text: 'Preview' });
   const apply = h('button.btn.danger', { type: 'button', id: 'ki-apply', text: 'Import', disabled: true });
-  const msg = h('p.msg', { id: 'ki-plan-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('ki-plan-msg');
   const plan = h('div', { id: 'ki-plan' });
   let previewed = null;
   const chosen = () => ({ take: Object.fromEntries(Object.entries(take).map(([k, b]) => [k, b.checked])), useRoot: useRoot.checked });
@@ -315,7 +315,7 @@ function renderImport(out, doc, profile) {
       has.root ? h('label.inline', {}, useRoot, h('span', { text: ' Replace the root MEK here with the file’s (only on an empty instance: no Drive item yet)' })) : null),
     field('Your password, for the preview and again for the import (or leave it empty to confirm with a passkey)', mine),
     h('div.btn-row', {}, preview), plan,
-    h('div.btn-row', {}, apply), msg);
+    h('div.btn-row', {}, apply), live);
 }
 
 /** The Drive keys card of Import / export. */

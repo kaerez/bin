@@ -16,7 +16,7 @@ import { b64urlFromBytes } from '../../js/bytes.js';
 import { buildKeyKit, verifyKeyKit, restoreKeyKit, fpText } from '../../js/keysclient.js';
 import { confirmStep, canUsePasskey, confirmLabel } from './confirm.js';
 import {
-  field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff,
+  field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff, liveMsg,
 } from './kit-ui.js';
 
 export const KEYS_ANCHOR = 'keys';
@@ -64,7 +64,7 @@ function reveal(slot, key, label) {
  */
 function keyChooser({ purpose, profile, confirmIn, box }) {
   return new Promise((resolve) => {
-    const msg = h('p.msg', { role: 'status', hidden: true });
+    const { msg, live } = liveMsg();
     const shown = h('div.stack');
     const manualIn = h('input.input', { type: 'password', id: `${purpose}-manual`, autocomplete: 'off', spellcheck: 'false', maxlength: '200', 'aria-describedby': `${purpose}-manual-help` });
     const manualHelp = h('p.type-hint', { id: `${purpose}-manual-help`, text: HELP.manual });
@@ -111,7 +111,7 @@ function keyChooser({ purpose, profile, confirmIn, box }) {
     box.replaceChildren(h('div.card.stack.key-chooser', { role: 'group', 'aria-label': purpose === 'root' ? 'The new root MEK' : 'The new sub-MEK' },
       h('div.btn-row', {}, gen), shown,
       h('details', {}, h('summary', { text: 'Enter manually' }), field('Key (32 bytes, base64 or hex)', manualIn, manualHelp), h('div.btn-row', {}, useManual)),
-      h('div.btn-row', {}, cancel), msg));
+      h('div.btn-row', {}, cancel), live));
     gen.focus();
   });
 }
@@ -155,7 +155,7 @@ function keyringCard(st, profile, { loud, changed }) {
   const confirmIn = h('input.input', { type: 'password', id: 'keys-confirm', autocomplete: 'current-password', maxlength: '1024' });
   const confirmText = h('span.field-label', { text: 'Your password (asked again for every action)' });
   canUsePasskey().then((ok) => { confirmText.textContent = confirmLabel('Your password (asked again for every action)', ok); }).catch(() => {});
-  const msg = h('p.msg', { id: 'keys-msg', role: 'status', hidden: true });
+  const { msg, live: msgLive } = liveMsg('keys-msg');
   const work = h('div', { id: 'keys-work' });
   const shown = h('div', { id: 'keys-shown' });
   const act = async (fn, ok) => {
@@ -277,7 +277,7 @@ function keyringCard(st, profile, { loud, changed }) {
     h('div.toolbar', {}, field('New sub-MEK in effect from (empty: now)', addWhen.el), field('Note (optional)', addNote)),
     h('p.type-hint', { id: 'keys-add-help', text: HELP.add }), h('p.type-hint', { id: 'keys-rotate-help', text: HELP.rotate }),
     h('div.btn-row', {}, addBtn, rotateBtn)),
-  shown, work, msg);
+  shown, work, msgLive);
   // A job left running (a re-seal, a root change): it carries on here.
   if (st.job && !st.job.finished) queueMicrotask(() => runJob(work).then(changed));
   return card;
@@ -345,7 +345,7 @@ function keyKitCard(st, profile, refreshed) {
   const pp = passphrasePair('kkit', 'every Drive');
   const mine = secret('kkit-confirm', 'current-password');
   const go = h('button.btn', { type: 'button', id: 'kkit-download', text: 'Download key kit' });
-  const msg = h('p.msg', { id: 'kkit-download-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('kkit-download-msg');
   go.addEventListener('click', async () => {
     if (pp.pass1.value !== pp.pass2.value) return showMsg(msg, 'The two passphrases differ.');
     go.disabled = true;
@@ -367,13 +367,13 @@ function keyKitCard(st, profile, refreshed) {
   });
   const download = h('fieldset.range', { id: 'kkit-download-set' }, h('legend', { text: 'Download' }),
     h('p.type-hint', { text: 'Each download is a new file with every key as it is now. If a sub-MEK is lost and not in a kit, the items under it cannot be opened by anyone.' }),
-    pp.el, field('Your password (or leave it empty to confirm with a passkey)', mine), h('div.btn-row', {}, go), msg);
+    pp.el, field('Your password (or leave it empty to confirm with a passkey)', mine), h('div.btn-row', {}, go), live);
   // Verify.
   const vfile = fileInput('kkit-verify-file');
   const vpass = secret('kkit-verify-pass', 'off');
   const day = datePicker('kkit-verify-date');
   const vgo = h('button.btn', { type: 'button', id: 'kkit-verify', text: 'Verify key kit', disabled: true, 'aria-describedby': 'kkit-verify-hint' });
-  const vmsg = h('p.msg', { id: 'kkit-verify-msg', role: 'status', hidden: true });
+  const { msg: vmsg, live: vlive } = liveMsg('kkit-verify-msg');
   const vout = h('div', { id: 'kkit-verify-out' });
   const vsync = () => { vgo.disabled = !vfile.files || !vfile.files.length; };
   vfile.addEventListener('change', vsync);
@@ -399,7 +399,7 @@ function keyKitCard(st, profile, refreshed) {
   const verify = h('fieldset.range', { id: 'kkit-verify-set' }, h('legend', { text: 'Verify' }),
     field('Key kit file to verify', vfile), field('Its passphrase', vpass), field('The sub-MEK in effect on', day.el),
     h('p.type-hint', { id: 'kkit-verify-hint', text: 'Choose the key kit file you saved. Nothing is changed and the file is not uploaded: the server compares check values and answers match or no match. The date (today by default; a future date too) shows which sub-MEK is in effect then and whether the kit holds it.' }),
-    h('div.btn-row', {}, vgo), vmsg, vout);
+    h('div.btn-row', {}, vgo), vlive, vout);
   // Restore (a preview first).
   const rfile = fileInput('kkit-restore-file');
   const rpass = secret('kkit-restore-pass', 'off');
@@ -407,7 +407,7 @@ function keyKitCard(st, profile, refreshed) {
   const useRoot = h('input', { type: 'checkbox', id: 'kkit-use-root' });
   const preview = h('button.btn', { type: 'button', id: 'kkit-preview', text: 'Preview the restore', disabled: true });
   const apply = h('button.btn.danger', { type: 'button', id: 'kkit-restore', text: 'Restore', disabled: true });
-  const rmsg = h('p.msg', { id: 'kkit-restore-msg', role: 'status', hidden: true });
+  const { msg: rmsg, live: rlive } = liveMsg('kkit-restore-msg');
   const plan = h('div', { id: 'kkit-restore-plan' });
   let held = null; // the file's text and passphrase, only between the preview and the restore
   const rsync = () => { preview.disabled = !rfile.files || !rfile.files.length; };
@@ -461,7 +461,7 @@ function keyKitCard(st, profile, refreshed) {
     h('label.inline', {}, useRoot, h('span', { text: ' Use the kit’s root MEK (only on an empty instance: no Drive item yet)' })),
     h('p.type-hint', { text: 'Only what this server lost comes back: the root MEK when there is none (or none of the sub-MEKs opens under the one here), sub-MEKs that are missing or do not open, and user salts of accounts that have none. Working keys are never replaced.' }),
     field('Your password, for the preview and again for the restore (or leave it empty to confirm with a passkey)', rmine),
-    h('div.btn-row', {}, preview), plan, h('div.btn-row', {}, apply), rmsg);
+    h('div.btn-row', {}, preview), plan, h('div.btn-row', {}, apply), rlive);
   const last = st.kit ? `Latest key kit: ${formatDate(st.kit.at)}${st.kitFresh ? ' (it covers every key and user)' : ' (older than the latest change)'}.` : 'No key kit downloaded yet.';
   return h('div.card.stack', { id: 'keys-kit', 'aria-labelledby': 'keys-kit-title' },
     h('h3.section-title', { id: 'keys-kit-title', text: 'Key kit' }), h('p.subtitle', { text: HELP.kit }), h('p.mono', { id: 'keys-kit-last', text: last }),
@@ -491,7 +491,7 @@ function upgradeCard(profile) {
     const tbody = h('tbody');
     const all = h('button.btn', { type: 'button', id: 'keys-upgrade-all', text: 'Upgrade every waiting Drive' });
     const bar = progressBar();
-    const msg = h('p.msg', { id: 'keys-upgrade-msg', role: 'status', hidden: true });
+    const { msg, live } = liveMsg('keys-upgrade-msg');
     const extra = h('div', { id: 'keys-upgrade-links' });
     const one = async (d, btn, step) => {
       btn.disabled = true;
@@ -569,7 +569,7 @@ function upgradeCard(profile) {
         h('thead', {}, h('tr', {}, ...['User', 'State', 'Items left'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
         tbody)) : null,
       upgrading ? field('Your password, to confirm “Upgrade now” (or leave it empty to confirm with a passkey)', confirmIn) : null,
-      upgrading && r.left > 1 ? h('div.btn-row', {}, all) : null, bar.el, msg, extra,
+      upgrading && r.left > 1 ? h('div.btn-row', {}, all) : null, bar.el, live, extra,
       hasArchive ? archiveBox(archive, profile, draw) : null].filter(Boolean));
   };
   draw();
@@ -585,7 +585,7 @@ function archiveBox(a, profile, redraw) {
   const typed = h('input.input', { id: 'keys-archive-confirm', autocomplete: 'off', spellcheck: 'false', maxlength: '64' });
   const pw = secret('keys-archive-pw', 'current-password');
   const go = h('button.btn.danger', { type: 'button', id: 'keys-archive-delete', text: 'Delete the archive' });
-  const msg = h('p.msg', { role: 'status', hidden: true });
+  const { msg, live } = liveMsg('keys-archive-msg');
   go.addEventListener('click', async () => {
     msg.hidden = true;
     go.disabled = true;
@@ -603,7 +603,7 @@ function archiveBox(a, profile, redraw) {
     h('p', { text: `When you started your Drive over in the previous release, its items were kept as an archive: ${a.items} item${a.items === 1 ? '' : 's'} (${formatBytes(a.bytes)}${a.received ? `, of which ${a.received} received through “Receive files” links` : ''}), sealed under that release’s key, and ${a.links.length} link${a.links.length === 1 ? '' : 's'} paused with it. Nothing here opens it any more, and it does not count towards your Drive’s storage.` }),
     h('p.type-hint', { text: 'Deleting it removes its content from storage for good and ends the paused links; files received through them and not yet taken in are listed as failed. A recovery kit of that release can open the archive offline only as long as its content exists.' }),
     field(`Type your username (${profile.user.username}) to confirm`, typed), field('Your password (or leave it empty to confirm with a passkey)', pw),
-    h('div.btn-row', {}, go), msg);
+    h('div.btn-row', {}, go), live);
 }
 
 // ── one user's keys ─────────────────────────────────────────────────────────
@@ -613,7 +613,7 @@ function userKeysCard(profile) {
   const go = h('button.btn', { type: 'button', id: 'keys-user-view', text: 'View keys' });
   const deks = h('button.btn', { type: 'button', id: 'keys-user-deks', text: 'List file keys (DEKs)' });
   const out = h('div', { id: 'keys-user-out' });
-  const msg = h('p.msg', { id: 'keys-user-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('keys-user-msg');
   admin.users().then((r) => {
     pick.replaceChildren(...r.users.filter((u) => u.role !== 'public').map((u) => h('option', { value: u.id, text: u.role === 'owner' ? `${u.username} (you)` : u.username })));
   }).catch((e) => showMsg(msg, friendlyError(e)));
@@ -649,5 +649,5 @@ function userKeysCard(profile) {
     h('h3.section-title', { id: 'keys-user-title', text: 'A user’s Drive keys' }),
     h('p.subtitle', { text: 'Read-only: a user’s salt and KEKs, or their files’ keys (DEKs) with each file’s name. Each view is in the admin audit (ids and counts only); the values stay masked until you choose Show and hide again after 60 seconds.' }),
     h('div.toolbar', {}, field('User', pick), field('Your password (or leave it empty to confirm with a passkey)', mine)),
-    h('div.btn-row', {}, go, deks), msg, out);
+    h('div.btn-row', {}, go, deks), live, out);
 }

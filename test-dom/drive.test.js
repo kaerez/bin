@@ -125,7 +125,7 @@ describe('startDrive states', () => {
     expect(mount.textContent).toMatch(/Drive is not enabled for your account/);
   });
 
-  it('a notice instead of the Drive (not ready yet, a user with no Drive while impersonating, disabled): the page’s status line announces its title (WCAG 4.1.3); the notice is content with a heading', async () => {
+  it('a notice instead of the Drive (disabled, the keys cannot be had): the page’s status line announces its title (WCAG 4.1.3); the notice is content with a heading', async () => {
     const withStatusLine = () => {
       const mount = mountPoint();
       const live = document.createElement('p');
@@ -135,10 +135,11 @@ describe('startDrive states', () => {
       mount.append(live); // as in /dashboard/drive/: in the page from the start
       return { mount, live };
     };
+    // (The release before also had "not ready yet" and "no Drive while impersonating": the key model v2 has neither.)
     const cases = [
-      ['not_ready', () => { S = fakeServer(); }, {}, '#drive-not-ready', 'Drive is not ready yet'],
-      ['impersonating', () => { S = fakeServer(); S.impersonatedBy = 'owner'; }, { impersonating: true }, '#drive-impersonating', 'The user hasn’t signed in since the Drive was enabled'],
       ['disabled', () => { S = fakeServer({ enabled: false }); }, {}, '#drive-disabled', 'Drive is not enabled for your account'],
+      ['unavailable', () => { S = fakeServer(); S.keysError = 'salt_missing'; }, {}, '#drive-unavailable', 'Your Drive cannot be opened right now'],
+      ['unavailable', () => { S = fakeServer(); S.keysError = 'keys_missing'; S.impersonatedBy = 'owner'; }, { impersonating: true }, '#drive-unavailable', 'Your Drive cannot be opened right now'],
     ];
     for (const [state, make, user, sel, said] of cases) {
       make();
@@ -153,16 +154,18 @@ describe('startDrive states', () => {
       const card = mount.querySelector(sel);
       expect(card.getAttribute('role')).toBeNull();
       expect(card.querySelector('h2').textContent).toBe(said);
-      expect(S.requests.some((x) => x.method !== 'GET')).toBe(false); // nothing is created
+      // Nothing is created: the one change is the request for the session's keys (a POST, refused here).
+      expect(S.requests.filter((x) => x.method !== 'GET').map((x) => x.path).filter((x) => x !== '/api/private/drive/keys')).toEqual([]);
     }
     // What a user reads calls the owner "the administrator", as the other notices do.
     {
       S = fakeServer();
+      S.keysError = 'keys_missing';
       globalThis.fetch = S.fetch;
       const mount = mountPoint();
       await startDrive(mount, deps());
-      const text = mount.querySelector('#drive-not-ready').textContent;
-      expect(text).toMatch(/The administrator must sign in once/);
+      const text = mount.querySelector('#drive-unavailable').textContent;
+      expect(text).toMatch(/The administrator restores them/);
       expect(text).not.toMatch(/\bowner\b/);
     }
   });
@@ -196,7 +199,7 @@ describe('startDrive states', () => {
     let mount = mountPoint();
     let r = await startDrive(mount, deps());
     expect(r).toEqual({ state: 'unavailable', reason: 'salt_missing' });
-    expect(mount.querySelector('#drive-unavailable [role="alert"]').textContent).toMatch(/user salt.*personal kit/);
+    expect(mount.querySelector('#drive-unavailable p.msg').textContent).toMatch(/user salt.*personal kit/);
     expect(mount.querySelector('#drive-unavailable a[href="/dashboard/account/#drive-kit"]')).not.toBeNull();
     S.keysError = 'keys_missing';
     mount = mountPoint();

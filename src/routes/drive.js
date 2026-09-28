@@ -470,36 +470,42 @@ async function restoreSalt(env, dir, uid, salt) {
  * key, a received item, a link key of the release before kept at rest
  * (`extra`: the owner's kit material, Directory saltRestore). →
  * 'ok' | 'wrong' | 'empty' (nothing is sealed under it) | 'has' (the account
- * has a salt: nothing to restore) | 'unknown' (no such account).
+ * has a salt: nothing to restore) | 'unknown' (no such account) |
+ * 'unreadable' (what it holds is sealed under sub-MEKs nobody has here).
  */
 export async function saltCheck(env, dir, uid, salt, { ownerId = null, extra = null } = {}) {
   const drive = driveStub(env, uid);
   const probe = async (p) => {
     const r = await dir.saltRestore(uid, salt, p, { ownerId, extra });
-    if (!r.ok) return r.error === 'exists' ? 'has' : r.error === 'invalid' ? 'unknown' : 'wrong';
+    if (!r.ok) return r.error === 'exists' ? 'has' : r.error === 'invalid' ? 'unknown' : 'unreadable';
     return r;
   };
   const keysOf = (r, k) => [r[k], r[`${k}Old`]].filter(Boolean).map(keyBytes);
-  const page = await drive.sealedPage(uid, { limit: 1 });
-  const item = page.items[0];
-  if (item) {
-    const r = await probe({ mek: item.mek });
+  // An item, else a link key, under a sub-MEK this server (or the owner's kit) has: the first of each sub-MEK in turn.
+  const page = await drive.sealedPage(uid, { limit: 50 });
+  let unreadable = false;
+  for (const mek of [...new Set(page.items.map((i) => i.mek))]) {
+    const item = page.items.find((i) => i.mek === mek);
+    const r = await probe({ mek });
+    if (r === 'unreadable') { unreadable = true; continue; }
     if (typeof r === 'string') return r;
     try { const got = await openItem(uid, keysOf(r, 'kek'), item); got.name.fill(0); if (got.dek) got.dek.fill(0); return 'ok'; } catch { return 'wrong'; }
   }
-  const link = page.links[0];
-  if (link) {
+  for (const link of page.links) {
     const r = await probe({ mek: link.mek, field: 'linkKey' });
+    if (r === 'unreadable') { unreadable = true; continue; }
     if (typeof r === 'string') return r;
     try {
-      const fk = { cur: { linkKey: keysOf(r, 'fieldKey')[0] }, old: keysOf(r, 'fieldKey')[1] ? { linkKey: keysOf(r, 'fieldKey')[1] } : null };
-      const sealed = JSON.parse(await fromRest(fk, uid, 'linkKey', link.id, link.priv));
+      const fks = keysOf(r, 'fieldKey');
+      const sealed = JSON.parse(await fromRest({ cur: { linkKey: fks[0] }, old: fks[1] ? { linkKey: fks[1] } : null }, uid, 'linkKey', link.id, link.priv));
       for (const kek of keysOf(r, 'kek')) {
         try { (await openLinkKey(kek, { userId: uid, mekId: link.mek, linkId: link.id }, sealed)).fill(0); return 'ok'; } catch { /* the next one */ }
       }
     } catch { /* does not open */ }
     return 'wrong';
   }
+  // Items sealed only under sub-MEKs nobody has here: the salt cannot be checked (nor used).
+  if (unreadable) return 'unreadable';
   // Only values the field layer seals: a received item, a link key of the release before.
   const rest = await drive.atRestPage(uid, { after: { kind: 'n', id: '' }, limit: 1 });
   const rec = rest.received.find((x) => isAtRest(x.name));

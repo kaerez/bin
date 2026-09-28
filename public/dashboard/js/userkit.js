@@ -9,7 +9,7 @@
 import { h, showMsg, friendlyError } from '../../js/common.js';
 import { toast } from '../../js/ui.js';
 import {
-  field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff,
+  field, secret, fileInput, datePicker, passphrasePair, saveText, takeFile, verifyResults, throttleWait, kitFailed, kitSucceeded, kitFailure, holdOff, liveMsg,
 } from './kit-ui.js';
 
 export const USER_KIT_ANCHOR = 'drive-kit';
@@ -23,7 +23,7 @@ function download({ profile, drive, confirm }) {
   const pp = passphrasePair('ukit', 'your Drive');
   const mine = secret('ukit-confirm', 'current-password');
   const go = h('button.btn', { type: 'button', id: 'ukit-download', text: 'Download personal kit' });
-  const msg = h('p.msg', { id: 'ukit-download-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('ukit-download-msg');
   go.addEventListener('click', async () => {
     if (pp.pass1.value !== pp.pass2.value) return showMsg(msg, 'The two passphrases differ.');
     go.disabled = true;
@@ -45,7 +45,7 @@ function download({ profile, drive, confirm }) {
   });
   return h('fieldset.range', { id: 'ukit-download-set' }, h('legend', { text: 'Download' }),
     h('p.type-hint', { text: 'Each download is a new file with the keys your Drive uses now. Your password (or a passkey) confirms it is you.' }),
-    pp.el, field('Your password (or leave it empty to confirm with a passkey)', mine), h('div.btn-row', {}, go), msg);
+    pp.el, field('Your password (or leave it empty to confirm with a passkey)', mine), h('div.btn-row', {}, go), live);
 }
 
 /** Verify: a read-only check of a kit file the user selects, and which key is in effect on a chosen day. */
@@ -56,7 +56,7 @@ function verify({ profile, drive }) {
   const day = datePicker('ukit-verify-date');
   const go = h('button.btn', { type: 'button', id: 'ukit-verify', text: 'Verify kit', disabled: true, 'aria-describedby': 'ukit-verify-hint' });
   const hint = h('p.type-hint', { id: 'ukit-verify-hint', text: 'Choose the kit file you saved. Nothing is changed and the file is not uploaded: the server compares check values and answers match or no match. The date (today by default; a future date too) shows which Drive key is in effect then and whether the kit holds it.' });
-  const msg = h('p.msg', { id: 'ukit-verify-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('ukit-verify-msg');
   const out = h('div', { id: 'ukit-verify-out' });
   const sync = () => { go.disabled = !file.files || !file.files.length; };
   file.addEventListener('change', sync);
@@ -81,7 +81,7 @@ function verify({ profile, drive }) {
     }
   });
   return h('fieldset.range', { id: 'ukit-verify-set' }, h('legend', { text: 'Verify' }),
-    field('Kit file to verify', file), field('Its passphrase', pass), field('The Drive key in effect on', day.el), hint, h('div.btn-row', {}, go), msg, out);
+    field('Kit file to verify', file), field('Its passphrase', pass), field('The Drive key in effect on', day.el), hint, h('div.btn-row', {}, go), live, out);
 }
 
 /** Restore: the user salt when the server has none, and files sealed under a key the server lost. */
@@ -92,7 +92,7 @@ function restore({ profile, drive, confirm }) {
   const mine = secret('ukit-restore-confirm', 'current-password');
   const go = h('button.btn', { type: 'button', id: 'ukit-restore', text: 'Restore from kit', disabled: true, 'aria-describedby': 'ukit-restore-hint' });
   const hint = h('p.type-hint', { id: 'ukit-restore-hint', text: 'Only what the server lost comes back: your salt if it has none, and files sealed under a key it no longer has (opened here with the kit and sealed again under the current key). Nothing that works is replaced.' });
-  const msg = h('p.msg', { id: 'ukit-restore-msg', role: 'status', hidden: true });
+  const { msg, live } = liveMsg('ukit-restore-msg');
   const sync = () => { go.disabled = !file.files || !file.files.length; };
   file.addEventListener('change', sync);
   go.addEventListener('click', async () => {
@@ -116,7 +116,7 @@ function restore({ profile, drive, confirm }) {
     }
   });
   return h('fieldset.range', { id: 'ukit-restore-set' }, h('legend', { text: 'Restore' }),
-    field('Kit file to restore from', file), field('Its passphrase', pass), field('Your password (or leave it empty to confirm with a passkey)', mine), hint, h('div.btn-row', {}, go), msg);
+    field('Kit file to restore from', file), field('Its passphrase', pass), field('Your password (or leave it empty to confirm with a passkey)', mine), hint, h('div.btn-row', {}, go), live);
 }
 
 /**

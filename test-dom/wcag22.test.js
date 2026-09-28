@@ -149,9 +149,12 @@ describe('watchSession — a warning before the session ends', () => {
     return { main, note, pw, toastEl };
   };
   it('when time is up the page locks: hidden and inert, the tab\'s Drive keys cleared, passwords emptied, the toast put away; the Drive is told', async () => {
-    const { saveSessionKey, loadSessionKey, saveImpersonationKey, loadImpersonationKey } = await import('../public/js/drivekeys.js');
-    saveSessionKey(new Uint8Array(32).fill(7), 'u1');
-    saveImpersonationKey(new Uint8Array(32).fill(8), 'u2');
+    // The Drive key model v2: the one key a tab may keep is the old Drive key of a Drive waiting for its
+    // upgrade (drivev1.js); a slot a release before kept (the KEKs, an impersonation key) goes too.
+    const { saveLegacyKey, loadLegacyKey } = await import('../public/js/drivev1.js');
+    const { writeSlot, readSlot } = await import('../public/js/drivekeys.js');
+    saveLegacyKey(new Uint8Array(32).fill(7), 'u1');
+    writeSlot('secbin_dk_imp', 'AAAA');
     const { main, note, pw, toastEl } = page();
     let told = 0;
     const onEnded = () => { told += 1; };
@@ -163,8 +166,8 @@ describe('watchSession — a warning before the session ends', () => {
     expect(told).toBe(1);
     expect(main.inert).toBe(true);
     expect(main.classList.contains('session-locked')).toBe(true);
-    expect(loadSessionKey('u1')).toBeNull();
-    expect(loadImpersonationKey('u2')).toBeNull();
+    expect(loadLegacyKey('u1')).toBeNull();
+    expect(readSlot('secbin_dk_imp')).toBeNull();
     expect(pw.value).toBe('');
     expect(note.value).toBe('my draft'); // what was typed is kept, hidden
     expect(toastEl.classList.contains('show')).toBe(false);
@@ -418,7 +421,9 @@ describe('credential fields on the static pages', () => {
   it('account passwords are for password managers: the right token, never "off"', () => {
     for (const p of ['dashboard/login/index.html', 'dashboard/setup/index.html', 'dashboard/account/index.html']) {
       const doc = page(p);
-      for (const f of doc.querySelectorAll('input[type="password"]:not(#setup-token)')) expect(f.getAttribute('autocomplete'), `${p} #${f.id}`).toMatch(/^(current|new)-password$/);
+      // Not the AUTHN token, nor the Drive keys the owner may enter at set-up (#setup-root, #setup-sub):
+      // keys, not the account's password, which a password manager must not offer or keep.
+      for (const f of doc.querySelectorAll('input[type="password"]:not(#setup-token):not(#setup-root):not(#setup-sub)')) expect(f.getAttribute('autocomplete'), `${p} #${f.id}`).toMatch(/^(current|new)-password$/);
     }
   });
   it('no code blocks paste anywhere in the browser modules', () => {

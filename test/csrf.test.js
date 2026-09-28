@@ -53,14 +53,15 @@ const da = (method, path) => ({ method, path, headers: intent });
 const DRIVE_ROUTES = [
   dj('POST', '/api/private/drive/keys'), // the session's KEKs: it may make the salt, and is audited for the owner acting as the user
   dj('POST', '/api/private/drive/kit'), dj('POST', '/api/private/drive/kit/verify'), dj('POST', '/api/private/drive/kit/restore'), dj('PUT', '/api/private/drive/kit/items'),
-  dj('PUT', '/api/private/drive/migrate'), dj('POST', '/api/private/drive/migrate/finish'),
+  dj('PUT', '/api/private/drive/migrate'), dj('POST', '/api/private/drive/migrate/finish'), dj('POST', '/api/private/drive/migrate/retire'),
   dj('POST', '/api/private/drive/folders'), dj('POST', '/api/private/drive/files'),
   { method: 'PUT', path: `/api/private/drive/files/${DRIVE_ID}/chunk/0`, raw: true },
   { method: 'POST', path: `/api/private/drive/files/${DRIVE_ID}/finalize`, headers: { ...intent, 'x-upload-token': 'A'.repeat(43) } },
   dj('PATCH', `/api/private/drive/nodes/${DRIVE_ID}`), da('DELETE', `/api/private/drive/nodes/${DRIVE_ID}`),
   dj('POST', '/api/private/drive/shares'),
   dj('PUT', `/api/private/admin/drive/migrate/${DRIVE_USER}`), dj('POST', `/api/private/admin/drive/migrate/${DRIVE_USER}/finish`),
-  dj('POST', `/api/private/admin/drive/migrate/${DRIVE_USER}/escrow`),
+  dj('POST', `/api/private/admin/drive/migrate/${DRIVE_USER}/escrow`), dj('POST', `/api/private/admin/drive/migrate/${DRIVE_USER}/retire`),
+  dj('DELETE', '/api/private/admin/drive/archive'),
 ];
 /**
  * Every Drive path the routers name, one concrete path each (the reads too:
@@ -73,13 +74,15 @@ const DRIVE_PATHS = [
   `/api/private/drive/files/${DRIVE_ID}/finalize`, `/api/private/drive/nodes/${DRIVE_ID}`, `/api/private/drive/nodes/${DRIVE_ID}/shares`,
   '/api/private/drive/shares', '/api/private/admin/drive/migration', `/api/private/admin/drive/migrate/${DRIVE_USER}`,
   `/api/private/admin/drive/migrate/${DRIVE_USER}/items`, `/api/private/admin/drive/migrate/${DRIVE_USER}/finish`,
-  `/api/private/admin/drive/migrate/${DRIVE_USER}/escrow`,
+  `/api/private/admin/drive/migrate/${DRIVE_USER}/escrow`, '/api/private/drive/migrate/retire', `/api/private/admin/drive/migrate/${DRIVE_USER}/retire`,
+  '/api/private/admin/drive/archive',
 ];
 /** The Drive paths that only read (GET): every other one takes a change the sweep sends. */
 const DRIVE_READS = [
   '/api/private/drive', `/api/private/drive/nodes/${DRIVE_ID}/shares`, '/api/private/drive/migrate/items',
   '/api/private/admin/drive/migration', `/api/private/admin/drive/migrate/${DRIVE_USER}/items`,
 ];
+// (The archive's GET is a read too, but its path also takes a DELETE: it stays in the sweep.)
 
 // ── the Drive keyring (src/routes/keys.js: Admin → Security → Keys) ──
 // The owner's key actions, with the method and shape the browser uses (public/js/api.js `keysApi`).
@@ -89,6 +92,7 @@ const KEYS_ROUTES = [
   dj('PATCH', `/api/private/admin/keys/subs/${KEYS_MEK}`), dj('DELETE', `/api/private/admin/keys/subs/${KEYS_MEK}`),
   dj('POST', `/api/private/admin/keys/subs/${KEYS_MEK}/current`), dj('POST', `/api/private/admin/keys/subs/${KEYS_MEK}/show`),
   dj('POST', '/api/private/admin/keys/root'), dj('POST', '/api/private/admin/keys/root/show'),
+  dj('POST', '/api/private/admin/keys/root/undo'), dj('POST', '/api/private/admin/keys/root/drop-old'),
   dj('POST', '/api/private/admin/keys/jobs'), dj('DELETE', '/api/private/admin/keys/jobs'), dj('POST', '/api/private/admin/keys/jobs/step'),
   dj('POST', '/api/private/admin/keys/kit'), dj('POST', '/api/private/admin/keys/verify'), dj('POST', '/api/private/admin/keys/restore'),
   dj('POST', '/api/private/admin/keys/export'), dj('POST', '/api/private/admin/keys/import'),
@@ -97,7 +101,7 @@ const KEYS_ROUTES = [
 const KEYS_PATHS = [
   '/api/private/admin/keys', '/api/private/admin/keys/usage', '/api/private/admin/keys/candidate', '/api/private/admin/keys/subs',
   `/api/private/admin/keys/subs/${KEYS_MEK}`, `/api/private/admin/keys/subs/${KEYS_MEK}/current`, `/api/private/admin/keys/subs/${KEYS_MEK}/show`,
-  '/api/private/admin/keys/root', '/api/private/admin/keys/root/show', '/api/private/admin/keys/jobs', '/api/private/admin/keys/jobs/step',
+  '/api/private/admin/keys/root', '/api/private/admin/keys/root/show', '/api/private/admin/keys/root/undo', '/api/private/admin/keys/root/drop-old', '/api/private/admin/keys/jobs', '/api/private/admin/keys/jobs/step',
   '/api/private/admin/keys/kit', '/api/private/admin/keys/verify', '/api/private/admin/keys/restore', '/api/private/admin/keys/export',
   '/api/private/admin/keys/import', `/api/private/admin/keys/users/${DRIVE_USER}/view`,
 ];

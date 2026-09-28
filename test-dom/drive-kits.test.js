@@ -267,6 +267,35 @@ describe('Admin → Security → Keys', () => {
   }, 120000);
 });
 
+describe('WCAG 2.2 (docs/WCAG22.md): the kit forms', () => {
+  it('each form\'s message sits in a status line that is in the page before it (4.1.3); the passphrase warning describes the field while it shows (1.3.1)', async () => {
+    S = fakeServer();
+    globalThis.fetch = S.fetch;
+    await S.ready;
+    const { personalKitCard } = await import('../public/dashboard/js/userkit.js');
+    mount(personalKitCard({ profile: { user: { ...S.user, username: 'alice' } }, drive, confirm: async () => ({ current: 'proof:pw' }) }));
+    for (const id of ['ukit-download-msg', 'ukit-verify-msg', 'ukit-restore-msg']) {
+      const m = document.getElementById(id);
+      expect(m.hasAttribute('role'), id).toBe(false);
+      expect(m.parentElement.getAttribute('role'), id).toBe('status');
+      expect(m.parentElement.hidden, id).toBe(false);
+    }
+    const pass = $('#ukit-pass');
+    expect(pass.getAttribute('aria-describedby')).toBe('ukit-pass-warn'); // empty: the warning shows
+    pass.value = 'a long enough kit passphrase';
+    pass.dispatchEvent(new Event('input'));
+    expect($('#ukit-pass-warn').hidden).toBe(true);
+    expect(pass.hasAttribute('aria-describedby')).toBe(false);
+    // A message said after the page loaded goes into the same, already present, status line.
+    const live = $('#ukit-download-msg').parentElement;
+    $('#ukit-pass2').value = 'something else';
+    $('#ukit-download').click();
+    await until(() => !$('#ukit-download-msg').hidden);
+    expect($('#ukit-download-msg').textContent).toMatch(/passphrases differ/);
+    expect($('#ukit-download-msg').parentElement).toBe(live);
+  });
+});
+
 describe('Admin → Import / export → Drive keys', () => {
   it('chooses parts and users (search, select all, id lists), shows the file masked, seals it; an import is previewed, then applied with the step-up', async () => {
     S = fakeServer({ role: 'owner' });
@@ -319,15 +348,19 @@ describe('Admin → Import / export → Drive keys', () => {
     const doc = await openExport(text, 'export pass');
     expect(doc).toMatchObject({ format: 'secbin-keys-export/1', root: { key: expect.any(String) } });
     expect(text).not.toContain(doc.root.key);
-    // Import: decrypt here, preview (no step-up), then import (the step-up).
+    // Import: decrypt here, preview (the step-up too: audit A F7), then import (the step-up again).
     pick($('#ki-file'), [new File([text], 'keys.json')]);
     $('#ki-pass').value = 'export pass';
     $('#ki-open').click();
     await until(() => $('#ki-preview'), 60000);
     expect($('#ki-take-root').checked).toBe(true);
     $('#ki-preview').click();
+    await until(() => /password/.test($('#ki-plan-msg').textContent) && !$('#ki-preview').disabled);
+    expect(S.importBodies).toBeUndefined(); // nothing sent without it
+    $('#ki-confirm').value = 'pw';
+    $('#ki-preview').click();
     await until(() => $('#ki-plan li'));
-    expect(S.importBodies[0]).toMatchObject({ dryRun: true, take: { root: true } });
+    expect(S.importBodies[0]).toMatchObject({ dryRun: true, take: { root: true }, current: 'proof:pw' });
     expect($('#ki-plan').textContent).toMatch(/Preview/);
     $('#ki-confirm').value = 'pw';
     $('#ki-apply').click();
