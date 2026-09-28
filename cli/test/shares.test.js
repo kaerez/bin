@@ -35,6 +35,19 @@ describe('secbin list', () => {
     expect(out.rows.map((r) => r.id).sort()).toEqual(made.map((m) => m.id).sort());
   });
 
+  it('says "none" for a Receive link with no expiry (expires: null)', async () => {
+    const server = makeServer();
+    const made = await create(server, 'x');
+    // As the server lists a Receive link with no expiry.
+    for (const r of server.notes.values()) r.noExpiry = true;
+    const a = makeIo({ server });
+    expect(await run(['list'], a.io)).toBe(0);
+    expect(a.text.out()).toMatch(/expires none/);
+    const s = makeIo({ server });
+    expect(await run(['show', made.id], s.io)).toBe(0);
+    expect(s.text.out()).toMatch(/^expires {2}none$/m);
+  });
+
   it('strips control characters from server strings', async () => {
     const server = makeServer();
     await create(server, 'x', ['--label', 'plain']);

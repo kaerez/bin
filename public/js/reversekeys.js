@@ -1,4 +1,4 @@
-// reversekeys.js — the keys of reverse shares ("Receive files", docs/REVERSE.md
+// reversekeys.js — the keys of reverse shares ("Receive", docs/REVERSE.md
 // §3), shared by the anonymous uploader's page and the user's Drive client.
 //
 // Each reverse share has its own ECDH P-256 key pair, made in the user's
@@ -12,7 +12,8 @@
 // unseal (the KEK is server-derived: SECURITY.md, "Drive keys"). A copy of R2
 // or of the Drive object alone cannot. The optional password only gates the uploader:
 // the server keeps the SHA-256 of an Argon2id-derived proof bound to the
-// public key, which it never sees.
+// public key, which is never sent (but which the server can rebuild from the
+// link's private key: it can test guesses, a copy of its data alone cannot).
 
 import { randomBytes, utf8, fromUtf8, b64urlFromBytes, bytesFromB64url } from './bytes.js';
 import { hkdf32, proofHash, DecryptError } from './crypto.js';

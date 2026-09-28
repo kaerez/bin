@@ -1,12 +1,16 @@
 // shares.js — "My shares": list what I sent (label, type, lifetime, views),
-// raise views / extend expiry within my limits, rename labels, revoke now.
-// A share the administrator has locked is shown frozen: no control changes it.
+// raise views / extend expiry within my limits, rename labels, revoke now;
+// a "Receive" link (reverse share) has an Edit instead (reverse-edit.js: its
+// expiry or none, views, limits, CAPTCHA, password and note, as the role
+// allows). A share the administrator has locked is shown frozen: no control
+// changes it.
 
-import { listShares, updateShare, revokeShare, shareOpens } from '../../js/api.js';
+import { listShares, updateShare, revokeShare, shareOpens, drive as driveApi } from '../../js/api.js';
 import { opensButton } from './receipts.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, viewsText } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatCoarse, friendlyError, DURATION_UNITS, unitSeconds, unencryptedHint, KIND_NAMES, viewsText, expiresText } from '../../js/common.js';
 import { toast, keepFocus } from '../../js/ui.js';
 import { ready } from './nav.js';
+import { reverseEditForm, saveReverseEdit } from './reverse-edit.js';
 
 const $ = (s) => document.querySelector(s);
 let profile;
@@ -18,6 +22,7 @@ let rows = [];
   let t = null;
   $('#shares-q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(reload, 250); });
   $('#shares-status').addEventListener('change', reload);
+  $('#shares-expiry').addEventListener('change', reload);
   $('#shares-more').onclick = () => load(false);
   reload();
 })();
@@ -32,7 +37,7 @@ function reload(focusKey = null) {
 async function load(fresh, focusKey = null) {
   const msg = $('#shares-msg');
   try {
-    const qs = new URLSearchParams({ q: $('#shares-q').value.trim(), status: $('#shares-status').value, offset: String(offset) });
+    const qs = new URLSearchParams({ q: $('#shares-q').value.trim(), status: $('#shares-status').value, expiry: $('#shares-expiry').value, offset: String(offset) });
     const r = await listShares(`?${qs}`);
     rows = fresh ? r.rows : rows.concat(r.rows);
     offset = rows.length;
@@ -54,7 +59,7 @@ function render(focusKey = null) {
   for (const [i, r] of rows.entries()) {
     const active = r.status === 'active';
     const views = viewsText(r);
-    const expires = r.expires ? (active && r.expires > now() ? `in ${formatCoarse(r.expires - now())}` : formatDate(r.expires)) : '—';
+    const expires = expiresText(r, now());
     const locked = !!r.locked;
     const labelIn = h('input.input.label-in', { value: r.label || '', maxlength: '100', 'aria-label': 'Label', placeholder: '(no label)', disabled: locked, dataset: { focusKey: `share:${r.id}:label` } });
     // Shown under the field while it is being edited (see .label-cell in styles.css);
@@ -67,7 +72,10 @@ function render(focusKey = null) {
     if (active && locked) {
       actions.appendChild(h('span.mono.muted', { text: 'Locked by the administrator — it cannot be changed or revoked.' }));
     } else if (active) {
-      actions.appendChild(h('button.btn', { type: 'button', text: 'Extend', dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openExtend(r, tr) } }));
+      // A Receive link: Edit (everything the role lets the user change after making it; reverseEdit off: only the label).
+      if (r.kind === 'reverse') {
+        if (profile.limits?.reverseEdit !== false) actions.appendChild(h('button.btn', { type: 'button', text: 'Edit', 'aria-label': `Edit ${r.label || 'this upload link'}`, dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openReverseEdit(r, tr) } }));
+      } else actions.appendChild(h('button.btn', { type: 'button', text: 'Extend', dataset: { focusKey: `share:${r.id}:extend` }, on: { click: () => openExtend(r, tr) } }));
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke', dataset: { focusKey: `share:${r.id}:revoke` } });
       armConfirm(rv, 'Revoke now — irreversible', async () => {
         rv.disabled = true;
@@ -92,6 +100,79 @@ function render(focusKey = null) {
     body.appendChild(tr);
   }
   refocus();
+}
+
+let client = null;
+/** The Drive client (for a note or a password: sealed with the link's key), opened once, on first need. */
+async function driveClient() {
+  if (!client) {
+    const m = await import('../../js/driveclient.js');
+    client = await m.openDrive({ user: { id: profile.user.id, role: profile.user.role, impersonating: !!profile.impersonatedBy } });
+  }
+  return client;
+}
+
+/** A Receive link's Edit row (reverse-edit.js), under its row; again closes it. */
+async function openReverseEdit(r, tr) {
+  const existing = tr.nextElementSibling;
+  if (existing && existing.classList.contains('extend-row')) { existing.remove(); return; }
+  const status = h('p.msg', { role: 'status', text: 'Loading this link’s options…' });
+  const cell = h('td.cell-full', { colspan: '8' }, h('div.extend-box', {}, status));
+  const row = h('tr.extend-row', { dataset: { focusKey: `share:${r.id}:extend` } }, cell);
+  tr.after(row);
+  let cur;
+  try {
+    cur = ((await driveApi.reverse()).reverse || []).find((x) => x.id === r.id);
+    if (!cur) throw new Error('This link is no longer in your Drive.');
+  } catch (e) {
+    status.textContent = `Its options could not be loaded: ${friendlyError(e)}`;
+    status.classList.add('error');
+    return;
+  }
+  const form = reverseEditForm(cur, profile);
+  const msg = h('p.msg.error', { role: 'alert', hidden: true });
+  const save = h('button.btn', { type: 'button', text: 'Save changes' });
+  save.onclick = async () => {
+    msg.hidden = true;
+    const o = form.read();
+    if (o.error) {
+      showMsg(msg, o.error);
+      const f = o.field && form.field(o.field);
+      if (f) f.focus();
+      return;
+    }
+    save.disabled = true;
+    // A change that weakens the link: the account password or a passkey first.
+    let step;
+    try {
+      step = await form.stepUp(o.patch);
+    } catch (e) {
+      save.disabled = false;
+      showMsg(msg, e && e.code ? friendlyError(e) : (e && e.message) || 'Enter your account password.');
+      form.field('confirm').focus();
+      return;
+    }
+    try {
+      await saveReverseEdit(r.id, { ...o.patch, ...step }, { updateShare, driveClient });
+      form.clearSecrets();
+      toast('Upload link updated.');
+      reload(`share:${r.id}:extend`);
+    } catch (e) {
+      save.disabled = false;
+      const confirmFailed = e && ['wrong_password', 'reauth_failed', 'reauth_required', 'invalid_credential'].includes(e.code);
+      const text = confirmFailed ? 'That did not confirm it is you — enter your account password again.' : friendlyError(e);
+      showMsg(msg, text);
+      toast(text, { error: true });
+      if (confirmFailed) form.field('confirm').focus();
+    }
+  };
+  const cancel = h('button.btn', { type: 'button', text: 'Cancel', on: { click: () => { row.remove(); tr.querySelector('[data-focus-key$=":extend"]')?.focus(); } } });
+  cell.firstChild.replaceChildren(
+    h('h2.field-label', { text: `Edit ${r.label ? `“${r.label}”` : 'this upload link'}` }),
+    form.el,
+    h('p.mono.muted', { text: 'The password and the note are encrypted in this browser with the link’s key: they are not sent in plain text, but like uploads to this link they are not end-to-end (the server holds the keys that open the link’s key). Files already received stay in your Drive.' }),
+    h('div.btn-row', {}, save, cancel), msg);
+  form.focus();
 }
 
 function openExtend(r, tr) {

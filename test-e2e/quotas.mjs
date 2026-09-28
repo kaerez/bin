@@ -6,7 +6,7 @@
 //     the Public role offering only the outgoing kinds it can use; axe
 //     (WCAG 2.2 A/AA) on both editors;
 //   • the user, at each quota, through the UI: the composer refusing a second
-//     note, the Drive refusing a second upload, the Receive files dialog
+//     note, the Drive refusing a second upload, the Receive dialog
 //     refusing a second link, and the anonymous uploader's page refusing a
 //     second upload session with the neutral message (nothing of the quota);
 //     axe on each refusal; the Account page listing the quotas;
@@ -189,7 +189,7 @@ try {
   await dialogButton(up, 'Create link').click();
   const refusedLink = await up.waitForFunction(() => [...document.querySelectorAll('.drive-dialog [role="dialog"] .modal-msg')].some((m) => !m.hidden && m.textContent.includes('Quota reached: 1 new Receive links per 1d.')), null, { timeout: 60000 }).then(() => true, () => false);
   check('Receive: the second link is refused — "Quota reached: 1 new Receive links per 1d."', refusedLink, await up.locator('.drive-dialog [role="dialog"] .modal-msg').allTextContents().then((t) => t.join(' | ')));
-  await audit(up, 'the Receive files dialog, refused at the links quota');
+  await audit(up, 'the Receive dialog, refused at the links quota');
   await up.keyboard.press('Escape');
 
   const sctx = await b.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });

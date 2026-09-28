@@ -3,7 +3,7 @@
 // of the anonymous API — the note shown as text, the limits, the password
 // field, the file list, drag and drop of files and folders, progress,
 // errors, and a bad or ended link (the CAPTCHA of a link that has one is on
-// its check page: test-dom/captcha.test.js) — and the Drive's "Receive files…" action (create a link with
+// its check page: test-dom/captcha.test.js) — and the Drive's "Receive…" action (create a link with
 // its options, the link with copy, the folder's links with revoke) plus the
 // received files being taken in when the Drive opens (sealed under the
 // user's KEK), and the owner acting as the user.
@@ -287,7 +287,7 @@ describe('the uploader page', () => {
   });
 });
 
-// ── the Drive: Receive files… and received files ─────────────────────────────
+// ── the Drive: Receive… and received files ─────────────────────────────
 
 let S;
 let ids;
@@ -335,7 +335,7 @@ async function existingReverse(folder = 'root') {
   return { id, pub };
 }
 
-describe('Drive: Receive files…', () => {
+describe('Drive: Receive…', () => {
   it('is shown only when the role allows it', async () => {
     await server();
     let r = await startDrive(mountPoint(), deps({ ...PROFILE, caps: { driveEnabled: true } }));
@@ -355,7 +355,7 @@ describe('Drive: Receive files…', () => {
     tr.querySelector('input[type="checkbox"]').click();
     $('#drive-receive').click();
     await until(() => dialog());
-    expect(dialog().querySelector('.modal-title').textContent).toBe('Receive files into “Documents”');
+    expect(dialog().querySelector('.modal-title').textContent).toBe('Receive into “Documents”');
     await until(() => $('#drive-rev-none'));
     $('#drive-rev-label').value = 'Contracts';
     $('#drive-rev-note').value = 'Signed copies, please.';
@@ -428,7 +428,7 @@ describe('Drive: Receive files…', () => {
     const tr = [...document.querySelectorAll('#drive-rows tr')].find((x) => x.children[1].textContent.trim() === 'Documents');
     button(tr, 'Shares').click();
     await until(() => dialog()?.querySelector('#drive-shares-empty'));
-    expect(dialog().querySelector('#drive-shares-empty').textContent).toMatch(/Share… or Receive files…/);
+    expect(dialog().querySelector('#drive-shares-empty').textContent).toMatch(/Share… or Receive…/);
   });
 
   it('the owner acting as the user is not asked to confirm (the server asks for nothing then)', async () => {
@@ -449,7 +449,9 @@ describe('Drive: Receive files…', () => {
   it('validates the options (reverseOptions)', () => {
     expect(reverseOptions({ n: '2', unit: 'h', maxFiles: '', maxMb: '', fileMb: '', typeMode: 'any' }, {})).toMatchObject({ expire: '2h', maxFiles: null, maxBytes: null, maxFileBytes: null, types: null });
     expect(reverseOptions({ n: '0', unit: 'h' }, {}).field).toBe('expire');
-    expect(reverseOptions({ n: '2', unit: 'h' }, { maxExpireSec: 3600 }).field).toBe('expire');
+    // A Receive link's expiry has its own role option (reverseMaxExpireSec), not the regular maxExpireSec.
+    expect(reverseOptions({ n: '2', unit: 'h' }, { reverseMaxExpireSec: 3600 }).field).toBe('expire');
+    expect(reverseOptions({ n: '2', unit: 'h' }, { maxExpireSec: 3600 }).error).toBeUndefined();
     expect(reverseOptions({ n: '1', unit: 'd', maxFiles: '0' }, {}).field).toBe('files');
     expect(reverseOptions({ n: '1', unit: 'd', maxMb: 'lots' }, {}).field).toBe('bytes');
     expect(reverseOptions({ n: '1', unit: 'd', maxMb: '2' }, { reverseMaxBytes: 1024 * 1024 }).field).toBe('bytes');
@@ -700,7 +702,7 @@ describe('WCAG 2.2: reverse shares', () => {
     expect(document.title).toBe('This link no longer accepts files · secbin');
   });
 
-  it('Receive files…: the file types list has a visible label, "Copy link" keeps its visible words in its name', async () => {
+  it('Receive…: the file types list has a visible label, "Copy link" keeps its visible words in its name', async () => {
     await server();
     await existingReverse('root');
     const r = await startDrive(mountPoint(), deps());

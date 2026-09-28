@@ -21,6 +21,8 @@ const safe = (v, n = 100) => String(v ?? '').replace(/[\u0000-\u001f\u007f-\u009
 // JSON escapes C0 controls but not DEL / C1 (U+009B is an 8-bit CSI): escape those too.
 const jsonLine = (v) => JSON.stringify(v).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`) + '\n';
 const when = (t) => (Number.isSafeInteger(t) && t > 0 ? new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ') : '-');
+/** A share's expiry: a Receive link (reverse share) may have none (`expires: null`). */
+const expiry = (t) => (t === null ? 'none' : when(t));
 
 function parse(args, options) {
   refuseInlineApiKey(args);
@@ -56,7 +58,7 @@ export async function cmdList(args, io) {
   for (const r of rows) {
     const views = r.left !== null && r.left !== undefined ? `${safe(r.left, 8)}/${safe(r.views_total, 8)} left` : r.views_total === null ? 'unlimited' : '-';
     io.stdout([safe(r.id, 30), safe(r.kind, 8).padEnd(6), safe(r.status, 10).padEnd(9), views.padEnd(12), `${safe(r.opens ?? 0, 8)} opens`.padEnd(10),
-      `expires ${when(r.expires)}`, r.locked ? 'locked' : '', safe(r.label)].filter(Boolean).join('  ') + '\n');
+      `expires ${expiry(r.expires)}`, r.locked ? 'locked' : '', safe(r.label)].filter(Boolean).join('  ') + '\n');
   }
   io.stderr(`${rows.length} of ${total} share${total === 1 ? '' : 's'}\n`);
   return 0;
@@ -92,7 +94,7 @@ export async function cmdShow(args, io) {
   }
   const views = r.views_total === null ? 'unlimited' : `${safe(r.left ?? '-', 8)} of ${safe(r.views_total, 8)} left`;
   io.stdout([`id       ${safe(r.id, 30)}`, `kind     ${safe(r.kind, 8)}`, `status   ${safe(r.status, 10)}${r.locked ? ' (locked by the administrator)' : ''}`,
-    `views    ${views}`, `opens    ${safe(r.opens ?? 0, 8)}`, `created  ${when(r.created)}`, `expires  ${when(r.expires)}`, `label    ${safe(r.label)}`].join('\n') + '\n');
+    `views    ${views}`, `opens    ${safe(r.opens ?? 0, 8)}`, `created  ${when(r.created)}`, `expires  ${expiry(r.expires)}`, `label    ${safe(r.label)}`].join('\n') + '\n');
   return 0;
 }
 

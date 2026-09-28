@@ -16,8 +16,8 @@ let oc;
 beforeAll(async () => { oc = await owner(); });
 
 describe('migration 16 from the Directory the release before left', () => {
-  it('is the last migration, after #65\'s CAPTCHA (15)', () => {
-    expect(SCHEMA_VERSION).toBe(16);
+  it('comes after #65\'s CAPTCHA (15); 17 (reverse-share options, reverse-parity.test.js) follows it', () => {
+    expect(SCHEMA_VERSION).toBe(17);
   });
 
   it('every account gets a salt; the Drives that may hold anything of the release before wait; every Drive opens', async () => {

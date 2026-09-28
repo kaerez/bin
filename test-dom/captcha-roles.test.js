@@ -75,7 +75,7 @@ async function editRole(name) {
   await until(() => detail() && detail().querySelector('h2'));
 }
 const SHARES = 'CAPTCHA on shares (notes, file shares, Drive shares)';
-const REVERSE = 'CAPTCHA on reverse shares (Receive files)';
+const REVERSE = 'CAPTCHA on reverse shares (Receive)';
 
 beforeAll(async () => {
   globalThis.fetch = vi.fn(adminFetch);
@@ -113,8 +113,8 @@ describe('Admin → Roles: the CAPTCHA options', () => {
     sel('Drive allowed').value = 'true';
     sel('Drive allowed').dispatchEvent(new Event('change', { bubbles: true }));
     expect(rev.closest('.limit-row').hidden).toBe(true); // reverse shares still off
-    sel('Receive files (reverse shares: anyone with the link uploads to a Drive folder)').value = 'true';
-    sel('Receive files (reverse shares: anyone with the link uploads to a Drive folder)').dispatchEvent(new Event('change', { bubbles: true }));
+    sel('Receive (reverse shares: anyone with the link uploads to a Drive folder)').value = 'true';
+    sel('Receive (reverse shares: anyone with the link uploads to a Drive folder)').dispatchEvent(new Event('change', { bubbles: true }));
     expect(rev.closest('.limit-row').hidden).toBe(false);
     const rr = radios(rev);
     expect(rr.map(labelOf)).toEqual(['Allow CAPTCHA (user chooses per share)', 'Require CAPTCHA for all reverse shares', 'Disable CAPTCHA']);

@@ -228,14 +228,17 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       if (body.mek !== S.current()?.id) return fail(409, 'mek_not_current');
       try { await openLinkKey(await S.kekOf(body.mek), { userId: S.user.id, mekId: body.mek, linkId: body.id }, body.priv); } catch { return fail(400, 'bad_seal'); }
       const t = Math.floor(Date.now() / 1000);
-      S.reverse.push({ ...body, status: 'active', files: 0, bytes: 0, created: t, expires: t + 7 * 86400 });
-      return ok({ id: body.id, expires: t + 7 * 86400 }, 201);
+      // "never": no expiry (the API says null); views as sent (none: unlimited), none used yet.
+      const expires = body.expire === 'never' ? null : t + 7 * 86400;
+      S.reverse.push({ ...body, status: 'active', files: 0, bytes: 0, created: t, expires, views: body.views ?? null, used: 0 });
+      return ok({ id: body.id, expires, views: body.views ?? null }, 201);
     }
     if (p === '/api/private/drive/reverse' && method === 'GET') {
       const folder = u.searchParams.get('folder');
       const rows = S.reverse.filter((r) => !folder || r.folder === folder).map((r) => ({
         id: r.id, folder: r.folder, label: r.label || '', created: r.created, expires: r.expires, status: r.status, locked: false, priv: r.priv, mek: r.mek ?? null,
         password: !!r.password, note: !!r.note, captcha: r.captcha === true, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
+        views: r.views ?? null, used: r.used ?? 0, left: r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)),
       }));
       return ok({ reverse: rows });
     }
@@ -272,6 +275,14 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       Object.assign(n, { parent: body.parent, name: body.name, meta: body.meta, dek: body.dek, ks: body.ks, mek: body.mek, fk: undefined, rs: null, rfail: null });
       S.accepted = (S.accepted || []).concat([{ id: n.id, body }]);
       return ok({ ok: true });
+    }
+    if ((m = p.match(/^\/api\/private\/shares\/([^/]+)$/)) && method === 'PATCH') {
+      // A reverse share's change (src/routes/reverse.js changeReverse): recorded as sent, applied to the row.
+      const rv = S.reverse.find((x) => x.id === m[1]);
+      if (!rv) return fail(404, 'not_found');
+      S.patches = (S.patches || []).concat([{ id: rv.id, body }]);
+      for (const k of ['label', 'expires', 'views', 'maxFiles', 'maxBytes', 'maxFileBytes', 'types', 'captcha', 'password', 'note']) if (body[k] !== undefined) rv[k] = body[k];
+      return ok({ ok: true, expires: rv.expires, views: rv.views ?? null });
     }
     if ((m = p.match(/^\/api\/private\/shares\/([^/]+)\/revoke$/)) && method === 'POST') {
       const rv = S.reverse.find((x) => x.id === m[1]);
