@@ -137,7 +137,7 @@ if (passkeysSupported()) {
 
 // ── second step: the password was right; now a passkey or recovery code ───
 let pending = null;
-let pendingPassword = ''; // kept (in memory only) to unlock the Drive once signed in
+let pendingPassword = ''; // kept (in memory only) to open the old Drive key once signed in (a Drive waiting for its upgrade)
 function startSecond(sf, password) {
   pending = sf;
   pendingPassword = password;

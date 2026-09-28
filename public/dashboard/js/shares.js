@@ -85,7 +85,7 @@ function render(focusKey = null) {
       h('td', { dataset: { label: 'Opened' } }),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${active ? 'ok' : 'bad'}`, { text: r.status }),
         locked ? h('span.pill.warn', { text: 'locked', title: 'Locked by the administrator' }) : null,
-        r.paused ? h('span.pill.warn', { text: 'paused', title: 'Not accepting files until your old Drive is restored from its recovery kit' }) : null),
+        r.paused ? h('span.pill.warn', { text: 'paused', title: 'Paused when the Drive was started over in the previous release: it does not accept files' }) : null),
       h('td.cell-actions', {}, actions));
     tr.querySelector('td[data-label="Opened"]').appendChild(opensButton(r, () => shareOpens(r.id), 8, tr));
     body.appendChild(tr);

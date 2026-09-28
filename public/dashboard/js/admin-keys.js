@@ -481,7 +481,7 @@ function upgradeCard(profile) {
       draw();
     });
     card.replaceChildren(h('h3.section-title', { id: 'keys-upgrade-title', text: 'Drive upgrade' }),
-      h('p.subtitle', { text: 'Drives made before this release use the old Drive keys until they are upgraded: each item is sealed again under its user’s new key and checked, then the old keys (and, once every Drive is upgraded, your escrow keys) are removed. A user’s own browser does it at their next sign-in; you can do it here, through your escrow key, for users who have not signed in. Your own old Drive key must be open in this tab: it is when you signed in with your password.' }),
+      h('p.subtitle', { text: 'Drives made before this release use the old Drive keys until they are upgraded: each item is sealed again under its user’s new key and checked, then the old keys (and, once every Drive is upgraded, your escrow keys) are removed. A user’s own Drive page does it after their next sign-in; you can do it here, through your escrow key of that release, for users who have not signed in. Your own old Drive key must be open in this tab: it is when you signed in with your password.' }),
       h('div.table-wrap', {}, h('table.table', { id: 'keys-upgrade-table' }, h('caption.sr-only', { text: 'Drives and their upgrade' }),
         h('thead', {}, h('tr', {}, ...['User', 'State', 'Items left'].map((t) => h('th', { scope: 'col', text: t })), h('th', { scope: 'col' }, h('span.sr-only', { text: 'Actions' })))),
         tbody)),
