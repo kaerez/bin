@@ -15,7 +15,7 @@ import { r2Key } from '../fileshare-do.js';
 import { verifierFrom } from './auth.js';
 import { handleAdmin } from './admin.js';
 import { binding } from '../lib/config.js';
-import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { requireTurnstile, turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { creationOptions, requestOptions } from '../lib/webauthn.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { handleDrive, syncCredentialWraps, drivePasswordChanged } from './drive.js';
@@ -105,7 +105,8 @@ export async function handlePrivate(request, env, url, ctx) {
   if (p === '/api/private/me') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const me = await dir.me(a.user.id, { impersonating: !!a.actor });
-    return withAuth(a, json({ ...me, impersonatedBy: a.actor ? a.actor.username : null }));
+    // captchaActive: the server has Turnstile keys, so a share's CAPTCHA is enforced (else it waits for them).
+    return withAuth(a, json({ ...me, impersonatedBy: a.actor ? a.actor.username : null, captchaActive: !!(await turnstileKeys(env)) }));
   }
 
   if (p === '/api/private/me/password') {
@@ -287,7 +288,7 @@ export async function createNote(request, env, a) {
   const dir = directory(env);
   const fmt = clean.adata.fmt;
   const deletable = clean.meta.deletable === true;
-  const auth = await dir.authorizeCreate(a.user.id, a.channel, { kind: 'text', fmt, deletable, views, expireSec: ttl, subjects: a.subjects });
+  const auth = await dir.authorizeCreate(a.user.id, a.channel, { kind: 'text', fmt, deletable, views, expireSec: ttl, subjects: a.subjects, captcha: body.captcha });
   if (!auth.ok) return fromDir(auth);
 
   const created = now();
@@ -297,7 +298,8 @@ export async function createNote(request, env, a) {
   if (deletable) meta.deletable = true;
   const paste = { v: clean.v, ct: clean.ct, wk: clean.wk, adata: clean.adata, meta };
   const deleteToken = genDeleteToken();
-  const record = { paste, dth: await hashToken(deleteToken), acc: clean.acc };
+  // `hc`: the CAPTCHA (the role's decision, auth.captcha): nothing is served without a grant.
+  const record = { paste, dth: await hashToken(deleteToken), acc: clean.acc, ...(auth.captcha ? { hc: true } : {}) };
 
   if (bar && JSON.stringify({ ...record, exp: 0, views, left: views }).length > MAX_BURN_RECORD) {
     await dir.refund(a.user.id, auth.refund);
@@ -320,8 +322,8 @@ export async function createNote(request, env, a) {
     throw e;
   }
   const kind = fmt === 'url' || fmt === 'secret' ? fmt : 'text';
-  indexed(await dir.recordShare({ id, uid: a.user.id, kind, label: a.noLabel ? '' : body.label, created, expires, views, lh: clean.acc.lh }, actorId(a)));
-  return json({ id, deletetoken: deleteToken, expires }, 201);
+  indexed(await dir.recordShare({ id, uid: a.user.id, kind, label: a.noLabel ? '' : body.label, created, expires, views, lh: clean.acc.lh, captcha: auth.captcha === true }, actorId(a)));
+  return json({ id, deletetoken: deleteToken, expires, captcha: auth.captcha === true }, 201);
 }
 
 /**
@@ -349,7 +351,7 @@ export async function initFile(request, env, a) {
   const auth = await dir.authorizeCreate(a.user.id, a.channel, {
     kind: 'files', views, expireSec: ttl, bytes: padded,
     files: body.files, maxFile: body.maxFile, types: body.types, depth: body.depth, deletable: body.deletable === true,
-    subjects: a.subjects,
+    subjects: a.subjects, captcha: body.captcha,
   });
   if (!auth.ok) return fromDir(auth);
   const uploadToken = genToken();
@@ -361,6 +363,7 @@ export async function initFile(request, env, a) {
       const ok = await fileStub(env, id).init({
         id, uid: a.user.id, uth: await hashToken(uploadToken), dth: await hashToken(deleteToken),
         padded, views, expire, ttl, pendingSec: auth.pendingSec ?? settings['files.pendingSec'], deletable: body.deletable === true,
+        hc: auth.captcha === true,
       });
       if (ok) break;
       if (attempt >= 4) throw new Error('id allocation failed');
@@ -369,7 +372,7 @@ export async function initFile(request, env, a) {
     await dir.refund(a.user.id, auth.refund);
     throw e;
   }
-  return json({ id, uploadtoken: uploadToken, deletetoken: deleteToken, chunks: Math.ceil(padded / (8 * 1024 * 1024)) }, 201);
+  return json({ id, uploadtoken: uploadToken, deletetoken: deleteToken, chunks: Math.ceil(padded / (8 * 1024 * 1024)), captcha: auth.captcha === true }, 201);
 }
 
 export async function putChunk(request, env, a, id, i) {
@@ -415,8 +418,8 @@ export async function finalizeFile(request, env, a, id) {
   if (r.status === 'mismatch') return err(400, 'invalid_format', 'The manifest’s view limit, expiry and recipient-delete setting must match the upload.');
   if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
   if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finalized.');
-  indexed(await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: a.noLabel ? '' : body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null, lh: clean.acc.lh }, actorId(a)));
-  return json({ ok: true, id, expires: r.expires });
+  indexed(await directory(env).recordShare({ id, uid: a.user.id, kind: 'files', label: a.noLabel ? '' : body.label, created: r.created, expires: r.expires, views: clean.meta.views ?? null, lh: clean.acc.lh, captcha: r.hc === true }, actorId(a)));
+  return json({ ok: true, id, expires: r.expires, captcha: r.hc === true });
 }
 
 // ── My shares ──────────────────────────────────────────────────────────────
@@ -433,7 +436,7 @@ async function liveStatus(env, id, uid) {
 
 /** Refresh active rows from their live store (views left, expiry, gone). */
 export async function withLiveStatus(env, dir, rows, uid = null) {
-  return Promise.all(rows.map(async (r) => {
+  return Promise.all(rows.map((x) => ('captcha' in x ? { ...x, captcha: !!x.captcha } : x)).map(async (r) => {
     const received = r.kind === 'reverse' ? { received: { files: 0, bytes: 0 } } : {};
     if (r.status !== 'active') {
       if (r.kind === 'reverse') {

@@ -58,3 +58,18 @@ export function lifecycleLine({ what, views, expire }) {
   if (views === 1) return `${what} can be opened once, then it is deleted; unopened, it expires in ${dur}`;
   return `${what} can be opened ${views} times; it is deleted after the last view or in ${dur}, whichever comes first`;
 }
+
+/**
+ * "--captcha" / "--no-captcha" → true / false, or undefined (neither: the
+ * account role's default). The role decides in the end: "require" makes it
+ * on whatever is asked, and a role with the CAPTCHA off refuses --captcha.
+ */
+export function parseCaptcha(values) {
+  if (values.captcha && values['no-captcha']) throw new UsageError('--captcha and --no-captcha are mutually exclusive');
+  if (values.captcha) return true;
+  if (values['no-captcha']) return false;
+  return undefined;
+}
+
+/** Printed (stderr) after creating a share that has the CAPTCHA. */
+export const CAPTCHA_LINE = 'CAPTCHA: recipients complete a CAPTCHA in a browser before the share opens (`secbin get` and the API cannot open it)';

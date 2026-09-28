@@ -50,10 +50,13 @@ const audit = async (subject) => (await (await fetchJson(`/api/private/admin/aud
 
 describe('role options and migration 14', () => {
   it('reverse shares are off by default, need the Drive too, and join the Default role', async () => {
-    expect(SCHEMA_VERSION).toBe(14);
-    expect(await dirStub().schemaVersion()).toBe(14);
+    expect(SCHEMA_VERSION).toBe(15); // 15: CAPTCHA on shares (captcha.test.js)
+    expect(await dirStub().schemaVersion()).toBe(15);
     const rows = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key LIKE 'reverse%' ORDER BY key").toArray());
     expect(rows).toEqual([
+      // Migration 15: the reverse-share CAPTCHA (required, as every link had it before).
+      { key: 'reverseCaptcha', value: '"require"' },
+      { key: 'reverseCaptchaDefault', value: '"on"' },
       { key: 'reverseEnabled', value: 'false' },
       { key: 'reverseMaxActive', value: '10' },
       { key: 'reverseMaxBytes', value: String(1024 ** 3) },
@@ -124,8 +127,8 @@ describe('creating a reverse share', () => {
     expect(fragmentOf(opened.pub)).toBe(fragmentOf(ok.pub)); // the link can be rebuilt
     await expect(openReversePriv(DK, newReverseId(), x.priv)).rejects.toThrow(); // bound to its id
     expect((await (await fetchJson('/api/private/drive/reverse', { cookie: u.cookie })).json()).reverse.length).toBe(1);
-    // Logged as a share creation.
-    expect((await audit(u.id)).some((e) => e.action === 'share.created' && e.detail === `id=${ok.id} kind=reverse`)).toBe(true);
+    // Logged as a share creation (with the CAPTCHA: the Default role requires it for reverse shares).
+    expect((await audit(u.id)).some((e) => e.action === 'share.created' && e.detail === `id=${ok.id} kind=reverse captcha`)).toBe(true);
   });
 
   it('obeys the role: expiry, bytes per share, active shares at once; session only, CSRF guards', async () => {
@@ -406,7 +409,7 @@ describe('the uploader', () => {
       const base = { ...intent, 'x-link-proof': await linkProof(r.pub), 'cf-connecting-ip': ip };
       let res = await tsFetch(`/api/reverse/${r.id}/begin`, base);
       expect(res.status).toBe(403);
-      expect(await errorOf(res)).toBe('turnstile_required');
+      expect(await errorOf(res)).toBe('captcha_required'); // the link has the CAPTCHA (the Default role requires it)
       res = await tsFetch(`/api/reverse/${r.id}/begin`, { ...base, 'x-secbin-turnstile': 'ok:login' });
       expect(await errorOf(res)).toBe('turnstile_failed'); // a token for another form
       res = await tsFetch(`/api/reverse/${r.id}/begin`, { ...base, 'x-secbin-turnstile': 'ok:reverse-upload' });
@@ -414,13 +417,23 @@ describe('the uploader', () => {
       expect(typeof (await res.json()).grant).toBe('string');
       // Opening the link (read only) needs no token.
       expect((await tsFetch(`/api/reverse/${r.id}/open`, base)).status).toBe(200);
-      // The uploader page: Turnstile's CSP (and no COEP) when on, the strict policy when off; never stored.
+      // The uploader page keeps the strict policy even with Turnstile on (the
+      // link's key is in its #fragment); the widget is on the check page
+      // (/r/<id>?check: Turnstile's CSP, no COEP), which has no uploader code. Never stored.
       const on = await tsFetch(`/r/${r.id}`);
       expect(on.status).toBe(200);
-      expect(on.headers.get('content-security-policy')).toBe(TURNSTILE_CSP);
-      expect(on.headers.get('cross-origin-embedder-policy')).toBeNull();
+      expect(on.headers.get('content-security-policy')).toBe(CSP);
+      expect(on.headers.get('cross-origin-embedder-policy')).toBe('require-corp');
       expect(on.headers.get('cache-control')).toBe('no-store');
       expect(await on.text()).toContain('/js/reverse.js');
+      const check = await tsFetch(`/r/${r.id}?check`);
+      expect(check.status).toBe(200);
+      expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP);
+      expect(check.headers.get('cross-origin-embedder-policy')).toBeNull();
+      expect(check.headers.get('cache-control')).toBe('no-store');
+      const html = await check.text();
+      expect(html).toContain('/js/check.js');
+      expect(html).not.toContain('/js/reverse.js');
     } finally {
       setSiteverify(prev);
     }

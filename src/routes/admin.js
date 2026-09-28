@@ -180,7 +180,8 @@ export async function handleAdmin(request, env, url) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     const g = await dir.adminGlobal();
     const off = bfpDisabled(env);
-    return json({ ...g, env: { authnSet: !!authnToken(env), sessionKeys: !!sessionKeys(env), bfpDisabled: off.all, bfpSetupDisabled: off.setup } });
+    // turnstile: keys are in force, so the roles' CAPTCHA options are enforced (the role editor says when not).
+    return json({ ...g, turnstile: !!(await turnstileKeys(env)), env: { authnSet: !!authnToken(env), sessionKeys: !!sessionKeys(env), bfpDisabled: off.all, bfpSetupDisabled: off.setup } });
   }
 
   if (p === '/api/private/admin/settings') {

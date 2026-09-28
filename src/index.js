@@ -6,7 +6,9 @@
 //   /api/public/*    anonymous creation (the public account), when enabled
 //   /api/paste/*, /api/file/*, /api/config   capability-gated public reads
 //   /api/reverse/*   anonymous uploads to a user's reverse share (docs/REVERSE.md)
-//   /r/<id>          the reverse-share uploader page (Turnstile headers when on)
+//   /p/<id>          the recipient's page (the viewer; strict headers, a page key)
+//   /r/<id>          the reverse-share uploader page (strict headers, a page key)
+//   /p|r/<id>?check  the CAPTCHA page of a share that has one (Turnstile headers)
 //   /dashboard*      the signed-in app (login/setup pages are the exceptions)
 //   everything else  Workers Static Assets (landing page + viewer)
 //
@@ -17,8 +19,10 @@
 
 import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, SECURITY_HEADERS } from './lib/http.js';
 import { readSession, logoutCookie, SESSION_COOKIE } from './lib/auth.js';
-import { ipContext, cachedSettings } from './lib/guard.js';
+import { ipContext, cachedSettings, directory } from './lib/guard.js';
 import { turnstileKeys } from './lib/turnstile.js';
+import { pageKey, pageNonce, PAGE_NONCE_RE } from './lib/human.js';
+import { parseId } from './lib/ids.js';
 import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
 import { handlePrivate } from './routes/private.js';
@@ -42,6 +46,8 @@ const TURNSTILE_DASH = /^\/dashboard\/(login|account)(\/|\/index\.html)?$/;
 const HOME = /^\/(index\.html)?$/;
 // The reverse-share uploader page: /r/<id> (the key is in the #fragment).
 const REVERSE_PAGE = /^\/r\/([^/]+)\/?$/;
+// The recipient's page: /p/<id> (the viewer, public/index.html; the key is in the #fragment).
+const SHARE_PAGE = /^\/p\/([^/]+)\/?$/;
 // The home page is public and browser-cached: look up a session only when a cookie is there.
 const hasSessionCookie = (request) => (request.headers.get('cookie') || '').includes(`${SESSION_COOKIE}=`);
 
@@ -104,24 +110,60 @@ async function handleDashboard(request, env, url) {
   return res;
 }
 
+const pageNotFound = () => withSecurityHeaders(new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } }));
+
 /**
- * /r/<id>: the uploader page (public/r/index.html), with the Turnstile CSP when
- * the human check is on (its widget is on the page) and the strict one
- * otherwise; never stored. Any other /r/ path is not found.
+ * The CAPTCHA of a share that has one, without the link's key ever being
+ * readable where Cloudflare's script runs (docs: SECURITY.md, "CAPTCHA on
+ * shares"):
+ *   • /p/<id> and /r/<id> — the recipient's page and the uploader's page —
+ *     always get the strict CSP. On a real navigation (Sec-Fetch-Dest:
+ *     document, Sec-Fetch-Mode: navigate, which a script cannot send with
+ *     fetch) the page also gets a page key: a meta tag with a nonce `n` and
+ *     HMAC(SIG-derived key, kind ‖ id ‖ n). When the share needs the CAPTCHA,
+ *     the page seals the link's key with it in sessionStorage, takes it out
+ *     of the address bar and goes to the check page.
+ *   • /p/<id>?check and /r/<id>?check — the check page (public/check/): the
+ *     Turnstile CSP, only when the share has the CAPTCHA and the server has
+ *     Turnstile keys (else a redirect back). It holds only the sealed key;
+ *     after the check it returns to /p/<id>?n=<n>, whose navigation gets the
+ *     page key for that nonce again, and that strict page opens the key.
+ * Never stored. Any other /p/ or /r/ path is not found.
  */
-async function reversePage(request, env, url) {
-  const m = url.pathname.match(REVERSE_PAGE);
-  if (!m || !REVERSE_ID_RE.test(m[1]) || (request.method !== 'GET' && request.method !== 'HEAD')) {
-    return withSecurityHeaders(new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } }));
-  }
+async function sharePage(request, env, url, kind) {
+  const m = url.pathname.match(kind === 'r' ? REVERSE_PAGE : SHARE_PAGE);
+  let id = null;
+  if (m) { try { id = decodeURIComponent(m[1]); } catch { id = null; } }
+  const valid = id !== null && (kind === 'r' ? REVERSE_ID_RE.test(id) : !!parseId(id));
+  if (request.method !== 'GET' && request.method !== 'HEAD') return pageNotFound();
+  // The viewer shows a readable error for a malformed /p/ link, as before; /r/ answers 404.
+  if (!m || (kind === 'r' && !valid)) return pageNotFound();
   if (!env.ASSETS) return new Response('Not found', { status: 404 });
-  const page = await env.ASSETS.fetch(new Request(new URL('/r/', url), { method: request.method, headers: request.headers }));
-  return withSecurityHeaders(page, { turnstile: !!(await turnstileKeys(env)) });
+  const asset = (path) => env.ASSETS.fetch(new Request(new URL(path, url), { method: request.method, headers: request.headers }));
+  const home = `/${kind}/${m[1]}`;
+  if (url.searchParams.has('check')) {
+    const on = valid && !!(await turnstileKeys(env)) && (await directory(env).shareCaptcha(id));
+    if (!on) return withSecurityHeaders(redirect(home, 302));
+    return withSecurityHeaders(await asset('/check/'), { turnstile: true });
+  }
+  const page = withSecurityHeaders(await asset(kind === 'r' ? '/r/' : '/'));
+  const nav = (request.headers.get('sec-fetch-dest') || '') === 'document' && (request.headers.get('sec-fetch-mode') || '') === 'navigate';
+  const Rewriter = globalThis.HTMLRewriter; // the Workers runtime's streaming HTML rewriter
+  if (!valid || !nav || request.method !== 'GET' || !page.ok || typeof Rewriter !== 'function') return page;
+  const asked = url.searchParams.get('n');
+  const n = asked && PAGE_NONCE_RE.test(asked) ? asked : pageNonce();
+  const key = await pageKey(env, kind, id, n);
+  return new Rewriter().on('head', {
+    element(el) { el.append(`<meta name="secbin-page-key" content="${n}.${key}">`, { html: true }); },
+  }).transform(page);
 }
 
 async function route(request, env, url, ctx) {
   const { pathname } = url;
-  if (pathname === '/r' || pathname.startsWith('/r/')) return reversePage(request, env, url);
+  if (pathname === '/r' || pathname.startsWith('/r/')) return sharePage(request, env, url, 'r');
+  if (pathname.startsWith('/p/')) return sharePage(request, env, url, 'p');
+  // The check page is served only as /p|r/<id>?check.
+  if (pathname === '/check' || pathname.startsWith('/check/')) return pageNotFound();
   const isApi = pathname.startsWith('/api/');
   const isDash = pathname === '/dashboard' || pathname.startsWith('/dashboard/');
   if (!isApi && !isDash) {

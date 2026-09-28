@@ -37,6 +37,7 @@ const LIMIT_SECTIONS = [
     ['maxViews', 'Max views per share', 'int'],
     ['allowUnlimitedViews', 'Unlimited views allowed', 'bool'],
     ['maxExpireSec', 'Max expiry', 'dur'],
+    ['shareCaptcha', 'CAPTCHA on shares (notes, file shares, Drive shares)', 'captcha', { which: 'share', defKey: 'shareCaptchaDefault' }],
   ]],
   ['Links', [
     ['url', 'Link shares allowed (needs notes)', 'bool'],
@@ -96,6 +97,8 @@ const LIMIT_SECTIONS = [
     ['reverseEnabled', 'Receive files (reverse shares: anyone with the link uploads to a Drive folder)', 'bool'],
     ['reverseMaxActive', 'Receive files: active links at once', 'int'],
     ['reverseMaxBytes', 'Receive files: most bytes one link may receive', 'bytes'],
+    // Shown while the role can use the Drive and reverse shares.
+    ['reverseCaptcha', 'CAPTCHA on reverse shares (Receive files)', 'captcha', { which: 'reverse', defKey: 'reverseCaptchaDefault', needs: ['driveEnabled', 'reverseEnabled'] }],
   ]],
 ];
 const LIMIT_UI = LIMIT_SECTIONS.flatMap(([section, list]) => list.map(([k, label, type, opt = {}]) => [k, label, type, opt, section]));
@@ -290,7 +293,60 @@ function defaultText(key, type, opt) {
   const v = SETTING_DEFAULT[key] ? d.settings?.[SETTING_DEFAULT[key]] : d.limits?.[key];
   if (v === undefined) return '';
   if (type === 'enum') return `default: ${opt.values.find(([k]) => k === v)?.[1] ?? v}`;
+  if (type === 'captcha') return `default: ${captchaModeText(v, opt.which)}${v === 'allow' ? `, ${CAPTCHA_DEFAULTS.find(([k]) => k === d.limits?.[opt.defKey])?.[1] ?? ''}` : ''}`;
   return `default: ${optText(type, v, opt)}`;
+}
+
+// The CAPTCHA role options (shareCaptcha / reverseCaptcha and their per-share defaults).
+const captchaModes = (which) => [
+  ['allow', 'Allow CAPTCHA (user chooses per share)'],
+  ['require', `Require CAPTCHA for all ${which === 'reverse' ? 'reverse shares' : 'shares'}`],
+  ['off', 'Disable CAPTCHA'],
+];
+const CAPTCHA_DEFAULTS = [['on', 'CAPTCHA on'], ['off', 'CAPTCHA off']];
+const captchaModeText = (v, which) => captchaModes(which).find(([k]) => k === v)?.[1] ?? String(v);
+let radioSeq = 0;
+
+/**
+ * One CAPTCHA role option as radio groups: the mode (allow / require / off,
+ * or "same as Default" for a custom role) and, while the mode in effect is
+ * "allow", the default for new shares (on / off). Returns { el, mode, def,
+ * sync } where `mode` and `def` read like the editor's other controls
+ * ("inherit" or "enum:<value>").
+ */
+function captchaInput({ key, label, opt, rows, inherited, explicit, active }) {
+  const seq = ++radioSeq;
+  const own = (k) => Object.prototype.hasOwnProperty.call(rows, k);
+  const initial = (k) => (own(k) ? rows[k] : explicit ? inherited?.[k] : 'inherit');
+  const group = (name, choices, current) => choices.map(([v, text]) => {
+    const r = h('input', { type: 'radio', name, value: v, checked: current === v });
+    return { r, el: h('label.radio-opt', {}, r, h('span', { text })) };
+  });
+  const inh = (k, texts) => {
+    const v = inherited?.[k];
+    return `Same as Default (${texts.find(([x]) => x === v)?.[1] ?? v ?? '—'})`;
+  };
+  const modeChoices = [...(explicit ? [] : [['inherit', inh(key, captchaModes(opt.which))]]), ...captchaModes(opt.which)];
+  const defChoices = [...(explicit ? [] : [['inherit', inh(opt.defKey, CAPTCHA_DEFAULTS)]]), ...CAPTCHA_DEFAULTS];
+  const modes = group(`captcha-${key}-${seq}`, modeChoices, initial(key));
+  const defs = group(`captcha-${opt.defKey}-${seq}`, defChoices, initial(opt.defKey));
+  const defId = `captcha-${opt.defKey}-${seq}-legend`;
+  const defBox = h('fieldset.captcha-default', {}, h('legend', { id: defId, text: `Default for new ${opt.which === 'reverse' ? 'reverse shares' : 'shares'}` }), ...defs.map((x) => x.el));
+  const noteId = `captcha-${key}-${seq}-note`;
+  const note = h(`p.mono${active ? '.muted' : '.warn'}`, { id: noteId, text: active
+    ? (opt.which === 'reverse' ? 'Uploaders complete the CAPTCHA before they can send files. Stored per link when it is created.' : 'Recipients complete the CAPTCHA before anything of a share is sent to them; the API and the CLI cannot open such a share. Stored per share when it is created.')
+    : 'The CAPTCHA is not active until Turnstile is configured (Security → Human check): until then it is saved but not asked for.' });
+  const el = h('fieldset.captcha-role', { 'aria-describedby': noteId }, h('legend', { text: label }), ...modes.map((x) => x.el), defBox, note);
+  const checked = (list) => list.find((x) => x.r.checked)?.r.value ?? 'inherit';
+  const read = (list) => ({ get value() { const v = checked(list); return v === 'inherit' ? 'inherit' : `enum:${v}`; } });
+  // "Default for new shares" matters only while the mode in effect is "allow".
+  const sync = () => {
+    const m = checked(modes);
+    defBox.hidden = (m === 'inherit' ? inherited?.[key] : m) !== 'allow';
+  };
+  for (const x of modes) x.r.addEventListener('change', sync);
+  sync();
+  return { el, mode: read(modes), def: read(defs), sync };
 }
 
 function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omit = [], explicit = false }) {
@@ -298,11 +354,22 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
   const keys = (channel === 'api' ? LIMIT_UI.filter(([k]) => API_KEYS.includes(k)) : LIMIT_UI).filter(([k]) => !omit.includes(k));
   const ctls = [];
   let section = null;
+  const visibility = []; // [el, needs]: rows shown only while other options (in this editor) allow them
   for (const [key, label, type, opt, sec] of keys) {
     if (sec !== section) {
       section = sec;
       box.appendChild(h('h4.limit-section', { text: sec }));
       if (channel !== 'api') for (const n of SECTION_NOTES[sec] || []) box.appendChild(n());
+    }
+    if (type === 'captcha') {
+      const c = captchaInput({ key, label, opt, rows, inherited, explicit, active: !!overview?.turnstile });
+      const eff = effective && Object.prototype.hasOwnProperty.call(effective, key) ? effective[key] : undefined;
+      const effText = eff === undefined ? '' : `effective: ${captchaModeText(eff, opt.which)}${eff === 'allow' && effective[opt.defKey] ? `, ${CAPTCHA_DEFAULTS.find(([k]) => k === effective[opt.defKey])?.[1]}` : ''}`;
+      const row = h('div.limit-row.captcha-row', {}, c.el, h('span.mono.muted', { text: [defaultText(key, type, opt), effText].filter(Boolean).join(' · ') }));
+      box.appendChild(row);
+      ctls.push({ key, type, mode: c.mode }, { key: opt.defKey, type, mode: c.def });
+      if (opt.needs) visibility.push([row, opt.needs]);
+      continue;
     }
     // The Default role (explicit) holds a value for every option: no "inherit".
     let has = Object.prototype.hasOwnProperty.call(rows, key);
@@ -343,6 +410,14 @@ function limitsEditor({ scope, channel, rows, effective, inherited, onSaved, omi
     box.appendChild(h('div.limit-row', {}, h('span.field-label', { text: label }), mode, val, h('span.mono.muted', { text: note })));
     ctls.push({ key, type, mode, val });
   }
+  // Rows that depend on other options (the reverse-share CAPTCHA needs the Drive and reverse shares).
+  const current = (k) => {
+    const c = ctls.find((x) => x.key === k);
+    if (!c || c.mode.value === 'inherit') return inherited?.[k] ?? effective?.[k];
+    return c.mode.value === 'true' ? true : c.mode.value === 'false' ? false : c.mode.value;
+  };
+  const applyVisibility = () => { for (const [row, needs] of visibility) row.hidden = !needs.every((k) => current(k) === true); };
+  if (visibility.length) { box.addEventListener('change', applyVisibility); applyVisibility(); }
   const save = h('button.btn', { type: 'button', text: `Save ${channel === 'api' ? 'API' : ''} limits`, dataset: { focusKey: `limits:${scope}:${channel}:save` } });
   save.onclick = async () => {
     const patch = {};
@@ -774,6 +849,7 @@ async function ownerRole(box) {
   const save = h('button.cta', { type: 'button', text: 'Save' });
   box.append(h('h2.section-title', { text: 'Owner role' }),
     h('p.mono.muted', { text: 'Belongs to the owner only. Everything is allowed, with no limits, quotas or password policy, and that cannot be changed. Only these apply to your own account:' }),
+    h('p.mono.muted', { id: 'owner-captcha', text: `CAPTCHA: allowed on shares and on reverse shares — you choose for each one (the box starts off for shares and on for reverse shares).${overview.turnstile ? '' : ' Not active until Turnstile is configured (Security → Human check).'}` }),
     h('div.card.stack', {},
       h('h3.field-label', { text: 'Your sessions' }), dur('session.idleSec', 'Sign out after being idle for'), dur('session.absSec', 'Sign out in any case after'),
       h('h3.field-label', { text: 'Your file shares' }), dur('files.grantSec', 'Recipients may download for this long after opening'), dur('files.pendingSec', 'An unfinished upload is discarded after'),
@@ -1070,7 +1146,8 @@ const PUBLIC_ID = 'public-user-0000';
 // or log of its own); the server refuses them too (PUBLIC_NA_LIMITS).
 const PUBLIC_OMIT = ['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs', 'receiptLanguages',
   'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax', 'sessionIdleSec', 'sessionAbsSec',
-  'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes', 'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes'];
+  'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes', 'reverseEnabled', 'reverseMaxActive', 'reverseMaxBytes',
+  'shareCaptcha', 'shareCaptchaDefault', 'reverseCaptcha', 'reverseCaptchaDefault'];
 const TRACKING = [
   ['tracker', 'Browser identifier only (default)', 'A random id kept in the browser (cookie, ETag cache, localStorage, IndexedDB), repaired from its other copies; if two ids that both created shares tie, that browser is blocked. Nothing about the network is used.'],
   ['ip', 'Network address only', 'Counts per IP address (IPv6 per the tracking prefix), stored only as a keyed hash. Nothing is stored in the browser; people behind one address share the limits.'],

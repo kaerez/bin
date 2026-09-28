@@ -21,7 +21,7 @@ import { refuseInlineApiKey, resolveApiKey } from '../apikey.js';
 import { ApiError, Client } from '../client.js';
 import { UsageError } from '../errors.js';
 import { formatBytes } from '../format-bytes.js';
-import { lifecycleLine, parseExpire, parseLabel, parseViews } from '../lifecycle.js';
+import { CAPTCHA_LINE, lifecycleLine, parseCaptcha, parseExpire, parseLabel, parseViews } from '../lifecycle.js';
 import { renderQr } from '../qr.js';
 import { newPassword } from '../secret.js';
 import { CLEAR_LINE } from '../tui/anim.js';
@@ -41,6 +41,8 @@ const OPTIONS = {
   json: { type: 'boolean', default: false, short: 'j' },
   qr: { type: 'boolean', default: false, short: 'q' },
   'recipient-can-delete': { type: 'boolean', default: false },
+  captcha: { type: 'boolean' },
+  'no-captcha': { type: 'boolean' },
 };
 
 /** Apply `--mime <share-path>=<type>` overrides (validated with checkMime). */
@@ -88,6 +90,7 @@ export async function cmdSend(args, io) {
   const views = parseViews(values.views);
   const expire = parseExpire(values.expire);
   const label = parseLabel(values.label);
+  const captcha = parseCaptcha(values);
   const server = requireServer(values.server, io.env);
   const apiKey = await resolveApiKey({ file: values['api-key-file'], io });
 
@@ -123,7 +126,7 @@ export async function cmdSend(args, io) {
   // files/maxFile are declared so the server can apply per-account limits;
   // names, types and individual sizes stay inside the encrypted manifest.
   const initBody = { views, expire, padded: l.padded, files: files.length, maxFile: Math.max(0, ...files.map((f) => f.size)),
-    ...(values['recipient-can-delete'] ? { deletable: true } : {}) };
+    ...(values['recipient-can-delete'] ? { deletable: true } : {}), ...(captcha === undefined ? {} : { captcha }) };
   let init;
   try {
     init = await client.initFile(initBody);
@@ -163,14 +166,16 @@ export async function cmdSend(args, io) {
 
   const url = buildShareUrl(server, init.id, fragment);
   const expires = Number.isSafeInteger(fin.expires) ? fin.expires : null;
+  const withCaptcha = init.captcha === true;
   if (values.json) {
-    io.stdout(JSON.stringify({ url, id: init.id, deletetoken: init.deletetoken, expires, views }) + '\n');
+    io.stdout(JSON.stringify({ url, id: init.id, deletetoken: init.deletetoken, expires, views, captcha: withCaptcha }) + '\n');
   } else {
     io.stdout(url + '\n');
     io.stderr(`delete token: ${init.deletetoken}\n`);
     const nf = files.length;
     io.stderr(`${nf} file${nf === 1 ? '' : 's'}${dirs.length ? ` and ${dirs.length} empty folder${dirs.length === 1 ? '' : 's'}` : ''}, ${formatBytes(l.total)}\n`);
     io.stderr(`${lifecycleLine({ what: 'the files', views, expire })}\n`);
+    if (withCaptcha) io.stderr(`${CAPTCHA_LINE}\n`);
   }
   if (values.qr) {
     const qr = renderQr(url);

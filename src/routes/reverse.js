@@ -16,7 +16,8 @@ import { directory, ipContext, isBlocked, recordFailure } from '../lib/guard.js'
 import { genToken, hashToken } from '../lib/ids.js';
 import { driveStub } from '../lib/store.js';
 import { binding } from '../lib/config.js';
-import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { requireTurnstile, turnstileKeys, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
+import { issueGrant, readGrant, netTag, captchaRequired, HUMAN_HEADER } from '../lib/human.js';
 import { stepUpFrom, afterRefusal } from './stepup.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { expireSeconds, isProof, ARGON2, MAX_TTL } from '../../public/js/format.js';
@@ -190,7 +191,7 @@ async function createReverse(request, env, dir, a) {
   // The id is claimed in the share index first, atomically with the role's
   // checks and its count of active reverse shares: an id another account
   // holds is refused (409), and concurrent creates cannot pass the limit.
-  const claim = await dir.claimReverse(uid, { id: body.id, expireSec: ttl, maxBytes, label: body.label, lh: body.lh });
+  const claim = await dir.claimReverse(uid, { id: body.id, expireSec: ttl, maxBytes, label: body.label, lh: body.lh, captcha: body.captcha });
   if (!claim.ok) return fromDo(claim);
   let r;
   try {
@@ -209,7 +210,7 @@ async function createReverse(request, env, dir, a) {
       }
     }
     r = await driveStub(env, uid).createReverse(uid, {
-      id: body.id, folder, priv, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl,
+      id: body.id, folder, priv, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl, captcha: claim.captcha === true,
       opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types },
     });
   } catch (e) {
@@ -225,7 +226,7 @@ async function createReverse(request, env, dir, a) {
     await driveStub(env, uid).endReverse(uid, body.id);
     return fromDo(act);
   }
-  return json({ id: body.id, expires: r.expires }, 201);
+  return json({ id: body.id, expires: r.expires, captcha: claim.captcha === true }, 201);
 }
 
 // ── the uploader (anonymous) ─────────────────────────────────────────────────
@@ -246,7 +247,7 @@ const uploadTokenOf = (request) => {
 
 /** Everything under /api/reverse/. */
 export async function handleReversePublic(request, env, url) {
-  const m = url.pathname.match(/^\/api\/reverse\/([^/]+)\/(open|begin|files|done)(?:\/([^/]+)(?:\/(chunk|finalize)(?:\/(\d{1,6}))?)?)?$/);
+  const m = url.pathname.match(/^\/api\/reverse\/([^/]+)\/(open|begin|files|done|human)(?:\/([^/]+)(?:\/(chunk|finalize)(?:\/(\d{1,6}))?)?)?$/);
   // Before any Guard accounting (another site could get a visitor's network blocked).
   assertNotCrossSite(request);
   const g = await ipContext(env, request);
@@ -278,13 +279,27 @@ export async function handleReversePublic(request, env, url) {
   }
   const uid = tg.uid;
   const drive = driveStub(env, uid);
+  // The link's CAPTCHA is in force only while the server has Turnstile keys.
+  const captcha = tg.captcha && !!(await turnstileKeys(env));
+
+  if (action === 'human') {
+    // A CAPTCHA grant for this link (the check page, before the uploader page
+    // starts a session): a Turnstile token for "reverse-upload" → { grant }.
+    if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    assertIntent(request);
+    if (!captcha) return json({ grant: null, expires: null });
+    await requireTurnstile(env, request, TURNSTILE_ACTIONS.reverse);
+    const r = await issueGrant(env, { kind: 'r', id, net: await netTag(env, g.key) });
+    return json({ grant: r.grant, expires: r.expires });
+  }
 
   if (action === 'open') {
     if (rawNode !== undefined) return err(404, 'not_found', 'Not found.');
     const r = await drive.reverseOpen(uid, id, { roleMaxBytes: tg.roleMaxBytes });
     if (r.status === 'paused') return pausedRes(); // the link proof matched (above)
     if (r.status !== 'ok') return err(410, 'gone', GONE);
-    return json(r.head);
+    return json({ ...r.head, captcha });
   }
 
   if (action === 'begin') {
@@ -297,12 +312,25 @@ export async function handleReversePublic(request, env, url) {
     if (r.ph && !kp) return err(401, 'password_required', 'This link needs a password.', { salt: r.head.password.salt, t: r.head.password.t });
     const lockedRes = (until) => err(429, 'password_locked', 'Too many wrong passwords for this link. Try again later.', { until });
     if (r.head.password && r.head.password.lockedUntil) return lockedRes(r.head.password.lockedUntil);
-    // The human check first: without a token no password guess is answered.
-    await requireTurnstile(env, request, TURNSTILE_ACTIONS.reverse);
+    // The CAPTCHA first (when the link has it): without it no password guess
+    // is answered. A grant from …/human (spent by this session start,
+    // whatever follows) or, as before these grants, a Turnstile token.
+    let human = null;
+    if (captcha) {
+      const held = request.headers.get(HUMAN_HEADER);
+      if (held) {
+        const c = await readGrant(env, held, { kind: 'r', id, net: await netTag(env, g.key) });
+        if (!c) throw captchaRequired(true);
+        human = { j: c.j, exp: c.exp };
+      } else if (request.headers.get('x-secbin-turnstile')) {
+        await requireTurnstile(env, request, TURNSTILE_ACTIONS.reverse);
+      } else throw captchaRequired(true);
+    }
     const grant = genToken();
     // The password is checked in the Drive, with the link's lockout (all networks).
     const proofHash = r.ph && isProof(kp) ? await proofHashOf(kp) : null;
-    const s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec, { net: g.key, proofHash });
+    const s = await drive.reverseBegin(uid, id, await hashToken(grant), tg.pendingSec, { net: g.key, proofHash, human });
+    if (s.status === 'captcha_used') throw captchaRequired(true);
     if (s.status === 'bad_password') {
       await dir.reverseEvent(id, 'bad_password');
       return failed(env, g, err(403, 'bad_password', 'Wrong password.', s.until ? { until: s.until } : undefined));
