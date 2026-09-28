@@ -118,7 +118,7 @@ try {
   const channel = (i) => rows.nth(i).getByLabel('Via (channel)', { exact: true });
   check('roles: the kind select has the groups Outgoing shares, Drive and Receive, every kind labelled', JSON.stringify(await groupsOf(kind(0))) === JSON.stringify([
     ['Outgoing shares', ['All outgoing shares', 'Notes, links and credentials', 'Notes', 'Links', 'Credentials', 'File and Drive shares', 'File shares', 'Drive shares']],
-    ['Drive', ['Files uploaded']],
+    ['Drive', ['Files uploaded', 'Bytes uploaded']],
     ['Receive', ['All receive', 'New links', 'Uploads received']],
   ]), JSON.stringify(await groupsOf(kind(0))));
   const plan = [['note', 'Notes'], ['drive-upload', 'Files uploaded'], ['receive-link', 'New links'], ['receive-upload', 'Uploads received']];

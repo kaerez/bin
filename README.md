@@ -215,9 +215,12 @@ working.
     Drive share), notes, links and credentials together (`text`), file and Drive shares
     together (`files`), or one type: notes (`note`: plain text, Markdown or code), links
     (`url`), credentials (`secret`), file shares (`file`), Drive shares (`drive`);
-  - *Drive:* files uploaded (`drive-upload`: each file, a folder upload counting every file;
-    files taken in from Receive links are not counted), given back when the upload never
-    completes;
+  - *Drive:* files uploaded (`drive-upload`: each file, a folder upload counting every file)
+    and bytes uploaded (`drive-bytes`: each file's size, counted with the file when its upload
+    starts; its max is in bytes, set in MiB or GiB, and the refusal names the size, e.g. "Quota
+    reached: 1.0 GB uploaded to the Drive per 1d."); files taken in from Receive links are not
+    counted by either, and both are given back when the Drive refuses the file or the upload
+    never completes;
   - *Receive:* all receive (`receive`: both below), new links (`receive-link`) and uploads
     received (`receive-upload`: each upload session that sends files through one of the user's
     links, counted for the user; at the quota the uploader is told only that the link cannot
@@ -387,7 +390,12 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
 - **The file policy (allowed/blocked types, folder depth) works the same way:** when the
   administrator sets one for an account, that account's browser or CLI declares the file types
   and folder depth it is uploading, and the server refuses what the policy forbids. It keeps
-  honest users within the rules; it is not a guarantee against a modified client.
+  honest users within the rules; it is not a guarantee against a modified client. The same
+  rules apply to the account's **Drive**: an upload declares its file's type (checked when the
+  upload is reserved), and the folder-depth limit is checked by the server against the Drive's
+  own tree on every upload, new folder and move (and on files taken in from Receive links, on
+  top of the link's own type rules). Files already in a Drive stay when a rule is added or
+  tightened; only new uploads, folders and moves are refused.
 
 ## Security
 

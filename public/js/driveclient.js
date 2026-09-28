@@ -37,6 +37,23 @@ export class DriveDisabled extends Error {
 }
 
 /**
+ * The role's file policy (its file-type rules or folder-depth limit, as for
+ * file shares) refuses an upload, a new folder, a move or a take-in: checked
+ * here before anything is sent (the server checks it too). `rule`: 'type' or
+ * 'depth'.
+ */
+export class DrivePolicyError extends Error {
+  constructor(message, rule) {
+    super(message);
+    this.name = 'DrivePolicyError';
+    this.rule = rule;
+  }
+}
+/** The server's refusals by the role's file policy (src/lib/drivepolicy.js, src/drive-do.js). */
+const POLICY_CODES = new Set(['file_type_not_allowed', 'folder_too_deep']);
+const depthLimit = (max) => `Folders may nest at most ${max} level${max === 1 ? '' : 's'} deep in your Drive for your account`;
+
+/**
  * The Drive's keys cannot be had now (`reason`: 'keys_missing' — the
  * server lost its keyring and the administrator restores it; 'salt_missing'
  * — this account's user salt is missing: a kit restores it).
@@ -195,6 +212,74 @@ export class DriveClient {
     /** The Drive key of the release before, while this Drive waits for its upgrade (the sign-in opened it; checked, driveupgrade.js provenLegacyKey). */
     this.legacy = user.impersonating ? null : legacy;
     this.legacyKeys = null;
+    /** The role's file policy (setPolicy), or null: none known here (the server still checks). */
+    this.policy = null;
+  }
+
+  // ── the role's file policy (as for file shares: public/js/filepolicy.js) ──
+  /**
+   * The role's file-type rules and folder-depth limit, from the profile's
+   * limits (fileTypeMode, fileTypeRules, maxFolderDepth): uploads, new
+   * folders, moves and take-ins are checked against them here before anything
+   * is sent, and uploads and take-ins declare the file's type for the server,
+   * which checks the same (src/lib/drivepolicy.js; the depth against its tree).
+   */
+  setPolicy(limits) {
+    this.policy = limits ? {
+      mode: ['allow', 'block'].includes(limits.fileTypeMode) ? limits.fileTypeMode : 'any',
+      rules: Array.isArray(limits.fileTypeRules) ? limits.fileTypeRules : [],
+      maxFolderDepth: Number.isInteger(limits.maxFolderDepth) ? limits.maxFolderDepth : null,
+    } : null;
+  }
+
+  get #typed() { return !!this.policy && this.policy.mode !== 'any'; }
+  get #deep() { return !!this.policy && this.policy.maxFolderDepth !== null; }
+
+  /** One file's type as the server gets it → `types` for the request (undefined: no type policy), or throws the reason. */
+  #declareType(name, mime) {
+    if (!this.#typed) return undefined;
+    if (uncheckableExt(name)) throw new DrivePolicyError(`“${name}” has an unusual extension that cannot be checked against your administrator’s file-type policy.`, 'type');
+    const { types } = declare([{ path: name, type: mime }]);
+    const refused = refusedTypes(this.policy.mode, this.policy.rules, types);
+    if (refused.length) throw new DrivePolicyError(`Your administrator does not allow ${describeType(refused[0])} files in the Drive (“${name}”).`, 'type');
+    return types;
+  }
+
+  /** Refuse a change that puts something at folder level `level` (a folder: its own; a file: its folder's) past the limit. */
+  #checkLevel(level, what) {
+    if (!this.#deep || level <= this.policy.maxFolderDepth) return;
+    throw new DrivePolicyError(`${depthLimit(this.policy.maxFolderDepth)}; ${what}.`, 'depth');
+  }
+
+  /** The folder level of folder `id` (the top folder: 0; a folder in it: 1). */
+  async levelOf(id) {
+    if (id === ROOT) return 0;
+    const r = await api.node(id);
+    if (!r || !Array.isArray(r.path)) throw malformed();
+    return r.path.filter((x) => x && x.id !== id).length;
+  }
+
+  /** A file's type as upload() seals it (and declares it). */
+  async #mimeOf(file, name, type) {
+    const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+    return normalizeMime(type) || detectMime({ name, platformType: file.type, head });
+  }
+
+  /**
+   * Check files and folders about to be uploaded into `parentId` against the
+   * role's file policy, before any is sent: `entries` = [{ path, file } |
+   * { path, dir: true }] (as uploadTree takes them). Throws the first refusal.
+   */
+  async checkUpload(parentId, entries) {
+    if (!this.#typed && !this.#deep) return;
+    const base = this.#deep ? await this.levelOf(parentId) : 0;
+    for (const e of entries) {
+      const segs = String(e.path).split('/').filter(Boolean);
+      const name = segs[segs.length - 1] || '';
+      if (e.dir) { this.#checkLevel(base + segs.length, `“${e.path}” would be at level ${base + segs.length}`); continue; }
+      this.#checkLevel(base + segs.length - 1, segs.length > 1 ? `“${e.path}” would be at level ${base + segs.length - 1}` : `this folder is at level ${base}`);
+      if (this.#typed) this.#declareType(name, await this.#mimeOf(e.file, name));
+    }
   }
 
   /** The KEKs again (after the server answered that the current sub-MEK changed). */
@@ -355,9 +440,13 @@ export class DriveClient {
     return { node, path, children };
   }
 
-  /** A new folder → its id. */
-  async mkdir(parentId, name) {
+  /** A new folder → its id. `level`: the folder level of `parentId`, if known (the role's depth limit). */
+  async mkdir(parentId, name, { level } = {}) {
     const clean = checkName(name);
+    if (this.#deep) {
+      const at = (level ?? await this.levelOf(parentId)) + 1;
+      this.#checkLevel(at, `the new folder would be at level ${at}`);
+    }
     const id = newId();
     const r = await this.#fresh(async () => api.mkdir({ id, parent: parentId, ...(await this.#sealNew({ name: clean })) }));
     if (r.id !== undefined && r.id !== id) throw malformed();
@@ -368,20 +457,32 @@ export class DriveClient {
    * Upload a File (or a Blob with `name`) into `parentId` → its id. Options:
    * onProgress(bytesDone, total), signal (AbortSignal), name, type, mtime,
    * taken (a Set of the names already in the folder, from names(); updated
-   * here — else the folder is read). A name already taken gets " (2)"….
+   * here — else the folder is read), level (the folder level of `parentId`,
+   * if known). A name already taken gets " (2)"…. The role's file policy is
+   * checked first (DrivePolicyError), and the file's type declared with it.
    */
-  async upload(parentId, file, { onProgress, signal, name, type, mtime, taken } = {}) {
+  async upload(parentId, file, { onProgress, signal, name, type, mtime, taken, level } = {}) {
     // A name already used in the folder gets " (2)", " (3)"… (the server cannot see names).
     const fileName = uniqueName(taken ?? (await this.names(parentId)).names, checkName(name ?? file.name));
     const size = file.size;
-    const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
-    const mime = normalizeMime(type) || detectMime({ name: fileName, platformType: file.type, head });
+    const mime = await this.#mimeOf(file, fileName, type);
+    let types;
+    try {
+      types = this.#declareType(fileName, mime);
+      if (this.#deep) {
+        const at = level ?? await this.levelOf(parentId);
+        this.#checkLevel(at, `this folder is at level ${at}`);
+      }
+    } catch (e) {
+      if (taken) taken.delete(fileName);
+      throw e;
+    }
     const time = Number.isSafeInteger(mtime) && mtime >= 0 ? mtime : (file.lastModified || 0);
     const id = newId();
     const dek = newKey();
     const n = refChunks(size);
     const init = await this.#fresh(async () => api.createFile({
-      id, parent: parentId, size,
+      id, parent: parentId, size, ...(types ? { types } : {}),
       ...(await this.#sealNew({ name: fileName, meta: JSON.stringify({ type: mime, mtime: time, size }), dek })),
     }));
     const token = init.uploadToken ?? init.uploadtoken;
@@ -429,6 +530,9 @@ export class DriveClient {
    * opts: onProgress(bytesDone, total), onFile(path), signal. → [ids of files].
    */
   async uploadTree(parentId, entries, { onProgress, onFile, signal } = {}) {
+    // The role's file policy, for every entry before anything is sent.
+    await this.checkUpload(parentId, entries.map((e) => ({ ...e, path: cleanName(e.path) })));
+    const base = this.#deep ? await this.levelOf(parentId) : null;
     const total = entries.reduce((s, e) => s + (e.dir ? 0 : e.file.size), 0);
     const folders = new Map([['', parentId]]);
     const inside = new Map(); // folder id → { dirs: Map(name → id), names: Set }
@@ -445,7 +549,7 @@ export class DriveClient {
       // An existing folder of that name is reused (merged into); a file of that name is not.
       let id = here.dirs.get(leaf);
       if (!id) {
-        id = await this.mkdir(parent, uniqueName(here.names, leaf));
+        id = await this.mkdir(parent, uniqueName(here.names, leaf), { level: base === null ? undefined : base + dirPath.split('/').length - 1 });
         here.dirs.set(leaf, id);
         inside.set(id, { dirs: new Map(), names: new Set() });
       }
@@ -462,9 +566,10 @@ export class DriveClient {
       const cut = path.lastIndexOf('/');
       const dir = await ensure(cut < 0 ? '' : path.slice(0, cut));
       if (onFile) onFile(path);
-      const base = before;
+      const sent = before;
       const { names: taken } = await contentOf(dir);
-      ids.push(await this.upload(dir, e.file, { name: path.slice(cut + 1), taken, signal, onProgress: onProgress && ((d) => onProgress(base + d, total)) }));
+      const level = base === null ? undefined : base + (cut < 0 ? 0 : path.slice(0, cut).split('/').length);
+      ids.push(await this.upload(dir, e.file, { name: path.slice(cut + 1), taken, level, signal, onProgress: onProgress && ((d) => onProgress(sent + d, total)) }));
       before += e.file.size;
     }
     if (onProgress) onProgress(total, total);
@@ -510,7 +615,16 @@ export class DriveClient {
     }
   }
 
-  async move(id, parentId) {
+  /**
+   * Move item `id` into folder `parentId`. `kind` ('dir' / 'file') and `level`
+   * (the folder level of `parentId`), when known, let the role's depth limit
+   * be checked here first (the server also counts the folders inside a folder).
+   */
+  async move(id, parentId, { kind, level } = {}) {
+    if (this.#deep && kind) {
+      const at = (level ?? await this.levelOf(parentId)) + (kind === 'dir' ? 1 : 0);
+      this.#checkLevel(at, kind === 'dir' ? `the folder would be at level ${at}` : `that folder is at level ${at}`);
+    }
     await api.update(id, { parent: parentId });
   }
 
@@ -823,24 +937,28 @@ export class DriveClient {
       if (!id) {
         if (newFolders >= RECEIVED_MAX_NEW_FOLDERS) return up;
         newFolders++;
-        id = await this.mkdir(up, uniqueName(here.names, leaf));
+        id = await this.mkdir(up, uniqueName(here.names, leaf), { level: depthOf.has(parent) ? depthOf.get(parent) + dirPath.split('/').length - 1 : undefined });
         here.dirs.set(leaf, id);
         inside.set(id, { dirs: new Map(), names: new Set() });
       }
       folders.set(key, id);
       return id;
     };
+    // The role's folder-depth limit (as for an upload): the folders a path may make stop there.
+    const maxLevel = this.#deep ? this.policy.maxFolderDepth : MAX_DEPTH;
     const levelsUnder = async (parent) => {
       if (!depthOf.has(parent)) {
         let d;
         try { const r = await api.node(parent); d = Array.isArray(r.path) ? r.path.filter((x) => x && x.id !== parent).length : 0; } catch { d = MAX_DEPTH; }
         depthOf.set(parent, d);
       }
-      return Math.max(0, Math.min(RECEIVED_MAX_DEPTH, MAX_DEPTH - depthOf.get(parent)));
+      return Math.max(0, Math.min(RECEIVED_MAX_DEPTH, MAX_DEPTH - depthOf.get(parent), maxLevel - depthOf.get(parent)));
     };
     const failure = (reason) => Object.assign(new Error(reason), { receivedReason: reason });
-    // A refusal by the Drive (full, folder full, too deep) fails the item; being signed out or losing the Drive stops the take-in.
-    const refused = (e) => e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403 && e.code !== 'mek_not_current';
+    // A refusal by the Drive (full, folder full, too deep, the role's file policy) fails the item;
+    // being signed out or losing the Drive stops the take-in.
+    const refused = (e) => e instanceof ApiError && ((e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403 && e.code !== 'mek_not_current') || POLICY_CODES.has(e.code));
+    const reasonOf = (e) => (e instanceof ApiError && e.code === 'file_type_not_allowed' ? 'type' : 'place');
     const out = { added: 0, failed: 0, renamed: 0, flattened: 0, deferred: 0, more: false };
     let after = null;
     for (let page = 0; page < RECEIVED_MAX_PAGES; page++) {
@@ -869,25 +987,36 @@ export class DriveClient {
           const renamed = path !== got.path;
           const segs = path.split('/');
           const leafName = segs.pop();
+          const type = normalizeMime(got.type) || OCTET;
+          // The role's file-type rules apply on top of the link's (the uploader's page checked those),
+          // so a Receive link is no way around the Drive's policy; the type is declared as for an upload.
+          let types;
+          try { types = this.#declareType(leafName, type); } catch (e) {
+            got.fk.fill(0);
+            if (e instanceof DrivePolicyError) throw failure('type');
+            throw e;
+          }
           const allowed = await levelsUnder(it.parent);
           const want = segs.slice(0, allowed).join('/');
+          // The link's folder itself deeper than the role now allows: nothing can go in it.
+          if (this.#deep && depthOf.get(it.parent) > maxLevel) { got.fk.fill(0); throw failure('place'); }
           let parent;
           try { parent = await ensure(it.parent, want); } catch (e) {
+            if (e instanceof DrivePolicyError) throw failure('place');
             if (!(e instanceof ApiError)) throw failure('name'); // a folder name this Drive cannot store
-            throw refused(e) ? failure('place') : e;
+            throw refused(e) ? failure(reasonOf(e)) : e;
           }
           // Deeper than allowed, or out of new folders: in the deepest folder there is.
           const flattened = segs.length > allowed || (want !== '' && folders.get(`${it.parent}\n${want}`) !== parent);
-          const type = normalizeMime(got.type) || OCTET;
           const { names: taken } = await contentOf(parent);
           const leaf = uniqueName(taken, leafName);
           const meta = { type, mtime: got.mtime, size: it.size, ...(renamed ? { renamed: true } : {}) };
           try {
             // The server's size is the one the chunks have: the metadata says the same.
-            await this.#fresh(async () => api.acceptReceived(it.id, { parent, ...(await this.#sealNew({ name: leaf, meta: JSON.stringify(meta), dek: got.fk })) }));
+            await this.#fresh(async () => api.acceptReceived(it.id, { parent, ...(types ? { types } : {}), ...(await this.#sealNew({ name: leaf, meta: JSON.stringify(meta), dek: got.fk })) }));
           } catch (e) {
             taken.delete(leaf);
-            throw refused(e) ? failure('place') : e;
+            throw refused(e) ? failure(reasonOf(e)) : e;
           } finally {
             got.fk.fill(0);
           }

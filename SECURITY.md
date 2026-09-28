@@ -86,7 +86,15 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
   deliberate, bounded leak (which *kinds* of files, never their names, count per type, or
   sizes) that exists only for accounts under a policy. Like the file-count limits, the
   declaration is not verifiable: it stops honest mistakes and makes the rule auditable, not a
-  modified client. The owner is never subject to it.
+  modified client. The owner is never subject to it. The same policy covers the account's
+  **Drive**: each upload's reservation (`POST /api/private/drive/files`) declares that file's one
+  `{extension, MIME type}` (an empty or longer list is refused, so nothing passes an allow list
+  by declaring nothing), checked in `src/lib/drivepolicy.js` and never stored; the folder-depth
+  limit needs no declaration there — the Drive object checks it against its own tree on an
+  upload, a new folder, a move (a folder with the folders inside it) and a take-in. A take-in
+  from a Receive link is held to the role's Drive rules as well as the link's own, so a link
+  cannot bring into the Drive a type or depth the role refuses there. Files already in a Drive
+  are never deleted by a new or tighter rule.
 - Access-proof *hashes*, delete/upload/grant/API-key *hashes*, and password verifiers
   (`SHA-256("secbin-auth/v2" ‖ Argon2id(password))`).
 
@@ -1463,7 +1471,8 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - Every value is re-validated server-side (formats, views, expiry, limits, quotas, settings).
 - **Quotas** (role option lists; public/js/quotakinds.js) are checked and counted in one
   synchronous Directory step, so concurrent creations cannot pass a quota: outgoing shares
-  (every share, or by type), Drive uploads (`drive-upload`, each file, at the upload's start) and
+  (every share, or by type), Drive uploads (`drive-upload`, each file, and `drive-bytes`, its
+  size, checked together in the same step at the upload's start: one refused, neither counted) and
   Receive (`receive-link`, `receive-upload`). An API-only quota narrows API creations only; the
   Drive and Receive have no API channel. The public account's quotas count per anonymous
   subject and take only the kinds it can use. The owner is never counted.

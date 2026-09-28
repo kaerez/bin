@@ -70,6 +70,9 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     kitRecord: null, // the key kit's record (at, root, subs)
     kitVerifyLeft: 30,
     meCalls: 0, // GET /api/private/me (the page recording its session)
+    // Refusals the real server makes and this fake does not decide itself (the role's file policy, a quota):
+    // { method, path: RegExp, status, error, message, extra } — the first match answers instead.
+    refusals: [],
   };
   let clock = 1700000000;
   const tick = () => ++clock;
@@ -149,6 +152,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
     }
     S.requests.push({ method, path: p, body, headers: init.headers || {} });
     if (needsCsrf(method, p) && headerOf(init.headers, 'x-secbin-csrf') !== FAKE_CSRF) return fail(403, 'csrf_mismatch');
+    const refusal = S.refusals.find((r) => r.method === method && r.path.test(p));
+    if (refusal) return ok({ error: refusal.error, message: refusal.message, ...(refusal.extra || {}) }, refusal.status);
     let m;
     if (p === '/api/auth/session') return ok({ authenticated: true, user: S.user, impersonatedBy: S.impersonatedBy });
     if (p === '/api/auth/prelogin' && method === 'POST') return ok({ salt: 'AAAAAAAAAAAAAAAAAAAAAA', t: 3 });

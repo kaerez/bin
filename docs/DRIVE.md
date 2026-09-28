@@ -389,10 +389,35 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   quotas (kinds `drive`, `files` and `all`), receipts, and the CAPTCHA (`shareCaptcha` / `shareCaptchaDefault`:
   SECURITY.md, *CAPTCHA on shares*). The owner has no limits. The public account has no Drive.
 - Uploads: each file added by an upload (a folder upload: each of its files) is counted by the
-  role's quotas of kind `drive-upload` when `POST /api/private/drive/files` reserves it
-  (`429 quota_exceeded` at the quota), and given back when the Drive refuses it or the upload
-  never completes (the browser deletes the unfinished file, or the purge removes it). Files
-  taken in from reverse shares are counted under Receive (docs/REVERSE.md §6.2), not here.
+  role's quotas of kind `drive-upload`, and its size by those of kind `drive-bytes` ("bytes
+  uploaded to the Drive per period"), both in one atomic Directory step when
+  `POST /api/private/drive/files` reserves it (`429 quota_exceeded` when either would pass its
+  max: "Quota reached: 1.0 GB uploaded to the Drive per 1d."), and both given back when the
+  Drive refuses it or the upload never completes (the browser deletes the unfinished file, or
+  the purge removes it; `refundDriveUploads`). Files taken in from reverse shares are counted
+  under Receive (docs/REVERSE.md §6.2), not here.
+- **File rules** (the role's `fileTypeMode` / `fileTypeRules` and `maxFolderDepth`, as for file
+  shares: `public/js/filepolicy.js`) apply to the Drive itself, not only to Drive shares:
+  - *Types:* with a type policy, `POST /api/private/drive/files` carries `types: [{ ext, mime }]`
+    — the one type of the file, from the name and type the browser seals — and the Worker
+    checks it (`src/lib/drivepolicy.js`) before anything is counted or reserved: `400
+    declaration_required` (with `policy`) without it, `400 invalid_declaration` for anything but
+    exactly one valid pair, `403 file_type_not_allowed` (with `refused`). Not stored. A modified
+    client could declare another type, as for file shares.
+  - *Depth:* a folder may be at most `maxFolderDepth` levels deep (one in the top folder is at
+    level 1) and a file sits at its folder's level. The Drive object checks it against its tree
+    — no declaration — on a new folder, an upload's reservation, a move (a folder counts the
+    folder levels inside it) and a take-in: `403 folder_too_deep` with `max`. The client checks
+    the same first and says why (`DrivePolicyError`).
+  - *Receive:* files taken in from a Receive link follow the link's own type rules at upload
+    (docs/REVERSE.md) **and** the role's Drive rules at the take-in: the take-in declares the
+    file's type like an upload (a refused one is recorded as failed, reason `type`), and a
+    received path makes folders only down to the role's depth limit (the rest flattened, as past
+    the 8 levels a take-in makes; a link folder already deeper takes nothing in: reason
+    `place`). So a Receive link is no way to bring into the Drive what the role refuses there.
+  - *Existing files* are never deleted: a rule added or tightened later applies to new uploads,
+    folders, moves and take-ins only. Files and folders already in a Drive stay, open and can be
+    downloaded, renamed and deleted.
 - Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
   `reverseMaxExpireSec`, `reverseNoExpiry`, `reverseMaxViews`, `reverseAllowUnlimitedViews`,
   `reversePassword`, `reversePasswordDefault`, `reverseEdit`, `reverseCaptcha`,
@@ -414,12 +439,12 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `POST /api/private/drive/kit/restore` · `GET`, `PUT /api/private/drive/kit/items` | `403 owner_only` for everyone, the owner's own session and the owner acting as a user included: only the owner restores from a personal kit, with `…/admin/keys/users/<userId>/kit-restore` |
 | `GET /api/private/drive/migrate` · `GET …/migrate/items?after=` · `PUT …/migrate` · `POST …/migrate/finish` · `POST …/migrate/retire` | the upgrade of the user's own Drive (§3.3): what is left and the user's own old wraps and salt (for the owner also the sealed escrow keys: with a stolen session they allow offline guessing of the old password, as the release before's `GET /drive` did, only while the Drive waits, and never while impersonating); a page of old items (link keys as the release before sealed them, the field layer taken off); `{ items: [{ id, ks, mek, name, meta?, dek? }], links: [{ id, mek, priv }] }` re-sealed (each checked; `409 mek_not_current`, `400 bad_seal`, `409 already_upgraded` once the Drive is upgraded) → `{ done, skipped, v1Items, v1Links }`; the verification a page per call → `{ verified, next }` or `{ done: true, left, cleanup }` (`409 not_upgraded`, `409 verify_failed`); `{ ids, current \| reauth }` → the links of the release before that the old key does not open, retired → `{ retired, failed, v1Items, v1Links }` (`drive.links_retired`). `403 impersonating` for the owner acting as the user |
 | `GET /api/private/drive/nodes/<id>` | the node and its children: `{ node, children: [...], path: [...ancestors] }` (`root` for the top; `path` root first). Each node: `{ id, parent, kind: 'dir' \| 'file', name, meta, ks, mek, mfp, size, chunks, state, dek, ch, created, updated }` with the sealed fields as stored; an item of the release before has `v1: true` and `fk` instead of `ks`, `mek`, `mfp`, `dek` and `ch`. 404 for an unknown id |
-| `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `{ id }` (`id` chosen by the browser; 409 if taken; every seal checked, §3) |
-| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `{ id, uploadToken, chunks }` (`size` = plaintext bytes, `chunks = ceil(size / 8 MiB)`; capacity checked) |
+| `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `{ id }` (`id` chosen by the browser; 409 if taken; every seal checked, §3; `403 folder_too_deep` past the role's `maxFolderDepth`, §5) |
+| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size, types? }` → `{ id, uploadToken, chunks }` (`size` = plaintext bytes, `chunks = ceil(size / 8 MiB)`; capacity checked; `types`: the file's type, declared when the role has a type policy, §5 — `400 declaration_required` / `invalid_declaration`, `403 file_type_not_allowed`; `403 folder_too_deep` into a folder deeper than the role allows; `429 quota_exceeded` for `drive-upload` / `drive-bytes`) |
 | `PUT /api/private/drive/files/<id>/chunk/<i>` | `application/octet-stream`, header `X-Upload-Token`; exact size check |
 | `POST /api/private/drive/files/<id>/finalize` | header `X-Upload-Token` → `{ ok, ch }` (the ciphertext hash); `409 busy` while a chunk of the file is still being written (finalize again), `409 incomplete` while one is missing |
 | `GET /api/private/drive/files/<id>/chunk/<i>` | ciphertext chunk for the user |
-| `PATCH /api/private/drive/nodes/<id>` | `{ parent?, name?, meta?, ks?, mek? }` move / rename → `{ ok }` (a new name or metadata comes with the item's own `ks` and `mek`: `409 stale_keys` when they changed, `400 bad_seal` when it does not open); 409 when `parent` is the node or inside it; the root cannot be moved, renamed or deleted |
+| `PATCH /api/private/drive/nodes/<id>` | `{ parent?, name?, meta?, ks?, mek? }` move / rename → `{ ok }` (a new name or metadata comes with the item's own `ks` and `mek`: `409 stale_keys` when they changed, `400 bad_seal` when it does not open); 409 when `parent` is the node or inside it; `403 folder_too_deep` when the move would put the item, or a folder inside it, past the role's `maxFolderDepth`; the root cannot be moved, renamed or deleted |
 | `DELETE /api/private/drive/nodes/<id>` | recursive; ends referencing shares; frees capacity; also used by the client to drop a failed upload's `pending` node |
 | `POST /api/private/drive/shares` | `{ nodes: [file ids], views, expire, deletable?, label?, types?, depth?, paste, acc }` → `{ id, deletetoken }`: `nodes` lists **files** (the browser flattens folders), and `refs[i]` is `nodes[i]`; `types` / `depth` are the file-policy declaration, sent only when a policy applies (as for file shares); `paste` is the `encryptPaste` body (`acc` is also inside it) |
 | `GET /api/private/drive/nodes/<id>/shares` | shares referencing the node — for a folder, every share that references a file under it: `{ shares: [{ id, label, kind: 'drive', created, expires, views_total, left, status, locked }] }` (My shares' row fields; `views_total` / `left` null = unlimited) |
@@ -530,7 +555,11 @@ stand-in. What each side relies on:
   empty folders are kept as `{ path, dir: true }`), `download(id, { onProgress, signal })` → a
   handle whose `save()` streams the file to disk or a download, and
   `downloadFolder(id, { onProgress, signal })` (a ZIP).
-- `mkdir(parent, name)` → the new id; `rename(id, name)`, `move(id, parent)`, `remove(id)`.
+- `mkdir(parent, name, { level })` → the new id; `rename(id, name)`, `move(id, parent, { kind,
+  level })`, `remove(id)`. `setPolicy(limits)` (the profile's limits) makes `upload`,
+  `uploadTree`, `mkdir`, `move` and `receivePending` check the role's file rules first
+  (`DrivePolicyError`, with the reason) and declare each file's type; `checkUpload(parent,
+  entries)` checks a whole batch before any of it is sent; `levelOf(id)` is a folder's level.
 - `share(ids, { views, expire, password, deletable, label, limits, view, captcha })` → `{ url, id,
   deletetoken, captcha }` (`captcha`: the Share dialog's "Require CAPTCHA to open", shown as the
   role says — a choice pre-set from its default, ticked and disabled, or hidden): `ids` may be files and folders (the client flattens them to files for the
@@ -612,8 +641,10 @@ stand-in. What each side relies on:
   change, or when the tab is shown again), an open Drive closes: its KEKs are overwritten and
   dropped, and what it showed leaves the page. The CSP and Trusted Types keep other script out,
   as for the rest of the app; what remains is in SECURITY.md.
-- Capacity, sizes and chunk counts are enforced server-side; names and types are not (they are
-  encrypted), so file-type rules for drive shares are enforced by the client, as for file shares.
+- Capacity, sizes and chunk counts are enforced server-side, and so is the folder-depth limit
+  (the tree is the server's). File types are declared by the client and checked by the server,
+  for Drive uploads, take-ins and Drive shares alike, as for file shares: the Worker does not
+  read the sealed name or type for it (§5).
 
 ## 10. Server notes (as built)
 

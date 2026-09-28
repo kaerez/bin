@@ -179,3 +179,22 @@ violations. It needs a fresh server (no owner yet):
 ```sh
 WT=$PWD BASE=http://localhost:8787 node test-e2e/quotas.mjs
 ```
+
+## `drive-rules.mjs` — the Drive's bytes quota, the role's file rules in the Drive, the footer
+
+What it covers (README "Quotas", [docs/DRIVE.md](../docs/DRIVE.md) §5): Admin → Roles → a custom
+role → Quotas — "Bytes uploaded" in the Drive group, its max in MiB or GiB (the unit shown for it
+only), no "API only", saved in bytes; the role's file rules (a blocked type, a folder-depth limit)
+set in its limits; then, as the user, a Drive upload past the bytes quota refused with the size
+("Quota reached: 1.0 KB uploaded to the Drive per 1d."), an upload of the blocked type refused
+before anything is sent, a folder nested past the limit refused in its dialog, the server asking a
+direct upload for its type declaration, and the Account page listing the quota as sizes; the
+viewer saying a note is end-to-end and a Drive share is not; the same footer ("Encrypted in your
+browser") on every page; axe (WCAG 2.2 A/AA) on every state; no page errors or CSP / Trusted
+Types violations. It needs a fresh server (no owner yet):
+
+```sh
+rm -rf .wrangler/rules-state
+npx wrangler dev --port 9241 --persist-to .wrangler/rules-state
+WT=$PWD BASE=http://localhost:9241 node test-e2e/drive-rules.mjs
+```
