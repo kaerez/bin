@@ -13,7 +13,7 @@
 
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
-import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig, rateLimit, EXTEND_DOWNLOADS } from '../lib/guard.js';
 import { parseUserAgent, parseLanguages } from '../lib/ua.js';
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
@@ -132,7 +132,7 @@ export async function handlePublic(request, env, url) {
   }
 
   // /chunk/<i> reads a file share's stream; /chunk/<ref>/<i> a Drive share's file.
-  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|chunk|human)(?:\/(\d{1,6})(?:\/(\d{1,6}))?)?)?$/);
+  const m = pathname.match(/^\/api\/(paste|file)\/([^/]+)(?:\/(open|expire|extend|chunk|human)(?:\/(\d{1,6})(?:\/(\d{1,6}))?)?)?$/);
   if (!m) return null;
   const [, kind, rawId, action, idx, idx2] = m;
   const id = decodePathSegment(rawId);
@@ -184,6 +184,10 @@ export async function handlePublic(request, env, url) {
     assertNotCrossSite(request);
     const proofs = await proofHashes(request);
     return expireByOpener(env, g, id, info, proofs, human.ok);
+  }
+  if (action === 'extend' && info.file && idx === undefined) {
+    if (request.method !== 'POST') return methodNotAllowed('POST');
+    return withHuman(await extendGrant(request, env, g, id, human.ok));
   }
   if (action === 'chunk' && info.file && idx !== undefined) {
     if (request.method !== 'GET') return methodNotAllowed('GET');
@@ -280,7 +284,8 @@ async function openFile(env, g, id, { lh, kh }, human) {
   if (r.status === 'captcha') throw captchaRequired();
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
-    const out = { paste: r.paste, grant, grantExpires: r.grantExpires, chunks: r.chunks, padded: r.padded, viewer: policy.viewer };
+    // `now`: the server's time, so the viewer's download-window warning does not depend on its clock.
+    const out = { paste: r.paste, grant, grantExpires: r.grantExpires, now: Math.floor(Date.now() / 1000), chunks: r.chunks, padded: r.padded, viewer: policy.viewer };
     if (r.refs) out.refs = r.refs; // a Drive share: its files' chunk counts and sizes
     return json(out);
   }
@@ -333,6 +338,42 @@ async function expireByOpener(env, g, id, info, { lh, kh }, human) {
   if (status === 'bad_link' || status === 'bad_password') return failed(env, g, proofFailure(status));
   if (status === 'not_allowed') return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
   return goneFor(env, g, id, err(410, 'gone', GONE), lh, !human);
+}
+
+/**
+ * Keep a download window open longer (WCAG 2.2.1): the grant itself is the
+ * credential (as for chunks); the window is the sender's role's, now. Every call
+ * counts towards the network's own "download-extend" limit (EXTEND_DOWNLOADS),
+ * checked first: a loop ends in 429 before the Directory is asked. Refusals a
+ * guesser produces also count as invalid (as on the chunk route): a bad grant,
+ * and an id that was never a share (answered from the Directory's index alone,
+ * without creating a FileShare object). A known share that has ended (410) and a
+ * grant past its last extension (409) are the right credential arriving late or
+ * once too often: never counted as invalid (the invalid-fetch rule). Each
+ * extension is recorded in the share owner's activity log.
+ */
+async function extendGrant(request, env, g, id, human = false) {
+  const rl = await rateLimit(env, g, 'download-extend', EXTEND_DOWNLOADS);
+  if (!rl.ok) {
+    const res = err(429, 'rate_limited', 'Too many requests to keep downloads open from your network. Try again later.', rl.until ? { until: rl.until } : undefined);
+    res.headers.set('retry-after', String(EXTEND_DOWNLOADS.blockSec));
+    return res;
+  }
+  const grant = request.headers.get('x-download-grant') || '';
+  if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) return failed(env, g, err(403, 'bad_grant', 'A valid X-Download-Grant header is required.'));
+  const policy = await directory(env).shareOpenPolicy(id);
+  // As on the chunk route: without a CAPTCHA grant (while the CAPTCHA is in force) a missing share
+  // answers exactly as a protected one, and a share that has the CAPTCHA is not extended.
+  if (!policy.known) return failed(env, g, human ? err(410, 'gone', GONE) : captchaRequired().toResponse());
+  const r = await fileStub(env, id).extendGrant(await hashToken(grant), policy.grantSec, human);
+  if (r.status === 'captcha') throw captchaRequired();
+  if (r.status === 'ok') {
+    await directory(env).recordDownloadExtended(id, { n: r.extensions, until: r.grantExpires });
+    return json({ grantExpires: r.grantExpires, extensionsLeft: r.extensionsLeft, now: Math.floor(Date.now() / 1000) });
+  }
+  if (r.status === 'limit') return err(409, 'extend_limit', 'The download window cannot be extended again. Open the link again if views remain.', { grantExpires: r.grantExpires });
+  if (r.status === 'bad_grant') return failed(env, g, err(403, 'bad_grant', 'The download window has expired — open the link again.'));
+  return human ? err(410, 'gone', GONE) : captchaRequired().toResponse();
 }
 
 /** Chunk i of a file share's stream, or (with `ref`) chunk i of a Drive share's file number `ref`. */

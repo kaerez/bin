@@ -12,7 +12,7 @@ import { expireSeconds, MAX_VIEWS } from './format.js';
 import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk, checkPath, checkMime, buildTree, basename, cleanName } from './files.js';
 import { detectMime, normalizeMime, COMMON_TYPES } from './mime.js';
 import { $, showView, toast, copyText, flashCopied, tablistKeys } from './ui.js';
-import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint, nameEl } from './common.js';
+import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint, nameEl, shareLifetimeNote } from './common.js';
 import { walkEntry } from './walk.js';
 import { folderBrowser } from './tree.js';
 import { buildSecret, describeHost, describeUrlRules, parseShareUrl, urlRulesOf, ShareTypeError } from './sharetypes.js';
@@ -583,7 +583,7 @@ function openPasswordModal(onSubmit) {
     input.value = '';
     confirmInput.value = '';
     invalid(null);
-    create.onclick = cancel.onclick = scrim.onclick = input.onkeydown = confirmInput.onkeydown = null;
+    create.onclick = cancel.onclick = scrim.onclick = scrim.onpointerdown = input.onkeydown = confirmInput.onkeydown = null;
     document.removeEventListener('keydown', onKey);
     if (opener && typeof opener.focus === 'function') opener.focus();
   };
@@ -607,7 +607,10 @@ function openPasswordModal(onSubmit) {
   };
   create.onclick = submitPw;
   cancel.onclick = close;
-  scrim.onclick = (e) => { if (e.target === scrim) close(); };
+  // Only a click that also began on the scrim closes it (2.5.2): a drag out of a field does not.
+  let downOnScrim = false;
+  scrim.onpointerdown = (e) => { downOnScrim = e.target === scrim; };
+  scrim.onclick = (e) => { if (e.target === scrim && downOnScrim) close(); downOnScrim = false; };
   input.onkeydown = confirmInput.onkeydown = (e) => { if (e.key === 'Enter') submitPw(); };
   document.addEventListener('keydown', onKey);
   mmsg.hidden = true;
@@ -620,11 +623,8 @@ function showSuccess({ kind, id, deletetoken, url, views, expiryText }) {
   showView('success');
   $('#paste-url').textContent = url;
   const what = kind === 'file' ? 'the files' : mode === 'url' ? 'the link' : mode === 'secret' ? 'the credential' : 'the note';
-  $('#success-note').textContent = (views === null
-    ? `Anyone with this link can open ${what} any number of times until it self-destructs in ${expiryText}.`
-    : views === 1
-      ? `Anyone with this link can open ${what} once. Unopened, it self-destructs in ${expiryText}.`
-      : `Anyone with this link can open ${what} up to ${views} times. It self-destructs after the last view or in ${expiryText}, whichever comes first.`)
+  // Files are downloaded under a window that can outlive the last view (src/fileshare-do.js).
+  $('#success-note').textContent = shareLifetimeNote({ what, views, expiryText, files: kind === 'file' })
     + ' Keep the whole link private — the key that unlocks it is inside the link.'
     + (publicMode ? ' Without an account you cannot manage it later: to delete it before it expires, keep the delete token below.' : ' Manage it later under “my shares”.');
   const tokenBox = document.getElementById('delete-token-box');

@@ -56,8 +56,21 @@ export const logoutCookie = () => [clearCookie(SESSION_COOKIE), clearCsrfCookie(
 export const accountDisabled = (headers) => new HttpError(403, 'account_disabled', 'This account is disabled. Contact the administrator.', undefined, headers);
 
 /**
+ * When a session ends (Unix seconds), for the browser's warning before it
+ * does (WCAG 2.2.1): `idleEndsAt` without further activity (each request
+ * slides it, at most once a minute), `endsAt` at the latest (the absolute
+ * timeout; it cannot be extended). `idleSec` is the inactivity allowance.
+ * `now` is the server's time: the page measures its clock against it, so a
+ * browser clock that is off does not move the warning.
+ */
+export function sessionTimes(c, { idleSec, absSec, t = now() }) {
+  const endsAt = Math.min(c.exp, c.iat + absSec);
+  return { idleSec, idleEndsAt: Math.min(c.lat + idleSec, endsAt), endsAt, slideSec: SLIDE_SEC, now: t };
+}
+
+/**
  * Resolve the session on a request. Returns
- *   { ok: true, user, actor, claims, csrf, maxAgeSec, setCookie? }  or
+ *   { ok: true, user, actor, claims, csrf, maxAgeSec, session, setCookie? }  or
  *   { ok: false, reason: 'none' | 'unconfigured' | 'invalid' | 'disabled' }.
  * `csrf` is the `csrfTokens` setting (read by the Directory with the session,
  * so it costs no extra round trip); `maxAgeSec` is how long the session
@@ -65,6 +78,7 @@ export const accountDisabled = (headers) => new HttpError(403, 'account_disabled
  * absolute expiry), the lifetime of a CSRF token cookie (re)set on its own;
  * `setCookie` is an array of Set-Cookie values (the refreshed session cookie
  * and its CSRF token cookie).
+ * `session` is when the session ends (sessionTimes), for the page's warning.
  */
 export async function readSession(request, env) {
   const token = getCookie(request, SESSION_COOKIE);
@@ -91,7 +105,7 @@ export async function readSession(request, env) {
   }
   const maxAgeSec = Math.min(claims.exp, claims.lat + idleSec, claims.iat + absSec) - t;
   // Fail closed: only an explicit `false` turns the token check off.
-  return { ok: true, user: res.user, actor: res.actor, claims: c, csrf: res.csrf !== false, maxAgeSec, setCookie };
+  return { ok: true, user: res.user, actor: res.actor, claims: c, csrf: res.csrf !== false, maxAgeSec, setCookie, session: sessionTimes(claims, { idleSec, absSec, t }) };
 }
 
 const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -147,7 +161,7 @@ export async function authenticate(request, env, { allowApiKey = false, scope = 
     throw new HttpError(401, 'unauthenticated', 'Please log in.');
   }
   await checkCsrf(request, env, s);
-  return { user: s.user, actor: s.actor, claims: s.claims, maxAgeSec: s.maxAgeSec, setCookie: s.setCookie, channel: 'all' };
+  return { user: s.user, actor: s.actor, claims: s.claims, maxAgeSec: s.maxAgeSec, setCookie: s.setCookie, session: s.session, channel: 'all' };
 }
 
 /** The actor recorded for an action: the user, or { id: owner, imp: true } while impersonating. */

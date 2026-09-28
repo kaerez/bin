@@ -57,7 +57,7 @@
             </a>
             <div class="topbar-right">
                 <nav class="dash-nav" id="dash-nav" aria-label="Dashboard" hidden>
-                    <a class="back" href="/dashboard/" data-nav="new"><span>new</span></a>
+                    <a class="back" href="/dashboard/" data-nav="new"><span>new share</span></a>
                     <a class="back" href="/dashboard/shares/" data-nav="shares"><span>my shares</span></a>
                     <a class="back" href="/dashboard/drive/" data-nav="drive" id="nav-drive" hidden><span>drive</span></a>
                     <a class="back" href="/dashboard/account/" data-nav="account"><span>account</span></a>
@@ -131,7 +131,7 @@
                     <h2 class="section-title">Change password</h2>
                     <label class="field-label" for="pw-current" id="pw-current-label">Current password</label>
                     <div class="pw pw-wide">
-                        <input type="password" id="pw-current" class="input" placeholder="Current password" autocomplete="current-password" aria-label="Current password" />
+                        <input type="password" id="pw-current" class="input" autocomplete="current-password" />
                         <button type="button" class="peek" id="pw-current-peek" aria-label="Show password" aria-pressed="false">
                             <svg
                                 class="ico-eye"
@@ -168,7 +168,7 @@
                     </div>
                     <label class="field-label" for="pw-new" id="pw-new-label">New password</label>
                     <div class="pw pw-wide">
-                        <input type="password" id="pw-new" class="input" placeholder="New password" autocomplete="new-password" aria-label="New password" aria-describedby="pw-policy" />
+                        <input type="password" id="pw-new" class="input" autocomplete="new-password" aria-describedby="pw-policy" />
                         <button type="button" class="peek" id="pw-new-peek" aria-label="Show password" aria-pressed="false">
                             <svg
                                 class="ico-eye"
@@ -204,8 +204,9 @@
                         </button>
                     </div>
                     <p class="mono muted" id="pw-policy"></p>
+                    <label class="field-label" for="pw-new2">Repeat the new password</label>
                     <div class="pw pw-wide">
-                        <input type="password" id="pw-new2" class="input" placeholder="Repeat new password" autocomplete="new-password" aria-label="Repeat new password" />
+                        <input type="password" id="pw-new2" class="input" autocomplete="new-password" />
                         <button type="button" class="peek" id="pw-new2-peek" aria-label="Show password" aria-pressed="false">
                             <svg
                                 class="ico-eye"
@@ -261,7 +262,7 @@
                         <input type="password" class="input" id="passkey-current" autocomplete="current-password" />
                         <div class="turnstile" id="passkey-turnstile" hidden></div>
                         <form class="toolbar" id="passkey-form">
-                            <input class="input" id="passkey-name" placeholder="Passkey name, e.g. work laptop" maxlength="100" aria-label="Passkey name" />
+                            <label class="field-inline"><span class="field-label">Passkey name</span><input class="input" id="passkey-name" placeholder="e.g. work laptop" maxlength="100" /></label>
                             <button type="submit" class="btn" id="passkey-add">Add a passkey</button>
                         </form>
                         <p class="mono muted" id="recovery-status"></p>
@@ -286,14 +287,14 @@
                         <div class="turnstile" id="key-turnstile" hidden></div>
                     </div>
                     <form class="toolbar" id="key-form">
-                        <input class="input" id="key-name" placeholder="Key name, e.g. laptop" maxlength="100" aria-label="Key name" />
-                        <select class="input" id="key-life" aria-label="Key lifetime">
+                        <label class="field-inline"><span class="field-label">Key name</span><input class="input" id="key-name" placeholder="e.g. laptop" maxlength="100" /></label>
+                        <label class="field-inline"><span class="field-label">Expires</span><select class="input" id="key-life">
                             <option value="">never expires</option>
                             <option value="604800">7 days</option>
                             <option value="2592000">30 days</option>
                             <option value="31536000">365 days</option>
-                        </select>
-                        <fieldset class="key-scopes" aria-label="What the key may do">
+                        </select></label>
+                        <fieldset class="key-scopes"><legend class="field-label">What the key may do</legend>
                             <label class="inline"><input type="checkbox" name="key-scope" value="notes" checked /> create notes</label>
                             <label class="inline"><input type="checkbox" name="key-scope" value="files" checked /> upload files</label>
                             <label class="inline"><input type="checkbox" name="key-scope" value="policy" checked /> read my policy</label>
@@ -309,7 +310,7 @@
                     <details class="api-help" id="api-help">
                         <summary>Using the API (REST)</summary>
                         <p>Send the key as <code>Authorization: Bearer &lt;key&gt;</code>. What a key may do is set by its scopes: <code>notes</code> and <code>files</code> create shares, <code>policy</code> reads what your client must check first, <code>read</code> lists your shares and their read receipts, and <code>manage</code> labels, extends and revokes them. A key only ever sees your own shares; it can never sign in, reach your account settings, your keys or the admin panel. Give each key only the scopes it needs.</p>
-                        <p>Content is encrypted <strong>before</strong> it is sent, exactly as this site does it, so creating a share needs a client that encrypts: the <code>secbin</code> command-line tool, or the Node.js and Python examples in the repository (<a href="https://github.com/kaerez/bin/blob/main/docs/API.md" rel="noopener noreferrer" target="_blank">docs/API.md</a>, <a href="https://github.com/kaerez/bin/tree/main/examples/api" rel="noopener noreferrer" target="_blank">examples/api</a>). Everything else works with plain <code>curl</code>. The examples read the key from <code>SECBIN_API_KEY</code> and a share id from <code>SHARE_ID</code>.</p>
+                        <p>Content is encrypted <strong>before</strong> it is sent, exactly as this site does it, so creating a share needs a client that encrypts: the <code>secbin</code> command-line tool, or the Node.js and Python examples in the repository (<a href="https://github.com/kaerez/bin/blob/main/docs/API.md" rel="noopener noreferrer" target="_blank">API documentation (docs/API.md)<span class="sr-only"> (opens in a new tab)</span></a>, <a href="https://github.com/kaerez/bin/tree/main/examples/api" rel="noopener noreferrer" target="_blank">API examples (examples/api)<span class="sr-only"> (opens in a new tab)</span></a>). Everything else works with plain <code>curl</code>. The examples read the key from <code>SECBIN_API_KEY</code> and a share id from <code>SHARE_ID</code>.</p>
                         <div class="toolbar"><label class="field-label" for="api-lang">Examples in</label><select class="input" id="api-lang"></select></div>
                         <div class="stack" id="api-examples"></div>
                     </details>
@@ -324,11 +325,13 @@
         </main>
         <footer class="foot reveal d4">
             <nav class="foot-links" id="foot-links" aria-label="Project">
-                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source</a>
+                <a href="https://github.com/kaerez/bin" rel="noopener noreferrer" target="_blank">Source code<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
                 <span class="foot-sep" aria-hidden="true">·</span>
-                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat Model</a>
+                <a href="https://github.com/kaerez/bin/blob/main/SECURITY.md" rel="noopener noreferrer" target="_blank">Threat model<span class="ext" aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>
                 <span class="foot-sep" aria-hidden="true">·</span>
-                <a href="/accessibility/">Accessibility</a>
+                <a href="/accessibility/">Accessibility statement</a>
+                <span class="foot-sep" aria-hidden="true">·</span>
+                <a href="/accessibility/#glossary">Glossary</a>
             </nav>
             <div class="features foot-feats" role="list" aria-label="How secbin protects what you share">
                 <span class="feat" role="listitem">Private</span>

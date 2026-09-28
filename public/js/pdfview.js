@@ -4,6 +4,11 @@
 // PDF never runs. Pages are rasterized to a canvas one at a time on demand,
 // with page-count and canvas-size caps so a hostile document cannot exhaust
 // memory. Parsing happens in pdf.js's Web Worker (worker-src 'self').
+//
+// A canvas is a picture: each page also gets its text (pdf.js's text content,
+// set as text nodes, never markup) under "Text of this page", for screen
+// readers and for reading reflowed (WCAG 1.1.1, 1.4.10). A page without text
+// (a scan) says so and points to the download.
 
 import * as pdfjs from './vendor/pdfjs/pdf.min.mjs';
 import { h } from './common.js';
@@ -31,6 +36,7 @@ function pdfWorker() {
 }
 
 export const MAX_PAGES = 500;
+let seq = 0;
 export const MAX_CANVAS_PIXELS = 16_000_000;
 
 /** Render `bytes` into `container`; returns a cleanup function. */
@@ -59,12 +65,15 @@ export async function renderPdf(container, bytes) {
     throw new Error(e && e.name === 'PasswordException' ? 'This PDF is password-protected — download it instead.' : 'This PDF could not be read.', { cause: e });
   }
   const pages = Math.min(doc.numPages, MAX_PAGES);
-  const canvas = h('canvas.viewer-pdf');
-  const label = h('span.mono.viewer-page');
-  const prev = h('button.btn', { type: 'button', text: '‹ Prev' });
-  const next = h('button.btn', { type: 'button', text: 'Next ›' });
+  const canvas = h('canvas.viewer-pdf', { role: 'img' });
+  const label = h('span.mono.viewer-page', { role: 'status' });
+  const prev = h('button.btn', { type: 'button', text: '‹ Previous page' });
+  const next = h('button.btn', { type: 'button', text: 'Next page ›' });
+  const text = h('div.viewer-pdf-text', { id: `pdf-text-${++seq}` });
+  const textBox = h('details.viewer-pdf-textbox', {}, h('summary', { text: 'Text of this page' }), text);
   container.appendChild(h('div.viewer-toolbar', {}, prev, label, next));
   container.appendChild(h('div.viewer-frame', {}, canvas));
+  container.appendChild(textBox);
   if (doc.numPages > MAX_PAGES) container.appendChild(h('p.msg.viewer-note', { text: `Showing the first ${MAX_PAGES} of ${doc.numPages} pages.` }));
 
   let current = 1;
@@ -89,7 +98,28 @@ export async function renderPdf(container, bytes) {
     canvas.height = Math.floor(vp.height);
     renderTask = page.render({ canvas, canvasContext: canvas.getContext('2d'), viewport: vp, annotationMode: pdfjs.AnnotationMode.DISABLE });
     try { await renderTask.promise; } catch (e) { if (!(e instanceof pdfjs.RenderingCancelledException)) throw e; }
+    await pageText(page, n);
     page.cleanup();
+  }
+
+  /** The page's text as paragraphs (one per line pdf.js reports), or a note when it has none. */
+  async function pageText(page, n) {
+    let lines = [];
+    try {
+      const tc = await page.getTextContent();
+      let line = '';
+      for (const it of tc.items) {
+        if (typeof it.str !== 'string') continue;
+        line += it.str;
+        if (it.hasEOL) { lines.push(line); line = ''; }
+      }
+      if (line) lines.push(line);
+      lines = lines.map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 5000);
+    } catch { lines = []; }
+    if (destroyed || n !== current) return;
+    canvas.setAttribute('aria-label', `Page ${n} of ${pages}${lines.length ? ' (its text follows, under “Text of this page”)' : ''}`);
+    text.replaceChildren(...(lines.length ? lines.map((l) => h('p', { text: l }))
+      : [h('p', { text: 'This page has no text layer (it may be a scanned image). Download the file to open it in your own reader.' })]));
   }
 
   prev.onclick = () => { if (current > 1) show(current - 1); };

@@ -203,9 +203,11 @@ export class DriveClient {
   }
 
   /**
-   * The page no longer acts for this session (another tab signed in as
-   * someone else, or started or ended impersonation): every key this client
-   * holds is overwritten and dropped; nothing here opens anything any more.
+   * The page no longer acts for this session (the session ended —
+   * session-timeout.js — or the browser is now signed in as someone else:
+   * another tab signed in, or started or ended impersonation): every key this
+   * client holds is overwritten and dropped; every later call that needs a key
+   * fails, so nothing more is opened or sealed with it.
    */
   forget() {
     for (const list of this.keys?.keks?.values() ?? []) for (const k of list) k.fill(0);

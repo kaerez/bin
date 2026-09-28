@@ -1,13 +1,15 @@
 // nav.js — shared dashboard chrome: loads the signed-in profile (/api/private/me)
 // and records it as the session this page acts for (api.js bindSession), shows
 // the nav (Drive only when the role allows it, Admin only for the owner), the
-// impersonation banner with "Return to admin", log-out, and the "session
-// changed" banner. Every dashboard page awaits `ready`.
+// impersonation banner with "Return to admin", log-out, the "session changed"
+// banner, and the warning before the session times out (session-timeout.js).
+// Every dashboard page awaits `ready`.
 
-import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, noteSessionChanged, SESSION_CHANGED } from '../../js/api.js';
+import { me, logout, admin, ApiError, bindSession, forgetSession, onSessionChanged, isSessionChanged, isPageSession, endPageSession, SESSION_CHANGED } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError, h } from '../../js/common.js';
 import { clearSessionKey, clearImpersonationKeys, purgeStaleSlots } from '../../js/drivekeys.js';
+import { watchSession } from './session-timeout.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -49,6 +51,8 @@ export function driveAllowed(profile) {
 export const ready = (async () => {
   const profile = await loadMe();
   bindSession(profile);
+  // A warning before the session times out, with the option to stay signed in (WCAG 2.2.1).
+  watchSession(profile.session);
   // Drive keys are never kept in the tab (each page asks the server): remove what a release before left there.
   purgeStaleSlots();
   const nav = $('#dash-nav');
@@ -117,8 +121,7 @@ let lastCheck = 0;
 addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible' || Date.now() - lastCheck < 5000) return;
   lastCheck = Date.now();
-  let was;
   let now;
-  try { was = await ready; now = await loadMe(); } catch { return; /* offline: the next request says so */ }
-  if (now.user.id !== was.user.id || (now.impersonatedBy ?? null) !== (was.impersonatedBy ?? null)) noteSessionChanged();
+  try { await ready; now = await me(); } catch { return; /* offline or signed out: the next request (or the session timeout) says so */ }
+  if (!isPageSession(now)) endPageSession();
 });

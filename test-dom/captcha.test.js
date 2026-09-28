@@ -283,7 +283,8 @@ describe('the viewer: a share with the CAPTCHA', () => {
     await until(() => w.renders.length);
     expect(w.renders[0].opts).toMatchObject({ action: 'share-open' });
     expect(go.disabled).toBe(true);
-    expect($('.human-wait').textContent).toBe('Waiting for the CAPTCHA…');
+    // The waiting note, with the way on for anyone who cannot complete it (WCAG 3.3.8, test-dom/wcag22.test.js).
+    expect($('.human-wait').textContent).toBe('Waiting for the CAPTCHA… If you cannot complete it, contact the administrator.');
     w.solve('tok-1'); // enabled by the check alone (nothing else on the page enables it)
     expect(go.disabled).toBe(false);
     go.click();

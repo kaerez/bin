@@ -641,3 +641,146 @@ describe('the owner acting as the user: received files', () => {
     expect(new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()))).toBe('signed contract');
   }, 60000);
 });
+// ── WCAG 2.2 (docs/WCAG22.md): the uploader and the Drive's reverse-share states ──
+describe('WCAG 2.2: reverse shares', () => {
+  it('the uploader: the drop zone is a named group, not a Tab stop; "Sent …" is said by a status line there from the start; focus goes to "Choose files" after a send', async () => {
+    const S = await reverseServer();
+    await mountUploader(page(), { location: S.location });
+    const drop = $('#reverse-drop');
+    expect(drop.getAttribute('role')).toBe('group');
+    expect(drop.hasAttribute('tabindex')).toBe(false);
+    const live = $('#reverse-done').parentElement;
+    expect(live.getAttribute('role')).toBe('status');
+    expect($('#reverse-done').hasAttribute('role')).toBe(false);
+    pick($('#reverse-file-input'), [fileOf('a.txt', 'alpha')]);
+    await until(() => !$('#reverse-send').disabled);
+    $('#reverse-send').focus();
+    $('#reverse-send').click();
+    await until(() => !$('#reverse-done').hidden);
+    expect($('#reverse-done').parentElement).toBe(live);
+    expect(document.activeElement.id).toBe('reverse-pick-files');
+  });
+
+  it('the uploader: an error state names itself in the page title', async () => {
+    const S = await reverseServer({ status: 410 });
+    await mountUploader(page(), { location: S.location });
+    expect(document.title).toBe('This link no longer accepts files · secbin');
+  });
+
+  it('Receive files…: the file types list has a visible label, "Copy link" keeps its visible words in its name', async () => {
+    await server();
+    await existingReverse('root');
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    $('#drive-receive').click();
+    await until(() => $('#drive-rev-table'));
+    const rules = $('#drive-rev-rules');
+    expect(rules.hasAttribute('aria-label')).toBe(false);
+    expect(document.querySelector('label[for="drive-rev-rules"]').textContent).toMatch(/^The file types/);
+    expect(rules.closest('.dfield').hidden).toBe(true);
+    $('#drive-rev-types').value = 'allow';
+    $('#drive-rev-types').dispatchEvent(new Event('change'));
+    expect(rules.closest('.dfield').hidden).toBe(false);
+    expect($('#drive-rev-unit').getAttribute('aria-label')).toBe('Accept files for: unit');
+    const copy = button($('#drive-rev-table tbody tr'), 'Copy link');
+    expect(copy.getAttribute('aria-label')).toBe('Copy link old');
+  });
+
+  it('a dialog opening puts away a toast from before it (nothing shown or read outside the modal); a toast raised while it is open still shows', async () => {
+    await server();
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const t = document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast' }));
+    t.setAttribute('role', 'status');
+    t.textContent = 'Added 1 received file.';
+    t.classList.add('show');
+    $('#drive-receive').click();
+    await until(() => dialog());
+    expect(t.classList.contains('show')).toBe(false);
+    expect(t.textContent).toBe('');
+    expect(t.inert).toBe(false);
+  });
+
+  // Security audit F6 (#67) and audit B L4: when the session ends (session-timeout.js), or the
+  // browser is now signed in as someone else (api.js), an open Drive closes: its KEKs are zeroed
+  // and leave the client, its dialogs close (the page behind them no longer inert on their
+  // account) and what it showed (decrypted names) leaves the page.
+  for (const [what, event, why] of [['the session ended', 'secbin:session-ended', 'ended'], ['another session is signed in', 'secbin:session-changed', 'changed']]) {
+    it(`${what}: the Drive forgets its keys, closes its dialogs and its contents, and offers a reload`, async () => {
+      await server();
+      const r = await startDrive(mountPoint(), deps());
+      await r.app.ready;
+      const forget = vi.spyOn(drive.DriveClient.prototype, 'forget');
+      const held = [...r.app.client.keys.keks.values()].flat();
+      expect(held.length).toBeGreaterThan(0);
+      $('#drive-receive').click();
+      await until(() => dialog());
+      expect(document.getElementById('main').inert).toBe(true);
+      window.dispatchEvent(new CustomEvent(event));
+      // Every client on the page forgets (earlier tests' Drives are still listening, too).
+      expect(forget).toHaveBeenCalled();
+      for (const client of forget.mock.contexts) { expect(client.keys.keks.size).toBe(0); expect(client.legacy).toBeNull(); expect(client.forgotten).toBe(true); }
+      for (const k of held) expect(k.every((b) => b === 0)).toBe(true); // overwritten, not only dropped
+      forget.mockRestore();
+      expect($('#drive-closed').dataset.why).toBe(why);
+    expect(dialog()).toBeNull();
+      expect(document.getElementById('main').inert).toBe(false);
+      expect($('#drive-app')).toBeNull();
+      expect($('#drive-rows')).toBeNull();
+      expect($('#drive-closed h2').textContent).toBe('Your Drive was closed');
+      expect($('#drive-closed-reload')).not.toBeNull();
+    });
+  }
+
+  it('received files taken in while a dialog is open: no toast outside the modal; the status line says it', async () => {
+    await server();
+    const rs = await existingReverse('root');
+    await seedReceived(S, { rid: rs.id, pub: rs.pub, path: 'late.txt', bytes: utf8('late') });
+    const mount = mountPoint(); // (resets the body)
+    const t = document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast' }));
+    t.setAttribute('role', 'status');
+    // The take-in (in the background) finishes only after the dialog has opened.
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const real = drive.DriveClient.prototype.receivePending;
+    const spy = vi.spyOn(drive.DriveClient.prototype, 'receivePending').mockImplementation(async function (...a) { await gate; return real.apply(this, a); });
+    try {
+      const r = await startDrive(mount, deps());
+      await r.app.ready;
+      expect(document.getElementById('toast')).toBe(t);
+      $('#drive-receive').click();
+      await until(() => dialog());
+      release();
+      await r.app.received;
+      expect(t.classList.contains('show')).toBe(false);
+      expect(t.textContent).toBe('');
+      expect($('#drive-received').textContent).toMatch(/1 new received file was added/);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('a refresh in the background (received files taken in) while a folder opens: the Drive ends in that folder, with focus on its heading', async () => {
+    await server();
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const opening = r.app.open(ids.get('Documents'), { focus: true });
+    await r.app.refresh(); // as takeInReceived does after adding files
+    await opening;
+    expect(r.app.current).toBe(ids.get('Documents'));
+    expect($('#drive-pane-title').textContent).toBe('Documents');
+    expect(document.activeElement.id).toBe('drive-pane-title');
+  });
+
+  it('received files: the Drive\'s status line is there before it says anything', async () => {
+    await server();
+    const rs = await existingReverse('root');
+    await seedReceived(S, { rid: rs.id, pub: rs.pub, path: 'a.txt', bytes: utf8('a') });
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const live = $('#drive-received-live');
+    expect(live.getAttribute('role')).toBe('status');
+    expect($('#drive-received').hasAttribute('role')).toBe(false);
+    await r.app.received;
+    expect($('#drive-received').parentElement).toBe(live);
+    expect($('#drive-received').textContent).toMatch(/1 new received file was added/);
+  });
+});

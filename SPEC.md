@@ -280,6 +280,7 @@ Common errors on any route:
 | `GET /api/file/:id` | head | 200 | 410, 429 |
 | `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes; at most 20 live grants per client (a reopen replaces its oldest); 429 `busy` (+ `Retry-After`) when 2000 are live |
 | `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
+| `POST /api/file/:id/extend` | `X-Download-Grant` | 200 `{grantExpires, extensionsLeft}`: the grant now ends the sender's role's window from now, never past the share's expiry; spends no view; after the last view the purge waits for it | 403 `bad_grant`, 409 `extend_limit` (at most 10 per grant), 410 |
 | `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
 | `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable` and the sender's account still has `openerDelete`; not after a file share's last view; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 |
 | `POST /api/{paste,file}/:id/human` | `X-Secbin-Intent: 1`; a Turnstile token (`share-open`) → a new CAPTCHA grant, or `X-Secbin-Human` → that grant renewed (10 min from now, at most 12 h after the check); looks nothing up, spends nothing; at most 30 token checks per network per 10 min; a missing or failed token counts as invalid | 200 `{grant, expires}` (`grant: null` without Turnstile keys) | 400 `missing_intent`, 403 `turnstile_*` / `captcha_required`, 429 `rate_limited` / `blocked` |
@@ -465,7 +466,8 @@ exact ciphertext size of every chunk: `min(CHUNK, padded − i·CHUNK) + 16`.
 2. `PUT …/chunk/:i` for every `i` (retries are idempotent — same bytes).
 3. `POST …/finalize` with the manifest share; `bar`, `views` and `expire` must match step 1.
 4. Readers open with proofs (§10) and receive a **download grant** (default 60 min, capped at
-   expiry); chunks are fetched with `X-Download-Grant`, decrypted, and files sliced out of the
+   expiry; the viewer warns 5 minutes before it ends and can extend it up to ten times with
+   `POST /api/file/:id/extend`, WCAG 2.2.1); chunks are fetched with `X-Download-Grant`, decrypted, and files sliced out of the
    stream.
 
 ---

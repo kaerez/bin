@@ -184,6 +184,11 @@ function mountInline(parent, nodes) {
       el.setAttribute('rel', 'noopener noreferrer nofollow ugc');
       el.setAttribute('target', '_blank');
       mountInline(el, n.children);
+      // Said, not only done (WCAG 3.2.5): the link opens a new tab.
+      const hint = document.createElement('span');
+      hint.className = 'sr-only';
+      hint.textContent = ' (opens in a new tab)';
+      el.appendChild(hint);
       parent.appendChild(el);
     }
   }

@@ -130,6 +130,8 @@ async function expireIt(s, ip, grant) {
   return ts(`/api/${kindOf(s.id)}/${s.id}/expire`, { method: 'POST', ip, headers: { ...headers, ...hh(grant) } });
 }
 const chunk = (s, dl, ip, grant) => ts(`/api/file/${s.id}/chunk/${s.drive ? '0/0' : '0'}`, { ip, headers: { 'x-download-grant': dl, ...hh(grant) } });
+// Keep a download window open longer (the viewer's "Keep downloads open", WCAG 2.2.1).
+const extendDl = (s, dl, ip, grant) => ts(`/api/file/${s.id}/extend`, { method: 'POST', ip, headers: { 'x-download-grant': dl, ...hh(grant) } });
 
 async function apiKeyFor(u) {
   expect((await limits(u.id, { apiEnabled: true })).status).toBe(200);
@@ -302,7 +304,7 @@ describe('a protected share serves nothing without a grant', () => {
     // A new action there fails this until the sweep covers it.
     const line = publicRoutesSource.split('\n').find((l) => l.includes('/^\\/api\\/(paste|file)\\/'));
     expect(line).toBeTruthy();
-    expect(/\(\?:\\\/\(([a-z|]+)\)/.exec(line)[1].split('|').sort()).toEqual(['chunk', 'expire', 'human', 'open']);
+    expect(/\(\?:\\\/\(([a-z|]+)\)/.exec(line)[1].split('|').sort()).toEqual(['chunk', 'expire', 'extend', 'human', 'open']);
   });
 
   it('head, open, "delete now" and chunks: 403 captcha_required on every kind (KV note, burn note, file share, Drive share); with a grant they work', async () => {
@@ -326,6 +328,10 @@ describe('a protected share serves nothing without a grant', () => {
         const c1 = await chunk(s, dl, ip, grant);
         expect(c1.status, kind).toBe(200);
         await c1.arrayBuffer();
+        // Nor is it enough to keep the download window open longer (the extend route).
+        const e0 = await extendDl(s, dl, ip);
+        expect([e0.status, await errorOf(e0)], kind).toEqual([403, 'captcha_required']);
+        expect((await extendDl(s, dl, ip, grant)).status, kind).toBe(200);
       }
     }
   });

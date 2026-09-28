@@ -13,6 +13,7 @@
   const CLASS = {
     keyboardNav: 'a11y-keyboard', noAnimations: 'a11y-no-anim', highContrast: 'a11y-contrast',
     readableFont: 'a11y-readable', markHeadings: 'a11y-headings', markLinks: 'a11y-links',
+    largeTargets: 'a11y-targets', textSpacing: 'a11y-spacing',
   };
   const html = document.documentElement;
   for (const k of Object.keys(CLASS)) if (s[k] === true) html.classList.add(CLASS[k]);

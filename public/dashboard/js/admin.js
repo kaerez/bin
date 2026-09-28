@@ -7,7 +7,7 @@
 import '../../js/kdf-progress.js';
 import { admin } from '../../js/api.js';
 import { newCredential, checkOwnerPassword, describePolicy, loginProof } from '../../js/pwauth.js';
-import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds, reducedMotion } from '../../js/common.js';
+import { h, clear, showMsg, armConfirm, formatDate, formatBytes, friendlyError, DURATION_UNITS, splitDuration, unitSeconds, reducedMotion, labelled } from '../../js/common.js';
 import { toast, copyText, flashCopied, keepFocus, tablistKeys } from '../../js/ui.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { normalizeUrlRules, parseShareUrl, matchingUrlRule, unanchoredRules, DEFAULT_URL_RULES } from '../../js/sharetypes.js';
@@ -23,7 +23,9 @@ const panel = (name) => document.querySelector(`.admin-panel[data-panel="${name}
 const MiB = 1024 * 1024;
 /** A header cell; the actions column (no visible title) is named for screen readers. */
 const th = (t) => (t ? h('th', { text: t }) : h('th', {}, h('span.sr-only', { text: 'Actions' })));
+
 let syncTabs = () => {};
+let chosen = false; // a tab was clicked (or opened by keyboard) before the first one was shown
 
 // Role options in sections (the editor shows a heading per section). Each row:
 // [key, label, type, options]; the section is added as a fifth element.
@@ -145,13 +147,14 @@ const guard = async (fn, okText) => {
     p.setAttribute('role', 'tabpanel');
     p.setAttribute('aria-labelledby', t.id);
     p.tabIndex = -1;
-    t.onclick = () => selectTab(t.dataset.tab);
+    t.onclick = () => { chosen = true; selectTab(t.dataset.tab); };
   }
   // Arrow keys move between the tabs; Enter / Space opens one (panels load from the server).
   syncTabs = tablistKeys(document.querySelector('.tabs[role="tablist"]'));
   await refreshOverview();
-  // /dashboard/admin/#portable opens Import / export; #keys the Drive keys (Security).
-  selectTab(location.hash === '#portable' ? 'portable' : location.hash === '#keys' ? 'security' : 'users');
+  // /dashboard/admin/#portable opens Import / export; #keys the Drive keys (Security). A tab the
+  // person chose while the overview loaded stays (WCAG 3.2.5): the first tab is only the default.
+  if (!chosen) selectTab(location.hash === '#portable' ? 'portable' : location.hash === '#keys' ? 'security' : 'users');
 })();
 
 async function refreshOverview() {
@@ -166,11 +169,31 @@ async function refreshOverview() {
   for (const w of warn) b.appendChild(h('p', { text: w }));
 }
 
+// One render per panel at a time. A render clears its panel, waits for the
+// server, then fills it: two at once (the first load and a quick click on the
+// tab, or a save while the tab loads) would both fill it, duplicating the
+// content and its ids (WCAG 4.1.1 / 4.1.2).
+// With none in flight a render starts at once (it clears its panel before this returns, so what
+// it replaces cannot be clicked in the meantime); otherwise it runs after the one in flight.
+const renders = new Map();
+function queued(name, fn) {
+  const prev = renders.get(name);
+  const run = prev ? prev.then(() => fn()) : (async () => fn())();
+  const settled = run.catch(() => {}).then(() => { if (renders.get(name) === settled) renders.delete(name); });
+  renders.set(name, settled);
+  return run;
+}
+
 function selectTab(name) {
   for (const t of document.querySelectorAll('.tab[data-tab]')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const p of document.querySelectorAll('.admin-panel')) p.hidden = p.dataset.panel !== name;
   syncTabs();
-  ({ users: renderUsers, roles: renderRoles, shares: () => renderShares(panel('shares')), settings: renderSettings, security: renderSecurity, public: renderPublic, portable: () => renderPortable(panel('portable'), profile), audit: renderAudit })[name]();
+  ({
+    users: () => renderUsers(), roles: () => renderRoles(),
+    shares: () => queued('shares', () => renderShares(panel('shares'))), settings: () => queued('settings', renderSettings),
+    security: () => queued('security', renderSecurity), public: () => queued('public', renderPublic),
+    portable: () => queued('portable', () => renderPortable(panel('portable'), profile)), audit: () => queued('audit', renderAudit),
+  })[name]();
 }
 
 // ── reusable controls ────────────────────────────────────────────────────────
@@ -447,12 +470,12 @@ function quotasEditor(scope, list) {
   const box = h('div.stack');
   const rows = h('div.stack');
   const addRow = (q = { channel: 'all', kind: 'all', n: 1, unit: 'd', max: 10 }) => {
-    const channel = h('select.input', { 'aria-label': 'Channel' }, ...[['all', 'GUI + API'], ['api', 'API only']].map(([v, t]) => h('option', { value: v, text: t, selected: q.channel === v })));
+    const channel = h('select.input', { 'aria-label': 'Via (channel)' }, ...[['all', 'GUI + API'], ['api', 'API only']].map(([v, t]) => h('option', { value: v, text: t, selected: q.channel === v })));
     const kind = h('select.input', { 'aria-label': 'Kind' }, ...[['all', 'all shares'], ['text', 'notes'], ['files', 'file shares']].map(([v, t]) => h('option', { value: v, text: t, selected: q.kind === v })));
     const max = h('input.input.opt-num', { type: 'number', min: '0', value: String(q.max), 'aria-label': 'Max' });
-    const n = h('input.input.opt-num', { type: 'number', min: '1', value: String(q.n), 'aria-label': 'Period' });
+    const n = h('input.input.opt-num', { type: 'number', min: '1', value: String(q.n), 'aria-label': 'Per (period)' });
     const unit = h('select.input', { 'aria-label': 'Period unit' }, ...[['s', 'seconds'], ['m', 'minutes'], ['h', 'hours'], ['d', 'days'], ['mo', 'months'], ['y', 'years']].map(([v, t]) => h('option', { value: v, text: t, selected: q.unit === v })));
-    const row = h('div.toolbar.quota-row', {}, max, kind, h('span.mono', { text: 'per' }), n, unit, h('span.mono', { text: 'via' }), channel,
+    const row = h('div.toolbar.quota-row', {}, labelled(max), labelled(kind), labelled(n, 'Per (period)'), labelled(unit, 'Period unit'), labelled(channel, 'Via (channel)'),
       h('button.btn', { type: 'button', text: 'Remove', on: { click: () => row.remove() } }));
     row.read = () => ({ channel: channel.value, kind: kind.value, n: Number(n.value), unit: unit.value, max: Number(max.value) });
     rows.appendChild(row);
@@ -473,10 +496,11 @@ function rulesEditor(scope, list, { withPresets = true } = {}) {
     const match = h('select.input', { 'aria-label': 'Match' }, ...[['mime', 'MIME type'], ['ext', 'extension'], ['any', 'any file']].map(([v, t]) => h('option', { value: v, text: t, selected: r.match === v })));
     const value = h('input.input', { value: r.value, placeholder: 'e.g. image/png, image/*, md', 'aria-label': 'Value', maxlength: '128' });
     const renderer = h('select.input', { 'aria-label': 'Show as' }, ...RENDERERS.map((v) => h('option', { value: v, text: v, selected: r.renderer === v })));
-    const sync = () => { value.hidden = match.value === 'any'; };
+    const valueBox = labelled(value);
+    const sync = () => { valueBox.hidden = match.value === 'any'; };
     match.onchange = sync;
     sync();
-    const row = h('div.toolbar', {}, match, value, h('span.mono', { text: '→' }), renderer, h('button.btn', { type: 'button', text: 'Remove', on: { click: () => row.remove() } }));
+    const row = h('div.toolbar', {}, labelled(match), valueBox, h('span.mono', { 'aria-hidden': 'true', text: '→' }), labelled(renderer), h('button.btn', { type: 'button', text: 'Remove', on: { click: () => row.remove() } }));
     row.read = () => ({ match: match.value, value: match.value === 'any' ? '' : value.value.trim(), renderer: renderer.value });
     rows.appendChild(row);
   };
@@ -501,7 +525,7 @@ const driveUsage = (d) => (!d ? '—' : !d.enabled && !d.used ? 'no Drive'
 /** `focusKey`: where focus goes if the re-render loses it (see keepFocus). */
 async function renderUsers(focusKey = null) {
   const refocus = keepFocus(panel('users'), { key: focusKey });
-  try { await renderUsersInto(); } finally { refocus(); }
+  try { await queued('users', renderUsersInto); } finally { refocus(); }
 }
 
 let usersRender = 0;
@@ -515,11 +539,11 @@ async function renderUsersInto() {
   const p = clear(panel('users'));
   if (!data) return;
   const assignable = (roleList?.roles || []).filter((r) => !r.locked && !r.fixed);
-  const user = h('input.input', { placeholder: 'username', maxlength: '64', 'aria-label': 'New username', autocomplete: 'off' });
+  const user = h('input.input', { maxlength: '64', 'aria-label': 'New username', autocomplete: 'off' });
   // The owner may set any password; the policy applies when users change their own.
   const newPolicy = overview?.defaults?.inherited;
-  const pw = h('input.input', { type: 'password', placeholder: 'password', 'aria-label': 'New user password', autocomplete: 'new-password' });
-  const pw2 = h('input.input', { type: 'password', placeholder: 'repeat password', 'aria-label': 'Repeat password', autocomplete: 'new-password' });
+  const pw = h('input.input', { type: 'password', 'aria-label': 'New user password', autocomplete: 'new-password' });
+  const pw2 = h('input.input', { type: 'password', 'aria-label': 'Repeat password', autocomplete: 'new-password' });
   const add = h('button.btn', { type: 'button', text: 'Create user', dataset: { focusKey: 'users:create' } });
   add.onclick = async () => {
     const bad = checkOwnerPassword(pw.value, pw2.value);
@@ -531,7 +555,7 @@ async function renderUsersInto() {
     if (r) renderUsers('users:create');
     else add.focus();
   };
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, user, pw, pw2, add),
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a user' }), h('div.toolbar', {}, labelled(user), labelled(pw), labelled(pw2), add),
     h('p.mono.muted', { text: `You may set any password. When users change their own, it must follow their policy (${describePolicy(newPolicy)}), checked in the browser only: the server never sees passwords.` }),
     h('p.mono.muted', { text: 'When the user’s role has the Drive, their Drive is ready at once: its keys come from the server (Security → Keys), not from their password.' })));
 
@@ -567,8 +591,8 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
   const title = h('h2.section-title', { text: `Manage ${d.user.username}`, tabindex: '-1' });
   box.appendChild(title);
   const userPolicy = d.effective.all;
-  const npw = h('input.input', { type: 'password', placeholder: 'new password', autocomplete: 'new-password', 'aria-label': 'New password' });
-  const npw2 = h('input.input', { type: 'password', placeholder: 'repeat', autocomplete: 'new-password', 'aria-label': 'Repeat new password' });
+  const npw = h('input.input', { type: 'password', autocomplete: 'new-password', 'aria-label': 'New password' });
+  const npw2 = h('input.input', { type: 'password', autocomplete: 'new-password', 'aria-label': 'Repeat new password' });
   const setBtn = h('button.btn', { type: 'button', text: 'Set password' });
   setBtn.onclick = async () => {
     const bad = checkOwnerPassword(npw.value, npw2.value);
@@ -580,7 +604,7 @@ async function openUser(id, passwordOnly = false, { scroll = true } = {}) {
     setBtn.disabled = false;
   };
   box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Set password (no current password needed)' }),
-    h('p.mono.muted', { text: 'This is account recovery: it also signs the user out everywhere. Their passkeys and recovery codes keep working; remove them below if the account may have been taken over. Their Drive does not depend on the password.' }), h('div.toolbar', {}, npw, npw2, setBtn),
+    h('p.mono.muted', { text: 'This is account recovery: it also signs the user out everywhere. Their passkeys and recovery codes keep working; remove them below if the account may have been taken over. Their Drive does not depend on the password.' }), h('div.toolbar', {}, labelled(npw), labelled(npw2), setBtn),
     h('p.mono.muted', { text: `You may set any password. This user's own changes follow: ${describePolicy(userPolicy)}` })));
   if (passwordOnly) return;
 
@@ -616,7 +640,7 @@ const scopeBoxes = (checked) => KEY_SCOPES.map(([v, t]) => {
 
 /** A user's API keys: the owner creates, changes and revokes them (no confirmation for other users). */
 function userKeysCard(id, list) {
-  const name = h('input.input', { placeholder: 'Key name', maxlength: '100', 'aria-label': 'Key name' });
+  const name = h('input.input', { placeholder: 'e.g. laptop', maxlength: '100', 'aria-label': 'Key name' });
   const life = h('select.input', { 'aria-label': 'Key lifetime' }, ...KEY_LIFE.map(([v, t]) => h('option', { value: v, text: t })));
   const boxes = scopeBoxes(DEFAULT_KEY_SCOPES);
   const shown = h('div.linkrow', { hidden: true });
@@ -653,7 +677,7 @@ function userKeysCard(id, list) {
           if (!scopes.length) return msg('Choose at least one thing the key may do.', true);
           if (await guard(() => admin.updateUserKey(id, k.id, { name: n.value.trim(), scopes }), 'API key updated.')) rows();
         };
-        tr.after(h('tr.key-edit-row', {}, h('td.cell-full', { colspan: '5' }, h('div.toolbar', {}, n, h('fieldset.key-scopes', { 'aria-label': 'What the key may do' }, ...bs.map((b) => b.label)), save))));
+        tr.after(h('tr.key-edit-row', {}, h('td.cell-full', { colspan: '5' }, h('div.toolbar', {}, labelled(n), h('fieldset.key-scopes', {}, h('legend.field-label', { text: 'What the key may do' }), ...bs.map((b) => b.label)), save))));
       };
       const rv = h('button.btn.danger', { type: 'button', text: 'Revoke' });
       armConfirm(rv, 'Revoke?', async () => { if (await guard(() => admin.revokeUserKey(id, k.id), 'Key revoked.')) rows(); });
@@ -665,7 +689,7 @@ function userKeysCard(id, list) {
   };
   fill(list);
   return h('div.card.stack', {}, h('h3.field-label', { text: 'API keys' }),
-    h('div.toolbar', {}, name, life, h('fieldset.key-scopes', { 'aria-label': 'What the key may do' }, ...boxes.map((b) => b.label)), create), shown,
+    h('div.toolbar', {}, labelled(name), labelled(life), h('fieldset.key-scopes', {}, h('legend.field-label', { text: 'What the key may do' }), ...boxes.map((b) => b.label)), create), shown,
     h('p.mono.muted', { text: 'Needs "API keys allowed" for this user. A new key is shown once: give it to the user over a safe channel.' }),
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Name', 'Created', 'Last used', 'Scopes', ''].map(th))), body)));
 }
@@ -678,7 +702,7 @@ function userKeysCard(id, list) {
 // options on "same as Default" until set.
 async function renderRoles(openId = null) {
   const refocus = keepFocus(panel('roles'));
-  try { await renderRolesInto(openId); } finally { refocus(); }
+  try { await queued('roles', () => renderRolesInto(openId)); } finally { refocus(); }
 }
 
 async function renderRolesInto(openId) {
@@ -686,13 +710,13 @@ async function renderRolesInto(openId) {
   await refreshOverview();
   const data = await guard(() => admin.roles());
   if (!data || !overview) return;
-  const name = h('input.input', { placeholder: 'Role name, e.g. Contractors', maxlength: '64', 'aria-label': 'New role name' });
+  const name = h('input.input', { placeholder: 'e.g. Contractors', maxlength: '64', 'aria-label': 'New role name' });
   const create = h('button.btn', { type: 'button', text: 'Create role' });
   create.onclick = async () => {
     const r = await guard(() => admin.createRole({ name: name.value.trim() }), 'Role created. Its options start as "same as Default".');
     if (r) renderRoles(r.id);
   };
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a role' }), h('div.toolbar', {}, name, create),
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Create a role' }), h('div.toolbar', {}, labelled(name), create),
     h('p.mono.muted', { text: 'Every user has exactly one role: Default unless you choose another (Users). A new role starts with every option on "same as Default", so it follows Default until you change an option.' })));
 
   const body = h('tbody');
@@ -743,7 +767,7 @@ async function ownerRole(box) {
   const defs = overview.defaults.settings;
   const fields = [];
   const dur = (key, label) => {
-    const c = durationInput(s[key]);
+    const c = durationInput(s[key], { label });
     fields.push([key, label, () => c.read()]);
     return h('div.limit-row', {}, h('span.field-label', { text: label }), c, h('span.mono.muted', { text: `default: ${limitText('dur', defs[key])}` }));
   };
@@ -752,7 +776,7 @@ async function ownerRole(box) {
     const mode = h('select.input', { 'aria-label': `${label}: mode` },
       h('option', { value: 'null', text: 'keep forever', selected: s[key] === null }),
       h('option', { value: 'value', text: 'limit to', selected: s[key] !== null }));
-    const c = type === 'dur' ? durationInput(s[key]) : numberInput(s[key], { label });
+    const c = type === 'dur' ? durationInput(s[key], { label }) : numberInput(s[key], { label });
     const sync = () => { c.hidden = mode.value !== 'value'; };
     mode.onchange = sync;
     sync();
@@ -804,9 +828,9 @@ async function publicRole(box, reopen) {
   const notice = h('input', { type: 'checkbox', checked: s['public.notice'] });
   const noticeText = h('textarea.input', { rows: '3', maxlength: '1000', 'aria-label': 'Notice text' });
   noticeText.value = s['public.noticeText'];
-  const perIp = numberInput(s['public.newTrackersPerIp'], { label: 'New anonymous identifiers per network' });
-  const perWin = durationInput(s['public.newTrackersWindowSec']);
-  const idle = durationInput(s['public.trackerIdleSec']);
+  const perIp = numberInput(s['public.newTrackersPerIp'], { label: 'New senders (browser ids) per network' });
+  const perWin = durationInput(s['public.newTrackersWindowSec'], { label: 'New senders per network: per' });
+  const idle = durationInput(s['public.trackerIdleSec'], { label: 'Forget idle browser ids after' });
   const save = h('button.cta', { type: 'button', text: 'Save tracking and notice' });
   save.onclick = async () => {
     const mode = radios.map((l) => l.querySelector('input')).find((r) => r.checked)?.value || 'tracker';
@@ -883,7 +907,7 @@ async function openRole(id, { scroll = true } = {}) {
     const save = h('button.btn', { type: 'button', text: 'Rename' });
     save.onclick = async () => { if (await guard(() => admin.updateRole(id, { name: rename.value.trim() }), 'Role renamed.')) renderRoles(id); };
     box.appendChild(h('h2.section-title', { text: `Role: ${d.role.name}`, tabindex: '-1' }));
-    box.appendChild(h('div.card.stack', {}, h('div.toolbar', {}, rename, save),
+    box.appendChild(h('div.card.stack', {}, h('div.toolbar', {}, labelled(rename), save),
       h('p.mono.muted', { text: d.users.length ? `Users: ${d.users.map((u) => u.username).join(', ')}` : 'No users have this role yet (assign it under Users).' })));
     box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Capabilities, limits, passkeys, password policy, sessions' }),
       limitsEditor({ scope, channel: 'all', rows: d.limits.all, effective: d.effective.all, inherited: d.inherited, onSaved: reopen })));
@@ -1135,8 +1159,8 @@ async function turnstileCard() {
     if (await guard(() => admin.setTurnstile({ clear: true, ...step }), 'Turnstile keys removed. The CAPTCHA is off.')) renderSecurity();
   });
   card.append(
-    h('label.field', {}, h('span.field-label', { text: 'Site key (public)' }), sitekey),
-    h('label.field', {}, h('span.field-label', { text: st.secretSet ? 'Secret key (saved; never shown again)' : 'Secret key' }), secret),
+    h('label.field', {}, h('span.field-label', { text: 'Turnstile site key' }), sitekey), h('p.mono.muted', { text: 'Public: it is sent to every browser that shows the check.' }),
+    h('label.field', {}, h('span.field-label', { text: 'Turnstile secret key' }), secret), ...(st.secretSet ? [h('p.mono.muted', { text: 'Secret key saved; never shown again.' })] : []),
     h('label.field', {}, h('span.field-label', { text: mineLabel }), mine),
     h('div.btn-row', {}, save, remove),
     h('p.mono.muted', { text: 'The secret key is stored in the server\'s database, never returned by any API and never logged. Test the keys by signing in from a private window before relying on them.' }));
@@ -1154,10 +1178,10 @@ async function renderSecurity() {
   if (location.hash === `#${KEYS_ANCHOR}`) keysEl.focus();
   p.appendChild(await turnstileCard());
   // Manual rules.
-  const cidr = h('input.input', { placeholder: 'IP, CIDR or range: 10.0.0.0/8, 10.0.0.5-10.0.0.20', 'aria-label': 'IP address, CIDR block or range', maxlength: '100' });
+  const cidr = h('input.input', { placeholder: '10.0.0.0/8, 10.0.0.5-10.0.0.20', 'aria-label': 'IP address, CIDR block or range', maxlength: '100' });
   const action = h('select.input', { 'aria-label': 'Action' }, h('option', { value: 'block', text: 'block' }), h('option', { value: 'allow', text: 'allow (never blocked or tracked)' }));
   const ttl = durationInput(null, { allowNull: true, label: 'Rule duration' });
-  const note = h('input.input', { placeholder: 'note (optional)', maxlength: '100', 'aria-label': 'Note' });
+  const note = h('input.input', { maxlength: '100', 'aria-label': 'Note (optional)' });
   const add = h('button.btn', { type: 'button', text: 'Add rule' });
   add.onclick = async () => {
     const exp = ttl.read();
@@ -1172,7 +1196,7 @@ async function renderSecurity() {
   }
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Manual IP rules' }),
     h('p.mono.muted', { text: 'Block rules deny the whole API and dashboard. Allow beats block. Leave the duration empty for a permanent rule.' }),
-    h('div.toolbar', {}, cidr, action, h('span.mono', { text: 'for' }), ttl, note, add),
+    h('div.toolbar', {}, labelled(cidr), labelled(action), h('div.field-inline', { role: 'group', 'aria-labelledby': 'rule-ttl-l', 'aria-describedby': 'rule-ttl-h' }, h('span.field-label', { id: 'rule-ttl-l', text: 'Rule duration' }), ttl, h('span.mono.muted', { id: 'rule-ttl-h', text: 'empty: until removed' })), labelled(note), add),
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Range', 'Action', 'Expires', 'Note', ''].map(th))), rbody))));
 
   const bbody = h('tbody');
@@ -1206,9 +1230,9 @@ function clearLogsCard(onDone) {
   const scope = h('select.input', { 'aria-label': 'Which log entries' },
     h('option', { value: 'all', text: 'all accounts' }), h('option', { value: 'user', text: 'one account' }));
   const who = h('select.input', { 'aria-label': 'Account', hidden: true });
-  const olderOn = h('input', { type: 'checkbox', 'aria-label': 'Only entries older than a date' });
+  const olderOn = h('input', { type: 'checkbox' });
   const date = h('input.input', { type: 'date', 'aria-label': 'Older than', disabled: true });
-  const mine = h('input.input', { type: 'password', placeholder: 'your password', autocomplete: 'current-password', 'aria-label': 'Your password, to confirm' });
+  const mine = h('input.input', { type: 'password', autocomplete: 'current-password', 'aria-label': 'Your password, to confirm' });
   const go = h('button.btn.danger', { type: 'button', text: 'Delete log entries' });
   scope.onchange = async () => {
     who.hidden = scope.value !== 'user';
@@ -1232,7 +1256,7 @@ function clearLogsCard(onDone) {
   });
   return h('div.card.stack', {}, h('h2.section-title', { text: 'Clear logs' }),
     h('p.mono.muted', { text: 'Deletes entries for good, without leaving a record that they existed.' }),
-    h('div.toolbar', {}, scope, who, h('label.inline', {}, olderOn, ' older than'), date, mine, go));
+    h('div.toolbar', {}, labelled(scope), labelled(who), h('label.inline', {}, olderOn, ' Only entries older than'), labelled(date), labelled(mine), go));
 }
 
 async function renderAudit() {

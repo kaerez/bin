@@ -108,6 +108,10 @@ describe('pure helpers', () => {
     expect(pathOf({ node: { id: 'x', name: 'X' }, path: [{ id: 'root', name: 'Drive' }, { id: 'x', name: 'X' }] })).toEqual([{ id: 'root', name: 'Drive' }, { id: 'x', name: 'X' }]);
     expect(pathOf({ node: { id: 'root', name: 'Drive' }, path: [{ id: 'root', name: 'Drive' }] })).toEqual([{ id: 'root', name: 'Drive' }]);
     expect(successNote({ views: 1, expiryText: '1 hour', what: 'the file' })).toMatch(/open the file once/);
+    // Security audit F1: a view-limited share says that downloads can outlast the last view (up to 10 more windows).
+    expect(successNote({ views: 3, expiryText: '1 day', what: 'the files' })).toMatch(/After the last view, the recipient can still download while their download window is open, and can keep it open up to 10 more times, never past the expiry\./);
+    expect(successNote({ views: 1, expiryText: '1 day', what: 'the file' })).toMatch(/up to 10 more times/);
+    expect(successNote({ views: null, expiryText: '1 day', what: 'the file' })).not.toMatch(/last view/);
   });
 });
 
@@ -119,6 +123,48 @@ describe('startDrive states', () => {
     const r = await startDrive(mount, deps());
     expect(r.state).toBe('disabled');
     expect(mount.textContent).toMatch(/Drive is not enabled for your account/);
+  });
+
+  it('a notice instead of the Drive (not ready yet, a user with no Drive while impersonating, disabled): the page’s status line announces its title (WCAG 4.1.3); the notice is content with a heading', async () => {
+    const withStatusLine = () => {
+      const mount = mountPoint();
+      const live = document.createElement('p');
+      live.className = 'msg';
+      live.setAttribute('role', 'status');
+      live.textContent = 'Opening your Drive…';
+      mount.append(live); // as in /dashboard/drive/: in the page from the start
+      return { mount, live };
+    };
+    const cases = [
+      ['not_ready', () => { S = fakeServer(); }, {}, '#drive-not-ready', 'Drive is not ready yet'],
+      ['impersonating', () => { S = fakeServer(); S.impersonatedBy = 'owner'; }, { impersonating: true }, '#drive-impersonating', 'The user hasn’t signed in since the Drive was enabled'],
+      ['disabled', () => { S = fakeServer({ enabled: false }); }, {}, '#drive-disabled', 'Drive is not enabled for your account'],
+    ];
+    for (const [state, make, user, sel, said] of cases) {
+      make();
+      globalThis.fetch = S.fetch;
+      const { mount, live } = withStatusLine();
+      const r = await startDrive(mount, deps({ user: { ...S.user, ...user } }));
+      expect(r.state).toBe(state);
+      // The same live region (never replaced), now visually hidden, says the notice's title.
+      expect(mount.querySelector('[role="status"]')).toBe(live);
+      expect(live.isConnected && live.className).toBe('sr-only');
+      expect(live.textContent).toBe(said);
+      const card = mount.querySelector(sel);
+      expect(card.getAttribute('role')).toBeNull();
+      expect(card.querySelector('h2').textContent).toBe(said);
+      expect(S.requests.some((x) => x.method !== 'GET')).toBe(false); // nothing is created
+    }
+    // What a user reads calls the owner "the administrator", as the other notices do.
+    {
+      S = fakeServer();
+      globalThis.fetch = S.fetch;
+      const mount = mountPoint();
+      await startDrive(mount, deps());
+      const text = mount.querySelector('#drive-not-ready').textContent;
+      expect(text).toMatch(/The administrator must sign in once/);
+      expect(text).not.toMatch(/\bowner\b/);
+    }
   });
 
   it('other errors are shown as an alert', async () => {
@@ -200,6 +246,8 @@ describe('startDrive states', () => {
   });
 });
 
+/** `mount`'s children: the page's status line (kept in place, WCAG 4.1.3) by its role, the rest by id, text nodes as '#text'. */
+const children = (mount) => [...mount.childNodes].map((n) => (n.nodeType !== 1 ? '#text' : n.id || n.getAttribute('role')));
 /** Text nodes reading "null" or "undefined" under `root` (a nullish child passed to append/replaceChildren). */
 function strayText(root) {
   const out = [];
@@ -229,7 +277,9 @@ describe('no stray "null" / "undefined" text in any state of the Drive page', ()
         const mount = mountPoint();
         const r = await startDrive(mount, deps({ user: { ...S.user, role } }));
         expect(r).toEqual({ state: 'unavailable', reason });
-        expect([...mount.childNodes].map((n) => n.id)).toEqual(['drive-unavailable']);
+        // The page's status line (in place from the start) says the notice's title; the notice is content.
+        expect(children(mount)).toEqual(['status', 'drive-unavailable']);
+        expect(mount.firstChild.textContent).toBe('Your Drive cannot be opened right now');
         expect(strayText(document.body)).toEqual([]);
       }
     }
@@ -301,6 +351,18 @@ describe('the Drive', () => {
     expect(B('move').disabled).toBe(false);
     expect(document.getElementById('drive-select-all').indeterminate).toBe(true);
     expect(document.getElementById('drive-selinfo').textContent).toBe('2 selected');
+  });
+
+  it('each selection box sits in a <label> (the pointer target, WCAG 2.5.8); "Select all" is named by its text (2.5.3)', async () => {
+    await openApp();
+    for (const cb of document.querySelectorAll('#drive-table input[type="checkbox"]')) expect(cb.parentElement.matches('label.check-hit')).toBe(true);
+    const all = document.getElementById('drive-select-all');
+    expect(all.hasAttribute('aria-label')).toBe(false);
+    expect(all.closest('label').textContent).toBe('Select all in this folder');
+    // Clicking the label (not the box) toggles it.
+    const box = row('readme.txt').querySelector('input[type="checkbox"]');
+    box.closest('label').click();
+    expect(box.checked).toBe(true);
   });
 
   it('new folder and rename (dialogs, validation, focus back); names are sealed on the wire', async () => {

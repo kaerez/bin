@@ -32,7 +32,12 @@ wirePeek(['#login-pass', '#login-pass-peek']);
 // script can load (SECURITY.md).
 clearSessionKey();
 // Sign-in buttons stay disabled until the human check (when on) has passed.
+// Its note offers the contact for anyone who cannot complete it (turnstile.js).
 const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'), $('#passkey-btn')] });
+// "Signing in…" for screen readers (WCAG 4.1.3) while the sign-in runs, and the
+// Drive's unlock or automatic set-up after it (the page's status line, in the
+// page from the start); an error is the alert under the form instead.
+const busy = (on) => { $('#login-status').textContent = on ? 'Signing in…' : ''; };
 
 /**
  * Signed in: the Drive needs nothing from the sign-in (its keys come from
@@ -98,6 +103,7 @@ $('#login-form').addEventListener('submit', async (e) => {
   }
   btn.disabled = true;
   btn.textContent = 'Signing in…';
+  busy(true);
   msg.hidden = true;
   flag(msg);
   try {
@@ -109,6 +115,7 @@ $('#login-form').addEventListener('submit', async (e) => {
   } catch (err) {
     failure(msg, err, [$('#login-user'), secret]);
   } finally {
+    busy(false);
     btn.disabled = false;
     btn.textContent = label;
   }
@@ -121,6 +128,7 @@ if (passkeysSupported()) {
   pk.addEventListener('click', async () => {
     const msg = $('#login-msg');
     pk.disabled = true;
+    busy(true);
     msg.hidden = true;
     try {
       const token = await (await check).take();
@@ -130,6 +138,7 @@ if (passkeysSupported()) {
     } catch (err) {
       failure(msg, err);
     } finally {
+      busy(false);
       pk.disabled = false;
     }
   });
@@ -159,6 +168,7 @@ function startOver(text) {
 async function second(body, btn, creds = {}) {
   const msg = $('#second-msg');
   btn.disabled = true;
+  busy(true);
   msg.hidden = true;
   try {
     const r = await secondFactor({ challengeId: pending.challengeId, ...body });
@@ -169,6 +179,7 @@ async function second(body, btn, creds = {}) {
     if (err instanceof ApiError && err.code === 'challenge_expired') startOver(err.message);
     else failure(msg, err, body.code ? [$('#second-code')] : []);
   } finally {
+    busy(false);
     btn.disabled = false;
   }
 }

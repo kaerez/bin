@@ -19,7 +19,11 @@ import { h, clear, showMsg, formatDate, friendlyError } from '../../js/common.js
 import { toast } from '../../js/ui.js';
 import { keysPortCard } from './admin-keysport.js';
 
-const field = (label, control, hint) => h('label.field', {}, h('span.field-label', { text: label }), control, hint ? h('span.mono.muted', { text: hint }) : null);
+// The label's text is the control's name (2.5.3); a hint sits beside it, outside the label.
+const field = (label, control, hint) => {
+  const l = h('label.field', {}, h('span.field-label', { text: label }), control);
+  return hint ? h('div.field-group', {}, l, h('span.mono.muted', { text: hint })) : l;
+};
 const check = (label, checked = false, note = '') => {
   const input = h('input', { type: 'checkbox', checked });
   return { input, el: h('label.inline.part-opt', {}, input, h('span', {}, ` ${label}`, note ? h('span.mono.muted.block', { text: note }) : null)) };
@@ -145,8 +149,8 @@ function exportCard(users, profile) {
     h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. Sessions and shares are never exported, nor your own password, role or API keys, nor Drive content (files, folders): Drive options travel with the roles, and the Drive keys have their own file (below). Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
     h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
     h('fieldset.range', {}, h('legend', { text: 'Users (you included) and what to export for each' }), bulks, table, partNotes()),
-    h('div.toolbar', {}, field('Export passphrase (optional)', pass1), field('Repeat', pass2)), noPass,
-    field('Your password (confirms it is you)', mine),
+    h('div.toolbar', {}, field('Export passphrase', pass1, 'Optional'), field('Repeat export passphrase', pass2)), noPass,
+    field('Your password', mine, 'Confirms that it is you.'),
     h('div.btn-row', {}, go), msg);
 }
 
@@ -193,7 +197,7 @@ function importCard(users, profile) {
   return h('div.card.stack', {},
     h('h2.section-title', { text: 'Import' }),
     h('p.subtitle', { text: 'Decrypt an export, choose what to take over, preview the changes, then import. Nothing changes until you import, and an import is applied completely or not at all. New accounts are created from the parts you choose. An account that already exists (yours included) keeps its password, recovery codes, API keys and passkeys: an import only sets its role and adds passkeys.' }),
-    h('div.toolbar', {}, file, pass, open), msg, review);
+    h('div.toolbar', {}, field('Export file', file), field('Export passphrase', pass), open), msg, review);
 }
 
 /** What an entry of the file (a user, or the owner's row) holds for a part (shown next to its checkbox). */
@@ -371,7 +375,7 @@ function renderReview(out, doc, users, profile) {
     rows.length ? h('fieldset.range', {}, h('legend', { text: 'Users (the owner included) and what to import for each' }), bulks,
       h('div.table-wrap', {}, h('table.table.part-table', {}, h('thead', {}, h('tr', {}, ...['User', 'Import as', 'Action', ...cols.map(([, label]) => label), 'Here'].map((t) => h('th', { text: t })))), body)),
       partNotes()) : null,
-    field('Your password (confirms it is you)', mine),
+    field('Your password', mine, 'Confirms that it is you.'),
     h('div.btn-row', {}, preview, apply), msg, planBox].filter(Boolean));
 }
 

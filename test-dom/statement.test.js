@@ -1,6 +1,6 @@
 // statement.test.js — the accessibility statement (#35): the structured model
-// (public/js/a11ystatement.js) defaults to English only and claims only
-// partial conformance; the renderer (public/js/statement.js) builds headings,
+// (public/js/a11ystatement.js) defaults to English only and claims what the
+// last review found (WCAG 2.2 AA, limits said); the renderer (public/js/statement.js) builds headings,
 // lists, lang/dir and the admin's contact from text only — markup in the
 // settings stays text — and a second language falls back to the main
 // language's headings, marked with that language.
@@ -23,15 +23,19 @@ const render = (over = {}) => renderStatement(root, publicStatement({ ...A11Y_DE
 const texts = (sel, el = root) => [...el.querySelectorAll(sel)].map((e) => e.textContent);
 
 describe('model', () => {
-  it('defaults to one English statement claiming partial conformance', () => {
+  it('defaults to one English statement: WCAG 2.2 AA met at the last review, with its limits said', () => {
     const p = publicStatement(A11Y_DEFAULTS);
     expect(p.statements).toHaveLength(1);
     expect(p.statements[0]).toMatchObject({ lang: 'en', dir: 'ltr', title: 'Accessibility statement' });
-    expect(p.statements[0].standard.join(' ')).toContain('partial conformance');
+    expect(p.statements[0].standard.join(' ')).toMatch(/met every WCAG 2\.2 level A and AA success criterion/);
+    // It says how far that goes: one browser engine, no assistive-technology testing yet.
+    expect(p.statements[0].standard.join(' ')).toMatch(/one browser engine; testing by people with screen readers/);
     expect(JSON.stringify(p)).not.toMatch(/fully (conforms|compliant)|full conformance/i);
     expect(JSON.stringify(p)).not.toMatch(/[֐-׿]/); // no Hebrew by default
-    expect(p.statements[0].done).toHaveLength(8);
-    expect(p.statements[0].limits).toHaveLength(3);
+    expect(p.statements[0].done).toHaveLength(10);
+    expect(p.statements[0].limits).toHaveLength(4);
+    // No country, region or national standard in the default text.
+    expect(JSON.stringify(p)).not.toMatch(/\b(Israel|IS 5568|5568|ADA|Section 508|EN 301 549|European|United States)\b/i);
     // Says what was tested, and claims no screen-reader testing that was not done.
     expect(JSON.stringify(p)).not.toMatch(/every combination of screen reader/i);
     expect(p.statements[0].reviewNote.join(' ')).toMatch(/accessibility tree/);
@@ -77,10 +81,10 @@ describe('renderer', () => {
     expect(texts('h1')).toEqual(['Accessibility statement']);
     expect(texts('h2')).toEqual(['Our commitment', 'Standard and status', 'What we have done', 'Known limitations', 'Report a problem or ask for an adjustment']);
     expect(root.querySelectorAll('ul.statement-list')).toHaveLength(2);
-    expect(root.querySelectorAll('ul.statement-list li')).toHaveLength(11);
+    expect(root.querySelectorAll('ul.statement-list li')).toHaveLength(14);
     const t = root.querySelector('time');
-    expect(t.getAttribute('datetime')).toBe('2026-09-25');
-    expect(t.parentElement.textContent).toMatch(/^Last technical review: .*2026\. This was an automated/);
+    expect(t.getAttribute('datetime')).toBe('2026-09-27');
+    expect(t.parentElement.textContent).toMatch(/^Last technical review: .*2026\. Every WCAG 2\.2 success criterion was checked/);
     expect(root.querySelector('#st-contact').textContent).toBe('Contact the administrator of this site.');
     expect(root.querySelector('#st-coord')).toBeNull();
     expect(root.querySelector('.eyebrow')).toBeNull(); // one language: no language switch

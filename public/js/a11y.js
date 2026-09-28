@@ -1,22 +1,26 @@
 // a11y.js — the accessibility preferences widget (English / עברית): a fixed
 // button that opens a panel of switches — keyboard focus highlight, stop
 // animations, high contrast, text size, readable font, mark headings, mark
-// links — saved in localStorage and applied as classes on <html>
+// links, large targets, text spacing — saved in localStorage and applied as
+// classes on <html>
 // (public/js/a11y-init.js applies them before paint on the next load).
 //
-// A comfort tool, not a compliance measure: the pages themselves are built
-// to WCAG 2.2 AA (see /accessibility/). Built with DOM calls only (no markup
-// strings), so it runs under the site's CSP and Trusted Types.
+// The pages themselves are built to WCAG 2.2 AA (docs/WCAG22.md); some modes
+// are the mechanism for AAA criteria: high contrast (1.4.6), text spacing
+// (1.4.8) and large targets (2.5.5). The panel closes when focus moves to the
+// page, so it never covers the focused control (2.4.11). Built with DOM calls
+// only (no markup strings), so it runs under the site's CSP and Trusted Types.
 
 const KEY = 'secbin:a11y';
 export const FLAGS = {
   keyboardNav: 'a11y-keyboard', noAnimations: 'a11y-no-anim', highContrast: 'a11y-contrast',
   readableFont: 'a11y-readable', markHeadings: 'a11y-headings', markLinks: 'a11y-links',
+  largeTargets: 'a11y-targets', textSpacing: 'a11y-spacing',
 };
 const FONT = { sm: 'a11y-font-sm', md: '', lg: 'a11y-font-lg' };
 const DEFAULTS = Object.freeze({
   keyboardNav: false, noAnimations: false, highContrast: false, readableFont: false,
-  markHeadings: false, markLinks: false, fontScale: 'md', lang: null,
+  markHeadings: false, markLinks: false, largeTargets: false, textSpacing: false, fontScale: 'md', lang: null,
 });
 
 export const STRINGS = {
@@ -24,6 +28,7 @@ export const STRINGS = {
     open: 'Accessibility settings', title: 'Accessibility settings', close: 'Close',
     keyboardNav: 'Highlight keyboard focus', noAnimations: 'Stop animations', highContrast: 'High contrast',
     readableFont: 'Readable font', markHeadings: 'Mark headings', markLinks: 'Mark links and buttons',
+    largeTargets: 'Large buttons and links', textSpacing: 'Text spacing',
     text: 'Text size', sm: 'Smaller', md: 'Default', lg: 'Larger',
     reset: 'Reset all', statement: 'Accessibility statement', language: 'Language',
     note: 'These settings are saved in this browser only.',
@@ -32,6 +37,7 @@ export const STRINGS = {
     open: 'הגדרות נגישות', title: 'הגדרות נגישות', close: 'סגירה',
     keyboardNav: 'הדגשת פוקוס מקלדת', noAnimations: 'עצירת אנימציות', highContrast: 'ניגודיות גבוהה',
     readableFont: 'גופן קריא', markHeadings: 'סימון כותרות', markLinks: 'סימון קישורים וכפתורים',
+    largeTargets: 'כפתורים וקישורים גדולים', textSpacing: 'ריווח טקסט',
     text: 'גודל טקסט', sm: 'קטן', md: 'רגיל', lg: 'גדול',
     reset: 'איפוס הכול', statement: 'הצהרת נגישות', language: 'שפה',
     note: 'ההגדרות נשמרות בדפדפן זה בלבד.',
@@ -152,14 +158,78 @@ export function mount(root = document.body) {
   }
   btn.addEventListener('click', () => toggle(!open));
   document.addEventListener('keydown', (e) => { if (open && e.key === 'Escape') { e.preventDefault(); toggle(false); } });
-  document.addEventListener('mousedown', (e) => {
-    if (open && !panel.contains(e.target) && !btn.contains(e.target)) toggle(false, { focusButton: panel.contains(document.activeElement) });
+  // A click outside closes it: on the up-event (2.5.2), so pressing and
+  // sliding away does nothing. Focus that fell to <body> returns to the button.
+  // (The event path, not contains(): a language button re-renders the panel
+  // and is detached by the time its click reaches the document.)
+  document.addEventListener('click', (e) => {
+    const path = e.composedPath();
+    if (open && !path.includes(panel) && !path.includes(btn)) {
+      const a = document.activeElement;
+      toggle(false, { focusButton: !a || a === document.body || panel.contains(a) });
+    }
+  });
+  // Focus moved to the page (Tab past the panel, a skip link): close, so the
+  // panel never covers the focused control. Focus stays where it went.
+  document.addEventListener('focusin', (e) => {
+    if (open && !panel.contains(e.target) && !btn.contains(e.target)) toggle(false, { focusButton: false });
   });
 
   render();
   root.appendChild(btn);
   root.appendChild(panel);
+  // In the next animation frame: the browser's own focus scroll comes after focusin (and Chromium
+  // does not scroll a text field that is already inside the viewport, ignoring scroll-padding, so
+  // a textarea can stay under the button), and animation-frame callbacks run before that frame
+  // is painted, so the covered layout never shows.
+  document.addEventListener('focusin', (e) => { if (!panel.contains(e.target) && e.target !== btn) requestAnimationFrame(() => unobscure(e.target)); });
   return { btn, panel, toggle, get settings() { return settings; } };
+}
+
+// Fixed elements that stay on screen while the page scrolls under them.
+// (.imp-banner is sticky at the top while the owner acts as a user: top-anchored once stuck.)
+const FIXED = '#a11y-btn, #toast.show, .pwa-banner:not([hidden]), .kdf-progress:not([hidden]), .imp-banner:not([hidden])';
+const GAP = 8;
+
+/**
+ * Focus not obscured (WCAG 2.4.11 / 2.4.12): when `el` (just focused) lies
+ * under one of the fixed elements, even in part, scroll the page until it is
+ * clear. The toast moves to the other edge instead (it is only a message), or is
+ * put away when it would cover `el` at either edge. An element
+ * inside a modal dialog, or too tall to fit between them, is left alone.
+ * Returns the distance scrolled (0 when nothing was in the way).
+ */
+export function unobscure(el) {
+  if (!(el instanceof Element) || el === document.body || el === document.documentElement) return 0;
+  if (el.closest('[aria-modal="true"], .a11y-panel, #toast, .pwa-banner, .kdf-progress')) return 0;
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  const r = el.getBoundingClientRect();
+  if (!r.width && !r.height) return 0;
+  // The band of the viewport that no fixed element covers, in the columns `el` occupies.
+  let top = 0;
+  let bottom = vh;
+  for (const c of document.querySelectorAll(FIXED)) {
+    if (c.contains(el)) continue;
+    const b = c.getBoundingClientRect();
+    if (!b.width || !b.height || !(r.left < b.right && r.right > b.left) || getComputedStyle(c).visibility === 'hidden') continue;
+    if (c.id === 'toast') {
+      // The toast moves to the other edge (top ↔ bottom); where it would cover `el` there too, it is
+      // put away (it has been said, and it would otherwise hide what Tab reaches on a short screen).
+      const covers = (x) => r.top < x.bottom + GAP && r.bottom > x.top - GAP;
+      if (covers(b)) {
+        c.classList.toggle('toast-top');
+        if (covers(c.getBoundingClientRect())) c.classList.remove('show');
+      }
+      continue;
+    }
+    // Bottom-anchored (the accessibility button, the install banner on phones) or top-anchored.
+    if (b.top + b.height / 2 > vh / 2) bottom = Math.min(bottom, b.top - GAP);
+    else top = Math.max(top, b.bottom + GAP);
+  }
+  if ((r.top >= top && r.bottom <= bottom) || r.height > bottom - top) return 0;
+  const dy = r.bottom > bottom ? r.bottom - bottom : r.top - top;
+  window.scrollBy({ top: dy, left: 0, behavior: 'instant' });
+  return dy;
 }
 
 if (typeof document !== 'undefined' && document.body && !globalThis.__SECBIN_A11Y_NO_AUTOMOUNT) mount();
