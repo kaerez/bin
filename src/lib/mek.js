@@ -175,10 +175,15 @@ export function toRest(fk, uid, field, ref, text) {
 /**
  * A value stored at rest back as text: opened with the field key (the one
  * now, then the previous one during a root change). A value stored before
- * the field layer (plain JSON text) comes back as it is.
+ * the field layer (plain JSON text) comes back as it is, unless `plain` is
+ * false: then it is refused (`not_at_rest`), for fields that were always
+ * sealed at rest (a received item's name, metadata and wrap).
  */
-export async function fromRest(fk, uid, field, ref, value) {
-  if (!isAtRest(value)) return value;
+export async function fromRest(fk, uid, field, ref, value, { plain = true } = {}) {
+  if (!isAtRest(value)) {
+    if (plain) return value;
+    throw new HttpError(500, 'not_at_rest', 'A stored value is not sealed at rest.');
+  }
   for (const set of [fk.cur, fk.old]) {
     if (!set) continue;
     try { return await openAtRest(set[field], { userId: uid, field, ref }, value); } catch { /* the next one */ }

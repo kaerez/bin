@@ -148,16 +148,21 @@ export async function handleReverseOwner(request, env, url, a, pol) {
     if (!failed && (r.items.length || r.keys.length)) {
       // The field layer comes off here: the browser gets the uploader's sealed fields and the link keys.
       const fk = await fieldKeys(env, uid);
+      // A received item's fields were always sealed at rest: one in plain text (written to storage by
+      // someone other than the Worker) is refused, never trusted for its declared kind.
+      const opened = (ref, v) => fromRest(fk, uid, 'received', ref, v, { plain: false });
       for (const it of r.items) {
         try {
-          it.name = parsed(await fromRest(fk, uid, 'received', `name:${it.id}`, it.name));
-          it.meta = it.meta ? parsed(await fromRest(fk, uid, 'received', `meta:${it.id}`, it.meta)) : null;
-          it.fk = parsed(await fromRest(fk, uid, 'received', `wrap:${it.id}`, it.fk));
-          // The kind its session declared (items from before these kinds: files).
-          it.declared = it.fk && isKind(it.fk.declared) ? it.fk.declared : 'files';
-        } catch {
-          // One item that does not open never holds up the rest: the browser records it as failed.
-          Object.assign(it, { name: null, meta: null, fk: null, unreadable: true });
+          it.name = parsed(await opened(`name:${it.id}`, it.name));
+          it.meta = it.meta ? parsed(await opened(`meta:${it.id}`, it.meta)) : null;
+          it.fk = parsed(await opened(`wrap:${it.id}`, it.fk));
+          // The kind its session declared, sealed with the wrap (none: refused at take-in, `kind`).
+          it.declared = it.fk && isKind(it.fk.declared) ? it.fk.declared : null;
+          if (it.fk) delete it.fk.declared;
+        } catch (e) {
+          // One item that does not open never holds up the rest: the browser records it as failed
+          // (`unsealed`: a field stored in plain text, recorded as `kind`).
+          Object.assign(it, { name: null, meta: null, fk: null, declared: null, unreadable: true, ...(e?.code === 'not_at_rest' ? { unsealed: true } : {}) });
         }
       }
       for (const k of r.keys) k.priv = await linkPriv(fk, uid, k.id, k.priv);
@@ -200,6 +205,16 @@ export async function handleReverseOwner(request, env, url, a, pol) {
     const dek = encField(body.dek, MAX_DEK_CT);
     const kf = typeof body.ks === 'string' && KEY_RE.test(body.ks) && typeof body.mek === 'string' && MEK_ID_RE.test(body.mek) ? { ks: body.ks, mek: body.mek } : null;
     if (!parent || !name || !meta || !dek || !kf) return invalid('Send { parent, name, meta, dek, ks, mek, types? } (sealed fields as {iv, ct}).');
+    // The kind its session declared (sealed at rest with its wrap; plain text refused) must be one the
+    // link accepts and the user's role allows now; the browser checks the item is that kind (§3).
+    const w = await drive().receivedDeclared(uid, node);
+    if (!w.ok) return fromDo(w);
+    let declared;
+    try { declared = parsed(await fromRest(await fieldKeys(env, uid), uid, 'received', `wrap:${node}`, w.wrap, { plain: false }))?.declared ?? null; } catch { declared = null; }
+    const nowKinds = await dir.receiveKindsOf(uid);
+    if (!isKind(declared) || !w.accept.includes(declared) || !nowKinds.includes(declared)) {
+      return err(409, 'kind_not_accepted', 'This item is of a kind its link or your role does not accept now.');
+    }
     // The role's Drive rules apply to what is taken in, on top of the link's own type rules (the
     // uploader's page checked those): its file types (declared, as for an upload) and folder depth
     // (the Drive checks its tree), so a Receive link is no way around the Drive's policy.

@@ -1633,6 +1633,22 @@ export class Drive extends DurableObject {
   }
 
   /**
+   * A received item waiting to be taken in: its wrap as stored (sealed at
+   * rest, with the kind its session declared) and what its link accepts →
+   * { ok, wrap, accept }, or 409 not_received. The Worker holds a take-in to
+   * the declared kind (docs/REVERSE.md §3).
+   */
+  async receivedDeclared(uid, node) {
+    this.#bind(uid);
+    const n = this.#node(node);
+    const rv = n && n.rs ? this.#reverse(n.rs) : null;
+    if (!n || !rv || n.state !== 'ready' || (rv.agen ?? null) !== null) return fail(409, 'not_received', 'This is not a received file waiting to be added.');
+    let opts = {};
+    try { opts = JSON.parse(rv.opts); } catch { /* none */ }
+    return { ok: true, wrap: n.fk, accept: acceptOf(opts) };
+  }
+
+  /**
    * The user's browser could not take received file `node` in (`failed`,
    * with a reason of RECEIVED_FAIL_REASONS): it leaves the queue and is listed
    * as failed; `failed: false` puts it back (try again).

@@ -280,7 +280,7 @@ describe('F-4: weakening a security control needs the owner\'s password or a pas
     // Tighter than Default first: needs nothing.
     const tight = { shareCaptcha: 'require', shareCaptchaDefault: 'on', reverseCaptcha: 'require', reverseCaptchaDefault: 'on', reversePassword: 'require', reversePasswordDefault: 'on',
       allowUnlimitedViews: false, reverseAllowUnlimitedViews: false, maxExpireSec: 3600, maxViews: 5, reverseMaxExpireSec: 3600, reverseMaxViews: 5,
-      fileTypeMode: 'allow', fileTypeRules: ['ext:pdf'], urlRules: ['scheme:https://'] };
+      fileTypeMode: 'allow', fileTypeRules: ['ext:pdf'], urlRules: ['scheme:https://'], files: false, reverseFiles: false };
     expect((await limits(scope, tight)).status).toBe(200);
     const cases = [
       [{ shareCaptcha: 'allow' }, ['shareCaptcha']], [{ shareCaptcha: 'off' }, ['shareCaptcha']], [{ shareCaptcha: 'inherit' }, ['shareCaptcha']],
@@ -294,6 +294,8 @@ describe('F-4: weakening a security control needs the owner\'s password or a pas
       [{ url: true }, ['url']], [{ secret: true }, ['secret']], [{ apiEnabled: true }, ['apiEnabled']],
       // Receive links that may take links or credentials (off in the Default role).
       [{ reverseUrl: true }, ['reverseUrl']], [{ reverseSecret: true }, ['reverseSecret']],
+      // Files (outgoing file and Drive shares, and Receive links that take files), off in this role first.
+      [{ files: true }, ['files']], [{ files: 'inherit' }, ['files']], [{ reverseFiles: true }, ['reverseFiles']], [{ reverseFiles: 'inherit' }, ['reverseFiles']],
       [{ fileTypeMode: 'block' }, ['fileTypeMode']], [{ fileTypeMode: 'any' }, ['fileTypeMode']],
       [{ fileTypeRules: ['ext:pdf', 'ext:exe'] }, ['fileTypeRules']], // more allowed types
       [{ urlRules: ['scheme:https://', 'scheme:tel:'] }, ['urlRules']],
@@ -365,5 +367,9 @@ describe('F-4: weakening a security control needs the owner\'s password or a pas
     expect([d.reverseUrl, d.reverseSecret]).toEqual([false, false]);
     expect(weakenedLimits(d, { ...d, reverseUrl: true, reverseSecret: true }, s)).toEqual(['reverseUrl', 'reverseSecret']);
     expect(weakenedLimits({ ...d, reverseUrl: true, reverseSecret: true }, d, s)).toEqual([]);
+    // Files too (RT2-3): on is weakening, off is not.
+    expect([d.files, d.reverseFiles]).toEqual([true, true]);
+    expect(weakenedLimits({ ...d, files: false, reverseFiles: false }, d, s)).toEqual(['files', 'reverseFiles']);
+    expect(weakenedLimits(d, { ...d, files: false, reverseFiles: false }, s)).toEqual([]);
   });
 });

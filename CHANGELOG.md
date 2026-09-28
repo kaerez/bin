@@ -32,7 +32,13 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   page asks first, as in the Drive, and ZIPs (Drive folders, a Drive share's "Download all" and
   folders) leave credentials out and say how many.
 - **A Receive link cannot be made on a folder deeper than the role's folder depth limit**
-  (`maxFolderDepth`; `403 folder_too_deep` with `max`): nothing it received could be placed there.
+  (`maxFolderDepth`, by the Drive's own depth rule; `403 folder_too_deep` with `max`): nothing it
+  received could be placed there. A link's folder moved deeper later takes nothing in.
+- **The server holds a take-in to the declared kind too:** `409 kind_not_accepted` unless the
+  kind the item's session declared is one its link accepts and the user's role allows at
+  take-in; a link the role now allows no kind for takes nothing in (the browser no longer reads
+  an empty list as "files"). A received item's fields stored in plain text at rest are refused
+  (no fallback), failed as `kind`.
 - **Impersonation no longer extends the owner's session.** Starting an impersonation and
   "Return to admin" each issue a new session that keeps the absolute end of the owner's sign-in
   (`session.absSec` counts from the sign-in, and a new session never ends later than the one it
@@ -46,8 +52,9 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   role); in a role (the public account's too, and its API restrictions), loosening passkeys,
   the password policy, session timeouts or log retention, the CAPTCHA and uploader-password
   options and their defaults, longer or unlimited expiry and views, links with no expiry, and
-  allowing link or credential shares, Receive links that take links or credentials
-  (`reverseUrl`, `reverseSecret`), API keys, more file types or more links; and adding an
+  allowing file, link or credential shares (`files`, `url`, `secret`), Receive links that take
+  files, links or credentials (`reverseFiles`, `reverseUrl`, `reverseSecret`), API keys, more
+  file types or more links; and adding an
   allow IP rule. Missing, the server answers `400 reauth_required` with what the change weakens, and
   the admin panel then shows the confirmation field; tightening asks for nothing (SECURITY.md
   "admin changes that weaken a control").

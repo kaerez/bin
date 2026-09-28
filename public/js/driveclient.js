@@ -1021,7 +1021,7 @@ export class DriveClient {
     // A refusal by the Drive (full, folder full, too deep, the role's file policy) fails the item;
     // being signed out or losing the Drive stops the take-in.
     const refused = (e) => e instanceof ApiError && ((e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403 && e.code !== 'mek_not_current') || POLICY_CODES.has(e.code));
-    const reasonOf = (e) => (e instanceof ApiError && e.code === 'file_type_not_allowed' ? 'type' : 'place');
+    const reasonOf = (e) => (e instanceof ApiError && e.code === 'file_type_not_allowed' ? 'type' : e instanceof ApiError && e.code === 'kind_not_accepted' ? 'kind' : 'place');
     // `kinds`: what was added, by kind (files, and notes, links and credentials received).
     const out = { added: 0, failed: 0, renamed: 0, flattened: 0, deferred: 0, more: false, kinds: { files: 0, note: 0, url: 0, secret: 0 } };
     let after = null;
@@ -1030,7 +1030,7 @@ export class DriveClient {
       const items = Array.isArray(r.items) ? r.items : [];
       for (const k of Array.isArray(r.keys) ? r.keys : []) {
         if (keys.has(k.id)) continue;
-        rules.set(k.id, { accept: Array.isArray(k.accept) && k.accept.length ? k.accept : ['files'], types: k.types && ['allow', 'block'].includes(k.types.mode) && Array.isArray(k.types.rules) ? k.types : null,
+        rules.set(k.id, { accept: Array.isArray(k.accept) ? k.accept : [], types: k.types && ['allow', 'block'].includes(k.types.mode) && Array.isArray(k.types.rules) ? k.types : null,
           maxFileBytes: Number.isSafeInteger(k.maxFileBytes) ? k.maxFileBytes : null });
         if (!k.mek && !this.legacy) { keys.set(k.id, 'later'); continue; }
         const got = await this.#linkKey(k.id, k.mek, k.priv);
@@ -1040,6 +1040,8 @@ export class DriveClient {
         try {
           const priv = keys.get(it.rs);
           if (priv === 'later') { out.deferred++; continue; }
+          // A field the server found in plain text at rest, or no declared kind: never taken in.
+          if (it.unsealed === true) throw failure('kind');
           if (!priv) throw failure('unreadable');
           let got;
           try { got = await openUpload(priv, it.rs, it); } catch { throw failure('unreadable'); }
@@ -1062,11 +1064,11 @@ export class DriveClient {
           // What it really is, against the link's rules (the uploader's browser only declared it to the
           // server, and a modified one can lie): its kind, and for a file its type and size. A mismatch
           // fails (listed, to delete): it never enters the Drive.
-          const rule = rules.get(it.rs) || { accept: ['files'], types: null, maxFileBytes: null };
+          const rule = rules.get(it.rs) || { accept: [], types: null, maxFileBytes: null };
           const kind = item ? item.kind : 'files';
           // What its session declared to the server (limits, quotas, role) must be what it is; the link
           // (as the user's role allows it now) must accept it; a note, link or credential fits its cap.
-          if (kind !== (isKind(it.declared) ? it.declared : 'files')) throw failure('kind');
+          if (!isKind(it.declared) || kind !== it.declared) throw failure('kind');
           if (!rule.accept.includes(kind)) throw failure('kind');
           if (item && it.size > ITEM_MAX_BYTES[item.kind]) throw failure('size');
           if (!item) {

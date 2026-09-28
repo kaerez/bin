@@ -594,6 +594,42 @@ describe('take-in holds each item to the kind its session declared, its kind\'s 
   });
 });
 
+describe('take-in after the re-audit (RT2)', () => {
+  it('RT2-1: the role allows none of a files-only link\'s kinds now (accept []): its waiting file fails (kind), never "files" by default', async () => {
+    await server();
+    S.roleKinds = []; // reverseFiles (and the rest) turned off after the file arrived
+    const r = await existingReverse(ids.get('Inbox'), ['files']);
+    const f = await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'waiting.txt', bytes: utf8('synthetic') });
+    const app = await startDrive(mountPoint(), deps());
+    await app.app.received;
+    expect(S.nodes.get(f).rwhy).toBe('kind');
+    expect(S.accepted || []).toEqual([]);
+  });
+
+  it('RT2-4: an item the server lists as unsealed (plain text at rest), or with no declared kind, fails (kind)', async () => {
+    await server();
+    const r = await existingReverse(ids.get('Inbox'), ['files']);
+    const plain = await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'a.txt', bytes: utf8('a'), unsealed: true });
+    const none = await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('Inbox'), path: 'b.txt', bytes: utf8('b'), declared: null });
+    const app = await startDrive(mountPoint(), deps());
+    await app.app.received;
+    expect([S.nodes.get(plain).rwhy, S.nodes.get(none).rwhy]).toEqual(['kind', 'kind']);
+    expect(S.accepted || []).toEqual([]);
+  });
+
+  it('RT2-2: a link whose folder was moved deeper than the role allows takes nothing in (place)', async () => {
+    S = fakeServer({ capacity: 50 * 1024 * 1024 });
+    globalThis.fetch = S.fetch;
+    ids = await seedTree(S, { B: { C: { A: {} } } }); // the link's folder A, now at level 3
+    const r = await existingReverse(ids.get('B/C/A'), ['files']);
+    const f = await seedReceived(S, { rid: r.id, pub: r.pub, folder: ids.get('B/C/A'), path: 'moved.txt', bytes: utf8('synthetic') });
+    const app = await startDrive(mountPoint(), deps({ ...PROFILE, limits: { ...PROFILE.limits, maxFolderDepth: 2 } }));
+    await app.app.received;
+    expect(S.nodes.get(f).rwhy).toBe('place');
+    expect(S.accepted || []).toEqual([]);
+  });
+});
+
 /** A Drive item (sealed as the take-in writes it) of `size` bytes whose content is never served. */
 async function oversizeItem(parent, name, item, size) {
   await S.ready;

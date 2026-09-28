@@ -24,7 +24,7 @@ import { linkProof } from '../public/js/reversekeys.js';
 import { utf8 } from '../public/js/bytes.js';
 import { validateExport, EXPORT_FORMAT } from '../src/lib/portable.js';
 import {
-  dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, reserve, send, sendItem, itemSession, received,
+  dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, begin, reserve, send, sendItem, itemSession, received, takeInAny,
 } from './reverse-helpers.js';
 
 vi.setConfig({ testTimeout: 60000 });
@@ -449,5 +449,68 @@ describe('a Receive link on a folder deeper than the role allows', () => {
     // No limit: any folder.
     await driveLimits(u.id, { driveEnabled: true, reverseEnabled: true, maxFolderDepth: null });
     expect((await newReverse(u.cookie, { folder: b.id })).res.status).toBe(201);
+  });
+});
+
+describe('audit RT2: the take-in, held to the declared kind by the server too', () => {
+  const take = async (cookie, node, parent = 'root') => {
+    const res = await takeInAny(cookie, node, parent);
+    return { status: res.status, error: res.status === 200 ? null : (await res.json()).error };
+  };
+
+  it('RT2-1: the role drops every kind a files-only link accepts — its waiting file is listed with accept [] and refused (409 kind_not_accepted); allowed again, it goes in', async () => {
+    const u = await everything('rt2-none');
+    const r = await newReverse(u.cookie, { accept: ['files'] });
+    const ip = freshIp();
+    const sent = await send(r, await grantAs(r, 'files', ip), { ip });
+    await driveLimits(u.id, { reverseFiles: false });
+    expect((await received(u.cookie)).keys.find((k) => k.id === r.id).accept).toEqual([]);
+    expect(await take(u.cookie, sent.node)).toEqual({ status: 409, error: 'kind_not_accepted' });
+    await driveLimits(u.id, { reverseFiles: true });
+    expect(await take(u.cookie, sent.node)).toEqual({ status: 200, error: null });
+  });
+
+  it('the declared kind must be one the link accepts and the role allows now (a note once notes are off; a kind the link dropped)', async () => {
+    const u = await everything('rt2-kind');
+    const r = await newReverse(u.cookie, { accept: ['note', 'url'] });
+    const ip = freshIp();
+    const { sent: note } = await itemSession(r, 'note', { text: 'synthetic' }, { ip });
+    const { sent: link } = await itemSession(r, 'url', { url: 'https://example.com/' }, { ip });
+    await driveLimits(u.id, { reverseText: false });
+    expect(await take(u.cookie, note.node)).toEqual({ status: 409, error: 'kind_not_accepted' });
+    expect((await patch(u.cookie, r.id, { accept: ['note'] })).status).toBe(200);
+    expect(await take(u.cookie, link.node)).toEqual({ status: 409, error: 'kind_not_accepted' });
+    await driveLimits(u.id, { reverseText: true });
+    expect(await take(u.cookie, note.node)).toEqual({ status: 200, error: null });
+  });
+
+  it('RT2-4: a wrap stored in plain text (not sealed at rest) is never trusted: listed as unsealed with no declared kind, and refused', async () => {
+    const u = await everything('rt2-plain');
+    const r = await newReverse(u.cookie, { accept: ['files'] });
+    const ip = freshIp();
+    const sent = await send(r, await grantAs(r, 'files', ip), { ip });
+    // Someone with write access to the Drive's storage swaps the sealed wrap for plain JSON.
+    await runInDurableObject(driveOf(u.id), (i, st) => st.storage.sql.exec('UPDATE nodes SET fk = ? WHERE id = ?', JSON.stringify({ kind: 'rs', data: 'x', declared: 'files' }), sent.node));
+    const it = (await received(u.cookie)).items.find((x) => x.id === sent.node);
+    expect(it).toMatchObject({ unsealed: true, unreadable: true, declared: null, fk: null });
+    expect(await take(u.cookie, sent.node)).toEqual({ status: 409, error: 'kind_not_accepted' });
+  });
+
+  it('RT2-2: a link\'s folder moved deeper than the role allows takes nothing in (403 folder_too_deep); a new link there is refused', async () => {
+    const u = await everything('rt2-moved');
+    const a = await mkdir(u.cookie, 'root');
+    const b = await mkdir(u.cookie, 'root');
+    const c = await mkdir(u.cookie, b.id);
+    const r = await newReverse(u.cookie, { folder: a.id, accept: ['files'] });
+    expect(r.res.status).toBe(201);
+    const ip = freshIp();
+    const sent = await send(r, await grantAs(r, 'files', ip), { ip });
+    // The folder moves to level 3 (no limit yet), then the role allows 2.
+    expect((await fetchJson(`/api/private/drive/nodes/${a.id}`, { method: 'PATCH', cookie: u.cookie, headers: intent, body: { parent: c.id } })).status).toBe(200);
+    await driveLimits(u.id, { maxFolderDepth: 2 });
+    const res = await takeInAny(u.cookie, sent.node, a.id);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'folder_too_deep', max: 2 });
+    expect((await newReverse(u.cookie, { folder: a.id })).res.status).toBe(403);
   });
 });

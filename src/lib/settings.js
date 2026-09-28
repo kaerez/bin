@@ -201,9 +201,10 @@ const WEAKER_LIMITS = {
   reversePassword: 'rank', reversePasswordDefault: 'unset',
   maxExpireSec: 'max', maxViews: 'max', allowUnlimitedViews: 'on',
   reverseMaxExpireSec: 'max', reverseMaxViews: 'max', reverseNoExpiry: 'on', reverseAllowUnlimitedViews: 'on',
-  url: 'on', secret: 'on', apiEnabled: 'on',
-  // Receive links that may take links or credentials, as the outgoing url / secret.
-  reverseUrl: 'on', reverseSecret: 'on',
+  files: 'on', url: 'on', secret: 'on', apiEnabled: 'on',
+  // Receive links that may take files, links or credentials, as the outgoing files / url / secret
+  // (a link adding files, links or credentials to what it accepts needs the user's step-up too).
+  reverseFiles: 'on', reverseUrl: 'on', reverseSecret: 'on',
   fileTypeMode: 'rank', fileTypeRules: 'types', urlRules: 'added',
 };
 /** Exported for the docs and tests: what counts as weakening. */

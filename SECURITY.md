@@ -884,8 +884,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
       - lifetimes and views: `maxExpireSec`, `reverseMaxExpireSec`, `maxViews` and
         `reverseMaxViews` raised or removed (no limit); `allowUnlimitedViews`,
         `reverseAllowUnlimitedViews` and `reverseNoExpiry` turned on;
-      - what may be shared: `url`, `secret` and `apiEnabled` turned on; `reverseUrl` and
-        `reverseSecret` turned on (Receive links that may take links or credentials); `fileTypeMode`
+      - what may be shared: `files`, `url`, `secret` and `apiEnabled` turned on; `reverseFiles`,
+        `reverseUrl` and `reverseSecret` turned on (Receive links that may take files, links or
+        credentials); `fileTypeMode`
         towards any (allow → block → any), or, with the same mode, a type added to an allow
         list or removed from a block list; `urlRules` gaining a rule;
     - IP rules: adding an allow rule.
@@ -1435,7 +1436,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   an item whose sealed kind is not the one its session declared, that exceeds its kind's cap, or
   that the link no longer accepts under the user's role as it is then** (so a modified uploader
   cannot pass a file off as a note to escape the file limits or quotas, or send a credential
-  once the role stopped allowing them). Like every Drive item a received credential is **not
+  once the role stopped allowing them). The server refuses the take-in too (`409
+  kind_not_accepted`) unless the declared kind, opened from the wrap sealed at rest, is one the
+  link accepts and the role allows then; a received item's name, metadata or wrap stored in
+  plain text is never trusted (no fallback: it fails as `kind`). Like every Drive item a received credential is **not
   end-to-end encrypted**: the recipient's server can decrypt it, and the uploader page says so on
   the credential form ("The recipient's server can decrypt this"). In the Drive each opens only
   in the inert viewers of regular shares (`public/js/typedview.js`): a note as text or through
