@@ -10,13 +10,22 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { owner, makeUser, fetchJson } from './helpers.js';
 import { enableDrive, driveLimits, sealed, mkdir, createFile, uploadFile, node, drive } from './drive-helpers.js';
 import { receiver, newReverse, grantOf, send, received, takeInAny } from './reverse-helpers.js';
+import { utf8 } from '../public/js/bytes.js';
 
 beforeAll(async () => { await owner(); });
 
 const errorBody = async (r) => ({ status: r.status, ...(await r.json()) });
-/** POST /api/private/drive/files as the browser sends it, with `types` (the declaration) when given. */
-async function reserve(cookie, parent, size, types) {
-  const f = await sealed(cookie, 'file');
+/**
+ * A file's name and metadata sealed as the browser seals them (a real name, `{ type, mtime, size }`):
+ * by default matching the declared type (`types[0]`), or `stored` — a crafted client's — instead.
+ */
+const fileFields = (cookie, types, stored) => {
+  const t = stored || (Array.isArray(types) && types[0] && typeof types[0] === 'object' ? types[0] : { ext: 'txt', mime: 'text/plain' });
+  return sealed(cookie, 'file', { name: utf8(t.ext ? `file.${t.ext}` : 'file'), meta: utf8(JSON.stringify({ type: t.mime, mtime: 0, size: 10 })) });
+};
+/** POST /api/private/drive/files as the browser sends it, with `types` (the declaration) when given; `stored`: what is sealed, when it differs. */
+async function reserve(cookie, parent, size, types, stored) {
+  const f = await fileFields(cookie, types, stored);
   return fetchJson('/api/private/drive/files', { method: 'POST', cookie, body: { parent, name: f.name, meta: f.meta, dek: f.dek, ks: f.ks, mek: f.mek, size, ...(types !== undefined ? { types } : {}) } });
 }
 const move = (cookie, id, parent) => fetchJson(`/api/private/drive/nodes/${id}`, { method: 'PATCH', cookie, body: { parent } });
@@ -69,6 +78,66 @@ describe('Drive uploads follow the role\'s file-type rules', () => {
     const r = await node(u.cookie, 'root');
     expect((await r.json()).children.map((c) => c.id)).toContain(f.id);
     expect((await fetchJson(`/api/private/drive/files/${f.id}/chunk/0`, { cookie: u.cookie })).status).toBe(200);
+  });
+});
+
+describe('the type rule is enforced on what is stored, not only on the declaration', () => {
+  const PDF = { ext: 'pdf', mime: 'application/pdf' };
+
+  it('an upload whose sealed name or type is refused, declared as an allowed type (a crafted client), is refused; nothing counted or reserved', async () => {
+    const u = await makeUser('dr-lie-upload');
+    await enableDrive(u.id, { fileTypeMode: 'block', fileTypeRules: ['ext:exe', 'mime:application/x-msdownload'] });
+    await setQuotas(u.id, [q('drive-upload', 10), q('drive-bytes', 1000)]);
+    const before = await drive(u.cookie);
+    // Declared: a .txt. Stored: an .exe (its name and its type).
+    expect(await errorBody(await reserve(u.cookie, 'root', 10, [TXT], EXE))).toEqual({
+      status: 403, error: 'file_type_not_allowed', message: 'The declared file type does not match the file’s stored type, so it may not be uploaded to your Drive.',
+    });
+    // The extension alone (a .exe name, a text type) and the type alone (a .txt name, the .exe type), each declared truthfully.
+    expect(await errorBody(await reserve(u.cookie, 'root', 10, [{ ext: 'exe', mime: 'text/plain' }]))).toMatchObject({ status: 403, error: 'file_type_not_allowed' });
+    expect(await errorBody(await reserve(u.cookie, 'root', 10, [{ ext: 'txt', mime: 'application/x-msdownload' }]))).toMatchObject({ status: 403, error: 'file_type_not_allowed' });
+    // Declared as the stored type: the rule refuses it as usual (the declaration is checked first).
+    expect((await errorBody(await reserve(u.cookie, 'root', 10, [EXE], EXE))).error).toBe('file_type_not_allowed');
+    // Metadata that does not say a type: cannot be checked, refused.
+    const f = await sealed(u.cookie, 'file', { name: utf8('file.txt'), meta: utf8('not json') });
+    const bad = await fetchJson('/api/private/drive/files', { method: 'POST', cookie: u.cookie, body: { parent: 'root', name: f.name, meta: f.meta, dek: f.dek, ks: f.ks, mek: f.mek, size: 10, types: [TXT] } });
+    expect(await errorBody(bad)).toMatchObject({ status: 403, error: 'file_type_not_allowed', message: 'This file’s type cannot be checked against your role’s file-type rules, so it may not be uploaded to your Drive.' });
+    expect(await drive(u.cookie)).toEqual(before);
+    expect(await usedQuotas(u.cookie)).toEqual({ 'drive-upload': 0, 'drive-bytes': 0 });
+    // Honest: declared as stored, allowed.
+    expect((await reserve(u.cookie, 'root', 10, [TXT], TXT)).status).toBe(201);
+    // An allow list is enforced the same way: a .pdf declared, a .txt stored.
+    await driveLimits(u.id, { fileTypeMode: 'allow', fileTypeRules: ['ext:pdf'] });
+    expect((await errorBody(await reserve(u.cookie, 'root', 10, [PDF], TXT))).error).toBe('file_type_not_allowed');
+    expect((await reserve(u.cookie, 'root', 10, [PDF], PDF)).status).toBe(201);
+  });
+
+  it('a take-in whose sealed name or type is refused, declared as an allowed type, is refused (the browser records it as "type")', async () => {
+    const u = await receiver('dr-lie-take');
+    const link = await newReverse(u.cookie);
+    const grant = await grantOf(link);
+    await send(link, grant, { path: 'a.exe', type: 'application/x-msdownload' });
+    const [x] = (await received(u.cookie)).items;
+    await driveLimits(u.id, { fileTypeMode: 'block', fileTypeRules: ['ext:exe'] });
+    const take = async (types, stored) => {
+      const f = await fileFields(u.cookie, types, stored);
+      return fetchJson(`/api/private/drive/received/${x.id}`, { method: 'POST', cookie: u.cookie, body: { parent: 'root', name: f.name, meta: f.meta, dek: f.dek, ks: f.ks, mek: f.mek, types } });
+    };
+    expect(await errorBody(await take([TXT], EXE))).toEqual({
+      status: 403, error: 'file_type_not_allowed', message: 'The declared file type does not match the file’s stored type, so it may not be added to your Drive.',
+    });
+    expect((await errorBody(await take([{ ext: 'exe', mime: 'text/plain' }]))).error).toBe('file_type_not_allowed');
+    expect((await received(u.cookie)).items.map((i) => i.id)).toEqual([x.id]); // still waiting: nothing taken in
+    // An honest take-in of an allowed name and type goes through.
+    expect((await take([TXT], TXT)).status).toBe(200);
+  });
+
+  it('without a type policy, nothing of the stored name or type is checked', async () => {
+    const u = await makeUser('dr-lie-none');
+    await enableDrive(u.id);
+    const f = await sealed(u.cookie, 'file', { name: utf8('tool.exe'), meta: utf8('not json') });
+    const r = await fetchJson('/api/private/drive/files', { method: 'POST', cookie: u.cookie, body: { parent: 'root', name: f.name, meta: f.meta, dek: f.dek, ks: f.ks, mek: f.mek, size: 10 } });
+    expect(r.status).toBe(201);
   });
 });
 
@@ -135,8 +204,8 @@ describe('files taken in from a Receive link follow the role\'s Drive rules (on 
     await send(link, grant, { path: 'b.txt' });
     const [x, y] = (await received(u.cookie)).items;
     await driveLimits(u.id, { fileTypeMode: 'block', fileTypeRules: ['ext:exe'] });
-    const take = async (id, types) => {
-      const f = await sealed(u.cookie, 'file');
+    const take = async (id, types, stored) => {
+      const f = await fileFields(u.cookie, types, stored);
       return fetchJson(`/api/private/drive/received/${id}`, { method: 'POST', cookie: u.cookie, body: { parent: 'root', name: f.name, meta: f.meta, dek: f.dek, ks: f.ks, mek: f.mek, ...(types ? { types } : {}) } });
     };
     expect((await errorBody(await takeInAny(u.cookie, x.id))).error).toBe('declaration_required');

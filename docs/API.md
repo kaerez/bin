@@ -184,7 +184,7 @@ The role's file rules (file types, folder depth) on the Drive's routes, for brow
 | --- | --- | --- |
 | 400 | `declaration_required` | `policy: { mode, rules, maxFolderDepth }` — the role has a type policy: send the file's `types` |
 | 400 | `invalid_declaration` | — `types` is not exactly one `{ ext, mime }` |
-| 403 | `file_type_not_allowed` | `refused: [{ ext, mime }]` — "This file type may not be uploaded to your Drive: .exe (application/x-msdownload)." (a take-in: "added to") |
+| 403 | `file_type_not_allowed` | `refused: [{ ext, mime }]` — "This file type may not be uploaded to your Drive: .exe (application/x-msdownload)." (a take-in: "added to"); checked on the declaration, then on the file's stored name and metadata (no `refused` then): "The declared file type does not match the file’s stored type, …", "This file type may not be …", "This file’s type cannot be checked against your role’s file-type rules, …" |
 | 403 | `folder_too_deep` | `max` — "Folders may be nested at most 2 levels deep in your Drive." (a new folder, an upload into a folder deeper than that, a move, a take-in) |
 
 ## Examples

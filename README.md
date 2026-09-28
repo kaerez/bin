@@ -395,8 +395,10 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
   administrator sets one for an account, that account's browser or CLI declares the file types
   and folder depth it is uploading, and the server refuses what the policy forbids. It keeps
   honest users within the rules; it is not a guarantee against a modified client. The same
-  rules apply to the account's **Drive**: an upload declares its file's type (checked when the
-  upload is reserved), and the folder-depth limit is checked by the server against the Drive's
+  rules apply to the account's **Drive**, where they are enforced by the server: an upload
+  declares its file's type, and the server checks both the declaration and the file's stored
+  (sealed) name and type, which it opens to check the seal anyway, so a modified client that
+  declares a false type is refused; the folder-depth limit is checked by the server against the Drive's
   own tree on every upload, new folder and move (and on files taken in from Receive links, on
   top of the link's own type rules). Files already in a Drive stay when a rule is added or
   tightened; only new uploads, folders and moves are refused.

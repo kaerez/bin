@@ -402,8 +402,15 @@ row or an escrow wrap) as `pending` (`drive_migration`).
     — the one type of the file, from the name and type the browser seals — and the Worker
     checks it (`src/lib/drivepolicy.js`) before anything is counted or reserved: `400
     declaration_required` (with `policy`) without it, `400 invalid_declaration` for anything but
-    exactly one valid pair, `403 file_type_not_allowed` (with `refused`). Not stored. A modified
-    client could declare another type, as for file shares.
+    exactly one valid pair, `403 file_type_not_allowed` (with `refused`). Not stored.
+    **The server enforces the rule from the stored metadata, not only from the declaration:**
+    the Worker opens the new file's sealed name and metadata anyway (`checkNewItem`, §3), and
+    checks the name's extension and the metadata's `type` with the same rule function
+    (`sealedTypeRefusal`). A declaration that does not match them, a stored type the rules refuse,
+    or metadata without a valid `type`: `403 file_type_not_allowed`, before anything is counted
+    or reserved. A take-in is checked the same way (the browser records a refusal as `type`).
+    The opened values are used for this check in memory only, zeroed after it, and never logged,
+    stored or returned (the refusal names neither the file nor its stored type).
   - *Depth:* a folder may be at most `maxFolderDepth` levels deep (one in the top folder is at
     level 1) and a file sits at its folder's level. The Drive object checks it against its tree
     — no declaration — on a new folder, an upload's reservation, a move (a folder counts the
@@ -642,9 +649,11 @@ stand-in. What each side relies on:
   dropped, and what it showed leaves the page. The CSP and Trusted Types keep other script out,
   as for the rest of the app; what remains is in SECURITY.md.
 - Capacity, sizes and chunk counts are enforced server-side, and so is the folder-depth limit
-  (the tree is the server's). File types are declared by the client and checked by the server,
-  for Drive uploads, take-ins and Drive shares alike, as for file shares: the Worker does not
-  read the sealed name or type for it (§5).
+  (the tree is the server's). File types of Drive uploads and take-ins are enforced
+  server-side from the stored (sealed) name and metadata, which the Worker opens in memory to
+  check the seal, and the client's declaration must match them (§5). A Drive share's types are
+  declared by the client and checked by the server, as for file shares (the share's manifest is
+  sealed with the link key, which the server does not have).
 
 ## 10. Server notes (as built)
 

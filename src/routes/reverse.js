@@ -34,7 +34,7 @@ import { NODE_ID_RE, ROOT, MAX_REVERSE_FILES, RECEIVED_FAIL_REASONS } from '../d
 import { encField } from './drive.js';
 import { KEY_RE, MEK_ID_RE } from '../../public/js/drivekeys.js';
 import { userKeys, checkNewItem, checkLinkKey, fieldKeys, toRest, fromRest } from '../lib/mek.js';
-import { driveTypeRefusal } from '../lib/drivepolicy.js';
+import { driveTypeRefusal, sealedTypeRefusal, typedPolicy } from '../lib/drivepolicy.js';
 
 export const REVERSE_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
 const B64_43 = /^[A-Za-z0-9_-]{43}$/;
@@ -196,8 +196,12 @@ export async function handleReverseOwner(request, env, url, a, pol) {
     // (the Drive checks its tree), so a Receive link is no way around the Drive's policy.
     const typeRefused = driveTypeRefusal(pol.policy, body.types, 'added to');
     if (typeRefused) return typeRefused;
-    // Taken in: sealed under the current KEK like any Drive file (checked here).
-    const mfp = await checkNewItem(uid, await userKeys(env, uid), { kind: 'file', ...kf, name, meta, dek });
+    // Taken in: sealed under the current KEK like any Drive file (checked here), and the type rule
+    // enforced on what is stored (the sealed name and metadata, opened in memory only).
+    let sealedRefused = null;
+    const mfp = await checkNewItem(uid, await userKeys(env, uid), { kind: 'file', ...kf, name, meta, dek },
+      typedPolicy(pol.policy) ? (n, m) => { sealedRefused = sealedTypeRefusal(pol.policy, n, m, body.types, 'added to'); } : null);
+    if (sealedRefused) return sealedRefused;
     const r = await drive().acceptReceived(uid, node, { parent, name, meta, dek, ...kf, mfp, maxDepth: pol.policy.maxFolderDepth });
     if (!r.ok) return fromDo(r);
     await dir.setDriveUsed(uid, r.used);

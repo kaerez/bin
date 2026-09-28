@@ -486,7 +486,11 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   the file-type rules (`fileTypeMode` / `fileTypeRules`) and the folder-depth limit
   (`maxFolderDepth`) now apply to Drive uploads, new folders and moves, not only to Drive
   shares. An upload declares its file's type, as a file share does (`types`, checked at the
-  reservation: `400 declaration_required`, `403 file_type_not_allowed`); the depth is checked by
+  reservation: `400 declaration_required`, `403 file_type_not_allowed`), and the server enforces
+  the rule from the stored metadata too: the sealed name's extension and the metadata's type,
+  which the Worker opens in memory to check the seal (never logged), must pass the rules and
+  match the declaration, so a modified client that declares a false type is refused (uploads and
+  take-ins alike); the depth is checked by
   the Drive against its own tree (`403 folder_too_deep`). The Drive page checks both first and
   says why (a whole batch before any of it is sent). Files taken in from a Receive link keep the
   link's own type rules and are held to the role's Drive rules too (a refused type is recorded as

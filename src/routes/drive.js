@@ -35,7 +35,7 @@ import { binding } from '../lib/config.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { NODE_ID_RE, ROOT, KEYS_PAGE } from '../drive-do.js';
 import { handleReverseOwner } from './reverse.js';
-import { driveTypeRefusal } from '../lib/drivepolicy.js';
+import { driveTypeRefusal, sealedTypeRefusal, typedPolicy } from '../lib/drivepolicy.js';
 import { userKeys, keksOf, openItem, checkNewItem, checkField, checkLinkKey, openLink, fieldKeys, toRest, fromRest } from '../lib/mek.js';
 
 const fromDir = (r) => {
@@ -221,7 +221,11 @@ export async function handleDrive(request, env, url) {
     const typeRefused = driveTypeRefusal(pol.policy, body.types);
     if (typeRefused) return withAuth(a, typeRefused);
     const keys = await userKeys(env, uid);
-    const mfp = await checkNewItem(uid, keys, { kind: 'file', ...kf, name, meta, dek });
+    // …and on what is stored: the sealed name's extension and the metadata's type, opened in memory only.
+    let sealedRefused = null;
+    const mfp = await checkNewItem(uid, keys, { kind: 'file', ...kf, name, meta, dek },
+      typedPolicy(pol.policy) ? (n, m) => { sealedRefused = sealedTypeRefusal(pol.policy, n, m, body.types); } : null);
+    if (sealedRefused) return withAuth(a, sealedRefused);
     const uploadToken = genToken();
     // One file added to the Drive: the quotas of kind drive-upload count it
     // (and those of kind drive-bytes its size) now, and give it back when the
