@@ -323,6 +323,8 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     ring while focus is in the widget (2.4.7).
   - the Drive: received files taken in while a folder opens no longer send it back to the folder
     being left (the refresh re-lists the folder being opened and keeps its focus) (3.2.5, 2.4.3).
+  - a Drive dialog opening puts away a toast from before it, so nothing outside the modal dialog
+    is shown or read.
 
 
 - **Drive keys and client library** (docs/DRIVE.md §3, §6, §7): `public/js/drivekeys.js` (the

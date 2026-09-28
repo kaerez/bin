@@ -182,6 +182,10 @@ export function openDialog({ title, sub = '', body = [], wide = false, fallback 
   const scrim = h('div.modal-scrim.drive-dialog', {}, box);
   const opener = document.activeElement;
   const inerted = [...document.body.children].filter((el) => el.id !== 'toast' && el.tagName !== 'SCRIPT' && !el.inert);
+  // A toast from before the dialog (already said) is about the page behind it: put away, so that
+  // nothing outside the modal dialog is shown or read (a toast raised while it is open still is).
+  const oldToast = document.getElementById('toast');
+  if (oldToast && oldToast.classList.contains('show')) { oldToast.classList.remove('show'); oldToast.textContent = ''; }
   let open = true;
   const onKey = (e) => {
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }

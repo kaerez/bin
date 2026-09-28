@@ -760,6 +760,21 @@ describe('WCAG 2.2: reverse shares', () => {
     expect(copy.getAttribute('aria-label')).toBe('Copy link old');
   });
 
+  it('a dialog opening puts away a toast from before it (nothing shown or read outside the modal); a toast raised while it is open still shows', async () => {
+    await server();
+    const r = await startDrive(mountPoint(), deps());
+    await r.app.ready;
+    const t = document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast' }));
+    t.setAttribute('role', 'status');
+    t.textContent = 'Added 1 received file.';
+    t.classList.add('show');
+    $('#drive-receive').click();
+    await until(() => dialog());
+    expect(t.classList.contains('show')).toBe(false);
+    expect(t.textContent).toBe('');
+    expect(t.inert).toBe(false);
+  });
+
   it('a refresh in the background (received files taken in) while a folder opens: the Drive ends in that folder, with focus on its heading', async () => {
     await server();
     const r = await startDrive(mountPoint(), deps());

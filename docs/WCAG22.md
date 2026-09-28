@@ -304,6 +304,8 @@ Level A and AA failures (all fixed):
   the visible words, a whole row; "Show more" in the review lost focus → the first row it loaded;
   a take-in of received files finishing while a folder opened sent the Drive back to the folder
   being left, and focus to the page (3.2.5, 2.4.3) → the refresh goes to the folder being opened.
+- **1.3.1 / 4.1.2** (found by the accessibility-tree suite: a toast from before a Drive dialog
+  opened stayed shown and in the tree outside the modal dialog) → a dialog opening puts it away.
 - **2.4.7** (the human check, found with Turnstile's testing keys) focus inside Cloudflare's widget
   showed no ring on secbin's side → its container draws one.
 - **2.4.11, 2.4.12** (found on the new states that show a toast) at 320×256 a toast moved to the
