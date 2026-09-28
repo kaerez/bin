@@ -38,7 +38,8 @@ vi.mock('../public/js/api.js', () => {
   };
 });
 vi.mock('../public/js/kdf-progress.js', () => ({}));
-vi.mock('../public/js/passkeys.js', () => ({ passkeysSupported: () => true, createPasskey: async () => ({ id: 'new' }) }));
+// Account adds passkeys with the PRF extension (the Drive's passkey wraps): no PRF output here.
+vi.mock('../public/js/passkeys.js', () => ({ passkeysSupported: () => true, createPasskey: async () => ({ id: 'new' }), createPasskeyPrf: async () => ({ credential: { id: 'new' }, prf: null }) }));
 vi.mock('../public/js/pwauth.js', () => ({
   newCredential: async () => ({ salt: 's', t: 3, proof: 'p' }),
   checkNewPassword: () => null,

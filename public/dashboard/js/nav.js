@@ -1,14 +1,17 @@
 // nav.js — shared dashboard chrome: loads the signed-in profile (/api/private/me),
-// shows the nav (Admin only for the owner), the impersonation banner with
+// shows the nav (Drive only when the role allows it, Admin only for the owner),
+// the impersonation banner with
 // "Return to admin", and log-out. Every dashboard page awaits `ready`.
 
 import { me, logout, admin, ApiError } from '../../js/api.js';
 import { toast } from '../../js/ui.js';
 import { friendlyError } from '../../js/common.js';
+import { clearSessionKey, clearImpersonationKey } from '../../js/drivekeys.js';
 
 const $ = (s) => document.querySelector(s);
 
 function toLogin(reason) {
+  clearSessionKey(); // signed out: forget the tab's Drive key (docs/DRIVE.md §3)
   location.replace(reason === 'account_disabled' ? '/dashboard/login/?disabled=1' : '/dashboard/login/');
 }
 
@@ -21,8 +24,15 @@ export async function loadMe() {
   }
 }
 
+/** Whether the signed-in account's role has a Drive: `caps.driveEnabled` (docs/DRIVE.md §5, §8.1). */
+export function driveAllowed(profile) {
+  return !!(profile && profile.caps && profile.caps.driveEnabled === true);
+}
+
 export const ready = (async () => {
   const profile = await loadMe();
+  // The Drive key of a user the owner acted as lives only while acting as them.
+  if (!profile.impersonatedBy) clearImpersonationKey();
   const nav = $('#dash-nav');
   if (nav) {
     nav.hidden = false;
@@ -30,6 +40,8 @@ export const ready = (async () => {
     for (const a of nav.querySelectorAll('a[data-nav]')) if (new URL(a.href).pathname === here) a.setAttribute('aria-current', 'page');
     const adminLink = $('#nav-admin');
     if (adminLink) adminLink.hidden = !(profile.user.role === 'owner' && !profile.impersonatedBy);
+    const driveLink = $('#nav-drive');
+    if (driveLink) driveLink.hidden = !driveAllowed(profile);
     $('#nav-logout').onclick = async () => {
       try { await logout(); } catch { /* the cookie is cleared regardless */ }
       toLogin();
@@ -42,6 +54,7 @@ export const ready = (async () => {
     $('#imp-return').onclick = async () => {
       try {
         await admin.unimpersonate();
+        clearImpersonationKey();
         location.href = '/dashboard/admin/';
       } catch (e) {
         toast(friendlyError(e), { error: true });

@@ -8,7 +8,9 @@ import { login, session, ApiError, passkeyLoginOptions, passkeyLogin, recoveryLo
 import { loginProof } from './pwauth.js';
 import { showMsg, markInvalid, wirePeek, friendlyError } from './common.js';
 import { humanCheck } from './turnstile.js';
-import { passkeysSupported, usePasskey } from './passkeys.js';
+import { passkeysSupported, usePasskeyPrf } from './passkeys.js';
+import { DRIVE_PRF_SALT, clearSessionKey, releaseSessionKeys } from './drivekeys.js';
+import { unlockAtSignIn } from './driveclient.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -25,11 +27,24 @@ if (new URLSearchParams(location.search).get('disabled') === '1') {
 })();
 
 wirePeek(['#login-pass', '#login-pass-peek']);
+// A Drive key left in this tab goes before the human check's (third-party)
+// script can load; the sign-in unlocks the Drive again (SECURITY.md).
+clearSessionKey();
 // Sign-in buttons stay disabled until the human check (when on) has passed.
 const check = humanCheck($('#login-turnstile'), 'login', { gate: [$('#login-btn'), $('#passkey-btn')] });
 
-/** Signed in: to the dashboard, or to Account when a recovery code was spent. */
-function done(r) {
+/**
+ * Signed in: unlock the Drive for this tab with what was used (the password,
+ * a passkey's PRF output, a recovery code — docs/DRIVE.md §3; never blocks the
+ * sign-in: the Drive page asks when this fails), then to the dashboard, or to
+ * Account when a recovery code was spent.
+ */
+async function done(r, creds = {}) {
+  if (r && r.user && typeof r.user.id === 'string') await unlockAtSignIn({ user: r.user, ...creds, spentWraps: r.driveSpent });
+  // The next page needs the key: with the human check's script loaded here, it
+  // was kept in memory (turnstile.js); it goes to sessionStorage now, as the
+  // page is left (the script on this page saw the password anyway).
+  releaseSessionKeys();
   $('#login-pass').value = '';
   if (r && typeof r.recoveryLeft === 'number') location.replace(`/dashboard/account/?recovery=${r.recoveryLeft}`);
   else location.replace('/dashboard/');
@@ -84,10 +99,10 @@ $('#login-form').addEventListener('submit', async (e) => {
   flag(msg);
   try {
     const token = await (await check).take();
-    if (recoveryMode) { done(await recoveryLogin(username, code, token)); return; }
+    if (recoveryMode) { await done(await recoveryLogin(username, code, token), { code }); return; }
     const r = await login(username, await loginProof(username, password), token);
-    if (r.secondFactor) { startSecond(r.secondFactor); return; }
-    done(r);
+    if (r.secondFactor) { startSecond(r.secondFactor, password); return; }
+    await done(r, { password });
   } catch (err) {
     failure(msg, err, [$('#login-user'), secret]);
   } finally {
@@ -107,7 +122,8 @@ if (passkeysSupported()) {
     try {
       const token = await (await check).take();
       const o = await passkeyLoginOptions();
-      done(await passkeyLogin(o.challengeId, await usePasskey(o.publicKey), token));
+      const { credential, prf } = await usePasskeyPrf(o.publicKey, DRIVE_PRF_SALT);
+      await done(await passkeyLogin(o.challengeId, credential, token), prf ? { prfOutput: prf, credentialId: credential.rawId } : {});
     } catch (err) {
       failure(msg, err);
     } finally {
@@ -118,8 +134,10 @@ if (passkeysSupported()) {
 
 // ── second step: the password was right; now a passkey or recovery code ───
 let pending = null;
-function startSecond(sf) {
+let pendingPassword = ''; // kept (in memory only) to unlock the Drive once signed in
+function startSecond(sf, password) {
   pending = sf;
+  pendingPassword = password;
   $('#login-form').hidden = true;
   $('#second-form').hidden = false;
   $('#second-msg').hidden = true;
@@ -128,18 +146,22 @@ function startSecond(sf) {
 }
 function startOver(text) {
   pending = null;
+  pendingPassword = '';
   $('#second-form').hidden = true;
   $('#login-form').hidden = false;
   $('#login-pass').value = '';
   $('#login-pass').focus();
   if (text) showMsg($('#login-msg'), text);
 }
-async function second(body, btn) {
+async function second(body, btn, creds = {}) {
   const msg = $('#second-msg');
   btn.disabled = true;
   msg.hidden = true;
   try {
-    done(await secondFactor({ challengeId: pending.challengeId, ...body }));
+    const r = await secondFactor({ challengeId: pending.challengeId, ...body });
+    const password = pendingPassword;
+    pendingPassword = '';
+    await done(r, { password, ...(body.code ? { code: body.code } : {}), ...creds });
   } catch (err) {
     if (err instanceof ApiError && err.code === 'challenge_expired') startOver(err.message);
     else failure(msg, err, body.code ? [$('#second-code')] : []);
@@ -150,8 +172,8 @@ async function second(body, btn) {
 $('#second-passkey').addEventListener('click', async () => {
   const btn = $('#second-passkey');
   try {
-    const credential = await usePasskey(pending.publicKey);
-    await second({ credential }, btn);
+    const { credential, prf } = await usePasskeyPrf(pending.publicKey, DRIVE_PRF_SALT);
+    await second({ credential }, btn, prf ? { prfOutput: prf, credentialId: credential.rawId } : {});
   } catch (err) {
     showMsg($('#second-msg'), friendlyError(err));
   }

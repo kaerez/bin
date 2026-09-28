@@ -127,7 +127,7 @@ function openExtend(r, tr) {
     + `${L.maxExpireSec === null ? 'expiry up to 365 days' : `expiry up to ${formatCoarse(L.maxExpireSec)} from now`}.`;
   const row = h('tr.extend-row', { dataset: { focusKey: `share:${r.id}:extend` } }, h('td.cell-full', { colspan: '8' },
     h('div.extend-box', {},
-      r.kind !== 'files' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
+      r.kind !== 'files' && r.kind !== 'drive' && r.views_total === null ? null : h('div.toolbar', {}, h('span.field-label', { text: 'Views (new total)' }), views, unlimited),
       h('div.toolbar', {}, h('span.field-label', { text: 'Extend expiry by' }), n, unit),
       h('p.mono.muted', { text: limitsText }),
       h('div.btn-row', {}, save), msg)));

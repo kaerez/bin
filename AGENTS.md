@@ -27,7 +27,9 @@ described in [README.md](./README.md); the threat model and security design in
   parallel branches must not both append one; the second to merge renumbers after rebasing on
   `main`.
 - **One PR per coherent change**, as a draft first, from a branch off `main`. Merge only when CI
-  is green (the maintainer allows merging your own green PRs); use a merge commit. After a PR is
+  is green (the maintainer allows merging your own green PRs); use a merge commit. Turn on
+  auto-merge for each PR (when the repository allows it) so it merges itself once green, and
+  delete the branch after the merge (GitHub's "Automatically delete head branches"). After a PR is
   merged, follow-up work starts on a new branch from the latest `main`.
 - **Merging:** turn on auto-merge for each PR (when the repository allows it) and delete the
   branch after the merge. Never merge two PRs back to back: every merge to `main` triggers a
@@ -100,6 +102,19 @@ never committed) and `node_modules`.
   region or national standard.
 - **Reverse shares:** an optional password gates the anonymous uploader only; uploads land in the
   user's chosen drive folder; the user never needs that password.
+- **Starting over without a kit (an accepted exception to "Security first", this case only):**
+  when the server reports that the owner started their Drive over without a recovery kit, users'
+  browsers move their Drives to the new escrow key automatically, once per owner reset (the
+  reset's epoch one more than the pinned one, the escrow key signed by the reset's signing key),
+  every time and with no time limit, without the user's approval. This is not limited to a
+  window after a real reset: nothing in a user's browser ties a reported reset to a real one,
+  so anyone able to change the server's responses can fake an owner reset at any time, and
+  again at each later epoch, and so can anyone able to complete AUTHN owner recovery and then
+  start over (anyone with access to the Worker's `AUTHN` secret configuration). Every other unsigned escrow key change keeps the signed-key pin (the notice
+  and "Trust the new key"). The rules are in one function (`resetApplies`,
+  `public/js/driveclient.js`); the maintainer may change this design.
+- **The Drive key never changes** on a password change or an admin reset: only the `pw` wrap is
+  replaced, proven to be of the same DK by the key check value.
 - **Impersonation:** the owner can do everything the user can, the Drive included; it is
   invisible to the user (the user's activity shows the actions as theirs), and the owner-only
   admin audit keeps the start, end and real actor.

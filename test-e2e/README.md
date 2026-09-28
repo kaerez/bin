@@ -1,0 +1,80 @@
+# test-e2e — manual end-to-end checks
+
+Browser tests that drive a real `wrangler dev` with Playwright and Chromium. They document and
+repeat the manual test of a feature; they are **not** part of `npm test` or CI (vitest does not
+pick them up, and CI does not install a browser).
+
+## `drive-int.mjs` — the Drive, end to end
+
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md)):
+
+- the sign-in setting up and unlocking the Drive (password, a passkey with PRF, a recovery
+  code);
+- Account keeping the wraps current;
+- the Drive page's unlock prompt;
+- the folder tree and right pane (mouse and keyboard), upload of files and folders (a clashing
+  name gets " (2)"), new folder, rename, move, delete, download (file and folder ZIP);
+- Share… with a password, the recipient's view, the item's shares and revoke;
+- the capacity text, the phone layout, a role without a Drive;
+- no names, contents or secrets in any Drive request;
+- no page errors or CSP / Trusted Types violations, and axe (WCAG 2.2 A/AA) on every state.
+
+It creates the owner itself, so it needs a server with **no owner yet**: fresh local state.
+
+```sh
+# 1. once: the test's own dependencies (not in package.json) and a Chromium
+npm install --no-save playwright-core axe-core
+npx playwright-core install chromium        # or point CHROMIUM at an installed one
+
+# 2. a fresh server (.dev.vars holds AUTHN, the setup token; see README.md)
+rm -rf .wrangler/e2e-state
+npx wrangler dev --port 8787 --persist-to .wrangler/e2e-state
+
+# 3. in another shell, from the repository root (localhost, not 127.0.0.1: passkeys need an RP ID)
+WT=$PWD BASE=http://localhost:8787 node test-e2e/drive-int.mjs
+# CHROMIUM=/path/to/chrome   use that browser instead of Playwright's
+# OUT=/some/dir              keep downloads, screenshots and axe.json there (default: a temp dir)
+```
+
+It prints one `PASS` / `FAIL` line per check and `N/M passed`, and exits non-zero on any
+failure. It takes a few minutes: Argon2id runs for every password unlock.
+
+## `drive-impersonate.mjs` — the owner in a user's Drive ("Log in as")
+
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3, §9): the owner, logged in as a user, opens
+the user's Drive through the owner escrow (the owner's own Drive unlocked in the tab), reads and
+downloads the user's file, uploads one and shares it (a recipient opens the link); the user's key
+sits in its own tab slot and goes when the impersonation ends; removing the user's password wrap
+is refused; a user who has not signed in since the Drive was enabled shows the notice and gets
+nothing created, and their first sign-in then sets the Drive up by itself (password and escrow
+wraps); the notice when the owner's Drive is locked; Hebrew and spoofing names in the Drive page;
+and the user's own activity listing the Drive actions done as them, as theirs and with no trace
+of the impersonation, while the admin audit names the owner. It also checks the create-user
+form: a user created with the owner's Drive unlocked gets a Drive at once; one created with it
+locked waits for their first sign-in. Same set-up as `drive-int.mjs` (a
+fresh server with no owner yet):
+
+```sh
+WT=$PWD BASE=http://127.0.0.1:8787 node test-e2e/drive-impersonate.mjs
+```
+
+## `owner-kit.mjs` — the owner recovery kit, starting over, the archive
+
+What it covers ([docs/DRIVE.md](../docs/DRIVE.md) §3.1, §3.2), in two phases on one server state:
+phase 1 — the kit status and the fresh-kit notice on the Drive page; Download kit on the export
+screen (refused without the step-up; again and again), the file saved to disk; after a reload,
+Verify kit with that saved file (`setInputFiles`), a tampered file, an older kit after a rotation
+(the notice announced, then static after a reload); Restore from kit; the create-user form setting
+the new user's Drive up now, or deferring it; phase 2 — after the server restarts with a new
+`AUTHN` value: AUTHN owner recovery (the Drive marked stale), the unlock screen (restore, start
+over), starting over (the typed username; the archive and the notice), and the archive brought
+back with the phase-1 kit. axe (WCAG 2.2 A/AA) on every state, and no page errors.
+
+```sh
+rm -rf .wrangler/kit-state
+npx wrangler dev --port 8787 --persist-to .wrangler/kit-state
+WT=$PWD BASE=http://localhost:8787 OUT=/tmp/kit PHASE=1 node test-e2e/owner-kit.mjs
+# stop wrangler, then restart it on the same state with a new setup token:
+npx wrangler dev --port 8787 --persist-to .wrangler/kit-state --var AUTHN:<a new value of 32+ characters>
+WT=$PWD BASE=http://localhost:8787 OUT=/tmp/kit PHASE=2 AUTHN2=<that value> node test-e2e/owner-kit.mjs
+```

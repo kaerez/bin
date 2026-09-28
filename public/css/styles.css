@@ -650,6 +650,118 @@ input[type="checkbox"], input[type="radio"] { width: max(1.125rem, 18px); height
 .tree-dir > .tree-row .tree-btn:last-child { margin-left: auto; }
 .tree-toggle { width: 22px; height: 22px; border: 1px solid var(--rule-2); border-radius: 3px; background: transparent; color: var(--ink-2); cursor: pointer; line-height: 1; }
 .tree-spacer { display: inline-block; width: 22px; }
+/* A folder name in a right pane: opens that folder. */
+.tree-open { display: inline-flex; align-items: center; min-height: 28px; min-width: 24px; background: none; border: 0; padding: .15rem 0; font-weight: 500; text-align: left; cursor: pointer; text-decoration: underline;
+  text-decoration-color: var(--rule-3); text-underline-offset: 3px; }
+.tree-open:hover { text-decoration-color: currentColor; }
+.tree-open:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--ring); border-radius: 2px; }
+.pane-empty { padding: .6rem 0; }
+
+/* The folder tree (public/js/tree.js): WAI-ARIA tree, collapsed by default.
+   The + / − toggle is a pointer target; the state lives on the treeitem. */
+.tree, .tree-group { list-style: none; margin: 0; padding: 0; }
+.tree-group { padding-left: .9rem; margin-left: .7rem; border-left: 1px solid var(--rule); }
+.tree-group[hidden] { display: none; }
+.tree-item:focus { outline: none; }
+.tree-label { display: flex; align-items: center; gap: .35rem; min-height: 32px; padding: .1rem .4rem .1rem .15rem; border-radius: 3px; cursor: pointer;
+  font-family: var(--mono); font-size: .78rem; color: var(--ink); }
+.tree-label:hover { background: var(--sheet-2); }
+.tree-item:focus-visible > .tree-label { box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--ring); }
+.tree-item[aria-selected="true"] > .tree-label { background: color-mix(in oklab, var(--sheet), var(--accent) 14%); color: var(--ink); font-weight: 500; }
+.tree-twisty { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 24px; height: 24px; border: 1px solid var(--rule-2);
+  border-radius: 3px; color: var(--ink-2); font-size: .85rem; line-height: 1; user-select: none; }
+.tree-twisty:hover { border-color: var(--rule-3); color: var(--ink); background: var(--sheet); }
+.tree-twisty.none { border-color: transparent; background: none; cursor: default; }
+.tree-icon { flex: none; width: 13px; height: 10px; margin-right: .1rem; border: 1.5px solid var(--ink-3); border-radius: 1px 2px 2px 2px; position: relative; }
+.tree-icon::before { content: ''; position: absolute; left: -1.5px; top: -4px; width: 6px; height: 3px; border: 1.5px solid var(--ink-3); border-bottom: 0; border-radius: 2px 2px 0 0; }
+.tree-text { overflow-wrap: anywhere; min-width: 0; }
+/* A file name (common.js nameEl): isolated from the text around it; the extension its own LTR isolate. */
+.fname, .fext { unicode-bidi: isolate; }
+
+/* Tree on the left, the selected folder's content on the right; stacked on phones. */
+.browser { display: grid; grid-template-columns: minmax(9rem, 32%) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.browser-tree { min-width: 0; padding-right: .6rem; border-right: 1px solid var(--rule); }
+.browser-pane { min-width: 0; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: .15rem .4rem; margin-bottom: .35rem; font-family: var(--mono); font-size: .72rem; color: var(--ink-3); }
+.crumbs .crumb { font-family: var(--mono); font-size: .72rem; }
+.crumbs span.crumb { color: var(--ink); font-weight: 500; }
+.crumbs button.crumb { min-height: 24px; min-width: 24px; padding: .1rem 0; }
+.crumb-sep { color: var(--ink-3); }
+@media (max-width: 640px) {
+  .browser { grid-template-columns: 1fr; gap: .6rem; }
+  .browser-tree { padding: 0 0 .6rem; border-right: 0; border-bottom: 1px solid var(--rule); }
+}
+/* ── drive (dashboard/drive: public/dashboard/js/drive-app.js) ────────────── */
+.drive { display: flex; flex-direction: column; gap: .9rem; }
+.drive-notice, .drive-unlock { max-width: 560px; display: flex; flex-direction: column; gap: .9rem; }
+.drive-unlock-form { display: flex; flex-direction: column; gap: .6rem; }
+/* the owner recovery kit (dashboard/js/ownerkit-ui.js): its status, notice and check results */
+.kit-status { display: flex; flex-direction: column; gap: .45rem; }
+.kit-status p { margin: 0; }
+.kit-notice { display: flex; flex-direction: column; gap: .45rem; align-items: flex-start; }
+.kit-notice .msg, .kit-results .msg, .drive-notice .msg.warn { padding: 0; text-align: left; }
+.msg.warn { color: var(--warn); }
+.kit-results { display: flex; flex-direction: column; gap: .6rem; }
+.kit-checks { margin: 0; padding-left: 1.1rem; display: grid; gap: .35rem; font-size: .85rem; word-break: break-word; }
+.kit-pass { color: var(--ok); }
+.kit-warn { color: var(--warn); }
+.kit-fail { color: var(--seal); }
+.kit-skip { color: var(--ink-2); }
+.dfield { display: flex; flex-direction: column; gap: .35rem; }
+.dfield .input { width: 100%; }
+.drive-cap { display: grid; grid-template-columns: auto minmax(8rem, 1fr); align-items: center; gap: .3rem .9rem; }
+.drive-cap-text { grid-column: 1 / -1; font-size: .72rem; color: var(--ink-2); }
+.drive-cap-text.over { color: var(--warn); }
+.drive-cap-meter { width: 100%; height: 10px; }
+.drive-cap-meter[hidden] { display: none; }
+.drive-cap-meter::-webkit-meter-bar { background: var(--sheet-2); border: 1px solid var(--rule-2); border-radius: 5px; height: 10px; }
+.drive-cap-meter::-webkit-meter-optimum-value { background: var(--accent-fill); border-radius: 5px; }
+.drive-cap-meter::-webkit-meter-suboptimum-value { background: var(--warn); border-radius: 5px; }
+.drive-cap-meter::-webkit-meter-even-less-good-value { background: var(--seal); border-radius: 5px; }
+.drive-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; }
+.drive-selinfo:empty { display: none; }
+.drive-transfer { display: flex; align-items: flex-end; gap: .6rem; }
+.drive-transfer .progress-block { flex: 1; min-width: 0; margin: 0; }
+.drive-msg { padding: 0; text-align: left; }
+.drive-layout { display: grid; grid-template-columns: minmax(12rem, 27%) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.drive-tree-pane, .drive-pane { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; padding: .8rem 1rem; min-width: 0; }
+.drive-tree-pane { max-height: 70vh; max-height: 70dvh; overflow: auto; }
+.drive-pane { transition: border-color .14s ease, background-color .14s ease; }
+.drive-pane.over { border-color: var(--ring); border-style: dashed; background: color-mix(in oklab, var(--sheet), var(--accent) 6%); }
+.drive-pane-h { font-family: var(--mono); font-size: .65rem; font-weight: 400; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); margin-bottom: .45rem; }
+.drive-pane-title { font-family: var(--serif); font-size: 1.2rem; font-weight: 500; letter-spacing: -.01em; margin-bottom: .5rem; overflow-wrap: anywhere; }
+.drive-pane-title:focus { outline: none; }
+.drive-pane-title:focus-visible { box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--ring); border-radius: 2px; }
+.drive-table .cell-check { width: 2.25rem; }
+.drive-table td { overflow-wrap: anywhere; }
+.drive-open { gap: .45rem; font-family: var(--mono); font-size: .8rem; color: var(--ink); }
+.drive-fname { font-family: var(--mono); font-size: .8rem; }
+.drive-empty { text-align: left; }
+.drive-drop-hint { margin-top: .6rem; }
+.drive-tree-toggle { display: none; }
+.drive-picker { max-height: 45vh; max-height: 45dvh; overflow: auto; border: 1px solid var(--rule); border-radius: 4px; padding: .5rem; margin-top: 1rem; }
+.drive-move-target { margin-top: .6rem; font-size: .75rem; color: var(--ink-2); overflow-wrap: anywhere; }
+.drive-del-list { margin: .9rem 0 0 1.1rem; font-size: .8rem; }
+.drive-share-form { display: flex; flex-direction: column; gap: .75rem; margin-top: 1rem; }
+.drive-share-form .viewer-opt { padding: 0; }
+.drive-share-form .label-row { margin-top: 0; }
+.drive-share-opts { display: flex; flex-wrap: wrap; gap: .6rem; }
+.drive-share-pw { display: flex; flex-direction: column; gap: .5rem; }
+.drive-share-pw[hidden] { display: none; }
+.modal-wide { max-width: 600px; }
+.modal-body .linkrow { margin-top: 1rem; }
+/* The whole link, wrapped (a scroller would need to be focusable). */
+.modal-body .linkrow .url { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.drive-qr { margin: 1rem auto 0; width: max-content; }
+@media (max-width: 640px) {
+  .drive-layout { grid-template-columns: 1fr; }
+  .drive-tree-toggle { display: inline-flex; justify-self: start; }
+  .drive-layout:not(.tree-open) > .drive-tree-pane { display: none; }
+  .drive-tree-pane { max-height: 50vh; max-height: 50dvh; }
+  .drive-toolbar .btn-row { width: 100%; }
+  .drive-toolbar .btn-row > .btn { flex: 1 1 auto; }
+  .drive-table td.cell-check { display: flex; justify-content: flex-start; }
+}
 .files-tree { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; padding: .8rem 1rem; margin-top: .8rem; }
 .files-window { font-size: .72rem; color: var(--ink-3); margin-bottom: .6rem; }
 .file-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
@@ -765,6 +877,8 @@ html.pwa-banner-open.pwa-banner-top body { padding-bottom: 0; padding-top: calc(
   .copy-btn, .tab { display: inline-flex; align-items: center; justify-content: center; }
   .theme-toggle, .tree-toggle { width: 44px; height: 44px; }
   .tree-spacer { width: 44px; }
+  .tree-label, .tree-open, .crumbs .crumb.linkbtn { min-height: 44px; }
+  .tree-twisty { width: 36px; height: 36px; }
   .peek, .opt-toggle { min-width: 44px; }
   .peek, .input { min-height: 44px; }
   .opt { min-height: 44px; }

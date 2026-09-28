@@ -59,9 +59,11 @@ flowchart TD
 | "Delete now" | If the admin allows it and the sender opts in, whoever opens a share can delete it for everyone at once (it needs the full link and password, and spends no view). |
 | View limits & expiry | 1–100 000 views or unlimited; expiry from 1 minute to 365 days. View counting is atomic (Durable Objects). |
 | Optional password | Argon2id (64 MiB, t=3). Checked by the server via a proof before any view is spent. |
-| Recipient downloads | Tree view: download any file raw, any folder/sub-folder as a ZIP, or everything at once. |
+| Recipient downloads | Folder tree on the left (collapsed by default; **+** opens a folder's sub-folders), the selected folder's files and folders on the right: download any file raw, any folder/sub-folder as a ZIP, or everything at once. The composer's file list uses the same tree. |
+| Drive | If the role allows it: **Dashboard → Drive**, a private, end-to-end encrypted folder tree (collapsed by default, content in a right pane) within a role capacity — upload files and folders (pickers or drag and drop), new folder, rename, move, delete, download (files raw, folders as ZIP), and **Share…** any files or folders with the usual share options; each item lists its shares with revoke. Unlocked in the browser with the password, a passkey (WebAuthn PRF) or a recovery code. See [`docs/DRIVE.md`](./docs/DRIVE.md). |
 | Safe in-browser viewer | Optional, admin-governed: text, Markdown, code, images, PDF (hardened pdf.js, no PDF scripting), audio/video. Nothing executes. |
 | Accounts | Built-in login; one owner/admin; users with one role each (capabilities, limits, quotas, password policy, passkeys, sessions) and API keys. |
+| Drive | If the user's role allows it: a private, end-to-end encrypted folder tree within a role capacity (Dashboard → Drive). Any file or folder can be shared any number of times, with the usual share options; when a share ends only the share goes. See [docs/DRIVE.md](./docs/DRIVE.md). |
 | My shares | Senders list their shares, extend views/expiry within their limits, revoke instantly, label shares, and see **read receipts** — every open with its time (and, if the admin allows, the opener's address, location, browser, system and languages). |
 | Admin | Users, roles (limits, quotas, session timeouts, file-size caps, viewer policy), impersonation ("log in as"), password resets, brute-force rules, IP allow/block rules, audit log. |
 | Brute-force protection | Per-IP tracking for login, setup and invalid fetches (links that never existed, wrong keys, wrong passwords — not shares that merely expired); account lockout. |
@@ -100,8 +102,8 @@ account. KV, R2, the Durable Objects and everything else are emulated locally.
 
 ## Deploying
 
-secbin is a single Cloudflare Worker: Static Assets, KV, R2 and four Durable Object classes
-(`BurnPaste`, `FileShare`, `Directory`, `Guard`).
+secbin is a single Cloudflare Worker: Static Assets, KV, R2 and five Durable Object classes
+(`BurnPaste`, `FileShare`, `Directory`, `Guard`, `Drive`).
 
 1. **Resources** — `npm run kv:create` (put the ids in `wrangler.toml`) and `npm run r2:create`.
    Recommended R2 backstop (the Worker deletes objects itself):
@@ -148,8 +150,10 @@ working.
 ## Accounts & administration
 
 - **Owner setup & recovery.** `/dashboard/setup` accepts the `AUTHN` token once. If an owner
-  already exists, it *recovers* it: new username/password, all owner sessions revoked. To recover
-  later, set a **new** `AUTHN` value and visit the page again.
+  already exists, it *recovers* it: new username/password, all owner sessions revoked, the owner's
+  passkeys and recovery codes removed. To recover later, set a **new** `AUTHN` value and visit the
+  page again. The owner's Drive (and the escrow access to users' Drives) then comes back with the
+  owner recovery kit; keep a fresh kit offline, next to the `AUTHN` secret.
 - **Sessions** are an HttpOnly, `SameSite=Strict`, `__Host-` cookie holding a JWT that is signed
   (HS256, `SIG`) and then encrypted (A256GCM, `ENC`). Idle and absolute timeouts are set by the
   owner. Rotating `SIG`/`ENC` signs everyone out.
@@ -178,6 +182,28 @@ working.
   unset. The locked Owner role never restricts the owner; only the owner's own session timeouts,
   file-share windows and activity-log retention are set there (per-IP protection still applies). The built-in Public
   role holds the public account's options (below); it cannot be renamed, deleted or assigned.
+- **Drive** (role options `driveEnabled`, off by default; `driveMaxBytes`, the capacity, 1 GiB by
+  default, "no limit" meaning the hard 100 GiB; `driveMaxFileBytes`, the largest file) — each
+  allowed user has a private folder tree, encrypted in the browser with a key only they (and,
+  through **owner escrow**, the owner) can unwrap. The server sees only the tree's shape, sizes
+  and times, never names, types or contents. Drive shares are file shares that reference the
+  Drive's ciphertext (nothing is copied): same options, limits and quotas, kind "drive" in My
+  shares; deleting a Drive item ends its shares. Admin → Users shows each user's usage; there is
+  no admin file browser. Drive content is not exported. Owner escrow lets the owner open any
+  user's Drive: from Admin after a password reset (with a reason), and while logged in as the
+  user, where the owner has the user's whole Drive (the owner's own Drive unlocked in the tab);
+  the escrow use is recorded in the owner-only admin audit (`drive.escrow_used`) and never in the
+  user's own activity (see [SECURITY.md](./SECURITY.md) and [docs/DRIVE.md](./docs/DRIVE.md) §9).
+  A user's Drive sets itself up at their first sign-in once the owner's escrow key exists, always
+  with an escrow wrap (or at once, when the owner creates the account with their own Drive
+  unlocked); the server never holds a key that opens a Drive. **Owner recovery kit** (Admin →
+  Import / export, or the owner's Drive page): a passphrase-sealed file with the owner's Drive key
+  and every escrow key, made in the browser. After a recovery with `AUTHN` (which removes the
+  owner's passkeys and recovery codes) it gives the owner back their Drive and the access to every
+  user's Drive. **Store it offline, like the `AUTHN` secret**: it opens every user's Drive, and
+  losing both the owner's credentials and every kit loses the escrow. Without a kit, the owner can
+  start the Drive over (the old one is kept, sealed, as an archive); users' Drives then move to
+  the new escrow key by themselves (see SECURITY.md, "Drive keys").
 - **Quotas** — N shares per n seconds/minutes/hours/days/months/years, for all shares, notes or
   file shares. GUI and API creations count together; API-only quotas and API limits can only
   *restrict* further, never widen (e.g. GUI 10/day + API 15/day ⇒ the API still gets at most 10).
@@ -297,6 +323,7 @@ shares, never the account or the admin panel.
 | `FileShare` DO + R2 (`FILES`) | File shares: upload state, views, download grants, R2 cleanup |
 | `Directory` DO | Accounts, sessions revocation, API keys, limits, quotas, settings, share index, audit |
 | `Guard` DOs | Brute-force tracking and IP blocks, sharded by IP |
+| `Drive` DOs + R2 (`FILES`) | Each user's encrypted Drive: folder tree, key wraps, share references |
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol, formats, HTTP API).
 

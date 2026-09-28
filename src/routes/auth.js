@@ -10,6 +10,7 @@ import { ipContext, isBlocked, recordFailure, directory } from '../lib/guard.js'
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { requestOptions } from '../lib/webauthn.js';
+import { syncCredentialWraps, driveOwnerRecovered } from './drive.js';
 
 const AUTH_LABEL = utf8('secbin-auth/v2');
 
@@ -35,9 +36,17 @@ async function signedIn(env, g, res) {
     }
     return err(res.status, res.error, res.message, res.until ? { until: res.until } : undefined);
   }
+  // A recovery code spent by this sign-in no longer unlocks the Drive either:
+  // its wrap goes now, and comes back once in this response, so this sign-in
+  // can still open the Drive with it (docs/DRIVE.md §3).
+  let spent = [];
+  if (typeof res.recoveryLeft === 'number') {
+    try { spent = (await syncCredentialWraps(env, res.user.id)).filter((w) => w.kind === 'recovery'); } catch (e) { console.warn('secbin: drive wraps not synced', e && e.message ? e.message : e); }
+  }
   const { cookie } = await issueSession(env, { uid: res.user.id, ver: res.user.ver, settings: res.settings });
   const out = { ok: true, user: { id: res.user.id, username: res.user.username, role: res.user.role } };
   if (typeof res.recoveryLeft === 'number') out.recoveryLeft = res.recoveryLeft;
+  if (spent.length) out.driveSpent = spent;
   return json(out, 200, { 'set-cookie': cookie });
 }
 
@@ -82,6 +91,13 @@ export async function handleAuth(request, env, url) {
     if (!verifier) return err(400, 'invalid_credential', 'Invalid password proof.');
     const res = await directory(env).setup({ authnHash, username: body.username, salt: body.salt, t: body.t, verifier });
     if (!res.ok) return err(res.status, res.error, res.message);
+    if (res.recovered && res.ownerId) {
+      // The owner's passkeys and recovery codes are gone, so are their Drive
+      // wraps, and the password wrap is stale: the owner's recovery kit opens
+      // the Drive and the browser writes the new wrap (docs/DRIVE.md §3). No
+      // key is created or changed. The recovery itself never fails on this.
+      try { await driveOwnerRecovered(env, res.ownerId); } catch (e) { console.warn('secbin: owner Drive not marked after recovery', e && e.message ? e.message : e); }
+    }
     return json({ ok: true, recovered: res.recovered });
   }
 

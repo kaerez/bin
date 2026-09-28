@@ -20,7 +20,7 @@ import { verifyRegistration, verifyAssertion, assertionId } from './lib/webauthn
 import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
-  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS,
+  UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
@@ -83,6 +83,7 @@ CREATE INDEX IF NOT EXISTS recovery_user ON recovery_codes(user_id);
 CREATE TABLE IF NOT EXISTS webauthn_challenges (id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL, challenge TEXT NOT NULL,
   exp INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS webauthn_spent (challenge TEXT PRIMARY KEY, exp INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -194,6 +195,13 @@ const MIGRATIONS = [
     for (const k of ['files.maxShareBytes', 'viewer.enabled', 'viewer.maxBytes']) m.sql.exec('DELETE FROM settings WHERE key = ?', k);
     materializeDefaultRole(m.sql);
   },
+  // 13: the Drive (docs/DRIVE.md): its role options join the Default role
+  // (driveEnabled off, 1 GiB, no per-file limit) and each user's Drive usage
+  // is mirrored here for Admin → Users (the Drive DO holds the truth).
+  (m) => {
+    m.sql.exec('CREATE TABLE IF NOT EXISTS drive_usage (user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL)');
+    materializeDefaultRole(m.sql);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -258,7 +266,7 @@ export const MAX_SHARE_FILTER_USERS = 500; // ~19 bytes per id in the URL: stays
  */
 export const PUBLIC_NA_LIMITS = Object.freeze(['apiEnabled', 'apiMaxKeys', 'receiptIp', 'receiptLocation', 'receiptBrowser', 'receiptOs',
   'receiptLanguages', 'logMaxAgeSec', 'logMaxEntries', 'pwMinLength', 'pwUpper', 'pwLower', 'pwDigit', 'pwSymbol', 'passkeys', 'passkeysMax',
-  'sessionIdleSec', 'sessionAbsSec']);
+  'sessionIdleSec', 'sessionAbsSec', 'driveEnabled', 'driveMaxBytes', 'driveMaxFileBytes']);
 const PUBLIC_NAME = '(public)';
 // Anonymous tracker ids are stateless until first used to create a share:
 // 12 random bytes ‖ issued-at (u32 BE seconds) ‖ HMAC tag (8 bytes) → 32 chars.
@@ -268,6 +276,21 @@ const MAX_TRACKERS = 200000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const B64_16_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHARE_PRUNE_SEC = 30 * 86400;
+/** Bound parameters per `IN (…)` query: SQLite in a Durable Object allows about 100. */
+const SQL_BATCH = 90;
+/**
+ * What is done in a user's Drive, logged like every other action of theirs
+ * (docs/DRIVE.md §9): as the user, or — the owner impersonating them — as the
+ * user's own in their activity with the real actor in the admin audit.
+ */
+/** The owner's own Drive recovery actions (admin audit only). */
+const OWNER_DRIVE_ACTIONS = ['drive.kit_exported', 'drive.kit_used', 'drive.kit_verified', 'drive.kit_keys_restored', 'drive.owner_reset', 'drive.archive_restored', 'drive.archive_deleted'];
+const DRIVE_ACTIONS = ['drive.keys_changed', 'drive.folder_created', 'drive.file_uploaded', 'drive.file_read', 'drive.item_changed', 'drive.item_deleted'];
+// A user's own file reads (one row per opened file) are throttled so that they
+// cannot flood the log and push other entries out: one per file per minute, at
+// most DRIVE_READS_PER_MINUTE a minute. The owner's rows are never dropped.
+const DRIVE_READ_DEDUPE_SEC = 60;
+const DRIVE_READS_PER_MINUTE = 30;
 const MAX_OPENS_PER_SHARE = 1000;
 // Read receipts are throttled so that a link holder cannot flood this object
 // or push the genuine receipts out: one per share and address per window, at
@@ -542,7 +565,7 @@ export class Directory extends DurableObject {
       }
       this.#setMeta(`authn_used:${authnHash}`, String(ts));
     });
-    return { ok: true, recovered };
+    return { ok: true, recovered, ...(recovered ? { ownerId: owner.id } : {}) };
   }
 
   // ── login / sessions ─────────────────────────────────────────────────────
@@ -693,6 +716,8 @@ export class Directory extends DurableObject {
       caps: {
         maxShareBytes: caps.maxShareBytes,
         grantSec: caps.grantSec,
+        // The Drive (docs/DRIVE.md): never for the public account.
+        driveEnabled: u.role !== 'public' && !!eff.all.driveEnabled,
       },
       viewer: {
         enabled: caps.viewerEnabled,
@@ -1351,13 +1376,16 @@ export class Directory extends DurableObject {
     if (L.maxExpireSec !== null && req.expireSec > L.maxExpireSec) {
       return fail(403, 'expiry_too_long', `Expiry may be at most ${L.maxExpireSec} seconds${via}.`, { max: L.maxExpireSec });
     }
+    if (req.drive && (pub || ch === 'api')) return fail(403, 'drive_unavailable', 'Drive shares need a signed-in account.');
     if (req.kind === 'files') {
       const cap = this.#caps(u, L, s).maxShareBytes;
-      if (!(req.bytes <= cap)) return fail(413, 'share_too_large', `A file share may be at most ${cap} bytes${via}.`, { max: cap });
+      // A Drive share uploads nothing: its files are already stored within the
+      // Drive's own capacity and largest-file limits (docs/DRIVE.md §5).
+      if (!req.drive && !(req.bytes <= cap)) return fail(413, 'share_too_large', `A file share may be at most ${cap} bytes${via}.`, { max: cap });
       if (L.maxFilesPerShare !== null && !(Number.isSafeInteger(req.files) && req.files <= L.maxFilesPerShare)) {
         return fail(403, 'too_many_files', `At most ${L.maxFilesPerShare} files per share${via}.`, { max: L.maxFilesPerShare });
       }
-      if (L.maxFileBytes !== null && !(Number.isSafeInteger(req.maxFile) && req.maxFile <= L.maxFileBytes)) {
+      if (!req.drive && L.maxFileBytes !== null && !(Number.isSafeInteger(req.maxFile) && req.maxFile <= L.maxFileBytes)) {
         return fail(413, 'file_too_large', `Each file may be at most ${L.maxFileBytes} bytes${via}.`, { max: L.maxFileBytes });
       }
       // File policy: checked against what the client declares — and it only
@@ -1628,13 +1656,17 @@ export class Directory extends DurableObject {
   // ── shares index ("My shares") ───────────────────────────────────────────
   async recordShare({ id, uid, kind, label, created, expires, views, lh = null }, actorId = uid) {
     const l = cleanLabel(label) ?? '';
-    // Upsert that never touches the lock columns: re-recording an id must not
-    // silently unlock it.
-    this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
-      ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, kind = excluded.kind, label = excluded.label, created = excluded.created,
-        expires = excluded.expires, views_total = excluded.views_total, status = 'active', lh = excluded.lh`,
-      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null);
+    // Upsert that never touches the lock columns (re-recording an id must not
+    // silently unlock it) and never moves an id to another user: a row that
+    // belongs to someone else stays theirs, and this call fails.
+    const w = this.sql.exec(`INSERT INTO shares (id, user_id, kind, label, created, expires, views_total, status, lh) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+      ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, label = excluded.label, created = excluded.created,
+        expires = excluded.expires, views_total = excluded.views_total, status = 'active', lh = excluded.lh
+      WHERE shares.user_id = excluded.user_id`,
+      id, uid, kind, l, created, expires, views ?? null, typeof lh === 'string' && lh.length <= 64 ? lh : null).rowsWritten;
+    if (!w) return fail(409, 'exists', 'That share id belongs to another account.');
     this.#log(actorId, uid, `share.created`, `id=${id} kind=${kind}`);
+    return { ok: true };
   }
 
   async listShares(uid, { q = '', status = '', limit = 50, offset = 0 } = {}) {
@@ -1791,6 +1823,7 @@ export class Directory extends DurableObject {
     // A change made with an API key names the key (its id, never the secret).
     if (keyId && !admin) parts.push(`apikey=${String(keyId).slice(0, 16)}`);
     this.#log(actor, subject, status === 'revoked' ? 'share.revoked' : 'share.updated', `id=${id} ${parts.join(' ')}`);
+    if (status !== undefined && status !== 'active') await this.#dropDriveRefs([id]);
     return { ok: true };
   }
 
@@ -1839,6 +1872,7 @@ export class Directory extends DurableObject {
 
   async markShareEnded(id, status) {
     this.sql.exec("UPDATE shares SET status = ? WHERE id = ? AND status = 'active'", status, id);
+    await this.#dropDriveRefs([id]);
   }
 
   /** A recipient used "delete now" (the sender allowed it): end the row and tell the sender. */
@@ -1846,13 +1880,282 @@ export class Directory extends DurableObject {
     const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
     this.sql.exec("UPDATE shares SET status = 'deleted' WHERE id = ? AND status = 'active'", id);
     if (row) this.#log(null, row.user_id, 'share.deleted_by_recipient', `id=${id}`);
+    await this.#dropDriveRefs([id]);
+  }
+
+  /**
+   * Drive shares that ended: their Drive forgets them (its `refs`), so an
+   * item's share list and its share count only hold live shares. Best effort:
+   * the Drive page's share list also drops ended ones.
+   */
+  async #dropDriveRefs(ids) {
+    const ns = this.env && this.env.DRIVE;
+    if (!ns || !ids.length) return;
+    const byUser = new Map();
+    for (let k = 0; k < ids.length; k += SQL_BATCH) {
+      const part = ids.slice(k, k + SQL_BATCH);
+      const rows = this.sql.exec(`SELECT id, user_id FROM shares WHERE kind = 'drive' AND status != 'active' AND id IN (${part.map(() => '?').join(', ')})`, ...part).toArray();
+      for (const r of rows) byUser.set(r.user_id, [...(byUser.get(r.user_id) || []), r.id]);
+    }
+    for (const [uid, list] of byUser) {
+      try {
+        await ns.get(ns.idFromName(`drive:${uid}`)).dropRefs(uid, list);
+      } catch (e) {
+        console.warn('secbin: drive refs not dropped', e && e.message ? e.message : e);
+      }
+    }
   }
 
   // ── admin: users ─────────────────────────────────────────────────────────
   async listUsers() {
     const ts = now();
-    return this.sql.exec('SELECT u.*, f.locked_until FROM users u LEFT JOIN failures f ON f.user_id = u.id ORDER BY u.role DESC, u.username').toArray()
-      .map((u) => ({ ...this.#publicUser(u), locked: !!(u.locked_until && u.locked_until > ts), lockedUntil: u.locked_until || 0 }));
+    return this.sql.exec(`SELECT u.*, f.locked_until, d.used AS drive_used FROM users u LEFT JOIN failures f ON f.user_id = u.id
+      LEFT JOIN drive_usage d ON d.user_id = u.id ORDER BY u.role DESC, u.username`).toArray()
+      .map((u) => ({ ...this.#publicUser(u), locked: !!(u.locked_until && u.locked_until > ts), lockedUntil: u.locked_until || 0, drive: this.#driveOf(u, u.drive_used ?? 0) }));
+  }
+
+  // ── Drive (docs/DRIVE.md; the content lives in each user's Drive DO) ──────
+  /**
+   * A user's Drive as the admin sees it: allowed?, bytes used, capacity (null:
+   * no limit, i.e. the hard HARD_MAX_DRIVE_BYTES). The public account has none.
+   */
+  #driveOf(u, used) {
+    if (u.role === 'public') return null;
+    const L = this.#effective(u).all;
+    return { enabled: !!L.driveEnabled, used, capacity: L.driveMaxBytes ?? null };
+  }
+
+  /**
+   * What the Worker needs before any Drive call: may this account use its
+   * Drive now, its capacity and largest file (null: no limit — the Worker
+   * enforces HARD_MAX_DRIVE_BYTES then), the upload deadline for pending
+   * files, and the owner's escrow public key (JWK text, or null).
+   */
+  async driveAccess(uid) {
+    const u = this.#user(uid);
+    if (!u || u.disabled) return fail(403, 'forbidden', 'Account unavailable.');
+    if (u.role === 'public') return fail(403, 'drive_unavailable', 'The public account has no Drive.');
+    const L = this.#effective(u).all;
+    const s = this.#settings();
+    const used = this.sql.exec('SELECT used FROM drive_usage WHERE user_id = ?', uid).toArray()[0]?.used ?? 0;
+    return {
+      ok: true,
+      enabled: !!L.driveEnabled,
+      owner: u.role === 'owner',
+      capacity: L.driveMaxBytes === null || L.driveMaxBytes === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxBytes),
+      maxFile: L.driveMaxFileBytes === null || L.driveMaxFileBytes === undefined ? null : Math.min(HARD_MAX_DRIVE_BYTES, L.driveMaxFileBytes),
+      pendingSec: this.#caps(u, L, s).pendingSec,
+      used,
+      escrowPub: this.#meta('drive.escrowPub'),
+      escrowSignPub: this.#meta('drive.escrowSignPub'),
+      escrowSig: this.#meta('drive.escrowSig'),
+      ownerReset: this.#meta('drive.ownerReset'),
+    };
+  }
+
+  /**
+   * The owner started over without a recovery kit (docs/DRIVE.md §3): a
+   * public record — the reset's epoch (one more than the last), the new
+   * escrow key's kid, the new signing public key and the time — that lets a
+   * user's browser move its Drive to the new escrow key by itself, once per
+   * reset (the maintainer's accepted exception to the signed-key pin).
+   *
+   * The new escrow public key, signing key and signature (`escrowPub`,
+   * `signPub`, `sig`: JSON text / base64url) are set in the same transaction,
+   * and only when the latest reset is still `expectEpoch` (the one the Worker
+   * read before the owner's Drive started over): a compare-and-set, so one
+   * start over is one epoch (R5-L2; `409 reset_conflict` otherwise).
+   */
+  async recordOwnerReset(ownerId, { kid, signPub, escrowPub, sig, expectEpoch }) {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner starts over.');
+    let prev;
+    try { prev = JSON.parse(this.#meta('drive.ownerReset') || 'null')?.epoch ?? 0; } catch { prev = 0; }
+    if (prev !== expectEpoch) return fail(409, 'reset_conflict', 'Another start over was recorded at the same time.');
+    const rec = { epoch: prev + 1, kid, signPub: JSON.parse(signPub), at: now() };
+    const had = !!this.#meta('drive.escrowPub');
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta('drive.escrowPub', escrowPub);
+      this.#setMeta('drive.escrowSignPub', signPub);
+      this.#setMeta('drive.escrowSig', sig);
+      this.#setMeta('drive.ownerReset', JSON.stringify(rec));
+      this.#log(ownerId, ownerId, 'drive.escrow_key_set', had ? 'replaced' : 'created');
+    });
+    return { ok: true, reset: rec };
+  }
+
+  /**
+   * A user's browser moved their Drive to the escrow key of owner reset
+   * `epoch` by itself: a system event in the user's activity, and the same,
+   * naming the user, in the owner-only admin audit — once per user and epoch
+   * (R5-I1: a repeated `escrowReset` for an epoch already applied, or an
+   * earlier one, writes nothing; → { ok, logged }).
+   */
+  async driveEscrowRewrapped(userId, fingerprint, epoch) {
+    const u = this.#user(userId);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (!Number.isSafeInteger(epoch) || epoch < 1) return fail(400, 'invalid', 'An owner reset epoch.');
+    const k = `drive.resetApplied:${userId}`;
+    if ((Number(this.#meta(k)) || 0) >= epoch) return { ok: true, logged: false };
+    const fp = String(fingerprint || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 16);
+    this.ctx.storage.transactionSync(() => {
+      this.#setMeta(k, String(epoch));
+      this.#log(null, userId, 'drive.escrow_rewrapped', `new escrow key ${fp}`);
+      this.#log({ id: null, adm: true }, userId, 'drive.escrow_rewrapped', `user=${u.username} new escrow key ${fp} (after the owner started over)`);
+    });
+    return { ok: true, logged: true };
+  }
+
+  /**
+   * The credentials a Drive key wrap may belong to: passkey ids and recovery
+   * code hashes, and whether the account may use a Drive at all.
+   */
+  async credentialRefs(uid) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'public') return null;
+    return {
+      drive: !!this.#effective(u).all.driveEnabled,
+      passkeys: this.sql.exec('SELECT id FROM passkeys WHERE user_id = ?', uid).toArray().map((r) => r.id),
+      recovery: this.sql.exec('SELECT hash FROM recovery_codes WHERE user_id = ?', uid).toArray().map((r) => r.hash),
+    };
+  }
+
+  /** Mirror a Drive's usage (bytes) after a change; called by the Worker and the Drive DO. */
+  async setDriveUsed(uid, used) {
+    if (typeof uid !== 'string' || !Number.isSafeInteger(used) || used < 0) return;
+    if (!this.#user(uid)) return;
+    this.sql.exec('INSERT INTO drive_usage (user_id, used, updated) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET used = excluded.used, updated = excluded.updated',
+      uid, used, now());
+  }
+
+  /**
+   * The owner sets (or replaces) the escrow public key every Drive wraps its
+   * key to, with the owner's signing key and its signature over the escrow key
+   * (users' browsers check it against the signing key they pinned).
+   * `onlyIfNone` (the very first escrow key, which needs no step-up): refused
+   * once an escrow or signing public key exists (`409 escrow_exists`).
+   */
+  async setEscrowPub(ownerId, jwkText, { signPub, sig, onlyIfNone = false } = {}) {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the owner can set the escrow key.');
+    const had = !!this.#meta('drive.escrowPub');
+    if (onlyIfNone && (had || this.#meta('drive.escrowSignPub'))) return fail(409, 'escrow_exists', 'An escrow key exists already: replacing it needs your confirmation.');
+    if (jwkText !== undefined) this.#setMeta('drive.escrowPub', jwkText);
+    if (signPub !== undefined) this.#setMeta('drive.escrowSignPub', signPub);
+    if (sig !== undefined) this.#setMeta('drive.escrowSig', sig);
+    this.#log(ownerId, ownerId, 'drive.escrow_key_set', jwkText === undefined ? 'signature' : had ? 'replaced' : 'created');
+    return { ok: true };
+  }
+
+  /** The kid a user's escrow wrap is made for (so the owner keeps an earlier escrow key while one needs it). */
+  async setEscrowKid(uid, kid) {
+    const u = this.#user(uid);
+    if (!u || u.role === 'owner' || typeof kid !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kid)) return;
+    this.#setMeta(`drive.escrowKid:${uid}`, kid);
+  }
+
+  /**
+   * The kids users' escrow wraps are made for (existing accounts only; never
+   * the owner's own Drive, which has no escrow wrap: R5-I6).
+   */
+  async escrowKidsInUse() {
+    return [...new Set(this.sql.exec("SELECT m.v AS v FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id WHERE u.role != 'owner'").toArray().map((r) => r.v))];
+  }
+
+  /**
+   * A Drive action (DRIVE_ACTIONS) on `userId`'s Drive. `actor` is the user's
+   * id, or { id, imp: true } for the owner acting as the user (#log: the
+   * user's activity shows it as theirs, the admin audit the real actor).
+   */
+  async driveLog(actor, userId, action, detail = '') {
+    if (!DRIVE_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    const u = this.#user(userId);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    const imp = actor && typeof actor === 'object';
+    if (imp) {
+      const o = this.#user(actor.id);
+      if (!o || o.role !== 'owner' || actor.imp !== true || actor.adm) return fail(403, 'forbidden', 'Owner only.');
+    } else if (actor !== userId) return fail(403, 'forbidden', 'Not your Drive.');
+    const d = cleanDetail(detail);
+    if (!imp && action === 'drive.file_read') {
+      const recent = this.sql.exec(`SELECT detail FROM (SELECT ts, actor_id, action, detail, imp FROM activity WHERE subject_id = ? ORDER BY id DESC LIMIT 200)
+        WHERE action = 'drive.file_read' AND actor_id = ? AND imp = 0 AND ts >= ?`, userId, userId, now() - DRIVE_READ_DEDUPE_SEC).toArray();
+      if (recent.length >= DRIVE_READS_PER_MINUTE || recent.some((r) => r.detail === d)) return { ok: true, logged: false };
+    }
+    this.#log(imp ? { id: actor.id, imp: true } : userId, userId, action, d);
+    return { ok: true, logged: true };
+  }
+
+  /**
+   * The owner opening a user's Drive with the escrow while impersonating
+   * them: the owner's own escrow key is used, not anything of the user's, so
+   * it is recorded in the admin audit only (like the admin escrow route).
+   */
+  async driveEscrowUsed(ownerId, userId, detail = '') {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
+    this.#log({ id: ownerId, imp: true, adm: true }, userId, 'drive.escrow_used', detail);
+    return { ok: true };
+  }
+
+  /** One user per kid users' escrow wraps are made for (the recovery kit's live check opens one wrap per kid). */
+  async escrowKidUsers() {
+    const seen = new Map();
+    for (const r of this.sql.exec("SELECT u.id AS id, m.v AS kid FROM meta m JOIN users u ON m.k = 'drive.escrowKid:' || u.id WHERE u.role != 'owner' ORDER BY u.created, u.id").toArray()) {
+      if (!seen.has(r.kid)) seen.set(r.kid, r.id);
+    }
+    return [...seen].map(([kid, userId]) => ({ kid, userId }));
+  }
+
+  /**
+   * The owner's own Drive recovery (docs/DRIVE.md §3), in the owner-only admin
+   * audit: a recovery kit downloaded (`drive.kit_exported`), used to restore
+   * the owner's Drive (`drive.kit_used`), checked (`drive.kit_verified`, with
+   * the verdict), or used to put back sealed escrow keys
+   * (`drive.kit_keys_restored`), and the owner's Drive started over without
+   * a kit (`drive.owner_reset`). Nothing of a kit reaches the server.
+   */
+  async driveOwnerLog(ownerId, action, detail = '') {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'owner_only', 'Only the administrator has this recovery kit.');
+    if (!OWNER_DRIVE_ACTIONS.includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    this.#log({ id: ownerId, adm: true }, ownerId, action, detail);
+    return { ok: true };
+  }
+
+  async driveAdminAction(ownerId, userId, action, detail = '') {
+    const o = this.#user(ownerId);
+    if (!o || o.role !== 'owner') return fail(403, 'forbidden', 'Owner only.');
+    const u = this.#user(userId);
+    if (!u || u.role === 'public') return fail(404, 'not_found', 'User not found.');
+    if (!['drive.escrow_used', 'drive.pw_rewrapped', 'drive.created_by_owner'].includes(action)) return fail(400, 'invalid', 'Unknown Drive action.');
+    this.#log({ id: ownerId, adm: true }, userId, action, detail);
+    // The user's own activity: a Drive the owner set up for them is a system event, with no admin detail.
+    if (action === 'drive.created_by_owner') this.#log(null, userId, 'drive.created_by_owner', '');
+    return { ok: true };
+  }
+
+  /** A Drive's shares that are still in the index (for "shares of this item"), queried in batches. */
+  async sharesByIds(uid, ids) {
+    const list = [...new Set((Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string'))].slice(0, 10000);
+    const out = [];
+    for (let k = 0; k < list.length; k += SQL_BATCH) {
+      const part = list.slice(k, k + SQL_BATCH);
+      out.push(...this.sql.exec(`SELECT id, kind, label, created, expires, views_total, status, locked FROM shares WHERE user_id = ? AND id IN (${part.map(() => '?').join(', ')})`,
+        uid, ...part).toArray());
+    }
+    return out.sort((x, y) => y.created - x.created || (x.id < y.id ? -1 : 1));
+  }
+
+  /** Drive items were deleted (or the account): the shares that referenced them end (revoked), locked or not. */
+  async endDriveShares(uid, ids, actorId = uid, reason = 'drive item deleted') {
+    const list = (Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string').slice(0, 10000);
+    let n = 0;
+    for (const id of list) {
+      n += this.sql.exec("UPDATE shares SET status = 'revoked' WHERE id = ? AND user_id = ? AND status = 'active'", id, uid).rowsWritten;
+    }
+    if (n) this.#log(actorId, uid, 'share.revoked', `${reason === 'account deleted' ? 'account deleted' : 'drive item deleted'}: ${n} share${n === 1 ? '' : 's'}`);
+    return { ok: true, ended: n };
   }
 
   async createUser({ username, salt, t, verifier }, actorId) {
@@ -1865,7 +2168,9 @@ export class Directory extends DurableObject {
     this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
       id, username, salt, t, verifier, ts, ts);
     this.#log(actorId, id, 'user.created', `username=${username}`);
-    return { ok: true, user: this.#publicUser(this.#user(id)) };
+    // With whether their role has a Drive: the owner's browser sets one up only then.
+    const u = this.#user(id);
+    return { ok: true, user: { ...this.#publicUser(u), drive: this.#driveOf(u, 0) } };
   }
 
   async updateUser(id, { username, disabled }, actorId) {
@@ -1889,16 +2194,25 @@ export class Directory extends DurableObject {
   }
 
   /** Delete a user. Returns the ids of their still-active shares (the Worker may purge them). */
-  async deleteUser(id, actorId) {
+  /** Whether an account may be deleted (the Worker removes its Drive first, then calls deleteUser). */
+  async canDeleteUser(id) {
     const u = this.#user(id);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'owner') return fail(403, 'forbidden', 'The owner cannot be deleted.');
     if (u.role === 'public') return fail(403, 'forbidden', 'The public account is built in and cannot be deleted.');
+    return { ok: true };
+  }
+
+  async deleteUser(id, actorId) {
+    const can = await this.canDeleteUser(id);
+    if (!can.ok) return can;
+    const u = this.#user(id);
     const shares = this.sql.exec("SELECT id FROM shares WHERE user_id = ? AND status = 'active'", id).toArray().map((r) => r.id);
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM meta WHERE k IN (SELECT ? || id FROM passkeys WHERE user_id = ?)', handleAlias(''), id);
-      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
+      for (const t of ['limits', 'quotas', 'usage', 'api_keys', 'failures', 'viewer_rules', 'shares', 'opens', 'passkeys', 'recovery_codes', 'webauthn_challenges', 'drive_usage']) this.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`, id);
       this.sql.exec('DELETE FROM users WHERE id = ?', id);
+      this.sql.exec('DELETE FROM meta WHERE k = ?', `drive.escrowKid:${id}`);
       this.#log(actorId, id, 'user.deleted', `username=${u.username}`);
     });
     return { ok: true, shares };
@@ -2901,7 +3215,9 @@ export class Directory extends DurableObject {
     this.sql.exec("DELETE FROM usage WHERE user_id IN (SELECT 'pub:t:' || id_hash FROM trackers WHERE last_seen < ?)", idleBefore);
     this.sql.exec('DELETE FROM trackers WHERE last_seen < ?', idleBefore);
     this.sql.exec('DELETE FROM ip_rules WHERE expires IS NOT NULL AND expires < ?', ts);
+    const expiring = this.sql.exec("SELECT id FROM shares WHERE kind = 'drive' AND status = 'active' AND expires > 0 AND expires < ?", ts).toArray().map((r) => r.id);
     this.sql.exec("UPDATE shares SET status = 'expired' WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
+    await this.#dropDriveRefs(expiring);
     this.sql.exec("DELETE FROM shares WHERE status != 'active' AND locked = 0 AND expires < ?", ts - SHARE_PRUNE_SEC);
     // Receipts go with their share: once the share row is gone nobody can see them.
     this.sql.exec('DELETE FROM opens WHERE share_id NOT IN (SELECT id FROM shares)');

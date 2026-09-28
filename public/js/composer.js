@@ -9,11 +9,12 @@
 import { encryptPaste } from './crypto.js';
 import { ApiError } from './api.js';
 import { expireSeconds, MAX_VIEWS } from './format.js';
-import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk, checkPath, checkMime, buildTree, basename } from './files.js';
+import { layout, buildManifest, importFileKey, encryptChunk, readStreamChunk, checkPath, checkMime, buildTree, basename, cleanName } from './files.js';
 import { detectMime, normalizeMime, COMMON_TYPES } from './mime.js';
 import { $, showView, toast, copyText, flashCopied, tablistKeys } from './ui.js';
-import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint } from './common.js';
+import { h, clear, showMsg, markInvalid, armConfirm, wirePeek, formatBytes, friendlyError, reducedMotion, wait, unencryptedHint, nameEl } from './common.js';
 import { walkEntry } from './walk.js';
+import { folderBrowser } from './tree.js';
 import { buildSecret, describeHost, describeUrlRules, parseShareUrl, urlRulesOf, ShareTypeError } from './sharetypes.js';
 import { declare, describeType, fileExt, refusedTypes, uncheckableExt } from './filepolicy.js';
 
@@ -252,9 +253,17 @@ function wireFiles() {
   renderList();
 }
 
+// Names that lost hidden characters (files.js cleanName) in the last add, told once.
+let renamedInAdd = 0;
+function tellRenamed() {
+  if (renamedInAdd) toast(`${renamedInAdd === 1 ? '1 name' : `${renamedInAdd} names`} had hidden direction or spacing characters, removed: ${renamedInAdd === 1 ? 'it was' : 'they were'} renamed.`);
+  renamedInAdd = 0;
+}
+
 async function addFileList(list) {
   for (const f of list) await addFile(f.webkitRelativePath || f.name, f);
   renderList();
+  tellRenamed();
 }
 
 /** Walk a drop: files and whole folders (recursively, including empty ones). */
@@ -267,14 +276,24 @@ async function addDataTransfer(dt) {
   }
   for (const entry of entries) await walkEntry(entry, addFile, addDirectory);
   renderList();
+  tellRenamed();
 }
 
-function addDirectory(path) {
+/** The path to share: cleaned of spoofing characters (counted for the note). */
+function cleaned(raw) {
+  const path = cleanName(raw);
+  if (path !== raw) renamedInAdd++;
+  return path;
+}
+
+function addDirectory(raw) {
+  const path = cleaned(raw);
   try { checkPath(path); } catch (e) { toast(`Skipped "${path}": ${e.message}`); return; }
   if (!items.has(path)) items.set(path, { path, dir: true });
 }
 
-async function addFile(path, file) {
+async function addFile(raw, file) {
+  const path = cleaned(raw);
   try { checkPath(path); } catch (e) { toast(`Skipped "${path}": ${e.message}`); return; }
   if (items.has(path) && !items.get(path).dir) { toast(`Already added: ${path}`); return; }
   let head = null;
@@ -288,9 +307,9 @@ async function addFile(path, file) {
   }
 }
 
-function removePrefix(prefix) {
+function removePrefix(prefix, rerender = true) {
   for (const k of [...items.keys()]) if (k === prefix || k.startsWith(prefix + '/')) items.delete(k);
-  renderList();
+  if (rerender) renderList();
 }
 
 function filesAndDirs() {
@@ -356,7 +375,11 @@ function policyText() {
   return parts.join(' ');
 }
 
+// The file list's folder browser (tree + right pane); its state survives re-renders.
+let fileBrowser = null;
+
 function renderList() {
+  const browserState = fileBrowser ? fileBrowser.state() : null;
   const list = clear($('#file-list'));
   const { files, dirs } = filesAndDirs();
   const total = files.reduce((n, f) => n + f.size, 0);
@@ -365,7 +388,7 @@ function renderList() {
     ? `${files.length} ${files.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} of ${formatBytes(cap)}`
     : '';
   $('#file-total').classList.toggle('over', total > cap);
-  if (!files.length && !dirs.length) return;
+  if (!files.length && !dirs.length) { fileBrowser = null; return; }
 
   let dl = document.getElementById('mime-list');
   if (!dl) {
@@ -373,28 +396,51 @@ function renderList() {
     document.body.appendChild(dl);
   }
   const entries = [...files.map((f) => ({ path: f.path, type: f.type, size: f.size })), ...dirs.map((d) => ({ path: d, dir: true }))];
-  const renderNode = (node) => {
-    const ul = h('ul.tree-list');
+  const size = (node) => node.files.reduce((n, f) => n + f.size, 0) + [...node.dirs.values()].reduce((n, d) => n + size(d), 0);
+  const count = (node) => node.files.length + [...node.dirs.values()].reduce((n, d) => n + count(d), 0);
+  // After a removal, focus the row that took its place (or the one before),
+  // so keyboard users are not dropped to the top of the page.
+  const removed = (ul, li, drop) => {
+    const idx = [...ul.children].indexOf(li);
+    drop();
+    renderList();
+    const rows = $('#file-list').querySelectorAll('.pane-list > li');
+    const next = rows[idx] || rows[idx - 1];
+    const target = next ? next.querySelector('button.tree-btn') : $('#file-list').querySelector('.tree-item[tabindex="0"]');
+    if (target) target.focus();
+  };
+  // One folder's content: its sub-folders (open, remove) and files (type,
+  // remove). With folders, a tree on the left picks the folder
+  // (public/js/tree.js — collapsed by default).
+  const renderPane = (node, { open } = {}) => {
+    const ul = h('ul.tree-list.pane-list');
     for (const d of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-      ul.appendChild(h('li.tree-dir', {},
-        h('div.tree-row', {}, h('span.tree-name', { text: `${d.name}/` }),
-          h('button.btn.tree-btn', { type: 'button', text: 'Remove folder', 'aria-label': `Remove folder ${d.path}`, on: { click: () => removePrefix(d.path) } })),
-        renderNode(d)));
+      const li = h('li.tree-dir', {},
+        h('div.tree-row', {},
+          h('button.tree-name.tree-open', { type: 'button', title: `Open ${d.name}`, on: { click: () => open(d.path) } }, nameEl(d.name, { suffix: '/' })),
+          h('span.tree-sub.mono', { text: `${count(d)} ${count(d) === 1 ? 'file' : 'files'} · ${formatBytes(size(d))}` }),
+          h('button.btn.tree-btn', { type: 'button', text: 'Remove folder', 'aria-label': `Remove folder ${d.path}`, on: { click: () => removed(ul, li, () => removePrefix(d.path, false)) } })));
+      ul.appendChild(li);
     }
-    for (const f of node.files) {
+    for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) {
       const it = items.get(f.path);
       const typeIn = h('input.input.mime-in', { value: it.type, list: 'mime-list', 'aria-label': `Type of ${f.path}`, maxlength: '255', spellcheck: 'false' });
       typeIn.addEventListener('change', () => {
         const t = normalizeMime(typeIn.value);
         if (t) { it.type = t; typeIn.value = t; typeIn.removeAttribute('aria-invalid'); } else { typeIn.setAttribute('aria-invalid', 'true'); it.type = typeIn.value; }
       });
-      ul.appendChild(h('li.tree-file', {},
-        h('div.tree-row', {}, h('span.tree-name', { text: basename(f.path) }), h('span.tree-sub.mono', { text: formatBytes(f.size) }), typeIn,
-          h('button.btn.tree-btn', { type: 'button', text: 'Remove', 'aria-label': `Remove ${f.path}`, on: { click: () => { items.delete(f.path); renderList(); } } }))));
+      const li = h('li.tree-file', {},
+        h('div.tree-row', {}, h('span.tree-name', {}, nameEl(basename(f.path))), h('span.tree-sub.mono', { text: formatBytes(f.size) }), typeIn,
+          h('button.btn.tree-btn', { type: 'button', text: 'Remove', 'aria-label': `Remove ${f.path}`, on: { click: () => removed(ul, li, () => items.delete(f.path)) } })));
+      ul.appendChild(li);
     }
+    if (!ul.firstChild) return h('p.muted.pane-empty', { text: 'This folder is empty.' });
     return ul;
   };
-  list.appendChild(renderNode(buildTree(entries)));
+  const root = buildTree(entries);
+  if (!root.dirs.size) { fileBrowser = null; list.appendChild(renderPane(root)); return; }
+  fileBrowser = folderBrowser({ label: 'Folders to share', rootName: 'All files', root, renderPane, state: browserState, paneLabel: 'Folder contents' });
+  list.appendChild(fileBrowser.el);
 }
 
 // ── submit ───────────────────────────────────────────────────────────────────
