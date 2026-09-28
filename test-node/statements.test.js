@@ -88,6 +88,7 @@ describe('the security statements about the Drive and reverse shares (audit B M3
     for (const f of DRIVE_PAGES) {
       const s = read(f);
       expect(s, f).not.toMatch(/zero-knowledge/i);
+      // The footer is the same on every page (below): "Encrypted in your browser".
       const foot = s.slice(s.indexOf('<footer'), s.indexOf('</footer>'));
       expect(foot, f).not.toMatch(/End-to-end encrypted/);
       expect(s.match(/<meta name="description" content="([^"]*)"/)[1], f).toMatch(/Drive|send files|can decrypt/i);
@@ -99,6 +100,31 @@ describe('the security statements about the Drive and reverse shares (audit B M3
       const d = read(f).match(/<meta name="description" content="([^"]*)"/);
       if (d) expect(d[1], f).not.toMatch(/Everything is encrypted|never sees it\b/i);
     }
+  });
+
+  it('every page\'s footer says "Encrypted in your browser" (true of everything, the Drive included); where notes and file shares are end-to-end, the page itself says so', () => {
+    const pages = FILES.filter((f) => f.endsWith('.html') && f.startsWith('public/') && read(f).includes('<footer'));
+    expect(pages.length).toBeGreaterThanOrEqual(11);
+    for (const f of pages) {
+      const s = read(f);
+      const foot = s.slice(s.indexOf('<footer'), s.indexOf('</footer>'));
+      expect(foot, f).toContain('<span class="feat" role="listitem">Encrypted in your browser</span>');
+      expect(foot, f).not.toMatch(/end-to-end|zero-knowledge/i);
+    }
+    const index = words('public/index.html');
+    // The landing page and the composer: notes and file shares, end-to-end, with the key in the link.
+    expect(index).toMatch(/End-to-end encrypted notes and file shares that self-destruct/);
+    expect(index).toMatch(/Notes and file shares are end-to-end encrypted: encrypted in your browser, with the key only in the link\./);
+    expect(words('public/dashboard/index.html')).toMatch(/Notes and file shares are end-to-end encrypted: encrypted in your browser, with the key only in the link\./);
+    // The viewer: a note always; a file share and a Drive share each as it is.
+    expect(index).toMatch(/End-to-end encrypted: this note was decrypted in your browser with the key in its link\./);
+    const view = read('public/js/view.js');
+    expect(view).toMatch(/const END_TO_END = 'End-to-end encrypted: these files are decrypted in your browser with the key in the link\./);
+    expect(view).toMatch(/const FROM_DRIVE = 'Shared from the sender’s Drive: encrypted in the sender’s browser, but not end-to-end\. The server holds the keys to the sender’s Drive and can decrypt these files\.'/);
+    // The glossary: both terms, and which is which.
+    const glossary = words('public/accessibility/index.html');
+    expect(glossary).toMatch(/Encrypted in your browser What every page’s footer says/);
+    expect(glossary).toMatch(/End-to-end encrypted Encrypted on the sender’s device and decrypted only on the recipient’s\..*Notes and file shares are; the Drive, shares of Drive files and files sent to you through a “Receive” link are not\./);
   });
 
   it('no page, doc or comment claims more than the key model v2 gives', () => {

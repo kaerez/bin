@@ -382,6 +382,7 @@ describe('links that open a new tab say so', () => {
     const pages = ['index.html', 'accessibility/index.html', 'r/index.html', 'check/index.html', 'dashboard/index.html',
       ...readdirSync(join(ROOT, 'public/dashboard'), { withFileTypes: true }).filter((d) => d.isDirectory() && existsSync(join(ROOT, 'public/dashboard', d.name, 'index.html'))).map((d) => `dashboard/${d.name}/index.html`)];
     const foots = new Set();
+    const whole = new Set();
     for (const p of pages) {
       const doc = page(p);
       const links = [...doc.querySelectorAll('footer .foot-links a')];
@@ -392,8 +393,14 @@ describe('links that open a new tab say so', () => {
       expect(f.length, p).toBe(1);
       expect(f[0].parentElement.tagName, p).toBe('BODY');
       expect(f[0].querySelector('[aria-label]:not(nav, [role])'), p).toBeNull(); // no name on a plain paragraph
+      // The same footer everywhere, word for word (the statement page marks its own link as the current page).
+      const copy = f[0].cloneNode(true);
+      copy.querySelectorAll('[aria-current]').forEach((a) => a.removeAttribute('aria-current'));
+      whole.add(copy.outerHTML);
+      expect(f[0].querySelector('.foot-feats').textContent.replace(/\s+/g, ' ').trim(), p).toBe('Private Encrypted in your browser Notes & files');
     }
     expect(foots.size).toBe(1);
+    expect(whole.size).toBe(1);
     expect([...foots][0]).toMatch(/\/accessibility\/\|Accessibility statement.*\/accessibility\/#glossary\|Glossary/);
   });
 });

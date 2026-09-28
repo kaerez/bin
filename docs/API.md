@@ -171,13 +171,24 @@ reached: 10 notes per 1d via the API.", quota: { channel, kind, n, unit, max } }
 `all` (GUI and API together) or `api` (API only); `kind` is what it counts — outgoing shares:
 `all` (every note, link, credential, file share and Drive share), `text` (notes, links and
 credentials), `note` (plain text, Markdown or code), `url`, `secret`, `files` (file and Drive
-shares), `file`, `drive`; the Drive: `drive-upload` (each file uploaded); Receive: `receive`
+shares), `file`, `drive`; the Drive: `drive-upload` (each file uploaded), `drive-bytes` (the
+bytes uploaded: `max` and the count are bytes, and the message names a size, e.g. "Quota
+reached: 1.0 GB uploaded to the Drive per 1d."); Receive: `receive`
 (both below), `receive-link` (a new reverse share), `receive-upload` (an upload session that
 sends files through one of your links). A key only ever meets the outgoing kinds (the Drive and
 Receive are for browser sessions). The message's words for each kind: outgoing shares; notes,
 links and credentials; notes; links; credentials; file and Drive shares; file shares; Drive
-shares; files uploaded to the Drive; Receive links and uploads received; new Receive links;
-uploads received.
+shares; files uploaded to the Drive; uploaded to the Drive (after the size); Receive links and
+uploads received; new Receive links; uploads received.
+
+The role's file rules (file types, folder depth) on the Drive's routes, for browser sessions:
+
+| Status | `error` | Body, besides `error` and `message` |
+| --- | --- | --- |
+| 400 | `declaration_required` | `policy: { mode, rules, maxFolderDepth }` — the role has a type policy: send the file's `types` |
+| 400 | `invalid_declaration` | — `types` is not exactly one `{ ext, mime }` |
+| 403 | `file_type_not_allowed` | `refused: [{ ext, mime }]` — "This file type may not be uploaded to your Drive: .exe (application/x-msdownload)." (a take-in: "added to"); checked on the declaration, then on the file's stored name and metadata (no `refused` then): "The declared file type does not match the file’s stored type, …", "This file type may not be …", "This file’s type cannot be checked against your role’s file-type rules, …" |
+| 403 | `folder_too_deep` | `max` — "Folders may be nested at most 2 levels deep in your Drive." (a new folder, an upload into a folder deeper than that, a move, a take-in) |
 
 ## Examples
 
@@ -524,11 +535,11 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/kit/restore` · `GET`, `PUT …/kit/items` | `403 owner_only` for everyone: only the owner restores from a personal kit (`POST /api/private/admin/keys/users/<userId>/kit-restore`, [docs/DRIVE.md](./DRIVE.md) §3.1) |
 | `GET /api/private/drive/migrate` · `GET …/migrate/items` · `PUT …/migrate` · `POST …/migrate/finish` · `POST …/migrate/retire` | the one-time upgrade of the user's own Drive made before the key model v2 (docs/DRIVE.md §3.3): `409 already_upgraded` once it is done; `retire` (`{ ids, current \| reauth }`) ends the links of the release before that the old key does not open. Not while impersonating |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
-| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta?, ks?, mek? }` — move / rename (a new name comes with the item's own `ks` and `mek`: `409 stale_keys`, `400 bad_seal`) |
+| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta?, ks?, mek? }` — move / rename (a new name comes with the item's own `ks` and `mek`: `409 stale_keys`, `400 bad_seal`; a move past the role's folder depth: `403 folder_too_deep`) |
 | `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
 | `GET /api/private/drive/nodes/:id/shares` | → `{ shares }` — the active shares of the item |
-| `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `201 { id }` |
-| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size }` → `201 { id, uploadToken, chunks }`; counted by the quotas of kind `drive-upload` (`429 quota_exceeded`), given back when the Drive refuses the file or the upload never completes (deleted unfinished, or purged) |
+| `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `201 { id }` (`403 folder_too_deep` past the role's folder depth) |
+| `POST /api/private/drive/files` | `{ id, parent, name, meta, dek, ks, mek, size, types? }` → `201 { id, uploadToken, chunks }`; `types: [{ ext, mime }]` (the file's type) when the role has a type policy (`400 declaration_required`, `403 file_type_not_allowed`); `403 folder_too_deep` into a folder deeper than the role allows; counted by the quotas of kind `drive-upload` (one) and `drive-bytes` (`size`) together (`429 quota_exceeded`), both given back when the Drive refuses the file or the upload never completes (deleted unfinished, or purged) |
 | `PUT /api/private/drive/files/:id/chunk/:i` | encrypted chunk bytes (exact size), header `X-Upload-Token` |
 | `POST /api/private/drive/files/:id/finalize` | header `X-Upload-Token` → `{ ok, ch }` (`409 busy` while a chunk is still being written) |
 | `GET /api/private/drive/files/:id/chunk/:i` | → the ciphertext chunk |
@@ -536,8 +547,8 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 | `POST /api/private/drive/reverse` | `{ id, folder, priv, mek, lh, expire, views?, password?, note?, label?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; below) — a reverse share (upload link; [`REVERSE.md`](./REVERSE.md) §6.1), confirmed with the password or a passkey; `409 exists` when any account holds the id; `captcha`: uploaders pass a CAPTCHA first (the role's "CAPTCHA on reverse shares": allow / require / off, as above); counted by the quotas of kind `receive-link` and `receive` (`429 quota_exceeded`; given back when the creation does not complete) |
 | `GET /api/private/drive/reverse` | `?folder=:id` → `{ reverse }` — the Drive's reverse shares |
 | `GET /api/private/drive/received` | `?after=:next` → `{ items, keys, more, next }` — received files not yet taken into the Drive (500 per page); `?failed=1` → the ones that could not be taken in (`{ items: [{ id, rs, label, size, created, failed, reason }], more, next }`) |
-| `POST /api/private/drive/received/:id` | `{ parent, name, meta, dek, ks, mek }` → `{ ok }` — a received file re-sealed into the Drive under the user's current KEK |
-| `POST /api/private/drive/received/:id/failed` | `{ reason }` → `{ ok, received, failed }` — the browser could not take it in (it leaves the queue); `DELETE` puts it back |
+| `POST /api/private/drive/received/:id` | `{ parent, name, meta, dek, ks, mek, types? }` → `{ ok }` — a received file re-sealed into the Drive under the user's current KEK; held to the role's Drive rules as an upload (`types` with a type policy; `403 file_type_not_allowed`, `403 folder_too_deep`) |
+| `POST /api/private/drive/received/:id/failed` | `{ reason }` (`unreadable`, `name`, `place`, `type`: the role's file-type rules refuse it in the Drive) → `{ ok, received, failed }` — the browser could not take it in (it leaves the queue); `DELETE` puts it back |
 | `GET /api/private/admin/keys` · `…/usage`; `POST …/candidate`, `…/subs`, `PATCH`/`DELETE …/subs/:id`, `POST …/subs/:id/current`, `…/subs/:id/show`, `…/root`, `…/root/show`, `…/root/undo`, `…/root/drop-old`, `…/jobs`, `…/jobs/step`, `DELETE …/jobs`, `…/kit`, `…/verify`, `…/restore`, `…/export`, `…/import`, `…/users/:userId/view` | owner only: the Drive keyring (Admin → Security → Keys; docs/DRIVE.md §3, §3.2), every change (and the restore and import previews) with `current` / `reauth` and in the admin audit by fingerprint; `409 migration_pending` for a root change while a Drive still waits for its upgrade |
 | `GET /api/private/admin/drive/migration` · `POST …/drive/migrate/:userId/escrow` · `GET`, `PUT …/drive/migrate/:userId[/items]` · `POST …/finish` · `POST …/retire` | owner only: the Drives waiting for their upgrade (disabled accounts too), and the upgrade of a user's Drive through the escrow of the release before (the escrow with `current` / `reauth`; in the admin audit) |
 | `GET`, `DELETE /api/private/admin/drive/archive` | owner only: the owner's Drive archive of the release before (a start over); deleted with `{ confirm: <username>, current \| reauth }` (its R2 objects go, its paused links end; in the admin audit) |

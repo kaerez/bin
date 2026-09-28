@@ -512,6 +512,9 @@ function upgradeBox(client, deps) {
 
 function mountApp(mount, client, deps) {
   const L = (deps.profile && deps.profile.limits) || {};
+  // The role's file-type rules and folder-depth limit apply to the Drive too (checked before anything is sent, and by the server).
+  client.setPolicy(L);
+  const depthLimited = Number.isInteger(L.maxFolderDepth);
   let current = ROOT;
   // The folder being opened (current until it has loaded) and whether that open was asked to move
   // focus: a refresh in the background (received files taken in) re-lists where the person is
@@ -845,7 +848,8 @@ function mountApp(mount, client, deps) {
       d.clearError();
       const done = [];
       try {
-        for (const it of items) { await client.move(it.id, target); done.push(it.id); }
+        const level = depthLimited ? await client.levelOf(target) : undefined;
+        for (const it of items) { await client.move(it.id, target, { kind: it.kind, level }); done.push(it.id); }
         toast(`Moved ${describe(items)}.`);
         d.close();
       } catch (e) {
@@ -921,10 +925,13 @@ function mountApp(mount, client, deps) {
     let done = 0;
     const label = files.length === 1 ? `Uploading ${files[0].name}` : `Uploading ${files.length} files`;
     const ok = await transfer(label, async (progress, signal) => {
+      // The role's file policy, for every file before any is sent.
+      await client.checkUpload(target, files.map((f) => ({ path: f.name, file: f })));
+      const level = depthLimited ? await client.levelOf(target) : undefined;
       // A name already in the folder gets " (2)", " (3)"… (one read of the folder for the batch).
       const { names: taken } = await client.names(target);
       for (const f of files) {
-        await client.upload(target, f, { signal, taken, onProgress: (d) => progress(done + d, total) });
+        await client.upload(target, f, { signal, taken, level, onProgress: (d) => progress(done + d, total) });
         done += f.size;
       }
     });
@@ -1336,7 +1343,8 @@ function mountApp(mount, client, deps) {
   const FAIL_TEXT = {
     unreadable: 'does not open with this Drive’s key (damaged, or not sent for this link)',
     name: 'its name or folder path cannot be used',
-    place: 'your Drive refused it (full, or its folder is full)',
+    place: 'your Drive refused it (full, its folder is full, or nested deeper than your account allows)',
+    type: 'your account does not allow this file type in the Drive',
   };
 
   /** The received files that could not be added: link, size, time, why; delete or try again. */

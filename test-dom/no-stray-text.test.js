@@ -29,7 +29,11 @@ const fx = vi.hoisted(() => {
       viewer: { enabled: false },
       apiKeys: { enabled: true, max: 5 },
       passkeys: { mode: 'any', count: 1, required: false, recoveryLeft: 20 },
-      quotas: [],
+      // A quota counted in bytes (the Drive's) and one counted in files.
+      quotas: [
+        { scope: 'user', channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 1024 ** 3, used: 25 * 1024 ** 2 },
+        { scope: 'user', channel: 'all', kind: 'drive-upload', n: 1, unit: 'd', max: 10, used: 3 },
+      ],
     },
   };
 });
@@ -53,7 +57,7 @@ vi.mock('../public/js/api.js', async () => {
       limits: Object.fromEntries(Object.entries(LIMITS).map(([k, v]) => [k, v.def])),
       inherited: resolveLimits({}, {}),
     },
-    quotas: [], viewerRules: [],
+    quotas: [{ id: 'q1', channel: 'all', kind: 'drive-bytes', n: 1, unit: 'd', max: 5 * 1024 ** 3 }], viewerRules: [],
   };
   class ApiError extends Error {}
   const share = (id, extra) => ({ id, label: `label ${id}`, kind: 'text', created: fx.now - 60, expires: fx.now + 3600, views_total: 3, left: 2, status: 'active', ...extra });
@@ -168,6 +172,8 @@ describe('no dashboard page shows a stray "null" or "undefined"', () => {
     await settle();
     expect(document.querySelectorAll('#view-account table.table').length).toBeGreaterThan(0);
     expect(strayText()).toEqual([]);
+    // The quotas: a size for the Drive's bytes, a count for its files.
+    expect([...document.querySelectorAll('#acct-quotas p')].map((x) => x.textContent)).toEqual(['25 MB / 1.0 GB uploaded to the Drive per 1d', '3 / 10 files uploaded to the Drive per 1d']);
   });
 
   it('Account with the Drive personal kit: never downloaded (no date), then out of date (the notices)', async () => {
@@ -229,6 +235,13 @@ describe('no dashboard page shows a stray "null" or "undefined"', () => {
       expect([...document.querySelectorAll('.admin-panel[data-panel="roles"] h2')].map((x) => x.textContent)).toContain(`${['Owner', 'Default', 'Public'][i]} role`);
       expect(strayText(), `role ${i}`).toEqual([]);
     }
+    // The Default role's bytes quota: its max in GiB, with its unit.
+    edits()[1].click();
+    await settle();
+    const row = document.querySelector('.admin-panel[data-panel="roles"] .quota-row');
+    expect(row.querySelector('input[aria-label="Max"]').value).toBe('5');
+    expect(row.querySelector('select[aria-label="Max unit"]').value).toBe('GiB');
+    expect(strayText(), 'bytes quota').toEqual([]);
   });
 
   it('Admin → Import / export: export, and a file open for import (no system part in it)', async () => {

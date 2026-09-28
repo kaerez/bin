@@ -110,8 +110,13 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     would interrupt every opening, put names an anonymous uploader chose in front of the user, and
     hold the items behind it; flattening never drops a file, only folder levels, and bounds the
     folders an uploader can make the user's browser create.
+  - **The role's Drive rules** apply on top of the link's own type rules: the take-in declares
+    the file's type (as a Drive upload does) and a type the role refuses in the Drive is not
+    taken in (reason `type`); a path makes folders only down to the role's `maxFolderDepth`
+    (flattened past it), and a link folder already deeper than that takes nothing in (reason
+    `place`). docs/DRIVE.md §5.
   - **Failures:** an item that cannot be taken in (it does not open with the link's key, its name
-    or path cannot be used, or the Drive refuses its place) is recorded on the server
+    or path cannot be used, the Drive refuses its place, or the role's file types refuse it) is recorded on the server
     (`POST …/received/<id>/failed`, with a reason). It leaves the queue, so it never holds up the
     items behind it, and the Drive lists it ("Review them": the link's label, size, time and why)
     with **Delete** and **Try again**. A network or server error leaves the item for the next
@@ -234,7 +239,7 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 | `POST /api/private/drive/reverse` | create: `{ id, folder, priv: {iv, ct}, mek, lh, password?: { salt, t, ph }, note?: {iv, ct}, label?, expire, views?, maxFiles?, maxBytes?, maxFileBytes?, types?, captcha?, current? \| reauth? }` → `201 { id, expires, views, captcha }` (`expire: "never"`: no expiry, `expires: null`; `views` absent or null: unlimited; the role's options of §5 apply: `403 no_expiry_disabled`, `expiry_too_long`, `too_many_views`, `unlimited_views_disabled`, `password_required_by_role`, `password_disabled`). The id is claimed in the share index first, in one step with the role's checks and the count of active reverse shares (`reverseMaxActive` holds under concurrent creates): `409 exists` when any account holds the id, `409 too_many_reverse`; `409 mek_not_current` / `400 bad_seal` when `priv` is not sealed under the current KEK (with `mek`, the sub-MEK it is sealed under). A link adds key material to the Drive, so the user confirms it with the password proof (`current`) or a passkey (`reauth`, from `POST /api/private/me/reauth`), as for API keys: `400 reauth_required`, `403 wrong_password` / `reauth_failed` (counted as failed confirmations; the claim is released). The owner acting as the user sends neither (§6.3) |
 | `GET /api/private/drive/reverse` | every reverse share of the Drive: `{ reverse: [row] }`; `?folder=<nodeId>` for one folder's |
 | `GET /api/private/drive/received` | received files waiting to be taken in, oldest first, 500 per page: `{ items: [{ id, parent, rs, name, meta, fk: { kind: 'rs', data }, size, chunks, created }], keys: [{ id, priv, mek }], more, next }` (an item whose field layer does not open comes with `unreadable: true` and no fields: the browser records it as failed); `?after=<next>` for the next page. `?failed=1`: the ones the browser could not take in instead, `{ items: [{ id, rs, label, size, created, failed, reason }], more, next }` |
-| `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek }` (sealed under the current KEK, checked; `parent` a folder) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
+| `POST /api/private/drive/received/<nodeId>` | taken in: `{ parent, name, meta, dek, ks, mek, types? }` (sealed under the current KEK, checked; `parent` a folder; `types` and the depth as for a Drive upload, docs/DRIVE.md §5) → `{ ok }`; logged as `drive.received_taken_in` (§7) |
 | `POST /api/private/drive/received/<nodeId>/failed` | the browser could not take it in: `{ reason: 'unreadable' \| 'name' \| 'place' }` → `{ ok, received, failed }`; it leaves the queue. `DELETE` (with `X-Secbin-Intent`) puts it back (try again). Logged as `drive.received_failed` / `drive.received_retried` (§7) |
 | `DELETE /api/private/drive/nodes/<nodeId>` | discard a received file (as any Drive item) |
 | `POST /api/private/shares/<id>/revoke` | revoke (My shares) |
@@ -288,7 +293,7 @@ session through the user's links, for the user (never the uploader): at `begin`,
 password is checked. A session that does not start (wrong password, busy, paused) or that ends
 having sent no file — `done`, or lapsing — is given back; one that sent a file stays counted. A
 new link counts under `receive-link` and `receive` (given back when its creation does not
-complete). Files taken in from a link are not Drive uploads (`drive-upload`).
+complete). Files taken in from a link are not Drive uploads (`drive-upload`, `drive-bytes`).
 
 ### 6.3 The owner acting as the user ("Log in as")
 

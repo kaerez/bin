@@ -4,13 +4,14 @@
 // new links and upload sessions, counted for the link's user), the API-only
 // channel, the public account's anonymous subjects and restricted kinds, the
 // refunds (refused after counting, a Drive upload that never completes, a
-// Receive session that sends nothing), the uploader's neutral 429, and the
-// validation of kinds.
-import { runDurableObjectAlarm } from 'cloudflare:test';
+// Receive session that sends nothing), the uploader's neutral 429, the
+// validation of kinds, and the Drive's bytes (drive-bytes: each upload's size,
+// counted with its file at the reservation, atomically, given back as it is).
+import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { owner, makeUser, fetchJson, createNote, freshIp, proofFor, USER_PW } from './helpers.js';
 import { enableDrive, createFile, uploadFile, del, putChunk, drive } from './drive-helpers.js';
-import { receiver, newReverse, begin, grantOf, send, rv, reserve, driveOf, takeInAny, received } from './reverse-helpers.js';
+import { receiver, newReverse, begin, grantOf, send, rv, reserve, driveOf, dirStub, takeInAny, received } from './reverse-helpers.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { buildSecret } from '../public/js/sharetypes.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
@@ -23,17 +24,19 @@ beforeAll(async () => { oc = await owner(); });
 afterEach(() => { vi.useRealTimers(); invalidateGuardCaches(); });
 
 // Every kind, and which kinds each action must count (and no other).
-const KINDS = ['all', 'text', 'note', 'url', 'secret', 'files', 'file', 'drive', 'drive-upload', 'receive', 'receive-link', 'receive-upload'];
+const KINDS = ['all', 'text', 'note', 'url', 'secret', 'files', 'file', 'drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload'];
 const COUNTED_BY = {
   note: ['all', 'text', 'note'],
   url: ['all', 'text', 'url'],
   secret: ['all', 'text', 'secret'],
   file: ['all', 'files', 'file'],
   drive: ['all', 'files', 'drive'],
-  'drive-upload': ['drive-upload'],
+  'drive-upload': ['drive-upload'], // and its bytes: BYTES_OF
   'receive-link': ['receive', 'receive-link'],
   'receive-upload': ['receive', 'receive-upload'],
 };
+// What an action adds to the quotas counted in bytes (the matrix's Drive upload is 10 bytes).
+const BYTES_OF = { 'drive-upload': 10 };
 // A window long enough that no test crosses into the next one (a fixed window: 100 calendar years).
 const q = (kind, max = 100, channel = 'all') => ({ channel, kind, n: 100, unit: 'y', max });
 const setQuotas = (scope, list) => fetchJson('/api/private/admin/quotas', { method: 'PUT', cookie: oc, body: { scope, list } });
@@ -83,10 +86,11 @@ describe('every kind is counted by its actions, and only by them', () => {
     for (const [action, run] of Object.entries(actions)) {
       await run();
       for (const k of COUNTED_BY[action]) expected[`${k}:all`]++;
+      expected['drive-bytes:all'] += BYTES_OF[action] ?? 0;
       expect(await used(u.cookie), action).toEqual(expected);
     }
     // In sum: "all" counted the five outgoing shares (not the Drive upload or Receive); "receive" both Receive actions.
-    expect(expected).toMatchObject({ 'all:all': 5, 'text:all': 3, 'files:all': 2, 'drive-upload:all': 1, 'receive:all': 2 });
+    expect(expected).toMatchObject({ 'all:all': 5, 'text:all': 3, 'files:all': 2, 'drive-upload:all': 1, 'drive-bytes:all': 10, 'receive:all': 2 });
     // Markdown and code notes are notes.
     await createNote(u.cookie, { text: '# md', fmt: 'markdown' });
     await createNote(u.cookie, { text: 'x = 1', fmt: 'code' });
@@ -159,7 +163,7 @@ describe('the API-only channel', () => {
     expect((await fileInit(null, bearer)).status).toBe(429);
     expect((await fileInit(u.cookie)).status).toBe(201);
     expect(await used(u.cookie)).toEqual({ 'note:api': 1, 'file:api': 1 });
-    for (const kind of ['drive', 'drive-upload', 'receive', 'receive-link', 'receive-upload']) {
+    for (const kind of ['drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload']) {
       const r = await setQuotas(u.id, [q(kind, 1, 'api')]);
       expect(await errorBody(r)).toEqual({ status: 400, error: 'invalid_quota', message: `quota kind ${kind} is only ever counted in the web app: its channel must be all` });
     }
@@ -185,7 +189,7 @@ describe('the public account', () => {
     expect((await publicNote(ip, { text: 'https://example.com/', fmt: 'url' })).status).toBe(429);
     expect((await publicNote(freshIp())).status).toBe(201); // another network has its own count
     // No Drive, no Receive: the public list refuses those kinds (and Drive shares), in the API and in an import.
-    for (const kind of ['drive', 'drive-upload', 'receive', 'receive-link', 'receive-upload']) {
+    for (const kind of ['drive', 'drive-upload', 'drive-bytes', 'receive', 'receive-link', 'receive-upload']) {
       const r = await setQuotas(PUBLIC_ID, [q(kind)]);
       expect(r.status).toBe(400);
       expect((await r.json()).message).toMatch(/^the public account has no Drive or Receive/);
@@ -203,6 +207,7 @@ describe('the public account', () => {
     const pub = (quotas) => doc({ public: { limits: { all: {}, api: {} }, quotas, viewerRules: [] } });
     expect(() => validateExport(pub([q('drive-upload')]))).toThrow(/^system\.public\.quotas\[0\]: the public account has no Drive or Receive/);
     expect(() => validateExport(pub([q('receive-link')]))).toThrow(PortableError);
+    expect(() => validateExport(pub([q('drive-bytes')]))).toThrow(/^system\.public\.quotas\[0\]: the public account has no Drive or Receive/);
     expect(validateExport(pub([q('url'), q('file')])).system.public.quotas.map((x) => x.kind)).toEqual(['url', 'file']);
     const roles = validateExport(doc({ limits: { all: {}, api: {} }, quotas: KINDS.map((k) => q(k)), viewerRules: [],
       roles: [{ name: 'Receivers', ownQuotas: true, limits: { all: {}, api: {} }, quotas: [q('receive-upload', 5)], viewerRules: [] }] }));
@@ -266,6 +271,91 @@ describe('Drive uploads', () => {
     await runDurableObjectAlarm(driveOf(u.id));
     vi.useRealTimers();
     expect(await used(u.cookie)).toEqual({ 'drive-upload:all': 1 });
+  });
+});
+
+describe('Drive bytes (drive-bytes)', () => {
+  const GiB = 1024 ** 3;
+  it('count each upload\'s size at its reservation; refused (naming the size) when a file would go past the max; the file quota counts on', async () => {
+    const u = await makeUser('qk-bytes');
+    await enableDrive(u.id);
+    await setQuotas(u.id, [q('drive-bytes', 100), q('drive-upload', 100)]);
+    expect((await createFile(u.cookie, 'root', 60)).res.status).toBe(201);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 60, 'drive-upload:all': 1 });
+    const before = await drive(u.cookie);
+    const over = await createFile(u.cookie, 'root', 41);
+    expect(await errorBody(over.res)).toEqual({ status: 429, error: 'quota_exceeded', message: 'Quota reached: 100 B uploaded to the Drive per 100y.', quota: { channel: 'all', kind: 'drive-bytes', n: 100, unit: 'y', max: 100 } });
+    // Refused as a whole: neither its bytes nor the file counted, nothing reserved.
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 60, 'drive-upload:all': 1 });
+    expect(await drive(u.cookie)).toEqual(before);
+    // Up to the max exactly, and an empty file even then.
+    expect((await createFile(u.cookie, 'root', 40)).res.status).toBe(201);
+    expect((await createFile(u.cookie, 'root', 0)).res.status).toBe(201);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 100, 'drive-upload:all': 3 });
+    expect((await createFile(u.cookie, 'root', 1)).res.status).toBe(429);
+    // The size in the refusal and on Account: in KB / MB / GB (1024-based, as the pages).
+    await setQuotas(u.id, [q('drive-bytes', GiB)]);
+    expect((await createFile(u.cookie, 'root', GiB + 1)).res.status).toBe(429);
+    expect((await (await createFile(u.cookie, 'root', GiB + 1)).res.json()).message).toBe('Quota reached: 1.0 GB uploaded to the Drive per 100y.');
+  });
+
+  it('are checked and counted atomically: uploads at once never go past the max together', async () => {
+    const u = await makeUser('qk-bytes-race');
+    await enableDrive(u.id);
+    await setQuotas(u.id, [q('drive-bytes', 100)]);
+    const all = await Promise.all(Array.from({ length: 10 }, () => createFile(u.cookie, 'root', 30)));
+    expect(all.map((f) => f.res.status).sort()).toEqual([201, 201, 201, 429, 429, 429, 429, 429, 429, 429]);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 90 });
+    // The file quota and the bytes quota are one check: at the file quota, no bytes are counted either.
+    await setQuotas(u.id, [q('drive-upload', 2), q('drive-bytes', 1000)]);
+    const both = await Promise.all(Array.from({ length: 5 }, () => createFile(u.cookie, 'root', 30)));
+    expect(both.filter((f) => f.res.status === 201)).toHaveLength(2);
+    expect(await used(u.cookie)).toEqual({ 'drive-upload:all': 2, 'drive-bytes:all': 60 });
+  });
+
+  it('give the bytes back when the Drive refuses the file, when an unfinished upload is deleted or purged; never for a finished one', async () => {
+    const u = await makeUser('qk-bytes-refund');
+    await enableDrive(u.id, { filePendingSec: 600, driveMaxBytes: 10 * 1024 * 1024 });
+    await setQuotas(u.id, [q('drive-bytes', GiB), q('drive-upload', 100)]);
+    // Refused by the Drive (past its capacity) after counting.
+    expect((await createFile(u.cookie, 'root', 11 * 1024 * 1024)).res.status).toBe(413);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0, 'drive-upload:all': 0 });
+    // Refused by the Drive for another reason (a folder that does not exist).
+    expect((await createFile(u.cookie, 'A'.repeat(22), 70)).res.status).toBe(404);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0, 'drive-upload:all': 0 });
+    // Cancelled: the browser deletes the unfinished file.
+    const cancelled = await createFile(u.cookie, 'root', 70);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 70, 'drive-upload:all': 1 });
+    expect((await del(u.cookie, cancelled.id)).status).toBe(200);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0, 'drive-upload:all': 0 });
+    // A finished file stays counted when deleted.
+    const kept = await uploadFile(u.cookie, 'root', 25);
+    expect((await del(u.cookie, kept.id)).status).toBe(200);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 25, 'drive-upload:all': 1 });
+    // Abandoned: purged by the alarm (a folder deleted with an unfinished file in it gives it back as well).
+    const left = await createFile(u.cookie, 'root', 50);
+    expect((await putChunk(u.cookie, left.id, 0, randomBytes(66), left.uploadToken)).status).toBe(200);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 75, 'drive-upload:all': 2 });
+    vi.useFakeTimers({ now: Date.now() + 601 * 1000, toFake: ['Date'] });
+    await runDurableObjectAlarm(driveOf(u.id));
+    vi.useRealTimers();
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 25, 'drive-upload:all': 1 });
+    // A refund never goes below zero, and a hit gives back only what it counted.
+    await runInDurableObject(dirStub(), (inst) => inst.refundDriveUploads(u.id, [{ t: Math.floor(Date.now() / 1000), size: 10 ** 9 }]));
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0, 'drive-upload:all': 0 });
+  });
+
+  it('files taken in from a Receive link are not counted; the max may be past 10 000 000 (bytes), up to 1 PiB', async () => {
+    const u = await receiver('qk-bytes-recv');
+    await setQuotas(u.id, [q('drive-bytes', 5 * GiB)]);
+    const link = await newReverse(u.cookie);
+    await uploadSession(link);
+    const [it0] = (await received(u.cookie)).items;
+    expect((await takeInAny(u.cookie, it0.id)).status).toBe(200);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0 });
+    expect((await setQuotas(u.id, [q('drive-bytes', 2 ** 50)])).status).toBe(200);
+    expect(await errorBody(await setQuotas(u.id, [q('drive-bytes', 2 ** 50 + 1)]))).toEqual({ status: 400, error: 'invalid_quota', message: `quota max of kind drive-bytes must be 0–${2 ** 50} bytes` });
+    expect((await setQuotas(u.id, [q('drive-upload', 10000001)])).status).toBe(400); // other kinds: as before
   });
 });
 
