@@ -208,7 +208,7 @@ export const drive = {
   migrate: (uid = null) => request(uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`),
   migrateItems: (after = null, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/items${after ? `?after=${enc(after)}` : ''}`),
   migratePut: (body, uid = null) => request(uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`, { method: 'PUT', headers: INTENT, body }),
-  migrateFinish: (after = null, uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/finish`, { method: 'POST', headers: INTENT, body: after ? { after } : {} }),
+  migrateFinish: (uid = null) => request(`${uid ? `${A}/drive/migrate/${enc(uid)}` : `${D}/migrate`}/finish`, { method: 'POST', headers: INTENT, body: {} }),
   migrateEscrow: (uid) => request(`${A}/drive/migrate/${enc(uid)}/escrow`, { method: 'POST', headers: INTENT, body: {} }),
   migration: () => request(`${A}/drive/migration`),
 };

@@ -510,10 +510,11 @@ const LINK_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
  *   user's KEK: each is checked (it opens under the current KEK) and stored
  *   only where the item is still sealed the old way (compare-and-set: a
  *   repeat changes nothing, so the upgrade can stop and resume at any time);
- * - `POST /finish` `{ after? }` — verification, a page at a time: every item
- *   and link key must open under the user's KEKs; after the last page the
- *   old key wraps go (the owner's own, and the escrow records, only once
- *   every Drive is upgraded).
+ * - `POST /finish` — verification, a page per call from where the last call
+ *   stopped (the cursor is kept in the Drive, so no page is skipped): every
+ *   item and link key must open under the user's KEKs; after the last page
+ *   the old key wraps go (the owner's own, and the escrow records, only
+ *   once every Drive is upgraded). A failure starts the verification over.
  */
 async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner }) {
   const drive = driveStub(env, uid);
@@ -571,12 +572,19 @@ async function upgradeRoute(request, env, url, dir, uid, sub, { owner, byOwner }
   if (sub === '/finish') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     assertIntent(request);
-    const body = await readJsonBody(request);
-    const after = typeof body.after === 'string' ? parseAfter(body.after) : null;
-    if (body.after !== undefined && body.after !== null && !after) return invalid('after is the "next" value of the previous answer.');
+    await readJsonBody(request);
+    // The cursor is the server's own: every page is verified, none can be skipped.
+    const after = parseAfter((await drive.upgradeCursor(uid)).cursor);
     const v = await verifyPage(env, uid, after);
-    if (v.failed.length) return err(409, 'verify_failed', `${v.failed.length} item(s) do not open under the Drive keys: nothing was removed.`, { failed: v.failed.slice(0, 20) });
-    if (v.next) return json({ ok: true, verified: v.verified, next: `${v.next.kind}.${v.next.id}` });
+    if (v.failed.length) {
+      await drive.upgradeCursor(uid, null);
+      return err(409, 'verify_failed', `${v.failed.length} item(s) do not open under the Drive keys: nothing was removed.`, { failed: v.failed.slice(0, 20) });
+    }
+    if (v.next) {
+      await drive.upgradeCursor(uid, `${v.next.kind}.${v.next.id}`);
+      return json({ ok: true, verified: v.verified, next: `${v.next.kind}.${v.next.id}` });
+    }
+    await drive.upgradeCursor(uid, null);
     const r = await finishUpgrade(env, dir, uid, { owner, byOwner });
     if (!r.ok) return fromDir(r);
     return json({ ok: true, verified: v.verified, done: true, left: r.left, cleanup: r.cleanup });

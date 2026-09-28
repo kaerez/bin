@@ -135,13 +135,12 @@ async function run({ dk, uid, mek, kek, target = null, onProgress }) {
     if (!after) break;
   }
   await flush();
-  // The server's check that everything opens under v2, then the old wraps go.
-  for (let after = null, n = 0; n < 100000; n++) {
-    const r = await api.migrateFinish(after, target);
+  // The server's check that everything opens under v2 (a page per call, from where it stopped), then the old wraps go.
+  for (let n = 0; n < 100000; n++) {
+    const r = await api.migrateFinish(target);
     out.verified += r.verified || 0;
     if (onProgress) onProgress({ phase: 'verify', done: out.verified });
     if (r.done || !r.next) break;
-    after = r.next;
   }
   return out;
 }
@@ -194,11 +193,10 @@ export async function upgradeUserDrive({ ownerId, userId, onProgress }) {
     if (!dk) {
       // Nothing sealed the old way: only the verification and the clean-up.
       let out = { upgraded: 0, damaged: 0, verified: 0 };
-      for (let after = null, n = 0; n < 100000; n++) {
-        const f = await api.migrateFinish(after, userId);
+      for (let n = 0; n < 100000; n++) {
+        const f = await api.migrateFinish(userId);
         out = { ...out, verified: out.verified + (f.verified || 0) };
         if (f.done || !f.next) break;
-        after = f.next;
       }
       return out;
     }

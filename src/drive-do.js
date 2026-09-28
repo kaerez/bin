@@ -83,7 +83,7 @@ const COLUMNS = [
   ['upchunks', 'h', 'TEXT'], ['reverse', 'mek', 'TEXT'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
-const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen'];
+const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify'];
 /** The owner's sealed escrow keys of the release before: dropped once every Drive is upgraded. */
 const LEGACY_OWNER_META = ['escrowPriv', 'escrowSignPriv', 'escrowPrivOld'];
 /** Items per page of the upgrade and of a re-seal. */
@@ -454,6 +454,18 @@ export class Drive extends DurableObject {
     });
     if (done) await this.#scheduleHashes(); // the ciphertext hashes of the upgraded files
     return { ok: true, done, skipped, ...this.#migrationState() };
+  }
+
+  /**
+   * Where the upgrade's verification is (the Worker's cursor over the items,
+   * "n.<id>" / "r.<id>"), kept here so that no page can be skipped: read
+   * with `value` undefined, set (or, with null, reset) otherwise.
+   */
+  async upgradeCursor(uid, value) {
+    this.#bind(uid);
+    if (value === undefined) return { ok: true, cursor: this.#meta('upgradeVerify') };
+    this.#setMeta('upgradeVerify', value);
+    return { ok: true };
   }
 
   /**
