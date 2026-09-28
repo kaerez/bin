@@ -14,7 +14,7 @@ import { owner, makeUser, fetchJson, intent, freshIp, ORIGIN, proofFor, USER_PW,
 import { enableDrive, driveLimits, mkdir, uploadFile, node, drive, enc, KCV } from './drive-helpers.js';
 import { SCHEMA_VERSION, PUBLIC_ID } from '../src/directory-do.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
-import { CSP, TURNSTILE_CSP } from '../src/lib/http.js';
+import { CSP, TURNSTILE_CSP, API_CSP } from '../src/lib/http.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
 import { driveChunkSize, driveChunkKey } from '../src/drive-do.js';
 import {
@@ -447,7 +447,7 @@ describe('the uploader', () => {
     for (const p of ['/r/', '/r/nope', '/r/index.html', `/r/${r.id}/x`]) {
       const res = await SELF.fetch(`${ORIGIN}${p}`);
       expect(res.status, p).toBe(404);
-      expect(res.headers.get('content-security-policy')).toBe(CSP);
+      expect(res.headers.get('content-security-policy')).toBe(API_CSP); // plain text: sandboxed, no script at all
       await res.text();
     }
   });

@@ -29,7 +29,7 @@ import { createReverseKey, fragmentOf, newReverseId, linkProof, setReverseStretc
 import { hkdf32 } from '../public/js/crypto.js';
 import { startDrive } from '../public/dashboard/js/drive-app.js';
 import * as drive from '../public/js/driveclient.js';
-import { createDriveKey, saveSessionKey, clearSessionKey, wrapRecovery, recoveryRef } from '../public/js/drivekeys.js';
+import { createDriveKey, saveSessionKey, clearSessionKey, wrapRecovery, recoveryRef, loadSessionKey, saveImpersonationKey, loadImpersonationKey, clearImpersonationKey } from '../public/js/drivekeys.js';
 import { fakeServer, seedTree } from './drive-fake-server.js';
 
 setReverseStretcher(async (pw, salt) => hkdf32(pw, salt, utf8('dom-stretch')));
@@ -370,6 +370,60 @@ describe('the viewer: a share with the CAPTCHA', () => {
     expect(w.renders).toHaveLength(0);
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(thirdPartyScripts()).toHaveLength(0);
+  }, T);
+});
+
+// ── N1: a Drive key planted in the tab's storage ──────────────────────────
+describe('a Drive key planted in this tab\'s storage (as a script on the check page could) is never used', () => {
+  const CODE = 'ABCD-EFGH-JKMN-PQRS';
+  async function realDrive() {
+    const S = fakeServer({ role: 'user' });
+    globalThis.fetch = S.fetch;
+    const dk = createDriveKey();
+    const w = await wrapRecovery(dk, CODE, await recoveryRef(CODE));
+    S.wraps.set(`${w.kind}|${w.ref}`, w);
+    await seedTree(S, dk, { 'notes.txt': utf8('mine') }); // the Drive's key check value, as its first set-up stored it
+    return { S, dk };
+  }
+
+  it('refused and removed (right user id, wrong key): the Drive asks to be unlocked; nothing is encrypted under it', async () => {
+    const { S } = await realDrive();
+    // What the check page could write: a key of the right shape, and the user's id (the session API gives it).
+    const planted = createDriveKey();
+    sessionStorage.setItem('secbin_dk', b64urlFromBytes(planted));
+    sessionStorage.setItem('secbin_dk_uid', S.user.id);
+    expect(loadSessionKey(S.user.id)).not.toBeNull(); // it looks like the tab's key…
+    const before = S.requests.length;
+    await expect(drive.openDrive({ user: S.user })).rejects.toMatchObject({ reason: 'locked' });
+    expect(loadSessionKey(S.user.id)).toBeNull(); // …and is gone
+    expect(sessionStorage.getItem('secbin_dk')).toBeNull();
+    // Nothing was written with it (no upload, no key, no folder).
+    expect(S.requests.slice(before).filter((r) => r.method !== 'GET')).toEqual([]);
+  }, T);
+
+  it('the real key, proven against the Drive\'s key check value, opens it as before', async () => {
+    const { S, dk } = await realDrive();
+    saveSessionKey(dk, S.user.id);
+    const c = await drive.openDrive({ user: S.user });
+    expect((await c.list('root')).children.map((n) => n.name)).toEqual(['notes.txt']);
+    expect(loadSessionKey(S.user.id)).not.toBeNull();
+  }, T);
+
+  it('a Drive whose server holds no key check value never trusts a stored key', async () => {
+    const { S, dk } = await realDrive();
+    S.kcv = null;
+    saveSessionKey(dk, S.user.id);
+    await expect(drive.openDrive({ user: S.user })).rejects.toMatchObject({ reason: 'locked' });
+    expect(loadSessionKey(S.user.id)).toBeNull();
+  }, T);
+
+  it('the owner acting as the user: a planted key in the user\'s own slot is refused and removed too', async () => {
+    const { S } = await realDrive();
+    S.impersonatedBy = 'owner';
+    saveImpersonationKey(createDriveKey(), S.user.id);
+    await expect(drive.openDrive({ user: { ...S.user, impersonating: true } })).rejects.toBeInstanceOf(drive.DriveLocked);
+    expect(loadImpersonationKey(S.user.id)).toBeNull();
+    clearImpersonationKey();
   }, T);
 });
 

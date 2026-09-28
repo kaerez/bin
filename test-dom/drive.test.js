@@ -230,12 +230,12 @@ describe('startDrive states', () => {
     expect(S.requests.some((x) => x.method !== 'GET')).toBe(false);
   });
 
-  it('a tab key that does not open this Drive goes back to the unlock prompt', async () => {
+  it('a tab key that is not this Drive\'s (its key check value differs) is refused and removed: the unlock prompt', async () => {
     await server({ locked: true });
     saveSessionKey(createDriveKey(), S.user.id);
     const mount = mountPoint();
     const r = await startDrive(mount, deps());
-    expect(r.state).toBe('open');
+    expect(r.state).toBe('locked'); // never opened with it
     await until(() => mount.querySelector('#drive-unlock'));
     expect(loadSessionKey(S.user.id)).toBeNull();
   });

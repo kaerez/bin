@@ -144,30 +144,49 @@ export const captchaRequired = (reverse = false) => new HttpError(403, 'captcha_
 // A random key, never derived from anything a page can read: 32 random bytes
 // and a nonce `n` (16 bytes) made on each strict navigation to /p/<id> or
 // /r/<id>. The Worker writes `n.key` into that document and into an HttpOnly,
-// Secure, SameSite=Strict cookie scoped to the share's own path. On the return
+// Secure, SameSite=Strict cookie named by the nonce (one per tab's round
+// trip), scoped to the share's own path. On the return
 // from the check page (/p/<id>?n=<n>) the key is written into the document
 // again only when that cookie comes with the navigation and names the same
 // nonce, and the cookie is cleared in the same response: one round trip, one
 // use. A client outside the browser has no cookie; a script in the browser
 // cannot read it (HttpOnly) and its fetch() is not a document navigation.
 
-export const PAGE_KEY_COOKIE = '__Secure-secbin_pk';
+export const PAGE_KEY_PREFIX = '__Secure-secbin_pk_';
 export const PAGE_KEY_MAX_AGE = 15 * 60;
+/** Page key cookies kept per share path at most (a new one clears the oldest beyond it). */
+export const PAGE_KEYS_MAX = 4;
 export const PAGE_NONCE_RE = /^[A-Za-z0-9_-]{22}$/;
 const PAGE_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /** A new page key → { n, key } (base64url; 16 and 32 random bytes). */
 export const newPageKey = () => ({ n: b64urlFromBytes(randomBytes(16)), key: b64urlFromBytes(randomBytes(32)) });
 
-/** The page key held in the cookie value `n.key`, or null. */
-export function parsePageKey(value) {
-  if (typeof value !== 'string' || value.length > 80) return null;
-  const [n, key, extra] = value.split('.');
-  return extra === undefined && PAGE_NONCE_RE.test(n || '') && PAGE_KEY_RE.test(key || '') ? { n, key } : null;
+/**
+ * The page keys in the request's cookies (only this share path's are sent):
+ * `__Secure-secbin_pk_<n>=<key>.<issued, unix seconds>` → [{ n, key, t }],
+ * malformed ones left out. Each tab's round trip has its own cookie (its own
+ * nonce), so two tabs of one share do not replace each other's.
+ */
+export function pageKeysIn(request) {
+  const out = [];
+  const header = request.headers.get('cookie') || '';
+  if (header.length > 8192) return out;
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    const name = part.slice(0, i).trim();
+    if (!name.startsWith(PAGE_KEY_PREFIX)) continue;
+    const n = name.slice(PAGE_KEY_PREFIX.length);
+    const [key, t, extra] = part.slice(i + 1).trim().split('.');
+    if (!PAGE_NONCE_RE.test(n) || !PAGE_KEY_RE.test(key || '') || extra !== undefined || !/^\d{1,12}$/.test(t || '')) continue;
+    out.push({ n, key, t: Number(t) });
+  }
+  return out;
 }
 
-/** Set-Cookie for page key `pk` on `path` (/p/<id> or /r/<id>), or its removal when `pk` is null. */
-export function pageKeyCookie(path, pk) {
-  const value = pk ? `${pk.n}.${pk.key}` : '';
-  return `${PAGE_KEY_COOKIE}=${value}; Path=${path}; HttpOnly; Secure; SameSite=Strict; Max-Age=${pk ? PAGE_KEY_MAX_AGE : 0}`;
+/** Set-Cookie for page key `pk` ({ n, key }) on `path` (/p/<id> or /r/<id>), or the removal of nonce `n`'s when `pk` is null. */
+export function pageKeyCookie(path, n, pk = null) {
+  const value = pk ? `${pk.key}.${Math.floor(Date.now() / 1000)}` : '';
+  return `${PAGE_KEY_PREFIX}${n}=${value}; Path=${path}; HttpOnly; Secure; SameSite=Strict; Max-Age=${pk ? PAGE_KEY_MAX_AGE : 0}`;
 }

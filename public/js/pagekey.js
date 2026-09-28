@@ -107,6 +107,9 @@ export function stashedNonce({ kind, id, storage }) {
  * from this document gets a fresh one (goToCheck).
  */
 export async function takeKey({ kind, id, pageKey, storage }) {
+  // The tab's Drive keys were removed before the check: any found now was written there (by the
+  // check page's scripts, say), so it goes too. The Drive also proves a stored key before using it.
+  dropDriveKeys(storage);
   const raw = storage.getItem(RECORD(kind, id));
   storage.removeItem(RECORD(kind, id));
   if (!raw || !pageKey) return null;

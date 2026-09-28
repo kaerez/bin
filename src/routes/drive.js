@@ -187,6 +187,9 @@ export async function handleDrive(request, env, url) {
       escrowPub: escrowPub(), ...escrowSign(), escrowPin: s.escrowPin ? JSON.parse(s.escrowPin) : null, pwStale: s.pwStale,
       received: s.received, receivedFailed: s.receivedFailed,
       ownerReset: pol.ownerReset ? JSON.parse(pol.ownerReset) : null,
+      // The Drive key's check value (HMAC under a key derived from DK; it reveals nothing about DK):
+      // the browser proves a key read from its tab storage against it before using it.
+      kcv: s.kcv ?? null,
     };
     if (a.actor) {
       // Impersonating: the escrow wrap only through the logged route below.

@@ -12,7 +12,7 @@
 //        creates a new Drive for the user (finished at the user's sign-in).
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { openDrive, unlockDrive, unlockAtSignIn, DriveLocked } from '../public/js/driveclient.js';
-import { escrowKeyEndorsed, sameEscrowKey } from '../public/js/drivekeys.js';
+import { escrowKeyEndorsed, sameEscrowKey, keyCheckValue } from '../public/js/drivekeys.js';
 import {
   loadSessionKey, clearSessionKey, saveSessionKey, createDriveKey, createEscrowKeyPair, sealEscrowPriv, wrapEscrow,
   wrapPassword, unlockWithPassword, escrowKeyId, openEscrowPin, sealEscrowPin, loadImpersonationKey, clearImpersonationKey,
@@ -222,6 +222,7 @@ describe('L-1: finalize while a chunk write is in flight', () => {
     const dk = createDriveKey();
     saveSessionKey(dk, 'u1');
     S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
+    S.kcv = await keyCheckValue(dk); // stored with the first wraps, as a real set-up does
     const c = await openDrive({ user: S.user });
     S.busyFinalize = 2;
     const id = await c.upload('root', fakeFile('late.txt', enc('written late')));
@@ -312,6 +313,7 @@ describe('names: real names kept, spoofing characters removed (audit round 3, L-
     const dk = createDriveKey();
     saveSessionKey(dk, 'u1');
     S.wraps.set('pw|pw', (await wrapPassword(dk, PASSWORD)).wrap);
+    S.kcv = await keyCheckValue(dk); // stored with the first wraps, as a real set-up does
     const c = await openDrive({ user: S.user });
     const dir = await c.mkdir('root', 'תיקייה');
     for (const n of REAL_NAMES) await c.upload(dir, fakeFile(n, enc(n)));

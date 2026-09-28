@@ -18,7 +18,7 @@
 // epoch. Not a test file itself (vitest.dom.config.js picks up *.test.js only).
 import { vi } from 'vitest';
 import { CHUNK, TAG, encryptChunk, importFileKey } from '../public/js/files.js';
-import { deriveSubkeys, sealField, escrowKeyId, escrowWrapKeyId, escrowKeyEndorsed } from '../public/js/drivekeys.js';
+import { deriveSubkeys, sealField, escrowKeyId, escrowWrapKeyId, escrowKeyEndorsed, keyCheckValue } from '../public/js/drivekeys.js';
 import { randomBytes, b64urlFromBytes } from '../public/js/bytes.js';
 import { sealUpload, newNodeId } from '../public/js/reversekeys.js';
 
@@ -108,7 +108,7 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
       const wraps = [...S.wraps.values()].map((w) => (S.impersonatedBy && w.kind === 'escrow' ? { ...w, data: null } : w));
       return ok({
         enabled: true, capacity: S.capacity, used: used(), driveSalt: S.driveSalt, wraps, escrowPub: S.escrowPub, escrowSignPub: S.escrowSignPub, escrowSig: S.escrowSig,
-        escrowPin: S.escrowPin, pwStale: S.pwStale, ownerReset: S.ownerReset,
+        escrowPin: S.escrowPin, pwStale: S.pwStale, ownerReset: S.ownerReset, kcv: S.kcv,
         received, receivedFailed: [...S.nodes.values()].filter((n) => n.rs && n.state === 'ready' && n.rfail).length,
         ...(role === 'owner' ? {
           escrowPriv: S.escrowPriv, escrowSignPriv: S.escrowSignPriv, escrowPrivOld: S.escrowPrivOld, escrowKids: S.escrowKids, kit: S.kit,
@@ -478,6 +478,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
  * folder) }. → Map(path → node id).
  */
 export async function seedTree(S, dk, tree, parent = 'root', prefix = '', ids = new Map()) {
+  // A real Drive has its key check value from its first set-up (the browser proves a tab key against it).
+  if (!S.kcv) S.kcv = await keyCheckValue(dk);
   const keys = await deriveSubkeys(dk);
   for (const [name, v] of Object.entries(tree)) {
     const id = b64urlFromBytes(randomBytes(16));

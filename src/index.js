@@ -17,11 +17,11 @@
 // expiry and brute-force protection. It never sees a decryption key, a password,
 // a file name or a file type. See SPEC.md §10 and SECURITY.md.
 
-import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, getCookie, SECURITY_HEADERS } from './lib/http.js';
+import { err, HttpError, withSecurityHeaders, withCachePolicy, redirect, SECURITY_HEADERS } from './lib/http.js';
 import { readSession, logoutCookie, SESSION_COOKIE } from './lib/auth.js';
 import { ipContext, cachedSettings, isBlocked, rateLimit, CAPTCHA_PAGE } from './lib/guard.js';
 import { turnstileKeys } from './lib/turnstile.js';
-import { newPageKey, parsePageKey, pageKeyCookie, PAGE_KEY_COOKIE } from './lib/human.js';
+import { newPageKey, pageKeysIn, pageKeyCookie, PAGE_KEYS_MAX } from './lib/human.js';
 import { parseId } from './lib/ids.js';
 import { BindingMissing } from './lib/config.js';
 import { handleAuth } from './routes/auth.js';
@@ -121,7 +121,9 @@ const pageNotFound = () => withSecurityHeaders(new Response('Not found', { statu
  *     'none'). A strict navigation (Sec-Fetch-Dest: document, Sec-Fetch-Mode:
  *     navigate, Sec-Fetch-Site: none or same-origin) gets a new random page
  *     key: `n.key` in a meta tag and in an HttpOnly, Secure, SameSite=Strict
- *     cookie scoped to the share's path, for 15 minutes. When the share needs
+ *     cookie of its own (`__Secure-secbin_pk_<n>`, so each tab's round trip
+ *     has one) scoped to the share's path, for 15 minutes, at most
+ *     PAGE_KEYS_MAX per path (the oldest are cleared). When the share needs
  *     the CAPTCHA, the page seals the link's key (only that) with it in
  *     sessionStorage, takes it out of the address bar and goes to the check
  *     page.
@@ -165,16 +167,22 @@ async function sharePage(request, env, url, kind) {
   // The cookie's path must be the path the browser asked for, character for character.
   if (!valid || m[1] !== id || !nav || request.method !== 'GET' || !page.ok || typeof Rewriter !== 'function') return page;
   const cookiePath = `/${kind}/${id}`;
+  const held = pageKeysIn(request); // this share path's page key cookies, one per round trip (tab)
   let pk;
   if (url.searchParams.has('n')) {
-    // The return from the check page: only the key this browser holds, once.
-    const held = parsePageKey(getCookie(request, PAGE_KEY_COOKIE));
-    if (!held || held.n !== url.searchParams.get('n')) return page;
-    pk = held;
-    page.headers.append('set-cookie', pageKeyCookie(cookiePath, null));
+    // The return from the check page: only the key this browser holds for that nonce, once.
+    const n = url.searchParams.get('n');
+    const hit = held.find((c) => c.n === n);
+    if (!hit) return page;
+    pk = { n, key: hit.key };
+    page.headers.append('set-cookie', pageKeyCookie(cookiePath, n, null));
   } else {
     pk = newPageKey();
-    page.headers.append('set-cookie', pageKeyCookie(cookiePath, pk));
+    page.headers.append('set-cookie', pageKeyCookie(cookiePath, pk.n, pk));
+    // At most PAGE_KEYS_MAX per share path: a new one clears the oldest beyond that.
+    for (const old of held.sort((a, b) => b.t - a.t).slice(PAGE_KEYS_MAX - 1)) {
+      page.headers.append('set-cookie', pageKeyCookie(cookiePath, old.n, null));
+    }
   }
   // Set as an attribute value by the rewriter (it escapes it), never written as markup.
   return new Rewriter().on('meta[name="secbin-page-key"]', {

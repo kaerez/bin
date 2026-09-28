@@ -14,7 +14,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { env, SELF, createExecutionContext, waitOnExecutionContext, runInDurableObject } from 'cloudflare:test';
 import worker from '../src/index.js';
 import { setSiteverify } from '../src/lib/turnstile.js';
-import { CSP, TURNSTILE_CSP } from '../src/lib/http.js';
+import { CSP, TURNSTILE_CSP, API_CSP } from '../src/lib/http.js';
 import { SCHEMA_VERSION } from '../src/directory-do.js';
 import { SHARE_GRANT_SEC, SHARE_GRANT_CAP_SEC } from '../src/lib/human.js';
 import publicRoutesSource from '../src/routes/public.js?raw';
@@ -690,7 +690,9 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
     expect([n.length, key && key.length, extra]).toEqual([22, 43, undefined]); // a nonce of 16 and a key of 32 random bytes
     return [content, n, key];
   };
-  const cookieOf = (res) => res.headers.get('set-cookie');
+  /** The response's Set-Cookie headers, one string each (a response may clear several). */
+  const setCookies = (res) => (typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')] : []));
+  const cookieOf = (res) => { const all = setCookies(res); return all.length ? all[0] : null; };
   /** A Set-Cookie header parsed (never matched as a pattern): { name, value, attrs } with lower-case attribute names. */
   const parseSetCookie = (header) => {
     const [pair, ...rest] = String(header).split(';').map((x) => x.trim());
@@ -702,12 +704,22 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
     }
     return { name: pair.slice(0, i), value: pair.slice(i + 1), attrs };
   };
-  /** The page key cookie for `path`: exactly these attributes (Max-Age 900 when set, 0 when cleared). */
+  const PREFIX = '__Secure-secbin_pk_';
+  /** A page key cookie for `path`: named by its nonce, exactly these attributes (Max-Age 900 when set, 0 when cleared) → { n, value }. */
   const expectPageKeyCookie = (header, path, maxAge) => {
     const c = parseSetCookie(header);
-    expect(c.name).toBe('__Secure-secbin_pk');
+    expect(c.name.startsWith(PREFIX)).toBe(true);
     expect(c.attrs).toEqual({ path, httponly: true, secure: true, samesite: 'Strict', 'max-age': String(maxAge) });
-    return c.value;
+    return { n: c.name.slice(PREFIX.length), value: c.value };
+  };
+  /** A cookie jar for one path: applies a response's Set-Cookie headers → the Cookie header to send next. */
+  const jar = () => {
+    const m = new Map();
+    return {
+      apply(res) { for (const h of setCookies(res)) { const c = parseSetCookie(h); if (c.attrs['max-age'] === '0') m.delete(c.name); else m.set(c.name, c.value); } },
+      header() { return [...m].map(([k, v]) => `${k}=${v}`).join('; '); },
+      names() { return [...m.keys()]; },
+    };
   };
   let paths;
   beforeAll(async () => {
@@ -734,8 +746,11 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       expect(html).not.toContain('challenges.cloudflare.com');
       const k = await keyOf(html);
       expect(k).not.toBeNull();
-      const value = expectPageKeyCookie(cookieOf(page), path, 900);
-      expect(value.split('.')).toEqual([k[1], k[2]]); // the same value, held by the browser
+      const c = expectPageKeyCookie(cookieOf(page), path, 900);
+      // The same key, held by the browser under its own nonce's name (value: key.issued).
+      expect(c.n).toBe(k[1]);
+      expect(c.value.split('.')[0]).toBe(k[2]);
+      expect(c.value.split('.')[1]).toMatch(/^\d+$/);
       // Random: another navigation, another nonce and key (never derived from the id or the nonce).
       const k2 = await keyOf(await (await ts(path, { headers: back })).text());
       expect(k2[1]).not.toBe(k[1]);
@@ -749,7 +764,7 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       const [, n, key] = await keyOf(await first.text());
       const cookie = cookieOf(first).split(';')[0];
       // An outside client (curl) sends the Fetch Metadata of a navigation, but has no cookie: no key, nothing set.
-      for (const headers of [nav, back, { ...back, cookie: '__Secure-secbin_pk=' }, { ...back, cookie: `__Secure-secbin_pk=${n}.${'A'.repeat(43)}x` }]) {
+      for (const headers of [nav, back, { ...back, cookie: `${PREFIX}${n}=` }, { ...back, cookie: `${PREFIX}${n}=${'A'.repeat(43)}x.1` }, { ...back, cookie: `__Secure-secbin_pk=${n}.${key}` }]) {
         const res = await ts(`${path}?n=${n}`, { headers });
         expect(await keyOf(await res.text())).toBeNull();
         expect(cookieOf(res)).toBeNull();
@@ -763,7 +778,7 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
       // The browser's own return: the key, and the cookie cleared in the same response.
       const ok = await ts(`${path}?n=${n}`, { headers: { ...back, cookie } });
       expect((await keyOf(await ok.text())).slice(1)).toEqual([n, key]);
-      expect(expectPageKeyCookie(cookieOf(ok), path, 0)).toBe('');
+      expect(expectPageKeyCookie(cookieOf(ok), path, 0)).toEqual({ n, value: '' });
     }
   });
 
@@ -811,6 +826,43 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
     }
   });
 
+  it('N6: two tabs of one share each keep their own page key (one cookie per round trip); both returns work, once each', async () => {
+    for (const path of paths) {
+      const j = jar();
+      const tab1 = await ts(path, { headers: nav });
+      const [, n1, k1] = await keyOf(await tab1.text());
+      j.apply(tab1);
+      const tab2 = await ts(path, { headers: { ...nav, cookie: j.header() } }); // the second tab, while the first is at its check
+      const [, n2, k2] = await keyOf(await tab2.text());
+      j.apply(tab2);
+      expect(j.names().sort()).toEqual([`${PREFIX}${n1}`, `${PREFIX}${n2}`].sort());
+      const back1 = await ts(`${path}?n=${n1}`, { headers: { ...back, cookie: j.header() } });
+      expect((await keyOf(await back1.text())).slice(1)).toEqual([n1, k1]);
+      j.apply(back1);
+      expect(j.names()).toEqual([`${PREFIX}${n2}`]); // only its own cookie went
+      const back2 = await ts(`${path}?n=${n2}`, { headers: { ...back, cookie: j.header() } });
+      expect((await keyOf(await back2.text())).slice(1)).toEqual([n2, k2]);
+      j.apply(back2);
+      expect(j.names()).toEqual([]);
+    }
+  });
+
+  it('N6: at most 4 page key cookies per share path — a new one clears the oldest', async () => {
+    const path = paths[0];
+    const j = jar();
+    const issued = [];
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const t0 = Date.now();
+    for (let i = 0; i < 7; i++) {
+      vi.setSystemTime(t0 + i * 1000); // distinct issue times
+      const res = await ts(path, { headers: { ...nav, cookie: j.header() } });
+      issued.push((await keyOf(await res.text()))[1]);
+      j.apply(res);
+      expect(j.names().length).toBeLessThanOrEqual(4);
+    }
+    expect(j.names().sort()).toEqual(issued.slice(-4).map((n) => `${PREFIX}${n}`).sort()); // the newest four
+  });
+
   it('the check page: the Turnstile CSP with worker-src \'none\', COOP same-origin-allow-popups, no COEP, never a key; for any well-formed id (it says nothing about the share)', async () => {
     const plain = await note({ cookie: oc });
     const unknown = `k${b64urlFromBytes(randomBytes(16))}`;
@@ -845,7 +897,7 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
     for (const p of ['/check', '/check/', '/check/index.html']) {
       const res = await ts(p);
       expect(res.status, p).toBe(404);
-      expect(res.headers.get('content-security-policy')).toBe(CSP);
+      expect(res.headers.get('content-security-policy')).toBe(API_CSP); // plain text: sandboxed, no script at all
       await res.text();
     }
   });
@@ -862,7 +914,7 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
     expect(status).toBe(200); // 60 in the window are served
     const over = await ts(`${paths[0]}?check`, { ip });
     expect([over.status, over.headers.get('retry-after')]).toEqual([429, '600']);
-    expect(over.headers.get('content-security-policy')).toBe(CSP); // no Turnstile script on the refusal
+    expect(over.headers.get('content-security-policy')).toBe(API_CSP); // no Turnstile script (no script at all) on the refusal
     expect(await over.text()).not.toContain('secbin-page-key');
     // Another network is not affected; the owner can lift the limit (a Guard scope like the others).
     expect((await ts(`${paths[1]}?check`, { ip: freshIp() })).status).toBe(200);
@@ -873,9 +925,58 @@ describe('the pages: strict where the key is, the Turnstile CSP only on the chec
     expect((await fetchJson('/api/private/admin/guard/block', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: `${blocked}/32`, seconds: 600 } })).status).toBe(200);
     const res = await ts(`${paths[1]}?check`, { ip: blocked });
     expect(res.status).toBe(429);
-    expect(res.headers.get('content-security-policy')).toBe(CSP);
+    expect(res.headers.get('content-security-policy')).toBe(API_CSP);
     await res.text();
     expect((await fetchJson('/api/private/admin/guard/unblock', { method: 'POST', cookie: oc, body: { scope: 'invalid', key: `${blocked}/32` } })).status).toBe(200);
+  });
+});
+
+// ── N2: isolation headers on every Worker response ────────────────────────
+describe('every Worker response carries the isolation headers (N2)', () => {
+  const baseline = (res, what) => {
+    expect(res.headers.get('cross-origin-opener-policy'), what).toMatch(/^same-origin(-allow-popups)?$/);
+    expect(res.headers.get('cross-origin-resource-policy'), what).toBe('same-origin');
+    expect(res.headers.get('x-frame-options'), what).toBe('DENY');
+    expect(res.headers.get('x-content-type-options'), what).toBe('nosniff');
+    expect(res.headers.get('referrer-policy'), what).toBe('no-referrer');
+    expect(res.headers.get('content-security-policy'), what).toBeTruthy();
+  };
+  it('API answers, errors, chunks and redirects: COOP/CORP same-origin, XFO DENY and default-src \'none\'; frame-ancestors \'none\'; sandbox — pages keep their own CSP', async () => {
+    expect(API_CSP).toBe("default-src 'none'; frame-ancestors 'none'; sandbox");
+    const u = await makeUser('cap-n2');
+    const plainFile = await fileShare({ cookie: u.cookie }, { captcha: false });
+    const ip = freshIp();
+    const o = await openIt(plainFile, ip);
+    const dl = (await o.clone().json()).grant;
+    const unknown = `k${b64urlFromBytes(randomBytes(16))}`;
+    const cases = [
+      ['config (200 JSON)', await ts('/api/config')],
+      ['unknown API route (404)', await ts('/api/nope')],
+      ['method not allowed (405)', await ts('/api/config', { method: 'PUT' })],
+      ['a CAPTCHA refusal (403)', await ts(`/api/paste/${unknown}`, { ip: freshIp() })],
+      ['missing intent (400)', await ts(`/api/paste/${unknown}/human`, { method: 'POST', ip: freshIp() })],
+      ['an open (200 JSON)', o],
+      ['a chunk (octet-stream)', await chunk(plainFile, dl, ip)],
+      ['a redirect (302)', await SELF.fetch(`${ORIGIN}/p/${unknown}?check`, { redirect: 'manual' })],
+      ['a private route without a session (401)', await fetchJson('/api/private/me')],
+    ];
+    for (const [what, res] of cases) {
+      baseline(res, what);
+      const type = res.headers.get('content-type') || '';
+      if (!/text\/html/.test(type)) expect(res.headers.get('content-security-policy'), what).toBe(API_CSP);
+      await res.arrayBuffer();
+    }
+    // Pages keep theirs: the strict page, and the check page with its own COOP.
+    const page = await ts(`/p/${unknown}`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'none' } });
+    baseline(page, 'page');
+    expect(page.headers.get('content-security-policy')).toBe(CSP);
+    expect(page.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    await page.text();
+    const check = await ts(`/p/${unknown}?check`, { ip: freshIp() });
+    baseline(check, 'check page');
+    expect(check.headers.get('cross-origin-opener-policy')).toBe('same-origin-allow-popups');
+    expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP.replace("worker-src 'self'", "worker-src 'none'"));
+    await check.text();
   });
 });
 

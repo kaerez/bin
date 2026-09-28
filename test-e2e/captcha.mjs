@@ -263,10 +263,12 @@ try {
     await scratch.close();
     // What the record holds (opened here with the browser's own cookie, as only the strict page could).
     // All of the context's cookies: this one is scoped to the share's path, so a lookup for the origin's "/" would not list it.
-    const pk = (await ctx.cookies()).find((c) => c.name === '__Secure-secbin_pk');
+    // Named by the round trip's nonce (one per tab): __Secure-secbin_pk_<n> = <key>.<issued>.
+    const pk = (await ctx.cookies()).find((c) => c.name === `__Secure-secbin_pk_${n}`);
     check('the page key cookie: HttpOnly, Secure, SameSite=Strict, scoped to the share\'s path, 15 minutes',
       pk && pk.httpOnly && pk.secure && pk.sameSite === 'Strict' && pk.path === `/p/${id}` && pk.expires > Date.now() / 1000 && pk.expires <= Date.now() / 1000 + 900 + 5, JSON.stringify(pk));
-    const [cn, ckey] = (pk ? pk.value : '.').split('.');
+    const cn = pk ? pk.name.slice('__Secure-secbin_pk_'.length) : '';
+    const [ckey] = (pk ? pk.value : '.').split('.');
     const b64 = (x) => Buffer.from(x, 'base64url');
     const aesKey = await webcrypto.subtle.importKey('raw', b64(ckey), { name: 'AES-GCM' }, false, ['decrypt']);
     const plain = JSON.parse(new TextDecoder().decode(await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(iv), additionalData: new TextEncoder().encode(`secbin-page/v1\np\n${id}\n${n}\n`) }, aesKey, b64(ct))));
@@ -312,6 +314,25 @@ try {
       return reg && reg.active ? new URL(reg.active.scriptURL).pathname : null;
     });
     check('the app\'s service worker still registers from normal pages (/sw.js)', sw === '/sw.js', String(sw));
+    // PoC N3: a script of this origin (the check page's, say) poisons Cache Storage; offline, the
+    // worker serves only bodies its build lists (a poisoned one fails), rebuilt with its own headers.
+    const q = await ctx.newPage(); // not watched: the offline probes log network errors on purpose
+    await q.goto(`${BASE}/`);
+    await q.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 15000 }).catch(() => {});
+    await q.evaluate(async () => {
+      for (const name of await caches.keys()) {
+        const c = await caches.open(name);
+        await c.put(new URL('/js/pwa.js', location.href).href, new Response('window.__poisoned = true;', { headers: { 'content-type': 'text/javascript' } }));
+      }
+    });
+    await ctx.setOffline(true);
+    const off = await q.evaluate(async () => {
+      const get = async (u) => { try { const r = await fetch(u); return { ok: r.ok, csp: r.headers.get('content-security-policy'), text: (await r.text()).slice(0, 40) }; } catch { return { failed: true }; } };
+      return { poisoned: await get('/js/pwa.js'), genuine: await get('/css/styles.css') };
+    });
+    await ctx.setOffline(false);
+    check('PoC N3: offline, a poisoned cache entry is not served (the request fails)', off.poisoned.failed === true, JSON.stringify(off.poisoned));
+    check('offline: a genuine cached asset is served, with the build\'s own CSP', off.genuine.ok === true && /default-src 'none'/.test(off.genuine.csp || ''), JSON.stringify(off.genuine));
     await ctx.close();
   }
   // Opened from another site: that navigation gets no page key, so the page reloads itself once (?pk) and goes on.

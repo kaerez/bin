@@ -135,7 +135,42 @@ export function withCachePolicy(res) {
     out.headers.set(EDGE_CACHE_CONTROL, 'no-store');
   }
   if (!out.headers.has('cache-control')) out.headers.set('cache-control', 'no-store');
+  withBaselineHeaders(out);
   return out;
+}
+
+/**
+ * The policy of a Worker response that is not a page: nothing loads, nothing
+ * frames it, and opened as a document it is sandboxed (an opaque origin, no
+ * script), so a window opened to it — by a script on the check page, say —
+ * is no same-origin realm outside the page CSP.
+ */
+export const API_CSP = "default-src 'none'; frame-ancestors 'none'; sandbox";
+
+/**
+ * The isolation headers on every response the Worker returns (API answers,
+ * chunks, errors, redirects and pages alike), where the route set none of its
+ * own: COOP same-origin (a window opened to it lands in its own browsing
+ * context group), CORP same-origin, X-Frame-Options DENY, nosniff and no
+ * referrer. The CSP: anything that is not HTML (JSON, chunks, plain-text
+ * errors, redirects) always gets API_CSP, which is stricter than any page
+ * policy (a page policy there was only copied along with the page headers);
+ * an HTML page keeps its own (the strict one, the Turnstile pages', the check
+ * page's), or gets the strict page CSP when it has none. A page's own COOP
+ * (the check page's) is kept too.
+ */
+export function withBaselineHeaders(res) {
+  const h = res.headers;
+  const setIfAbsent = (k, v) => { if (!h.has(k)) h.set(k, v); };
+  setIfAbsent('cross-origin-opener-policy', 'same-origin');
+  setIfAbsent('cross-origin-resource-policy', 'same-origin');
+  setIfAbsent('x-frame-options', 'DENY');
+  setIfAbsent('x-content-type-options', 'nosniff');
+  setIfAbsent('referrer-policy', 'no-referrer');
+  const html = /^\s*text\/html\b/i.test(h.get('content-type') || '');
+  if (!html) h.set('content-security-policy', API_CSP);
+  else if (!h.has('content-security-policy')) h.set('content-security-policy', CSP);
+  return res;
 }
 
 export function redirect(location, status = 302) {

@@ -67,6 +67,19 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     minutes reach siteverify (`429 rate_limited`), a failed token counts as an invalid request,
     the check page is behind the Guard's block and a rate limit and looks nothing up, and a
     missing or ended share answers `403 captcha_required` without a grant, like a protected one.
+  - **Re-audit fixes (N1–N3, N6):**
+    - a Drive key read from the tab's `sessionStorage` is used only when its key check value
+      equals the Drive's (`GET /api/private/drive` now returns `kcv`); a planted key is removed
+      and the Drive asks to be unlocked; the return from a CAPTCHA page also removes any Drive
+      key found in the tab;
+    - every Worker response carries COOP and CORP `same-origin`, `X-Frame-Options: DENY`,
+      `nosniff` and `no-referrer`, and anything that is not HTML
+      `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`;
+    - the service worker serves a cached copy only when its SHA-256 is in the build's integrity
+      manifest (generated into `sw.js` by `tools/sw-manifest.mjs`), rebuilt with the build's own
+      headers; a copy that does not match is deleted and the request fails;
+    - the page-key cookie is named by its nonce (`__Secure-secbin_pk_<n>`), so two tabs of one
+      share keep their own; at most 4 per share path.
   - **Wording:** the UI calls the Turnstile check "CAPTCHA" everywhere (Admin → Security →
     CAPTCHA, the waiting and load-failure notes on login, Account and the home page).
 - **Reverse shares when the owner starts over** (docs/REVERSE.md §9, docs/DRIVE.md §3.2): the
