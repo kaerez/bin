@@ -21,6 +21,18 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   file, and each item's kind against what the link accepts. A mismatch is never added to the
   Drive: it is recorded as failed (new reasons `type`, `size`, `kind`) and listed, to delete.
 
+- **Received names are cleaned first, then checked again (ZIP slip).** The viewer checked a
+  file or Drive share's paths before removing their hidden characters and never after, so a
+  modified sender could write `.`, U+200B, `.` (which becomes `..`) or a leading U+200B segment
+  (which becomes `/`) and get `../` or absolute members into **Download all** / **Download
+  folder** ZIPs. Every received path is now cleaned and then validated (`files.js`
+  `cleanPath` / `cleanEntries`); such a path, or two names that clean to the same path, refuse
+  the manifest. The ZIP writer (`zip.js` `memberName`) cleans and checks each member name again
+  right before writing it and refuses `..`, absolute paths, drive letters, backslashes, empty
+  segments and duplicates, for file shares, Drive shares and Drive folders. `secbin get` now
+  also saves and lists names cleaned (it kept the hidden characters on disk), reports how many
+  were renamed, cleans `--path`, and refuses to write a name that still holds them.
+
 - **Every step-up takes a passkey: Admin → Import / export (the account and system export and
   import) and Admin → Audit → Clear logs** confirm with the owner's password or, the field left
   empty, a fresh passkey assertion (`POST /api/private/me/reauth`, then `{ reauth }`), verified
@@ -498,6 +510,19 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
     password or a passkey, and an API key cannot do it (`403 step_up_required`, `weakens:
     ["accept"]`). Adding a note does not.
   - The CLI does not send to Receive links; it is unchanged.
+
+- **Admin → Import / export: user id lists for the account export and import**, as the Drive
+  keys card has had (`public/dashboard/js/id-list.js`, now shared by both cards). Export: each
+  row shows the user's id; a search by user name or id, Select all / Deselect all of the rows
+  shown, "Choose from an id list" (an uploaded plain text list, one id per line, or a JSON
+  array) and "Download the chosen ids"; the per-part checkboxes and their bulk toggles are as
+  before. Import: each row shows the id in the file; an uploaded id list takes over the accounts
+  it names (by the id in the file, or the id of the account here that the row updates) with
+  their usual action and skips the others, and "Download the ids in the file". An id list holds
+  user ids only, never keys, passwords or other credentials, and only chooses rows: an existing
+  account still only gets its role set and passkeys added. The export document now carries each
+  user's id (`users[].id`, `owner.id`: the id on the exporting server); an import accepts it and
+  never uses it (a created account gets a new id).
 
 - **Admin → Import / export → Drive keys: Verify** (docs/DRIVE.md §3.2): a saved Drive keys
   export is decrypted in the browser and checked against this server, read-only, after the

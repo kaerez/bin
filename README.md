@@ -239,7 +239,11 @@ working.
   codes; never the owner's password, sessions or shares) to a file **encrypted in the
   browser** with a passphrase (Argon2id + AES-256-GCM), and imports such a file after
   decrypting it locally: the parts chosen again per user, a preview (dry run), per-user
-  skip/create/update or rename, then an all-or-nothing import. An import never removes or
+  skip/create/update or rename, then an all-or-nothing import. Users are picked by id lists too:
+  on export a search by name or id, Select all / Deselect all of those shown, an uploaded id list
+  and a download of the chosen ids; on import an uploaded list chooses the accounts to take over
+  and the file's ids can be downloaded (a plain text list of user ids, never keys or
+  credentials). An import never removes or
   overwrites an existing account's credentials: an existing account (the owner included) only
   gets its role set and the imported passkeys added. Both need the owner to confirm again (the
   password, or a passkey).

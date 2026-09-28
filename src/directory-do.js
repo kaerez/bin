@@ -4008,7 +4008,8 @@ export class Directory extends DurableObject {
     // Never produce a file that the import would refuse.
     if (picks.length > MAX_EXPORT_USERS) return fail(413, 'too_many_users', `An export holds at most ${MAX_EXPORT_USERS} users — export them in parts.`);
     for (const { u, parts: P } of picks) {
-      const e = { username: u.username };
+      // The user id (this server's) travels too, for the id lists of Import / export; an import ignores it.
+      const e = { id: u.id, username: u.username };
       if (P.includes('credentials')) e.credentials = { salt: u.pw_salt, t: u.pw_t, verifier: u.pw_verifier, disabled: !!u.disabled };
       // A user's role, by name (the role itself travels in `system`).
       if (P.includes('role')) e.role = this.#role(u.role_id)?.name ?? 'Default';
@@ -4025,7 +4026,7 @@ export class Directory extends DurableObject {
     const owner = OP.length ? this.#owner() : null;
     const ownerLog = [];
     if (owner) {
-      doc.owner = {};
+      doc.owner = { id: owner.id };
       if (OP.includes('passkeys')) {
         doc.owner.passkeys = { keys: this.#exportPasskeys(owner) };
         ownerLog.push(`passkeys(${doc.owner.passkeys.keys.length})`);

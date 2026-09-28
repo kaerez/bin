@@ -4,8 +4,12 @@
 // import rule (an existing account takes only its role and passkeys, the owner
 // only passkeys: the other parts are shown but disabled and never sent), and
 // the step-up of both (confirm.js, real: the typed password stretched into
-// `current`, or, the field left empty, a passkey assertion as `reauth`).
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+// `current`, or, the field left empty, a passkey assertion as `reauth`); and
+// the user id lists (id-list.js): on export a search, Select all / Deselect
+// all of the rows shown, an uploaded id list and a download of the chosen ids;
+// on import an uploaded list that only chooses the accounts to take over (the
+// import rule unchanged) and a download of the ids in the file.
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const calls = { exportData: [], importData: [], reauth: 0, prelogin: [] };
 const pk = { supported: true, keys: 1 };
@@ -61,7 +65,20 @@ beforeEach(async () => {
   panel = document.body.appendChild(document.createElement('div'));
   await renderPortable(panel, profile);
 });
+afterEach(() => { vi.restoreAllMocks(); });
 const cards = () => panel.querySelectorAll('.card');
+const pick = (input, files) => { Object.defineProperty(input, 'files', { configurable: true, get: () => files }); input.dispatchEvent(new Event('change')); };
+/** What a download saves: the Blob and the file name. */
+function captureSaves() {
+  const saved = [];
+  let last = null;
+  URL.createObjectURL = (b) => { last = b; return 'blob:x'; };
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() { saved.push({ blob: last, name: this.download }); });
+  return saved;
+}
+const A = 'a'.repeat(16);
+const B = 'b'.repeat(16);
+const O = 'o'.repeat(16);
 
 describe('export', () => {
   it('the owner is the first row, with only passkeys and recovery codes (off by default)', () => {
@@ -82,7 +99,7 @@ describe('export', () => {
 
   it('Select all / Deselect all per column include the owner row; the owner\'s parts go separately', async () => {
     const exp = cards()[0];
-    click(exp, 'Select all: users to export');
+    click(exp, 'Select all: users to export (those shown)');
     expect(['owner', 'alice', 'bob'].every((n) => q(exp, `Export ${n}`).checked)).toBe(true);
     click(exp, 'Select all: Passkeys for every user');
     click(exp, 'Select all: Recovery codes for every user');
@@ -132,8 +149,8 @@ describe('export', () => {
     for (const state of [{ keys: 0 }, { supported: false }]) {
       Object.assign(pk, { supported: true, keys: 1 }, state);
       [...exp.querySelectorAll('button')].find((b) => b.textContent === 'Encrypt and download').click();
-      await until(() => /Enter your current password/.test(exp.querySelector('p.msg').textContent));
-      exp.querySelector('p.msg').textContent = '';
+      await until(() => /Enter your current password/.test(exp.querySelector('#ax-msg').textContent));
+      exp.querySelector('#ax-msg').textContent = '';
     }
     expect(calls.exportData).toHaveLength(0);
     expect(calls.reauth).toBe(0);
@@ -144,8 +161,86 @@ describe('export', () => {
     q(exp, 'Export owner').click();
     q(exp, MINE).value = 'pw';
     [...exp.querySelectorAll('button')].find((b) => b.textContent === 'Encrypt and download').click();
-    await until(() => /Choose what to export for "owner"/.test(exp.querySelector('p.msg').textContent));
+    await until(() => /Choose what to export for "owner"/.test(exp.querySelector('#ax-msg').textContent));
     expect(calls.exportData).toHaveLength(0);
+  });
+});
+
+
+describe('export: the user id lists', () => {
+  const exp = () => cards()[0];
+  const shownNames = () => [...exp().querySelectorAll('#ax-users tr')].filter((tr) => !tr.hidden).map((tr) => tr.querySelector('td[data-label="User"]').firstChild.textContent);
+  const picked = () => ['owner', 'alice', 'bob'].filter((n) => q(exp(), `Export ${n}`).checked);
+  const find = (text) => { const s = exp().querySelector('#ax-search'); s.value = text; s.dispatchEvent(new Event('input')); };
+
+  it('shows each user\'s id; the search finds by name or id; Select all / Deselect all take the rows shown', () => {
+    expect([...exp().querySelectorAll('#ax-users tr')].map((tr) => tr.dataset.id)).toEqual([O, A, B]);
+    expect(exp().querySelector('#ax-users tr[data-id="' + A + '"] td[data-label="User"]').textContent).toBe(`alice${A}`);
+    const search = exp().querySelector('#ax-search');
+    expect(search.type).toBe('search');
+    expect(search.closest('label').querySelector('.field-label').textContent).toBe('Find users');
+    expect(exp().querySelector('#ax-count').getAttribute('role')).toBe('status');
+    expect(exp().querySelector('#ax-count').textContent).toBe('0 of 3 chosen');
+    find('bo');
+    expect(shownNames()).toEqual(['bob']);
+    click(exp(), 'Select all: users to export (those shown)');
+    expect(picked()).toEqual(['bob']);
+    expect(exp().querySelector('#ax-count').textContent).toBe('1 of 3 chosen');
+    find(A.slice(0, 5));
+    expect(shownNames()).toEqual(['alice']);
+    click(exp(), 'Select all: users to export (those shown)');
+    expect(picked()).toEqual(['alice', 'bob']);
+    find('');
+    expect(shownNames()).toEqual(['owner (you, owner)', 'alice', 'bob']);
+    find('nobody');
+    expect(shownNames()).toEqual([]);
+    click(exp(), 'Deselect all: users to export (those shown)'); // nothing shown: nothing changes
+    expect(picked()).toEqual(['alice', 'bob']);
+    find('ali');
+    click(exp(), 'Deselect all: users to export (those shown)');
+    expect(picked()).toEqual(['bob']);
+    // The part checkboxes and their bulk toggles are still there, for every user.
+    click(exp(), 'Select all: Passkeys for every user');
+    expect(['owner', 'alice', 'bob'].every((n) => q(exp(), `Passkeys for ${n}`).checked)).toBe(true);
+  });
+
+  it('an uploaded id list chooses exactly those users (hidden or not), and they are what is exported', async () => {
+    q(exp(), 'Export bob').click();
+    const s = exp().querySelector('#ax-search');
+    s.value = 'bob';
+    s.dispatchEvent(new Event('input'));
+    const upload = exp().querySelector('#ax-ids-file');
+    expect(upload.closest('label').querySelector('.field-label').textContent).toBe('Choose from an id list (user ids only: one per line, or a JSON array)');
+    pick(upload, [new File([`${A}\nnot-a-user-id\n${'z'.repeat(16)}\n`], 'ids.txt')]);
+    await until(() => !exp().querySelector('#ax-ids-file-msg').hidden);
+    expect(picked()).toEqual(['alice']);
+    expect(exp().querySelector('#ax-ids-file-msg').textContent).toBe('1 of 2 ids in the list are accounts here and are now chosen; the others are not on this server.');
+    expect(exp().querySelector('#ax-ids-file-msg').closest('[role="status"]')).not.toBeNull();
+    // A JSON array too, the owner included.
+    pick(upload, [new File([JSON.stringify([O, B])], 'ids.json')]);
+    await until(() => picked().length === 2);
+    expect(picked()).toEqual(['owner', 'bob']);
+    q(exp(), 'Passkeys for owner').click();
+    q(exp(), MINE).value = 'pw';
+    [...exp().querySelectorAll('button')].find((b) => b.textContent === 'Encrypt and download').click();
+    await until(() => calls.exportData.length === 1);
+    expect(calls.exportData[0].owner).toEqual(['passkeys']);
+    expect(calls.exportData[0].users).toEqual([{ id: B, parts: ['role'] }]);
+  });
+
+  it('downloads the chosen ids as a plain text list, user ids only', async () => {
+    const saves = captureSaves();
+    const down = exp().querySelector('#ax-ids-save');
+    expect(down.textContent).toBe('Download the chosen ids (a list of user ids, no keys or credentials)');
+    expect(exp().textContent).toMatch(/plain text file of the chosen user ids, one per line, with no keys, passwords or other credentials/);
+    q(exp(), 'Export owner').click();
+    q(exp(), 'Export bob').click();
+    down.click();
+    expect(saves).toHaveLength(1);
+    expect(await saves[0].blob.text()).toBe(`${O}\n${B}\n`);
+    expect(saves[0].blob.type).toBe('text/plain');
+    expect(saves[0].name).toMatch(/^secbin-user-ids-.*\.txt$/);
+    expect(calls.exportData).toHaveLength(0); // nothing sent to the server
   });
 });
 
@@ -263,5 +358,80 @@ describe('import', () => {
     [...imp.querySelectorAll('button')].find((b) => b.textContent === 'Preview').click();
     await until(() => /Choose what to import for "bob"/.test(imp.querySelector('p.msg:not([hidden])')?.textContent || ''));
     expect(calls.importData).toHaveLength(0);
+  });
+  describe('the user id lists', () => {
+    const withIds = () => {
+      fileDoc = { format: 'secbin-export/v1', created: 1, owner: { id: 'O'.repeat(16), passkeys: { keys: [key('ownerkey')] }, recoveryCodes: ['d'.repeat(64)] },
+        users: [{ id: 'B'.repeat(16), ...all('bob') }, { id: 'C'.repeat(16), ...all('carol') }, { id: 'D'.repeat(16), username: 'dave', role: 'Default' }] };
+    };
+    const openIds = async () => {
+      const imp = cards()[1];
+      Object.defineProperty(q(imp, 'Export file'), 'files', { configurable: true, value: [{ size: 10, text: async () => '{}' }] });
+      [...imp.querySelectorAll('button')].find((b) => b.textContent === 'Decrypt').click();
+      await until(() => imp.querySelector('#ai-ids-file'));
+      return imp;
+    };
+    const actions = (imp) => ['the owner', 'bob', 'carol', 'dave'].map((n) => q(imp, `Action for ${n}`).value);
+
+    it('shows the ids in the file; an uploaded list takes over the accounts it names and skips the others, the import rule unchanged', async () => {
+      withIds();
+      const imp = await openIds();
+      const cells = [...imp.querySelectorAll('table.part-table tbody td[data-label="User"]')].map((td) => td.textContent);
+      expect(cells).toEqual([`owner (in the file)${'O'.repeat(16)}`, `bob${'B'.repeat(16)}`, `carol${'C'.repeat(16)}`, `dave${'D'.repeat(16)}`]);
+      expect(actions(imp)).toEqual(['skip', 'skip', 'create', 'skip']);
+      const upload = imp.querySelector('#ai-ids-file');
+      expect(upload.closest('label').querySelector('.field-label').textContent).toBe('Choose from an id list (user ids only: one per line, or a JSON array)');
+      // bob by the id of the account here, dave (no credentials: cannot be created); carol is not listed.
+      pick(upload, [new File([`${B}\n${'D'.repeat(16)}\n${'z'.repeat(16)}\n`], 'ids.txt')]);
+      await until(() => !imp.querySelector('#ai-ids-file-msg').hidden);
+      expect(actions(imp)).toEqual(['skip', 'update', 'skip', 'skip']);
+      expect(imp.querySelector('#ai-ids-file-msg').textContent).toBe('1 of 3 ids in the list are accounts in this file and are now taken over; every other account in the file is skipped. 1 account in the list cannot be created (no credentials in the file). Nothing changes until you import.');
+      // bob exists here: still only its role and passkeys, whatever the list says.
+      for (const part of ['Credentials', 'API keys', 'Recovery codes']) {
+        expect(q(imp, `Import ${part} for bob`).disabled).toBe(true);
+        expect(q(imp, `Import ${part} for bob`).checked).toBe(false);
+      }
+      // By the ids in the file: the owner row and carol.
+      pick(upload, [new File([JSON.stringify(['O'.repeat(16), 'C'.repeat(16)])], 'ids.json')]);
+      await until(() => q(imp, 'Action for carol').value === 'create' && q(imp, 'Action for bob').value === 'skip');
+      expect(actions(imp)).toEqual(['update', 'skip', 'create', 'skip']);
+      expect(q(imp, 'Import Recovery codes for the owner').disabled).toBe(true);
+      pick(upload, [new File([`${B}\n${'C'.repeat(16)}\n`], 'ids.txt')]);
+      await until(() => q(imp, 'Action for bob').value === 'update');
+      q(imp, MINE).value = 'pw';
+      [...imp.querySelectorAll('button')].find((b) => b.textContent === 'Preview').click();
+      await until(() => calls.importData.length === 1);
+      const d = calls.importData[0].decisions;
+      expect(d.owner).toBe(false);
+      expect(d.users).toEqual({
+        bob: { as: 'bob', action: 'update', parts: ['role', 'passkeys'] },
+        carol: { as: 'carol', action: 'create', parts: ['credentials', 'role', 'apiKeys', 'passkeys', 'recoveryCodes'] },
+      });
+      // A new list after a preview asks for a new preview.
+      await until(() => !imp.querySelector('button.btn.danger').disabled);
+      pick(upload, [new File([`${B}\n`], 'ids.txt')]);
+      await until(() => q(imp, 'Action for carol').value === 'skip');
+      expect(imp.querySelector('button.btn.danger').disabled).toBe(true);
+    });
+
+    it('downloads the ids in the file as a plain text list, user ids only', async () => {
+      withIds();
+      const imp = await openIds();
+      const saves = captureSaves();
+      const down = imp.querySelector('#ai-ids-save');
+      expect(down.textContent).toBe('Download the ids in the file (a list of user ids, no keys or credentials)');
+      expect(imp.textContent).toMatch(/An id list only chooses the accounts to take over/);
+      expect(imp.textContent).toMatch(/An existing account keeps its password, recovery codes, API keys and passkeys whichever way it was chosen/);
+      down.click();
+      expect(await saves[0].blob.text()).toBe(`${'O'.repeat(16)}\n${'B'.repeat(16)}\n${'C'.repeat(16)}\n${'D'.repeat(16)}\n`);
+      expect(saves[0].blob.type).toBe('text/plain');
+      expect(calls.importData).toHaveLength(0);
+    });
+
+    it('a file without ids: nothing to download', async () => {
+      const imp = await open();
+      expect(imp.querySelector('#ai-ids-save').disabled).toBe(true);
+      expect(imp.querySelectorAll('table.part-table tbody .mono.muted.block')).toHaveLength(0);
+    });
   });
 });

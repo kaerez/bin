@@ -11,6 +11,12 @@
 // recovery codes, API keys or passkeys: it only sets its role and adds
 // passkeys, so the parts that cannot apply to an existing account are shown
 // but disabled.
+// User id lists (id-list.js, as for the Drive keys): the export's users are
+// found by name or id, chosen (Select all / Deselect all of those shown, or an
+// uploaded list) and their ids downloaded; the import's accounts are taken
+// over from an uploaded list and the file's ids downloaded. A list holds user
+// ids only, never keys or credentials, and it only chooses rows: the import
+// rule above is the same whichever way a row was chosen.
 // The Drive keys (admin-keysport.js) are a card of their own here, in a file
 // of their own, never part of the account export.
 
@@ -20,6 +26,7 @@ import { h, clear, showMsg, formatDate, friendlyError } from '../../js/common.js
 import { toast } from '../../js/ui.js';
 import { keysPortCard } from './admin-keysport.js';
 import { confirmStep, canUsePasskey } from './confirm.js';
+import { UID_RE, idPicker, idListUpload, saveIds } from './id-list.js';
 
 // The label's text is the control's name (2.5.3); a hint sits beside it, outside the label.
 const field = (label, control, hint) => {
@@ -32,6 +39,10 @@ const check = (label, checked = false, note = '') => {
 };
 const box = (label, checked = false) => h('input', { type: 'checkbox', checked, 'aria-label': label });
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+/** A user's id under its name (in a table cell), when it has one. */
+const idLine = (id) => (typeof id === 'string' && UID_RE.test(id) ? h('span.mono.muted.block', { text: id }) : null);
+/** What the owner's row of a document holds, in words (its `id` is not a part). */
+const ownerHas = (o) => Object.keys(o).filter((k) => k !== 'id').map((k) => (k === 'passkeys' ? 'passkeys' : 'recovery codes')).join(' and ');
 // What each part holds, and what to know about it (shown on export and import).
 const SYSTEM_PARTS = [
   ['settings', 'Settings', 'Server-wide settings (brute-force protection, lockout, logs, public access, accessibility statement…).'],
@@ -59,7 +70,7 @@ const MINE = 'Your password (or leave it empty to confirm with a passkey)';
 /** `{ current }` from the typed password (the field is cleared), or `{ reauth }` from a passkey when it is empty. */
 const stepFrom = async (input, profile) => confirmStep(input, profile.user.username, !input.value && await canUsePasskey());
 
-/** Select all / Deselect all for a set of checkboxes (a part column, or the users). */
+/** Select all / Deselect all for a set of checkboxes (a part column). */
 function bulk(label, what, boxes) {
   const set = (on) => () => {
     for (const b of boxes()) {
@@ -80,34 +91,48 @@ const none = (why) => h('span.muted', { text: '—', title: why, 'aria-label': w
 export async function renderPortable(panel, profile) {
   const p = clear(panel);
   let users = [];
-  try { users = (await admin.users()).users.filter((u) => u.role === 'user'); } catch (e) { showMsg(p.appendChild(h('p.msg')), friendlyError(e)); }
-  p.appendChild(exportCard(users, profile));
-  p.appendChild(importCard(users, profile));
+  let ownerId = profile.user.id ?? null;
+  try {
+    const all = (await admin.users()).users;
+    users = all.filter((u) => u.role === 'user');
+    ownerId = all.find((u) => u.role === 'owner')?.id ?? ownerId;
+  } catch (e) { showMsg(p.appendChild(h('p.msg')), friendlyError(e)); }
+  p.appendChild(exportCard(users, profile, ownerId));
+  p.appendChild(importCard(users, profile, ownerId));
   // The Drive keys (docs/DRIVE.md §3.1): a file of their own, never in the export above.
   const slot = p.appendChild(h('div', { id: 'drive-keys-slot' }));
   slot.replaceWith(await keysPortCard(profile));
 }
 
 // ── export ───────────────────────────────────────────────────────────────────
-function exportCard(users, profile) {
+function exportCard(users, profile, ownerId) {
   const sysChecks = SYSTEM_PARTS.map(([k, label, note]) => ({ k, ...check(label, k !== 'turnstile', note) }));
   // One row per account: whether to export it, and each part. The owner's row
   // comes first, with only its passkeys and recovery codes (all off by
   // default); for users the role is on by default.
   const me = profile.user.username;
   const rows = [
-    { owner: true, name: me, label: `${me} (you, owner)`, pick: box(`Export ${me}`),
+    { owner: true, id: ownerId, name: me, label: `${me} (you, owner)`, pick: box(`Export ${me}`),
       parts: Object.fromEntries(USER_PARTS.filter(([k]) => OWNER_PARTS.includes(k)).map(([k, label]) => [k, box(`${label} for ${me}`)])) },
-    ...users.map((u) => ({ u, name: u.username, label: u.username, pick: box(`Export ${u.username}`),
+    ...users.map((u) => ({ u, id: u.id, name: u.username, label: u.username, pick: box(`Export ${u.username}`),
       parts: Object.fromEntries(USER_PARTS.map(([k, label]) => [k, box(`${label} for ${u.username}`, k === 'role')])) })),
   ];
+  for (const r of rows) {
+    r.el = h('tr', { dataset: { id: r.id ?? '' } },
+      h('td', { dataset: { label: 'Export' } }, r.pick), h('td', { dataset: { label: 'User' } }, r.label, idLine(r.id)),
+      ...USER_PARTS.map(([k, label]) => h('td', { dataset: { label } }, r.parts[k] ?? none('never exported for the owner'))));
+  }
   const table = h('div.table-wrap', {}, h('table.table.part-table', {},
     h('thead', {}, h('tr', {}, h('th', { text: 'Export' }), h('th', { text: 'User' }), ...USER_PARTS.map(([, label]) => h('th', { text: label })))),
-    h('tbody', {}, ...rows.map((r) => h('tr', {},
-      h('td', { dataset: { label: 'Export' } }, r.pick), h('td', { dataset: { label: 'User' }, text: r.label }),
-      ...USER_PARTS.map(([k, label]) => h('td', { dataset: { label } }, r.parts[k] ?? none('never exported for the owner'))))))));
-  const bulks = h('div.stack.bulk', {},
-    bulk('Users', 'users to export', () => rows.map((r) => r.pick)),
+    h('tbody', { id: 'ax-users' }, ...rows.map((r) => r.el))));
+  // The users: search, Select all / Deselect all of those shown, an id list (id-list.js).
+  const picker = idPicker(rows.map((r) => ({ id: r.id, name: r.name, box: r.pick, el: r.el })), {
+    prefix: 'ax',
+    labels: { selectAll: 'Select all: users to export (those shown)', deselectAll: 'Deselect all: users to export (those shown)' },
+    download: 'Download the chosen ids (a list of user ids, no keys or credentials)',
+    hint: 'The downloaded list is a plain text file of the chosen user ids, one per line, with no keys, passwords or other credentials: choose it here again later, or in the import below, to pick the same users. A list only chooses the users; the parts are still ticked per user.',
+  });
+  const bulks = h('div.stack.bulk', {}, picker.top,
     ...USER_PARTS.map(([k, label]) => bulk(label, `${label} for every user`, () => rows.map((r) => r.parts[k]).filter(Boolean))));
   const pass1 = pw('Export passphrase', 'new-password');
   const pass2 = pw('Repeat export passphrase', 'new-password');
@@ -117,7 +142,7 @@ function exportCard(users, profile) {
   pass1.addEventListener('input', syncNoPass);
   syncNoPass();
   const mine = pw(MINE, 'current-password');
-  const msg = h('p.msg', { role: 'status', hidden: true });
+  const msg = h('p.msg', { id: 'ax-msg', role: 'status', hidden: true });
   const go = h('button.btn', { type: 'button', text: 'Encrypt and download' });
 
   go.onclick = async () => {
@@ -136,7 +161,7 @@ function exportCard(users, profile) {
       const { document } = await admin.exportData({ ...step, system: anySys ? system : false, owner, users: chosen.filter((c) => !c.r.owner).map((c) => ({ id: c.r.u.id, parts: c.parts })) });
       const text = await sealExport(document, pass1.value);
       download(text, `secbin-export-${location.hostname}-${new Date().toISOString().slice(0, 10)}.json`);
-      const what = `Exported ${document.system ? 'the system configuration, ' : ''}${document.owner ? `your ${Object.keys(document.owner).map((k) => (k === 'passkeys' ? 'passkeys' : 'recovery codes')).join(' and ')}, ` : ''}${plural(document.users.length, 'user')}.`;
+      const what = `Exported ${document.system ? 'the system configuration, ' : ''}${document.owner ? `your ${ownerHas(document.owner)}, ` : ''}${plural(document.users.length, 'user')}.`;
       showMsg(msg, pass1.value ? `${what} Keep the file and its passphrase apart.` : `${what} No passphrase: anyone with the file can read it.`, false);
       toast('Export saved.');
       pass1.value = pass2.value = '';
@@ -153,7 +178,7 @@ function exportCard(users, profile) {
     h('h2.section-title', { text: 'Export' }),
     h('p.subtitle', { text: 'The file is encrypted in your browser (Argon2id + AES-256-GCM) with the passphrase below — without it, it cannot be read or imported. Sessions and shares are never exported, nor your own password, role or API keys, nor Drive content (files, folders): Drive options travel with the roles, and the Drive keys have their own file (below). Credentials, API keys, passkeys and the Turnstile secret let accounts and services keep working on the target: treat the file as sensitive, and export only what you need.' }),
     h('fieldset.range', {}, h('legend', { text: 'System' }), ...sysChecks.map((c) => c.el)),
-    h('fieldset.range', {}, h('legend', { text: 'Users (you included) and what to export for each' }), bulks, table, partNotes()),
+    h('fieldset.range', {}, h('legend', { text: 'Users (you included) and what to export for each' }), bulks, table, picker.bottom, partNotes()),
     h('div.toolbar', {}, field('Export passphrase', pass1, 'Optional'), field('Repeat export passphrase', pass2)), noPass,
     field(MINE, mine, 'Confirms that it is you.'),
     h('div.btn-row', {}, go), msg);
@@ -169,7 +194,7 @@ function download(text, name) {
 }
 
 // ── import ───────────────────────────────────────────────────────────────────
-function importCard(users, profile) {
+function importCard(users, profile, ownerId) {
   const file = h('input.input', { type: 'file', accept: '.json,application/json', 'aria-label': 'Export file' });
   const pass = pw('Export passphrase', 'off');
   const open = h('button.btn', { type: 'button', text: 'Decrypt' });
@@ -189,7 +214,7 @@ function importCard(users, profile) {
       // Bound the review table before building it (the server re-validates everything).
       if (doc.users.length > 5000) throw new ExportCryptError('This export holds more than 5000 users, which is more than an import accepts.');
       msg.hidden = true;
-      renderReview(review, doc, users, profile);
+      renderReview(review, doc, users, profile, ownerId);
     } catch (e) {
       doc = null;
       clear(review);
@@ -242,7 +267,7 @@ function partBoxes(entry, cols, who) {
   return { boxes, fit, cells, chosen: () => Object.keys(boxes).filter((k) => boxes[k].checked && !boxes[k].disabled) };
 }
 
-function renderReview(out, doc, users, profile) {
+function renderReview(out, doc, users, profile, ownerId) {
   clear(out);
   const existing = new Map(users.map((u) => [u.username.toLowerCase(), u]));
   const me = profile.user.username;
@@ -261,9 +286,9 @@ function renderReview(out, doc, users, profile) {
       h('option', { value: 'skip', text: 'skip' }), h('option', { value: 'update', text: 'update your account: add passkeys' }));
     const pb = partBoxes(doc.owner, cols, 'the owner');
     pb.fit((k) => EXISTING.owner.includes(k));
-    rows.push({ owner: true, name: 'the owner', action, parts: pb, usual: () => 'update' });
+    rows.push({ owner: true, name: 'the owner', action, parts: pb, usual: () => 'update', ids: () => [doc.owner.id, ownerId] });
     body.appendChild(h('tr', {},
-      h('td', { dataset: { label: 'User' }, text: 'owner (in the file)' }),
+      h('td', { dataset: { label: 'User' } }, 'owner (in the file)', idLine(doc.owner.id)),
       h('td', { dataset: { label: 'Import as' }, text: `${me} (you)` }),
       h('td', { dataset: { label: 'Action' } }, action),
       ...pb.cells(doc.owner),
@@ -275,6 +300,7 @@ function renderReview(out, doc, users, profile) {
     const status = h('span.mono.muted');
     const pb = partBoxes(u, cols, u.username);
     let usual = 'skip'; // what "Select all" picks for this row
+    let hereId = null; // the id of the account here it would update
     const sync = () => {
       const name = as.value.trim().toLowerCase();
       const clash = name === ownerName ? 'owner' : existing.has(name) ? 'user' : null;
@@ -285,6 +311,7 @@ function renderReview(out, doc, users, profile) {
         clash === 'user' ? h('option', { value: 'update', text: 'update existing: role + add passkeys' }) : null,
         clash === 'owner' ? h('option', { value: 'update', text: 'update your account: add passkeys' }) : null].filter(Boolean));
       usual = clash ? 'update' : u.credentials ? 'create' : 'skip';
+      hereId = clash === 'owner' ? ownerId : clash === 'user' ? existing.get(name).id : null;
       action.value = [...action.options].some((o) => o.value === keep) ? keep : 'skip';
       pb.fit((k) => !clash || EXISTING[clash].includes(k));
       status.textContent = clash === 'owner' ? 'your own (owner) account — only passkeys can be added; it keeps the Owner role'
@@ -294,9 +321,9 @@ function renderReview(out, doc, users, profile) {
     as.addEventListener('input', sync);
     sync();
     if ([...action.options].some((o) => o.value === 'create')) action.value = 'create';
-    rows.push({ u, name: u.username, action, as, parts: pb, usual: () => usual });
+    rows.push({ u, name: u.username, action, as, parts: pb, usual: () => usual, ids: () => [u.id, hereId] });
     body.appendChild(h('tr', {},
-      h('td', { dataset: { label: 'User' }, text: u.username }),
+      h('td', { dataset: { label: 'User' } }, u.username, idLine(u.id)),
       h('td', { dataset: { label: 'Import as' } }, as),
       h('td', { dataset: { label: 'Action' } }, action),
       ...pb.cells(u),
@@ -321,6 +348,27 @@ function renderReview(out, doc, users, profile) {
   const userBulk = h('div.toolbar.bulk-row', {}, h('span.field-label', { text: 'Users' }),
     h('button.btn.mini', { type: 'button', text: 'Select all', 'aria-label': 'Select all: users to import', on: { click: setUsers(true) } }),
     h('button.btn.mini', { type: 'button', text: 'Deselect all', 'aria-label': 'Deselect all: users to import (skip them)', on: { click: setUsers(false) } }));
+
+  // An id list takes over the accounts it names (each with its usual action) and skips the others.
+  // It only picks rows: an existing account still takes only its role and new passkeys.
+  const takeList = (ids) => {
+    let taken = 0;
+    let cannot = 0;
+    for (const r of rows) {
+      const hit = r.ids().some((id) => id && ids.has(id));
+      const v = hit ? r.usual() : 'skip';
+      if (hit && v === 'skip') cannot++;
+      else if (hit) taken++;
+      if (r.action.value !== v && [...r.action.options].some((o) => o.value === v)) { r.action.value = v; invalidate(); }
+    }
+    return `${taken} of ${plural(ids.size, 'id')} in the list are accounts in this file and are now taken over; every other account in the file is skipped${cannot ? `. ${plural(cannot, 'account')} in the list cannot be created (no credentials in the file)` : ''}. Nothing changes until you import.`;
+  };
+  const upload = idListUpload('ai-ids-file', takeList);
+  const fileIds = [doc.owner?.id, ...doc.users.map((u) => u.id)].filter((id) => typeof id === 'string' && UID_RE.test(id));
+  const saveFileIds = h('button.btn.mini', { type: 'button', id: 'ai-ids-save', text: 'Download the ids in the file (a list of user ids, no keys or credentials)', disabled: !fileIds.length, on: { click: () => saveIds(fileIds) } });
+  const idTools = h('div.stack', {}, h('div.toolbar', {}, upload.el, saveFileIds),
+    h('p.type-hint', { text: 'An id list only chooses the accounts to take over: those it names get their usual action (create a new account, or update the existing one), the others are skipped, and you can still change each row. An existing account keeps its password, recovery codes, API keys and passkeys whichever way it was chosen. An id matches a row by the id in the file, or by the id of the account here that the row updates. The downloaded list is a plain text file of the user ids in the file, one per line, with no keys, passwords or other credentials.' }),
+    upload.live);
 
   const decisions = () => {
     const chosen = sysChecks.filter((c) => c.input.checked).map((c) => c.k);
@@ -370,7 +418,7 @@ function renderReview(out, doc, users, profile) {
   preview.onclick = () => run(true);
   apply.onclick = () => { if (previewed === JSON.stringify(decisions())) run(false); else invalidate(); };
 
-  const ownerHolds = doc.owner ? Object.keys(doc.owner).map((k) => (k === 'passkeys' ? 'passkeys' : 'recovery codes')).join(' and ') : '';
+  const ownerHolds = doc.owner ? ownerHas(doc.owner) : '';
   const bulks = h('div.stack.bulk', {}, userBulk,
     ...cols.map(([k, label]) => bulk(label, `${label} for every user`, () => rows.map((r) => r.parts.boxes[k]).filter(Boolean))));
   out.append(...[
@@ -378,7 +426,7 @@ function renderReview(out, doc, users, profile) {
     sysChecks.length ? h('fieldset.range', {}, h('legend', { text: 'System parts to import' }), ...sysChecks.map((c) => c.el)) : null,
     rows.length ? h('fieldset.range', {}, h('legend', { text: 'Users (the owner included) and what to import for each' }), bulks,
       h('div.table-wrap', {}, h('table.table.part-table', {}, h('thead', {}, h('tr', {}, ...['User', 'Import as', 'Action', ...cols.map(([, label]) => label), 'Here'].map((t) => h('th', { text: t })))), body)),
-      partNotes()) : null,
+      idTools, partNotes()) : null,
     field(MINE, mine, 'Confirms that it is you, for the preview and again for the import.'),
     h('div.btn-row', {}, preview, apply), msg, planBox].filter(Boolean));
 }

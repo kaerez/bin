@@ -22,8 +22,8 @@ import { exportKeys, openKeysExport, importKeys, verifyKeysExport, fpText } from
 import { ExportCryptError } from '../../js/exportcrypt.js';
 import { confirmStep, canUsePasskey } from './confirm.js';
 import { field, secret, fileInput, saveText, liveMsg, datePicker, takeFile, verifyResults } from './kit-ui.js';
+import { UID_RE, parseIds, idPicker } from './id-list.js';
 
-const UID_RE = /^[A-Za-z0-9_-]{16}$/;
 const NODE_RE = /^[A-Za-z0-9_-]{22}$/;
 const SHOW_SEC = 60;
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
@@ -58,61 +58,27 @@ function masked(label, value) {
   return h('span', {}, dots, ' ', b, slot);
 }
 
-/** Ids from an uploaded list: one per line, or a JSON array (anything else ignored). */
-function parseIds(text, re) {
-  let list;
-  try { list = JSON.parse(text); } catch { list = String(text).split(/[\s,;]+/); }
-  if (!Array.isArray(list)) list = [];
-  return [...new Set(list.map((x) => String(x).trim()).filter((x) => re.test(x)))];
-}
-
 /**
- * The account picker: a search box and one checkbox per account (the owner
- * included), Select all / Deselect all (of those shown), Upload an id list,
- * Download the chosen ids. → { el, chosen() }.
+ * The account picker: one checkbox per account (the owner included), with the
+ * search, Select all / Deselect all (of those shown), an uploaded id list and
+ * a download of the chosen ids (id-list.js). → { el, chosen() }.
  */
 function userPicker(accounts, prefix) {
-  const rows = accounts.map((u) => ({ u, box: h('input', { type: 'checkbox', 'aria-label': `Choose ${u.username}` }) }));
-  const search = h('input.input', { type: 'search', id: `${prefix}-search`, placeholder: 'Search by user name or id', maxlength: '64', autocomplete: 'off', spellcheck: 'false' });
-  const count = h('span.mono.muted', { role: 'status' });
-  const list = h('ul.plain-list.user-pick', { id: `${prefix}-users` }, ...rows.map((r) => h('li', { dataset: { id: r.u.id } },
-    h('label.inline', {}, r.box, h('span', { text: ` ${r.u.username}` }), h('span.mono.muted', { text: ` ${r.u.id}${r.u.role === 'owner' ? ' (you)' : ''}` })))));
-  const sync = () => { count.textContent = `${rows.filter((r) => r.box.checked).length} of ${rows.length} chosen`; };
-  const shown = () => rows.filter((r) => !r.box.closest('li').hidden);
-  search.addEventListener('input', () => {
-    const q = search.value.trim().toLowerCase();
-    for (const r of rows) r.box.closest('li').hidden = !!q && !r.u.username.toLowerCase().includes(q) && !r.u.id.toLowerCase().includes(q);
+  const rows = accounts.map((u) => {
+    const box = h('input', { type: 'checkbox', 'aria-label': `Choose ${u.username}` });
+    const el = h('li', { dataset: { id: u.id } },
+      h('label.inline', {}, box, h('span', { text: ` ${u.username}` }), h('span.mono.muted', { text: ` ${u.id}${u.role === 'owner' ? ' (you)' : ''}` })));
+    return { u, id: u.id, name: u.username, box, el };
   });
-  list.addEventListener('change', sync);
-  const set = (on) => () => { for (const r of shown()) r.box.checked = on; sync(); };
-  const upload = fileInput(`${prefix}-ids-file`);
-  upload.accept = '.txt,.json,text/plain,application/json';
-  const { msg: umsg, live: ulive } = liveMsg();
-  upload.addEventListener('change', async () => {
-    const f = upload.files && upload.files[0];
-    if (!f) return;
-    if (f.size > 1024 * 1024) { upload.value = ''; return showMsg(umsg, 'That list is too large (max 1 MiB).'); }
-    const ids = new Set(parseIds(await f.text(), UID_RE));
-    upload.value = '';
-    let hit = 0;
-    for (const r of rows) { r.box.checked = ids.has(r.u.id); if (r.box.checked) hit++; }
-    sync();
-    showMsg(umsg, `${hit} of ${ids.size} id${ids.size === 1 ? '' : 's'} in the list are accounts here and are now chosen${ids.size > hit ? '; the others are not on this server' : ''}.`, false);
+  const picker = idPicker(rows, {
+    prefix,
+    labels: { selectAll: 'Select all users shown', deselectAll: 'Deselect all users shown' },
+    download: 'Download the chosen ids (a list of user ids, no keys)',
+    hint: 'The downloaded list is a plain text file of the chosen user ids, one per line, with no keys: choose it here again later to pick the same users.',
   });
-  const down = h('button.btn.mini', { type: 'button', text: 'Download the chosen ids (a list of user ids, no keys)', on: { click: () => {
-    const ids = rows.filter((r) => r.box.checked).map((r) => r.u.id);
-    saveText(`${ids.join('\n')}\n`, `secbin-user-ids-${location.hostname}-${new Date().toISOString().slice(0, 10)}.txt`);
-  } } });
-  sync();
   return {
-    chosen: () => rows.filter((r) => r.box.checked).map((r) => r.u),
-    el: h('div.stack', {},
-      h('div.toolbar', {}, field('Find users', search),
-        h('button.btn.mini', { type: 'button', text: 'Select all', 'aria-label': 'Select all users shown', on: { click: set(true) } }),
-        h('button.btn.mini', { type: 'button', text: 'Deselect all', 'aria-label': 'Deselect all users shown', on: { click: set(false) } }), count),
-      list,
-      h('div.toolbar', {}, field('Choose from an id list (one id per line, or a JSON array)', upload), down),
-      h('p.type-hint', { text: 'The downloaded list is a plain text file of the chosen user ids, one per line, with no keys: choose it here again later to pick the same users.' }), ulive),
+    chosen: () => picker.chosen().map((r) => r.u),
+    el: h('div.stack', {}, picker.top, h('ul.plain-list.user-pick', { id: `${prefix}-users` }, ...rows.map((r) => r.el)), picker.bottom),
   };
 }
 

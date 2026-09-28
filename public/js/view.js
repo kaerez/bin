@@ -13,7 +13,7 @@
 import './kdf-progress.js';
 import { deriveAccess, openPaste, PasswordRequired, DecryptError } from './crypto.js';
 import { validateHead, validatePaste } from './format.js';
-import { validateManifest, buildTree, basename, cleanName } from './files.js';
+import { validateManifest, buildTree, basename, cleanEntries } from './files.js';
 import { fetchHead, openShare, expireShare, extendDownloads, session, ApiError, publicProfile, publicApi, setPublicAid, setPublicHumanCheck,
   setHumanGrant, humanGrantOf, setHumanGrantListener, shareHuman } from './api.js';
 import { tabStorage, readPageKey, takeKey, goToCheck, loadGrant, saveGrant, CHECK_REFUSED } from './pagekey.js';
@@ -223,10 +223,11 @@ async function doOpen({ id, kind, head, fragment, password }) {
     } else {
       manifest = validateManifest(m);
     }
+    // Clean first, then check again: a path that cleaning makes unsafe refuses the manifest.
+    const cleaned = cleanManifest(manifest);
+    if (cleaned !== manifest && reader) reader = RefsReader.forShare({ id, grant: res.grant, refs: res.refs, manifest: cleaned });
+    manifest = cleaned;
   } catch { throw new DecryptError('malformed manifest'); }
-  const cleaned = cleanManifest(manifest);
-  if (cleaned !== manifest && reader) reader = RefsReader.forShare({ id, grant: res.grant, refs: res.refs, manifest: cleaned });
-  manifest = cleaned;
   // The sender's role's viewer policy, sent with the open (off when absent).
   const viewerCfg = res.viewer && typeof res.viewer === 'object' ? res.viewer : null;
   if (!reader) reader = await ShareReader.create({ id, grant: res.grant, chunks: res.chunks, manifest });
@@ -370,19 +371,16 @@ function renderNote(paste, result) {
 
 // ── file rendering ───────────────────────────────────────────────────────────
 /**
- * Received names without spoofing characters (files.js cleanName): each entry
- * whose path loses any is kept under the cleaned path, marked `renamed`
- * (shown on the item). Saving and zipping use the cleaned paths.
+ * Received names without spoofing characters (files.js cleanEntries): each
+ * entry whose path loses any is kept under the cleaned path, marked `renamed`
+ * (shown on the item), and every cleaned path is checked again (checkPath,
+ * duplicates, file/folder conflicts) — a path that is only safe before
+ * cleaning (".", U+200B, "." → "..") refuses the manifest. Saving and zipping
+ * use the cleaned paths.
  */
 function cleanManifest(manifest) {
-  let changed = false;
-  const entries = manifest.entries.map((e) => {
-    const p = cleanName(e.path);
-    if (p === e.path) return e;
-    changed = true;
-    return { ...e, path: p, renamed: true };
-  });
-  return changed ? { ...manifest, entries } : manifest;
+  const entries = cleanEntries(manifest.entries);
+  return entries === manifest.entries ? manifest : { ...manifest, entries };
 }
 
 const renamedNote = (e) => (e.renamed ? h('span.tree-sub.mono.renamed-note', { text: 'renamed: hidden characters removed' }) : null);
