@@ -18,7 +18,8 @@
 
 import { json, err, methodNotAllowed, decodePathSegment, assertNotCrossSite, assertJsonRequest } from '../lib/http.js';
 import { MAX_BODY } from '../lib/store.js';
-import { directory, ipContext, isBlocked, recordFailure, cachedSettings } from '../lib/guard.js';
+import { directory, ipContext, isBlocked, recordFailure, cachedSettings, rateLimit } from '../lib/guard.js';
+import { parseIp, trackingKey } from '../lib/ip.js';
 import { parseId } from '../lib/ids.js';
 import { createNote, initFile, putChunk, finalizeFile } from './private.js';
 import { PUBLIC_ID } from '../directory-do.js';
@@ -110,6 +111,7 @@ export async function handlePublicApi(request, env, url) {
   }
 
   // ── creation (the account handlers, as the public account) ───────────────
+  let fresh = null; // a tracker row this request stored: given back unless the create succeeds
   const subjects = async () => {
     const keys = [];
     if (usesTracker(mode)) {
@@ -120,6 +122,16 @@ export async function handlePublicApi(request, env, url) {
       if (!TRACKER_RE.test(c) || c !== h) return { error: err(428, 'tracker_required', 'Reload the page to continue.') };
       const t = await dir.trackerSubject(c, g.key);
       if (!t.ok) return { error: err(t.status, t.error, t.message) };
+      if (t.fresh) {
+        fresh = t.subject;
+        // Rotating IPv6 networks inside one /48 do not multiply the allowance. Only
+        // looked at here: a new id counts towards its /48 once its create succeeded
+        // (below), so refused creates from one /64 never block the rest of the /48.
+        const wide = wideNetwork(g);
+        if (wide && (await isBlocked(env, { ...g, key: wide }, 'public-trackers')).blocked) {
+          return { error: err(429, 'tracker_rate_limited', 'Too many new anonymous senders from your network. Try again later.') };
+        }
+      }
       keys.push(t.subject);
     }
     if (usesIp(mode)) keys.push(await dir.ipSubject(g.key));
@@ -142,15 +154,27 @@ export async function handlePublicApi(request, env, url) {
     assertJsonRequest(request, paste ? MAX_BODY : undefined);
     // Chunks and finalize ride on the upload token; only starting a share is checked.
     await requireTurnstile(env, request, TURNSTILE_ACTIONS.public);
-    const { a, error } = await asPublic();
-    if (error) return error;
-    const res = await (paste ? createNote(request, env, a) : initFile(request, env, a));
-    // The admin's "shares" count per tracker: successful creations only.
-    if (res.status === 201) {
-      const t = a.subjects.keys.find((k) => k.startsWith('pub:t:'));
-      if (t) await dir.trackerUsed(t);
+    let res;
+    try {
+      const { a, error } = await asPublic();
+      if (error) return (res = error);
+      res = await (paste ? createNote(request, env, a) : initFile(request, env, a));
+      // The admin's "shares" count per tracker: successful creations only.
+      if (res.status === 201) {
+        const t = a.subjects.keys.find((k) => k.startsWith('pub:t:'));
+        if (t) await dir.trackerUsed(t);
+      }
+      return res;
+    } finally {
+      // A new id is stored only once it has created a share (C6): a refused
+      // create gives its row (and the network's allowance) back; a successful
+      // one counts towards its /48.
+      if (fresh && !(res && res.status === 201)) await dir.dropNewTracker(fresh);
+      else if (fresh) {
+        const wide = wideNetwork(g);
+        if (wide) await rateLimit(env, { ...g, key: wide }, 'public-trackers', wideRule(settings));
+      }
     }
-    return res;
   }
   const fm = p.match(/^\/api\/public\/file\/([^/]+)\/(chunk|finalize)(?:\/(\d{1,6}))?$/);
   if (fm) {
@@ -170,3 +194,22 @@ export async function handlePublicApi(request, env, url) {
   }
   return err(404, 'not_found', 'Not found.');
 }
+
+/**
+ * The wider network of an IPv6 caller (its /48, when the Guard tracks longer
+ * prefixes), or null: new tracker ids are also counted per /48, so rotating
+ * /64s inside one allocation does not multiply `public.newTrackersPerIp`.
+ */
+function wideNetwork(g) {
+  const ip = parseIp(g.ip);
+  if (!ip || ip.v !== 6 || g.settings['guard.v6Prefix'] <= WIDE_V6_PREFIX) return null;
+  return trackingKey(g.ip, WIDE_V6_PREFIX);
+}
+const WIDE_V6_PREFIX = 48;
+/**
+ * A /48 may store WIDE_FACTOR times a network's allowance of new ids per window:
+ * the count is made after each successful first create, and reaching it blocks
+ * the next ones.
+ */
+const WIDE_FACTOR = 16;
+const wideRule = (s) => ({ max: s['public.newTrackersPerIp'] * WIDE_FACTOR, windowSec: s['public.newTrackersWindowSec'], blockSec: s['public.newTrackersWindowSec'] });

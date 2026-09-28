@@ -126,7 +126,9 @@ from the share's CAPTCHA page, and nothing is spent: an API client or `secbin ge
 it. The grant route is `POST /api/(paste|file)/:id/human` with `X-Secbin-Intent: 1` and a
 Turnstile token (`X-Secbin-Turnstile`) for the action `share-open`, which only the page's
 widget produces. At most 30 such checks per network per 10 minutes (`429 rate_limited`), and
-a failed token counts as an invalid request.
+a failed token counts as an invalid request. The share's CAPTCHA page (`/p/:id?check`,
+`/r/:id?check`) is served only to this site's own document navigations; any other request is
+redirected to the share's page without being counted.
 
 While Turnstile is configured, a recipient route without a grant answers the same `403
 captcha_required` for an id whose share does not exist or has ended, so it tells nothing about
@@ -160,7 +162,8 @@ SPEC.md §10). The ones specific to keys and shares:
 | 400 | `invalid_captcha` | `captcha` is not `true` or `false` |
 | 403 | `captcha_disabled` | `captcha: true` while your role has the CAPTCHA off |
 | 403 | `captcha_required` | a recipient route of a share with the CAPTCHA — or of a missing or ended share, while Turnstile is on — without a grant (open it in a browser) |
-| 429 | `rate_limited` | too many CAPTCHA checks from your network (30 per 10 minutes) |
+| 429 | `rate_limited` | too many requests from your network: CAPTCHA checks on the share CAPTCHA routes (30 per 10 minutes); rejected CAPTCHA tokens on sign-in, account changes and anonymous creation (60 per 10 minutes; accepted tokens are never counted); sign-in prelogins (`POST /api/auth/prelogin`, 600 per 10 minutes, and 20 per username); chunk fetches of shares that have ended (600 per 10 minutes). `Retry-After` says when to try again |
+| 410 | `gone` | the share has ended (expired, used up, revoked or deleted) — also for a chunk fetch with a download grant of a share that ended during the download, which is never counted as an invalid request |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
 
 `429 quota_exceeded` names the quota it reached: `{ error: "quota_exceeded", message: "Quota
@@ -600,6 +603,9 @@ anonymous uploader's routes (`/api/reverse/:id/open`, `begin`, `human`, `files`,
   Prefer short lifetimes and the narrowest scopes; keep `read` and `manage` for the tools that
   need them.
 - Keys are stored only as hashes; the server cannot show a key again.
+- Every response (API answers, chunks, errors and redirects as well as pages) carries
+  `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` and a
+  `Permissions-Policy` that turns off every powerful browser feature.
 - Every key creation, change and revocation, every share created with a key and every change a
   key makes to a share is recorded in your activity log (and the administrator's audit log).
 - Read receipts can contain personal data about the people who opened a share (network address,

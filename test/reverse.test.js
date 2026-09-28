@@ -427,7 +427,7 @@ describe('the uploader', () => {
       expect(on.headers.get('cross-origin-embedder-policy')).toBe('require-corp');
       expect(on.headers.get('cache-control')).toBe('no-store');
       expect(await on.text()).toContain('/js/reverse.js');
-      const check = await tsFetch(`/r/${r.id}?check`);
+      const check = await tsFetch(`/r/${r.id}?check`, { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin' });
       expect(check.status).toBe(200);
       // The Turnstile policy with no workers at all (no service worker registration from the check page).
       expect(check.headers.get('content-security-policy')).toBe(TURNSTILE_CSP.replace("worker-src 'self'", "worker-src 'none'"));
