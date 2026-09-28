@@ -412,8 +412,11 @@ describe('the Drive: received notes, links and credentials', () => {
     rowOf(sshName).querySelector('button.drive-open').click();
     await until(() => dialog()?.querySelector('.link-card'));
     const card = dialog().querySelector('.link-card');
-    expect(card.querySelector('.link-host').textContent).toBe('example.com');
-    expect(card.querySelector('.link-full').textContent).toBe('ssh://example.com/repo');
+    // The host is compared as a parsed URL's, never matched as a substring.
+    const shown = new URL(card.querySelector('.link-full').textContent);
+    expect(shown.href).toBe(new URL('ssh://example.com/repo').href);
+    expect(card.querySelector('.link-host').textContent).toBe(shown.hostname);
+    expect(shown.hostname).toBe('example.com');
     expect(button(card, 'Open link')).toBeUndefined();
     expect(button(card, 'Copy link')).toBeDefined();
     expect(card.textContent).toMatch(/Your account’s URL rules allow https:\/\/ links; this link is not one of them/);

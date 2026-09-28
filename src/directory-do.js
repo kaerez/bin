@@ -3392,7 +3392,8 @@ export class Directory extends DurableObject {
       await this.refund(uid, q.hits);
       return fail(409, 'exists', 'A share with this id already exists.');
     }
-    return { ok: true, maxBytes: maxBytes ?? roleMax, captcha: hc.captcha, refund: q.hits };
+    // maxFolderDepth: the role's folder depth limit (null: none); the Drive refuses a link on a folder deeper than it.
+    return { ok: true, maxBytes: maxBytes ?? roleMax, captcha: hc.captcha, refund: q.hits, maxFolderDepth: Number.isSafeInteger(L.maxFolderDepth) ? L.maxFolderDepth : null };
   }
 
   /**

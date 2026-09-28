@@ -170,7 +170,7 @@ try {
   await u.click('#reverse-tab-url');
   await audit(u, 'uploader: the Link tab');
   await u.fill('#reverse-link-in', LINK);
-  check('uploader: the link\'s destination is spelled out', (await u.textContent('#reverse-link-host')) === 'Destination: example.com');
+  check('uploader: the link\'s destination is spelled out', (await u.textContent('#reverse-link-host')) === `Destination: ${new URL(LINK).hostname}`);
   await u.click('#reverse-send');
   await sent(u);
   check('uploader: the link is sent', /^Sent the link, encrypted/.test(await u.textContent('#reverse-done')), await u.textContent('#reverse-done'));
@@ -234,7 +234,9 @@ try {
   await ap.click('.drive-dialog button:has-text("Close")');
   await openRow('url');
   await ap.waitForSelector('.drive-dialog .link-card');
-  check('viewer: the link spelled out, with Open (https, allowed by the rules)', (await ap.textContent('.drive-dialog .link-host')) === 'example.com'
+  // Hosts compared as parsed URLs' (never a substring match).
+  const shownHost = new URL((await ap.textContent('.drive-dialog .link-full')).trim()).hostname;
+  check('viewer: the link spelled out, with Open (https, allowed by the rules)', shownHost === new URL(LINK).hostname && (await ap.textContent('.drive-dialog .link-host')) === shownHost
     && (await ap.locator('.drive-dialog .link-card button:has-text("Open link")').count()) === 1);
   await audit(ap, 'drive viewer: a link');
   await ap.click('.drive-dialog button:has-text("Close")');

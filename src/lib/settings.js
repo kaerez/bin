@@ -202,8 +202,8 @@ const WEAKER_LIMITS = {
   maxExpireSec: 'max', maxViews: 'max', allowUnlimitedViews: 'on',
   reverseMaxExpireSec: 'max', reverseMaxViews: 'max', reverseNoExpiry: 'on', reverseAllowUnlimitedViews: 'on',
   url: 'on', secret: 'on', apiEnabled: 'on',
-  // TODO(claude/receive-types): add reverseUrl: 'on' and reverseSecret: 'on' here when those
-  // role options reach main (they do not exist yet).
+  // Receive links that may take links or credentials, as the outgoing url / secret.
+  reverseUrl: 'on', reverseSecret: 'on',
   fileTypeMode: 'rank', fileTypeRules: 'types', urlRules: 'added',
 };
 /** Exported for the docs and tests: what counts as weakening. */

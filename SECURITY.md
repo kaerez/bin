@@ -865,7 +865,8 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
       - lifetimes and views: `maxExpireSec`, `reverseMaxExpireSec`, `maxViews` and
         `reverseMaxViews` raised or removed (no limit); `allowUnlimitedViews`,
         `reverseAllowUnlimitedViews` and `reverseNoExpiry` turned on;
-      - what may be shared: `url`, `secret` and `apiEnabled` turned on; `fileTypeMode`
+      - what may be shared: `url`, `secret` and `apiEnabled` turned on; `reverseUrl` and
+        `reverseSecret` turned on (Receive links that may take links or credentials); `fileTypeMode`
         towards any (allow → block → any), or, with the same mode, a type added to an allow
         list or removed from a block list; `urlRules` gaining a rule;
     - IP rules: adding an allow rule.

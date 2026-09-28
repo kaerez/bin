@@ -265,7 +265,7 @@ async function createReverse(request, env, dir, a) {
     const stored = await toRest(await fieldKeys(env, uid), uid, 'linkKey', body.id, priv);
     r = await driveStub(env, uid).createReverse(uid, {
       id: body.id, folder, priv: stored, mek: body.mek, lh: body.lh, ph: pw?.ph, salt: pw?.salt, t: pw?.t, note, ttl, views, captcha: claim.captcha === true,
-      opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types, accept },
+      opts: { maxFiles, maxBytes: claim.maxBytes, maxFileBytes, types, accept }, maxDepth: claim.maxFolderDepth,
     });
   } catch (e) {
     await dir.releaseReverse(uid, body.id, claim.refund); // the id is free again, and the quota

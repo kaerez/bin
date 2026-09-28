@@ -13,7 +13,7 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW, proofHeaders } from './helpers.js';
-import { driveLimits, uploadFile } from './drive-helpers.js';
+import { driveLimits, uploadFile, mkdir } from './drive-helpers.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { PUBLIC_ID, SCHEMA_VERSION } from '../src/directory-do.js';
@@ -428,5 +428,26 @@ describe('the uploader page reads what the link accepts', () => {
     expect((await received(u.cookie)).items.some((x) => x.id === sent.node)).toBe(true);
     const take = await fetchJson(`/api/private/drive/received/${sent.node}`, { method: 'POST', cookie: u.cookie, headers: intent, body: {} });
     expect(take.status).toBe(400);
+  });
+});
+
+describe('a Receive link on a folder deeper than the role allows', () => {
+  it('is refused (403 folder_too_deep, with the limit); a folder within it, and the root, take one; the id stays free', async () => {
+    const u = await receiver('rt-deep');
+    // Folders first, with no limit (the Drive may already hold deeper ones than a later limit allows).
+    const a = await mkdir(u.cookie, 'root');
+    const b = await mkdir(u.cookie, a.id);
+    expect([a.res.status, b.res.status]).toEqual([201, 201]);
+    await driveLimits(u.id, { driveEnabled: true, reverseEnabled: true, maxFolderDepth: 1 });
+    const deep = await newReverse(u.cookie, { folder: b.id });
+    expect(deep.res.status).toBe(403);
+    expect(await deep.res.json()).toMatchObject({ error: 'folder_too_deep', max: 1 });
+    expect(await listed(u.cookie, deep.id)).toBeUndefined();
+    // Level 1 and the root are within the limit; the refused link's id can be used again.
+    expect((await newReverse(u.cookie, { folder: a.id, id: deep.id })).res.status).toBe(201);
+    expect((await newReverse(u.cookie, { folder: 'root' })).res.status).toBe(201);
+    // No limit: any folder.
+    await driveLimits(u.id, { driveEnabled: true, reverseEnabled: true, maxFolderDepth: null });
+    expect((await newReverse(u.cookie, { folder: b.id })).res.status).toBe(201);
   });
 });

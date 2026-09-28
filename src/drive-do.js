@@ -1166,6 +1166,13 @@ export class Drive extends DurableObject {
     const f = this.#node(rec.folder);
     if (!f || f.rs) return fail(404, 'not_found', 'The folder does not exist.');
     if (f.kind !== 'dir') return fail(400, 'not_a_folder', 'Files can only be received into a folder.');
+    // A folder deeper than the role's folder depth limit (`maxDepth`; the root is 0, a folder counts at
+    // its own level) takes no link: nothing it received could be placed there.
+    // TODO(#82): once the Drive applies maxFolderDepth itself (claude/footer-drive-rules), use its
+    // depth rule here too (its take-in already refuses such a folder with folder_too_deep).
+    if (Number.isSafeInteger(rec.maxDepth) && this.#depth(rec.folder) > rec.maxDepth) {
+      return fail(403, 'folder_too_deep', `Folders may be nested at most ${rec.maxDepth} levels deep: choose a folder higher up for this link.`, { max: rec.maxDepth });
+    }
     if (this.#reverse(rec.id)) return fail(409, 'exists', 'A reverse share with this id already exists.');
     this.#dropEndedReverse();
     if (this.sql.exec('SELECT COUNT(*) AS c FROM reverse').one().c >= MAX_REVERSE) return fail(409, 'too_many_reverse', `A Drive holds at most ${MAX_REVERSE} reverse shares.`);
