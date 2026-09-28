@@ -128,7 +128,8 @@ describe('the security statements about the Drive and reverse shares (audit B M3
     // The glossary: both terms, and which is which.
     const glossary = words('public/accessibility/index.html');
     expect(glossary).toMatch(/Encrypted in your browser What every page’s footer says/);
-    expect(glossary).toMatch(/End-to-end encrypted Encrypted on the sender’s device and decrypted only on the recipient’s\..*Notes and file shares are; the Drive, shares of Drive files and files sent to you through a “Receive” link are not\./);
+    expect(glossary).toMatch(/End-to-end encrypted Encrypted on the sender’s device and decrypted only on the recipient’s\..*Notes and file shares are; the Drive, shares of Drive files and anything sent to you through a “Receive” link are not\./);
+    expect(glossary).toMatch(/The Drive, shares of Drive files and anything sent to you through a “Receive” link are encrypted with keys the server holds/);
   });
 
   it('no page, doc or comment claims more than the key model v2 gives', () => {
