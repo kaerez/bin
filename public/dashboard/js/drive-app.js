@@ -402,7 +402,7 @@ function unlockView(mount, deps, lockedErr) {
       pwForm,
       h('div.login-alt', {}, pkBtn, codeToggle),
       codeForm,
-      msg), recovery);
+      msg), ...(recovery ? [recovery] : []));
     pw.focus();
   });
 }
