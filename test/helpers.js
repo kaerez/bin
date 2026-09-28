@@ -5,6 +5,7 @@
 import { env, SELF } from 'cloudflare:test';
 import { encryptPaste, deriveAccess, setPasswordStretcher, hkdf32 } from '../public/js/crypto.js';
 import { b64urlFromBytes, randomBytes, utf8 } from '../public/js/bytes.js';
+import { CSRF_COOKIE } from '../src/lib/csrf.js';
 
 export const ORIGIN = 'https://secbin.test';
 export const AUTHN = env.AUTHN;
@@ -40,8 +41,9 @@ async function roleForUser(uid, cookie) {
 
 // CSRF tokens (src/lib/csrf.js): like the browser client (public/js/api.js),
 // a signed-in state-changing request carries the session's token. The helpers
-// get it from GET /api/private/me (once per cookie) and send it unless the
-// test passes `csrf: false` or sets X-Secbin-CSRF itself.
+// take it from the response that set the session cookie (cookieOf), or else
+// from GET /api/private/me, once per cookie, and send it unless the test
+// passes `csrf: false` or sets X-Secbin-CSRF itself.
 export const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const csrfCache = new Map();
 /** The session's CSRF token for `cookie` (null when the session is not valid). */
@@ -71,9 +73,18 @@ export async function fetchJson(path, { method = 'GET', body, cookie, headers = 
   return SELF.fetch(`${ORIGIN}${path}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
 }
 
+/**
+ * The session cookie a response sets (`name=value`), or null. A response that
+ * starts a session also sets its CSRF token cookie (src/lib/csrf.js); that
+ * token is recorded for the session cookie, as the browser has it from the
+ * same response, so the helpers need no GET /api/private/me for it.
+ */
 export const cookieOf = (res) => {
-  const sc = res.headers.get('set-cookie');
-  return sc ? sc.split(';')[0] : null;
+  const all = res.headers.getSetCookie().map((c) => c.split(';')[0]);
+  const cookie = all[0] ?? null;
+  const t = all.find((c) => c.startsWith(`${CSRF_COOKIE}=`))?.slice(CSRF_COOKIE.length + 1);
+  if (cookie && /^__Host-secbin_sess=./.test(cookie) && /^[A-Za-z0-9_-]{43}$/.test(t || '')) csrfCache.set(cookie, t);
+  return cookie;
 };
 
 let ownerCookie = null;
