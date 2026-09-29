@@ -803,18 +803,17 @@ export async function handleReversePublic(request, env, url) {
     if (!token) return failed(env, g, err(403, 'bad_token', 'Missing or invalid X-Upload-Token.'));
     const cl = Number(request.headers.get('content-length'));
     if (Number.isFinite(cl) && cl > MAX_CHUNK_CT) return err(413, 'too_large', 'Chunk is too large.');
+    const i = Number(idx);
+    // The chunk request starts: checked (the token, the upload still open) and recorded as the
+    // upload's activity before its body is read, so a slow sender is never released as idle while
+    // its chunk is still arriving (docs/REVERSE.md §4).
+    const st = await drive.reverseChunkStart(uid, id, node, await hashToken(token), i);
+    if (st.status !== 'ok') return chunkRefusal(env, g, st, i);
     const bytes = await readCappedBody(request.body, MAX_CHUNK_CT);
     if (bytes === null) return err(413, 'too_large', 'Chunk is too large.');
-    const i = Number(idx);
     // The upload's content counts in the Drive as it arrives: each chunk must fit (docs/REVERSE.md §4).
     const r = await drive.reversePutChunk(uid, id, node, await hashToken(token), i, bytes, { capacity: tg.capacity ?? HARD_MAX_DRIVE_BYTES });
-    if (r.status === 'forbidden') return failed(env, g, err(403, 'bad_token', 'Wrong upload token.'));
-    if (r.status === 'bad_index') return err(400, 'bad_index', 'No such chunk index.');
-    if (r.status === 'bad_size') return err(400, 'bad_size', `Chunk ${i} must be exactly ${r.expected} bytes.`);
-    if (r.status === 'full') return err(413, 'drive_full', 'There is not enough space left for that file.');
-    // No chunk for 10 minutes: the reservation was released (never counted); the session may reserve it again.
-    if (r.status === 'released') return err(410, 'released', 'This upload waited too long without data and was released: send the file again.');
-    if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finished.');
+    if (r.status !== 'ok') return chunkRefusal(env, g, r, i);
     await dir.setDriveUsed(uid, r.used);
     return json({ ok: true });
   }
@@ -844,6 +843,17 @@ export async function handleReversePublic(request, env, url) {
     return json({ ok: true });
   }
   return err(404, 'not_found', 'Not found.');
+}
+
+/** A chunk request the Drive refused (reverseChunkStart, reversePutChunk: `r`) → the answer; only a wrong token counts. */
+function chunkRefusal(env, g, r, i) {
+  if (r.status === 'forbidden') return failed(env, g, err(403, 'bad_token', 'Wrong upload token.'));
+  if (r.status === 'bad_index') return err(400, 'bad_index', 'No such chunk index.');
+  if (r.status === 'bad_size') return err(400, 'bad_size', `Chunk ${i} must be exactly ${r.expected} bytes.`);
+  if (r.status === 'full') return err(413, 'drive_full', 'There is not enough space left for that file.');
+  // No chunk started for 10 minutes: the reservation was released (never counted); the session may reserve it again.
+  if (r.status === 'released') return err(410, 'released', 'This upload waited too long without data and was released: send the file again.');
+  return err(410, 'gone', 'This upload has expired or was already finished.');
 }
 
 /**

@@ -254,7 +254,11 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   wrap, plus the field layer), so an uploader cannot store data outside the capacity; once taken
   in (name ≤ 512, meta ≤ 1024, DEK ≤ 128 characters, and its salt) it counts like any Drive file. Upload tokens are stored hashed (`upload_hash`), and a pending upload with no chunk for
   **10 minutes** (`RECEIVE_IDLE_SEC`, or the role's `filePendingSec` when shorter) is
-  **released**: its chunk after that answers `410 released` (never counted by the Guard), the
+  **released**. The time counts from the last chunk request that *started*: the Worker records
+  the start in the Drive (its token checked) before it reads the chunk's body, and the alarm
+  leaves an upload alone while one of its chunks is being written, so a slow sender whose chunk
+  is still arriving is never released (the start is stored, so it counts after a restart of the
+  Drive object too). Released: its chunk after that answers `410 released` (never counted by the Guard), the
   Drive's alarm purges it and gives its reservation back (`rgone.released` keeps its token for
   that answer), and its session, while it is open, may reserve the file again — the uploader page
   sends it again once. Past `RECEIVE_MAX_SEC` (24 hours) a reservation is purged whatever its

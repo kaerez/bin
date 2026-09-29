@@ -1758,8 +1758,12 @@ export class Drive extends DurableObject {
    * late write never lands on, or is removed from, a finished file); if the
    * upload ended meanwhile (cancelled, revoked, purged) the object is deleted.
    */
-  async reversePutChunk(uid, id, node, uploadHash, i, bytes, { capacity = null } = {}) {
-    this.#bind(uid);
+  /**
+   * Can chunk `i` of received upload `node` be sent now (the link active, the
+   * token right, the reservation neither past RECEIVE_MAX_SEC nor released
+   * for want of data)? → { status: 'ok', n } or the answer.
+   */
+  #chunkCheck(id, node, uploadHash, i) {
     const n = this.#node(node);
     if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
     // Released (its reservation went while the link still takes uploads: idle, see below): the
@@ -1767,16 +1771,44 @@ export class Drive extends DurableObject {
     if (!n || n.rs !== id) return { status: this.#released(id, uploadHash) ? 'released' : 'gone' };
     const c = this.#pending(node, uploadHash);
     if (c.status !== 'ok') return c;
-    // Re-sent chunks keep a reservation alive, but not past RECEIVE_MAX_SEC; one with no chunk for
-    // RECEIVE_IDLE_SEC is released (the alarm purges it; its session may reserve the file again).
+    // Re-sent chunks keep a reservation alive, but not past RECEIVE_MAX_SEC; one with no chunk
+    // started for RECEIVE_IDLE_SEC is released (the alarm purges it; its session may reserve the
+    // file again).
     if (c.n.created + RECEIVE_MAX_SEC <= nowSec()) return { status: 'gone' };
     if (c.n.updated + this.#receiveIdle() <= nowSec()) return { status: 'released' };
     if (!Number.isInteger(i) || i < 0 || i >= c.n.chunks) return { status: 'bad_index' };
+    return { status: 'ok', n: c.n };
+  }
+
+  /**
+   * A chunk request of received upload `node` starts (the Worker calls this
+   * after its token check and before it reads the body): the reservation's
+   * last activity is now, stored, so a slow sender whose chunk is still
+   * arriving is never released by the idle rule (RECEIVE_IDLE_SEC counts
+   * from the last chunk that started), also if this object restarts
+   * meanwhile. → { status: 'ok' } or the answer reversePutChunk would give.
+   */
+  async reverseChunkStart(uid, id, node, uploadHash, i) {
+    this.#bind(uid);
+    const c = this.#chunkCheck(id, node, uploadHash, i);
+    if (c.status !== 'ok') return c;
+    this.sql.exec("UPDATE nodes SET updated = MAX(updated, ?) WHERE id = ? AND state = 'pending'", nowSec(), node);
+    await this.#schedulePurge();
+    return { status: 'ok' };
+  }
+
+  async reversePutChunk(uid, id, node, uploadHash, i, bytes, { capacity = null } = {}) {
+    this.#bind(uid);
+    const c = this.#chunkCheck(id, node, uploadHash, i);
+    if (c.status !== 'ok') return c;
     const expected = driveChunkSize(c.n.size, i);
     if (!bytes || bytes.byteLength !== expected) return { status: 'bad_size', expected };
     // Its content counts in the Drive as it arrives: this chunk must fit (checked again as it is recorded).
     if (this.#chunkFull(node, i, capacity)) return { status: 'full' };
     const key = driveChunkKey(uid, node, i);
+    // Its write is activity too (stored: it counts after a restart), and while it is in flight the
+    // alarm leaves the upload alone.
+    this.sql.exec("UPDATE nodes SET updated = MAX(updated, ?) WHERE id = ? AND state = 'pending'", nowSec(), node);
     this.inflight ??= new Map();
     this.inflight.set(node, (this.inflight.get(node) ?? 0) + 1);
     let h;
@@ -2011,7 +2043,9 @@ export class Drive extends DurableObject {
     await this.ctx.blockConcurrencyWhile(async () => {
       const t = nowSec();
       const stale = this.sql.exec(`SELECT id, chunks, size, rs, created, updated FROM nodes WHERE kind = 'file' AND state = 'pending'
-        AND ((rs IS NULL AND updated <= ?) OR (rs IS NOT NULL AND (updated <= ? OR created <= ?)))`, t - sec, t - this.#receiveIdle(), t - RECEIVE_MAX_SEC).toArray();
+        AND ((rs IS NULL AND updated <= ?) OR (rs IS NOT NULL AND (updated <= ? OR created <= ?)))`, t - sec, t - this.#receiveIdle(), t - RECEIVE_MAX_SEC).toArray()
+        // A received upload whose chunk is being written now is not idle (past RECEIVE_MAX_SEC it goes).
+        .filter((f) => !(f.rs && this.inflight?.get(f.id) && f.created > t - RECEIVE_MAX_SEC));
       if (!stale.length) return;
       await this.#deleteObjects(uid, stale);
       this.ctx.storage.transactionSync(() => {

@@ -12,9 +12,9 @@
 //   C-6 "Go back" on a root change re-checks the sub-MEKs before it writes;
 //   kg F4 the owner acting as the user gets no personal-kit state;
 //   RT2-4 a link key stored in plain text is never handed out.
-import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
-import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW, cookieOf } from './helpers.js';
+import { owner, makeUser, fetchJson, intent, freshIp, proofFor, USER_PW, cookieOf, ORIGIN } from './helpers.js';
 import { enableDrive, driveLimits, driveKeys, sealed, createFile, mkdir, node, drive } from './drive-helpers.js';
 import {
   dirStub, driveOf, errorOf, receiver, newReverse, rv, openLink, grantOf, reserve, send, received, putChunk, overhead,
@@ -123,6 +123,41 @@ describe('C-2: a Receive link cannot fill the Drive without sending data', () =>
     const again = await send(r, g, { ip, bytes: f.bytes });
     expect(again.data.chunks).toBe(1);
     expect((await received(u.cookie)).items.map((x) => x.id)).toEqual([again.node]);
+  });
+
+  it('a slow chunk (its request starts at minute 9, its body arrives by minute 12) is never released: the idle time counts from the chunk\'s start, stored in the Drive', async () => {
+    const u = await receiver('w3c-c2-slow', { filePendingSec: 3600 });
+    const r = await newReverse(u.cookie);
+    const ip = freshIp();
+    const g = await grantOf(r, { ip });
+    const f = await reserve(r, g, { ip, bytes: randomBytes(10) });
+    expect(f.res.status).toBe(201);
+    const ct = await chunkOf(f, 0);
+    const t0 = Date.now();
+    const at = (min) => vi.setSystemTime(t0 + min * 60 * 1000);
+    vi.useFakeTimers({ now: t0, toFake: ['Date'] });
+    at(9);
+    // The chunk's request starts; its body is held back (a slow sender).
+    let send;
+    const body = new ReadableStream({ start(c) { send = c; } });
+    const put = SELF.fetch(`${ORIGIN}/api/reverse/${r.id}/files/${f.node}/chunk/0`, {
+      method: 'PUT', body, duplex: 'half', headers: { 'content-type': 'application/octet-stream', 'x-upload-token': f.data.uploadToken, 'cf-connecting-ip': ip },
+    });
+    // Its start is recorded in the Drive's storage (it survives a restart of the object), before the body.
+    const updated = () => runInDurableObject(driveOf(u.id), (i, st) => st.storage.sql.exec('SELECT updated FROM nodes WHERE id = ?', f.node).one().updated);
+    for (let k = 0; k < 200 && (await updated()) < Math.floor(t0 / 1000) + 9 * 60; k++) await new Promise((res) => setTimeout(res, 10));
+    expect(await updated()).toBeGreaterThanOrEqual(Math.floor(t0 / 1000) + 9 * 60);
+    // Minute 12: 12 minutes after the reservation, 3 after the chunk began. The purge runs: not released.
+    at(12);
+    await runDurableObjectAlarm(driveOf(u.id));
+    expect(await runInDurableObject(driveOf(u.id), (i, st) => st.storage.sql.exec('SELECT COUNT(*) AS c FROM nodes WHERE id = ?', f.node).one().c)).toBe(1);
+    // The body arrives: the chunk is stored and the file finishes.
+    send.enqueue(ct);
+    send.close();
+    const res = await put;
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect((await finalize(r, g, f, ip)).status).toBe(200);
+    expect((await received(u.cookie)).items.map((x) => x.id)).toEqual([f.node]);
   });
 
   it('an idle reservation is released even before the alarm runs', async () => {

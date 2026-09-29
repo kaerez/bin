@@ -1739,7 +1739,9 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   the space left, but nothing more is charged. What a link's uploads in progress have reserved and
   not sent, counting each one's next chunk (8 MiB at most), may not pass 40 MiB (a chunk for each
   of the 5 uploads one network may run at once; `429 busy` past it), and a reservation with no
-  chunk for 10 minutes (or the role's `filePendingSec`, when shorter) is released: its
+  chunk started for 10 minutes (or the role's `filePendingSec`, when shorter) is released (a
+  chunk request's start is stored before its body is read, so a slow chunk still arriving is
+  never released): its
   reservation goes, its late chunks get `410 released` (never counted) and its session, while
   open, may reserve the file again (the uploader page does so once). So an uploader who reserves
   files and sends nothing cannot fill the user's Drive, nor hold a link's limits for long. The

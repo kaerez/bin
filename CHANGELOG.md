@@ -62,9 +62,10 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   (each must fit: `413 drive_full`), with its sealed fields from the reservation, where the whole
   file must merely fit the space left; what a link's uploads in progress have reserved and not
   sent, counting each one's next chunk, may not pass 40 MiB (a chunk for each of the 5 uploads a
-  network may run; `429 busy`); a reservation with no chunk for 10 minutes is released (its late
-  chunks get `410 released`, never counted as guesses; the session may reserve it again, and the
-  uploader page sends the file again once). The Drive's Receive… list and the Receive API
+  network may run; `429 busy`); a reservation with no chunk started for 10 minutes is released
+  (the start of each chunk request is stored before its body is read, so a slow sender's chunk
+  still arriving never is). Its late chunks get `410 released`, never counted as guesses; the
+  session may reserve it again, and the uploader page sends the file again once. The Drive's Receive… list and the Receive API
   (`uploading`) show each link's uploads in progress with what they sent so far of the size
   they reserved. Large multi-chunk uploads work as before.
 - **A rename is held to the role's file-type rule** (C-1): the Drive checked the rule on what it
