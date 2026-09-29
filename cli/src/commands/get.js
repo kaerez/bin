@@ -38,6 +38,7 @@ const OPTIONS = {
   path: { type: 'string', short: 'p' },
   force: { type: 'boolean', default: false },
   field: { type: 'string' },
+  raw: { type: 'boolean', default: false },
 };
 
 // --field for a credential share: one of its fields, or "code" (the current one-time code).
@@ -47,14 +48,20 @@ const FIELD_NAMES = [...Object.keys(SECRET_FIELDS), 'code'];
 // as a status line cannot inject terminal escape sequences.
 // eslint-disable-next-line no-control-regex
 const safeLine = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-// For multi-line values shown on a terminal: like safeLine, but keeps newlines and tabs.
+// For multi-line values shown on a terminal: like safeLine, but keeps newlines and tabs
+// (a CRLF line end is shown as a newline; any other carriage return is escaped, since it
+// could overwrite what the line showed).
 // eslint-disable-next-line no-control-regex
-const safeText = (s) => String(s).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+const safeText = (s) => String(s).replace(/\r\n/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /**
  * The text `get` prints for a decrypted note. Typed shares are validated
  * fail-closed like the web viewer: a link is printed, never opened, with its
  * real host on stderr; a credential is JSON unless one --field is asked for.
+ * `tty`: printed to a terminal (not --out, not --raw), where the sender's text
+ * has its control characters escaped (C0 but newline and tab, DEL and C1, so
+ * ESC, CSI and OSC sequences cannot reach the terminal); anywhere else it is
+ * the exact text.
  * This runs after the view is spent, so it never throws: anything unexpected
  * is reported on stderr and the content is still printed.
  */
@@ -71,7 +78,7 @@ async function renderNote(fmt, text, field, io, tty) {
     io.stderr(`${h.external ? `${h.scheme}: link (opens another app)` : `link to ${h.ascii}`}${h.idn ? ` (displayed as ${safeLine(h.unicode)} — international characters can imitate another site)` : ''}${h.insecure ? ' — not HTTPS' : ''}\n`);
     return `${u.href}\n`;
   }
-  if (fmt !== 'secret') return text;
+  if (fmt !== 'secret') return tty ? safeText(text) : text;
   let sec;
   try { sec = parseSecret(text); } catch (e) {
     if (!(e instanceof ShareTypeError)) throw e;
@@ -185,6 +192,7 @@ export async function cmdGet(args, io) {
     throw new UsageError(`invalid --field "${values.field.slice(0, 40)}" (one of: ${FIELD_NAMES.join(', ')})`);
   }
   if (kind === 'file' && values.field !== undefined) throw new UsageError('--field applies to credential shares only');
+  if (kind === 'file' && values.raw) throw new UsageError('--raw applies to notes only');
   if (values.list && (values.out !== undefined || values.force)) {
     throw new UsageError('--list prints the file list only; it takes no --out / --force');
   }
@@ -218,7 +226,9 @@ export async function cmdGet(args, io) {
     try {
       return await client.open(kind, id, access);
     } catch (e) {
-      if (!(e instanceof ApiError && e.code === 'bad_password' && needsPassword && io.stdinIsTTY && !fromEnv)) throw e;
+      // Not after the failure that locked the share's password (it says until when): the next try would be refused.
+      const locked = Number.isSafeInteger(e?.details?.until);
+      if (!(e instanceof ApiError && e.code === 'bad_password' && !locked && needsPassword && io.stdinIsTTY && !fromEnv)) throw e;
       io.stderr('wrong password — try again (the share was not opened).\n');
       password = await io.promptHidden('Password: ');
       access = await deriveAccess({ adata: head.adata, fragment, password });
@@ -258,8 +268,8 @@ async function getNote({ io, values, openShare, access }) {
   try {
     const paste = validatePaste(await openShare());
     const out = await openPaste({ paste, access: access() });
-    // Escaping is for a terminal only; --out files get the exact value.
-    out.text = await renderNote(paste.adata.fmt, out.text, values.field, io, !outFile && io.stdoutIsTTY === true);
+    // Escaping is for a terminal only; --out files, a pipe and --raw get the exact value.
+    out.text = await renderNote(paste.adata.fmt, out.text, values.field, io, !outFile && !values.raw && io.stdoutIsTTY === true);
     if (outFile) {
       try {
         await outFile.writeFile(out.text);

@@ -38,18 +38,48 @@ function parseEmphasis(str) {
   return nodes;
 }
 
+// A URL runs to the first ")" or white space (as `[^)\s]*` would).
+const URL_STOP = /[)\s]/g;
+
+/**
+ * The links of `str`: exactly what the pattern /\[([^\]]*)\]\(([^)\s]*)\)/g
+ * finds, scanned in linear time. That regex retried from every "[" to the end
+ * of the paragraph, so 300 000 "[" (or "[](x" repeated) froze the tab for
+ * seconds. Here each "[" looks for the first "]" after it, and each "](" for
+ * the first ")" or white space after it; both are remembered while the scan
+ * moves on (every "[" before that "]" has the same one, and fails or matches
+ * the same way), so each character is read a bounded number of times.
+ */
 function parseLinks(str) {
   const nodes = [];
-  const re = /\[([^\]]*)\]\(([^)\s]*)\)/g;
-  let m, last = 0;
-  while ((m = re.exec(str))) {
-    if (m.index > last) nodes.push(...parseEmphasis(str.slice(last, m.index)));
-    const href = sanitizeUrl(m[2]);
-    const children = parseEmphasis(m[1]);
-    // Unsafe/absent URL → drop the link, keep its text. Never emit a bad href.
-    if (href) nodes.push({ type: 'link', href, children });
-    else nodes.push(...children);
-    last = re.lastIndex;
+  let last = 0;
+  let from = 0;
+  let close = -1; // the first "]" after the current "[" (valid while it is after it)
+  let stop = -1; // the first ")" or white space at or after the current URL's start
+  for (;;) {
+    const open = str.indexOf('[', from);
+    if (open < 0) break;
+    if (close <= open) { close = str.indexOf(']', open + 1); if (close < 0) break; }
+    if (str[close + 1] === '(') {
+      const u = close + 2;
+      if (stop < u) {
+        URL_STOP.lastIndex = u;
+        const s = URL_STOP.exec(str);
+        stop = s ? s.index : str.length;
+      }
+      if (str[stop] === ')') {
+        if (open > last) nodes.push(...parseEmphasis(str.slice(last, open)));
+        const href = sanitizeUrl(str.slice(u, stop));
+        const children = parseEmphasis(str.slice(open + 1, close));
+        // Unsafe/absent URL → drop the link, keep its text. Never emit a bad href.
+        if (href) nodes.push({ type: 'link', href, children });
+        else nodes.push(...children);
+        last = from = stop + 1;
+        continue;
+      }
+    }
+    // No link starts at any "[" before this "]": go on after it.
+    from = close + 1;
   }
   if (last < str.length) nodes.push(...parseEmphasis(str.slice(last)));
   return nodes;

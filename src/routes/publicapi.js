@@ -18,8 +18,7 @@
 
 import { json, err, methodNotAllowed, decodePathSegment, assertNotCrossSite, assertJsonRequest } from '../lib/http.js';
 import { MAX_BODY } from '../lib/store.js';
-import { directory, ipContext, isBlocked, recordFailure, cachedSettings, rateLimit } from '../lib/guard.js';
-import { parseIp, trackingKey } from '../lib/ip.js';
+import { directory, ipContext, isBlocked, recordFailure, cachedSettings, rateLimit, wideNetwork, TRACKER_FETCH } from '../lib/guard.js';
 import { parseId } from '../lib/ids.js';
 import { createNote, initFile, putChunk, finalizeFile } from './private.js';
 import { PUBLIC_ID } from '../directory-do.js';
@@ -83,6 +82,13 @@ export async function handlePublicApi(request, env, url) {
   if (p === '/api/public/t') {
     if (request.method !== 'GET') return methodNotAllowed('GET');
     if (!usesTracker(mode)) return json({ mode, aid: null });
+    // Every call reaches the Directory: a generous per-network limit, checked first.
+    const rl = await rateLimit(env, g, 'tracker-fetch', TRACKER_FETCH);
+    if (!rl.ok) {
+      const res = err(429, 'rate_limited', 'Too many requests from your network. Try again later.', rl.until ? { until: rl.until } : undefined);
+      res.headers.set('retry-after', String(TRACKER_FETCH.blockSec));
+      return res;
+    }
     const etag = (request.headers.get('if-none-match') || '').replace(/^W\//, '').replace(/"/g, '').trim();
     const candidates = [
       { src: 'cookie', value: cookieValue(request, TRACKER_COOKIE) },
@@ -195,17 +201,8 @@ export async function handlePublicApi(request, env, url) {
   return err(404, 'not_found', 'Not found.');
 }
 
-/**
- * The wider network of an IPv6 caller (its /48, when the Guard tracks longer
- * prefixes), or null: new tracker ids are also counted per /48, so rotating
- * /64s inside one allocation does not multiply `public.newTrackersPerIp`.
- */
-function wideNetwork(g) {
-  const ip = parseIp(g.ip);
-  if (!ip || ip.v !== 6 || g.settings['guard.v6Prefix'] <= WIDE_V6_PREFIX) return null;
-  return trackingKey(g.ip, WIDE_V6_PREFIX);
-}
-const WIDE_V6_PREFIX = 48;
+// New tracker ids are also counted per /48 (guard.js wideNetwork), so rotating
+// /64s inside one allocation does not multiply `public.newTrackersPerIp`.
 /**
  * A /48 may store WIDE_FACTOR times a network's allowance of new ids per window:
  * the count is made after each successful first create, and reaching it blocks
