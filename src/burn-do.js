@@ -12,12 +12,20 @@
 // never released — not even its head — unless the Worker has verified a
 // CAPTCHA grant for it (`human`); without one the answer is 'captcha' and
 // nothing is spent (src/lib/human.js).
+//
+// Wrong passwords (a note with one) are counted here too, from any network,
+// with the proofs (src/lib/sharepw.js): at the rule's count the password is
+// locked, and while it is every attempt is refused ('pw_locked') before its
+// password is checked, the right one too. The count lives under its own key.
 
 import { DurableObject } from 'cloudflare:workers';
 import { verifyToken } from './lib/ids.js';
 import { timingSafeEqualHex } from '../public/js/bytes.js';
+import { PASSWORD_KDF, pwLockedUntil, pwFailed, pwDirty } from './lib/sharepw.js';
 
 const KEY = 'rec';
+const PW_KEY = 'pw';
+const nowSec = () => Math.floor(Date.now() / 1000);
 
 const safeEq = (a, b) => typeof a === 'string' && typeof b === 'string' && timingSafeEqualHex(a, b);
 
@@ -60,14 +68,37 @@ export class BurnPaste extends DurableObject {
     });
   }
 
+  /**
+   * The key proof, after the link proof, under the share's password lockout
+   * (`rule`: src/lib/sharepw.js) → null when it is right (the count cleared),
+   * else the refusal: { status: 'pw_locked', until } before any check while
+   * locked, or { status: 'bad_password', locked } (locked: { until, strike }
+   * when this failure locked it). Callers are inside blockConcurrencyWhile.
+   */
+  async #keyProof(rec, kh, rule) {
+    if (rec.paste?.adata?.kdf !== PASSWORD_KDF) return safeEq(kh, rec.acc.kh) ? null : { status: 'bad_password', locked: null };
+    const t = nowSec();
+    const st = await this.ctx.storage.get(PW_KEY);
+    const until = pwLockedUntil(st, t);
+    if (until) return { status: 'pw_locked', until };
+    if (safeEq(kh, rec.acc.kh)) {
+      if (pwDirty(st)) await this.ctx.storage.delete(PW_KEY);
+      return null;
+    }
+    const f = pwFailed(st, rule, t);
+    await this.ctx.storage.put(PW_KEY, f.next);
+    return { status: 'bad_password', locked: f.locked };
+  }
+
   /** Verify both proof hashes, then atomically spend one view and release. */
-  async open(lh, kh, human = false) {
+  async open(lh, kh, human = false, rule = null) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#get();
       if (!rec) return { status: 'gone' };
       if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
-      if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
+      const refused = await this.#keyProof(rec, kh, rule);
+      if (refused) return refused;
       let left = rec.left;
       if (left !== null) {
         left -= 1;
@@ -115,13 +146,14 @@ export class BurnPaste extends DurableObject {
    * "Delete now" by someone who can open the share (both proofs): only when
    * the sender allowed it (meta.deletable). Spends no view.
    */
-  async expireByOpener(lh, kh, human = false) {
+  async expireByOpener(lh, kh, human = false, rule = null) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#get();
       if (!rec) return { status: 'gone' };
       if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
-      if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
+      const refused = await this.#keyProof(rec, kh, rule);
+      if (refused) return refused;
       if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };
       await this.#purge();
       return { status: 'ok' };

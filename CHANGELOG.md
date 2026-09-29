@@ -15,6 +15,45 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Share passwords have a per-share lockout** (security audit W3, B-1). Wrong passwords were
+  limited only per network, so guesses spread over many networks (the /64s of one IPv6 /48, for
+  example) were never refused. Now each share counts its wrong passwords from any network:
+  `share.pwMaxFails` (default 20) within `share.pwWindowSec` (default 15 minutes) lock its
+  password for `share.pwLockSec` (default 15 minutes), twice as long on each lock after the
+  first (up to 64 times, at most 30 days); the right password, once accepted, clears the count.
+  While it is locked every attempt, on `open` and on "delete now", is refused before its password
+  is checked, the right one too: `429 password_locked` with `until` and "Too many wrong passwords
+  for this share. Try again at …". The wrong password that locks it answers `403 bad_password`
+  with `until`. Each lock is in the share user's activity (`share.password_locked`: the share,
+  until when, which lock). Every kind is covered (notes, view-limited notes, file shares, Drive
+  shares; the count lives with the proof check, atomically), shares without a password are not
+  counted, and the three values are owner settings (Admin → Settings → Share password lockout;
+  loosening them needs the step-up). Attempts on a locked share are never invalid fetches, since
+  the right password may be among them, and have a per-network limit of their own
+  (`password-locked`: 120 per 10 minutes, then `429 rate_limited`). Invalid requests from IPv6 are
+  also counted per /48 (`invalid-wide`: 16 times `guard.invalid.max` in the same window), next to
+  the /64. The right key for a share that has ended, and the right password, are still never
+  counted.
+- **"Delete now" on a made-up id is counted** (B-2): `POST /api/(paste|file)/<id>/expire` for an
+  id that was never a share answers the same counted `410 gone` as the other routes (it answered
+  `403 not_allowed`, uncounted). Ids that were shares are not counted with their right key.
+- **The chunk route no longer tells a share's layout** (B-3): the download grant is checked before
+  the index, so without a valid grant every chunk request (file shares, and each file of a Drive
+  share) gets the same counted `403 bad_grant`; an out-of-range index is `404` only with a valid
+  grant.
+- **The note renderers run in linear time** (B-4): the Markdown link pattern retried from every
+  `[` to the end of the paragraph, so a note of 300 000 `[` froze the recipient's tab for about
+  35 seconds. Links are now found by a linear scan that gives the same result, and the code
+  highlighter's heuristic (long words) and tokenizer (unclosed strings with escapes, unclosed
+  block comments) had the same issue and no longer do. The rendering of normal notes is
+  unchanged.
+- **`GET /api/public/t` has a per-network limit** (B-5): at most 600 calls per 10 minutes
+  (`tracker-fetch`, then `429 rate_limited`), since every call reaches the Directory.
+- **`secbin get` escapes terminal control characters in notes** (B-7): printed to a terminal,
+  plain, Markdown and code notes have their C0 and C1 control characters, ESC and DEL escaped
+  (`\u001b`), newlines and tabs kept (a CRLF line end is shown as a newline), so a note cannot
+  write the clipboard (OSC 52), retitle the window or redraw the screen. `--raw` prints the exact
+  text; a pipe and `--out` always get it.
 - **Sign-in and viewer records are sealed at rest.** Read receipts (the opener's address,
   location, browser, system and languages), the detail of the activity log's sign-in entries
   (sign-ins, sign-outs, lockouts, passkeys added or removed, blocked and unblocked addresses) and
