@@ -468,7 +468,8 @@ describe('ending: revoke, expiry, the admin lock, the folder deleted, the purge'
     await send(r, grant, { ip });
     const half = await reserve(r, grant, { bytes: new Uint8Array(CHUNK + 1), ip });
     expect((await putChunk(r.id, half.node, 0, new Uint8Array(CHUNK + 16), half.data.uploadToken, ip)).status).toBe(200);
-    expect((await drive(u.cookie)).used).toBe(11 + CHUNK + 1 + (await overhead(u.id)));
+    // An upload in progress counts what it sent so far (its first chunk), not the size it reserved (C-2).
+    expect((await drive(u.cookie)).used).toBe(11 + CHUNK + (await overhead(u.id)));
     expect((await fetchJson(`/api/private/shares/${r.id}/revoke`, { method: 'POST', cookie: u.cookie, headers: intent })).status).toBe(200);
     for (const res of [await openLink(r, ip), await begin(r, { ip }), await reserve(r, grant, { ip }).then((x) => x.res),
       await putChunk(r.id, half.node, 1, new Uint8Array(17), half.data.uploadToken, ip)]) {

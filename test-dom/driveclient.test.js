@@ -8,7 +8,7 @@
 // recipient would), reading v3 shares in downloads.js, and the personal kit.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-  openDrive, DriveDisabled, DriveUnavailable, checkName, buildPersonalKit, verifyPersonalKit,
+  openDrive, DriveDisabled, DriveUnavailable, DrivePolicyError, checkName, buildPersonalKit, verifyPersonalKit,
 } from '../public/js/driveclient.js';
 import { clearSessionKey, openName, openDek, chunkHash, ciphertextHash } from '../public/js/drivekeys.js';
 import { keyCheckValueV1, saveLegacyKey } from '../public/js/drivev1.js';
@@ -434,6 +434,35 @@ describe('shares (manifest v3)', () => {
     await expect(deriveAccess({ adata: body.paste.adata, fragment })).rejects.toThrow(/password/);
     const access = await deriveAccess({ adata: body.paste.adata, fragment, password: 'share pw' });
     expect(JSON.parse((await openPaste({ paste: served(body.paste), access })).text).entries[0].path).toBe('run.exe');
+  }, 60000);
+});
+
+describe('rename and the role\'s file-type rule (audit W3 C-1)', () => {
+  it('a rename to a type the rule refuses is refused here with the reason, before anything is sent; a file keeping its type may be renamed', async () => {
+    install();
+    const d = await openDrive();
+    const pdf = await d.upload('root', fakeFile('report.pdf', pattern(4), 'application/pdf'));
+    const old = await d.upload('root', fakeFile('old.exe', pattern(4), 'application/x-msdownload')); // before the rule
+    d.setPolicy({ fileTypeMode: 'block', fileTypeRules: ['ext:exe'] });
+    const patches = () => S.requests.filter((r) => r.method === 'PATCH').length;
+    const before = patches();
+    const e = await d.rename(pdf, 'tool.exe').catch((x) => x);
+    expect(e).toBeInstanceOf(DrivePolicyError);
+    expect(e.rule).toBe('type');
+    expect(e.message).toBe('Your administrator does not allow .exe files in the Drive, so the file was not renamed to “tool.exe”.');
+    await expect(d.rename(pdf, 'odd.e\u0301xe')).rejects.toThrow(/unusual extension/);
+    expect(patches()).toBe(before);
+    // Allowed: another pdf name; and old.exe keeps its type, so it may still be renamed within it.
+    await d.rename(pdf, 'summary.pdf');
+    await d.rename(old, 'older.exe');
+    expect(patches()).toBe(before + 2);
+    const names = (await d.list('root')).children.map((c) => c.name).sort();
+    expect(names).toEqual(['older.exe', 'summary.pdf']);
+    // An allow list: out of it is refused too; with no type policy nothing is checked here.
+    d.setPolicy({ fileTypeMode: 'allow', fileTypeRules: ['ext:pdf'] });
+    await expect(d.rename(pdf, 'notes.txt')).rejects.toBeInstanceOf(DrivePolicyError);
+    d.setPolicy({ fileTypeMode: 'any', fileTypeRules: [] });
+    await d.rename(pdf, 'notes.txt');
   }, 60000);
 });
 

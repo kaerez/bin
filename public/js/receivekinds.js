@@ -97,6 +97,36 @@ export function widening(prev, next) {
   return next.filter((k) => !prev.includes(k) && k !== 'note');
 }
 
+/**
+ * The limits of a link that a change loosens (`cur`: the link's limits now,
+ * `next`: the new values, undefined for those it leaves): its file types
+ * made less restrictive — removed, the mode changed, a type added to an allow
+ * list or dropped from a block list — and its most files, most bytes and
+ * largest file raised or removed (null: none). Each lets an anonymous sender
+ * send more, or more kinds of, files than the user allowed, so it weakens the
+ * link as the other weakening changes do (src/routes/reverse.js weakening) →
+ * the names ('types', 'maxFiles', 'maxBytes', 'maxFileBytes').
+ */
+export function limitsWidening(cur = {}, next = {}) {
+  const out = [];
+  const t = next.types;
+  if (t !== undefined && cur.types) {
+    const was = cur.types;
+    const had = new Set(was.rules || []);
+    const has = new Set((t && t.rules) || []);
+    if (!t || t.mode !== was.mode
+      || (was.mode === 'allow' && [...has].some((r) => !had.has(r)))
+      || (was.mode === 'block' && [...had].some((r) => !has.has(r)))) out.push('types');
+  }
+  for (const k of ['maxFiles', 'maxBytes', 'maxFileBytes']) {
+    const v = next[k];
+    const c = cur[k];
+    if (v === undefined || c === null || c === undefined) continue; // no limit before: any value is tighter
+    if (v === null || v > c) out.push(k);
+  }
+  return out;
+}
+
 // ── an item's content (the uploader's browser, and the user's) ─────────────
 
 /**

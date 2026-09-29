@@ -22,7 +22,7 @@ import { MAX_VIEWS, MAX_TTL } from '../../js/format.js';
 import { normalizeRules } from '../../js/filepolicy.js';
 import { captchaChoice } from '../../js/captcha.js';
 import { confirmStep, confirmLabel, canUsePasskey } from './confirm.js';
-import { RECEIVE_KINDS, KIND_LABELS, KIND_OPTIONS, DEFAULT_ACCEPT, widening } from '../../js/receivekinds.js';
+import { RECEIVE_KINDS, KIND_LABELS, KIND_OPTIONS, DEFAULT_ACCEPT, widening, limitsWidening } from '../../js/receivekinds.js';
 import { createTree } from '../../js/tree.js';
 
 const MiB = 1024 * 1024;
@@ -214,18 +214,25 @@ export function reverseEditPatch(v, cur, L = {}, now = Math.floor(Date.now() / 1
 
 /**
  * Whether `patch` (from reverseEditPatch) weakens link `cur`: its password
- * removed or changed, its CAPTCHA turned off, no expiry, unlimited views, or
- * files, links or credentials it did not accept (a note does not weaken it).
- * Such a change needs the account password or a passkey (the server decides:
- * src/routes/reverse.js weakening).
+ * removed or changed, its CAPTCHA turned off, no expiry, unlimited views,
+ * files, links or credentials it did not accept (a note does not weaken it),
+ * or its own file types or size limits loosened (receivekinds.js
+ * limitsWidening; `roleMaxBytes`: what a total size left empty becomes, the
+ * role's reverseMaxBytes). Such a change needs the account password or a
+ * passkey (the server decides: src/routes/reverse.js weakening).
  */
-export function weakensLink(patch, cur) {
+export function weakensLink(patch, cur, { roleMaxBytes = null } = {}) {
   if (!patch) return false;
+  const limits = {
+    types: patch.types, maxFiles: patch.maxFiles, maxFileBytes: patch.maxFileBytes,
+    maxBytes: patch.maxBytes === undefined ? undefined : patch.maxBytes ?? roleMaxBytes,
+  };
   return (patch.expires === null && cur.expires !== null)
     || (patch.views === null && cur.views !== null && cur.views !== undefined)
     || ((typeof patch.password === 'string' || patch.removePassword === true) && !!cur.password)
     || (patch.captcha === false && !!cur.captcha)
-    || (Array.isArray(patch.accept) && widening(acceptOfRow(cur), patch.accept).length > 0);
+    || (Array.isArray(patch.accept) && widening(acceptOfRow(cur), patch.accept).length > 0)
+    || limitsWidening(cur, limits).length > 0;
 }
 
 /** A radio group in a fieldset: choices [[value, text, hidden?]] → { el, value(), radios }. */
@@ -334,7 +341,7 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
   let withPasskey = passkey === true;
   if (!impersonating && passkey === null) canUsePasskey().then((ok) => { withPasskey = !!ok; confirmText.textContent = confirmLabel('Your account password (to confirm it is you)', withPasskey); }).catch(() => {});
   const confirmBox = h('div.dfield', { hidden: true }, confirmText, confirmIn,
-    h('p.type-hint', { id: id('confirm-hint'), text: 'This change removes a protection of the link (its password, its CAPTCHA, its expiry or its views limit) or lets it accept files, links or credentials it did not, so it needs your password or a passkey, as making a link does.' }));
+    h('p.type-hint', { id: id('confirm-hint'), text: 'This change removes a protection of the link (its password, its CAPTCHA, its expiry or its views limit), lets it accept files, links or credentials it did not, or loosens its file types or size limits, so it needs your password or a passkey, as making a link does.' }));
 
   const el = h('div.rev-edit.stack', {},
     expiry.el, expBox,
@@ -359,7 +366,7 @@ export function reverseEditForm(cur, profile, { confirm = null, passkey = null, 
     note: note.value(), noteText: noteIn.value,
     ...(folder && folder.chosen() ? { folder: folder.chosen().id, folderDepth: folder.chosen().depth } : {}),
   }, cur, L);
-  const needsStepUp = (patch) => !impersonating && weakensLink(patch, cur);
+  const needsStepUp = (patch) => !impersonating && weakensLink(patch, cur, { roleMaxBytes: L.reverseMaxBytes ?? null });
   const sync = () => { confirmBox.hidden = !needsStepUp(read().patch); };
   el.addEventListener('change', sync);
   el.addEventListener('input', (e) => { if (e.target !== confirmIn) sync(); });

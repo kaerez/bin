@@ -374,6 +374,23 @@ function swap(mount, ...nodes) {
 
 // ── notices above the Drive ─────────────────────────────────────────────────
 
+/**
+ * A Receive link's "Received" cell: what arrived (finished uploads), and the
+ * uploads in progress — reserved, not finished — with what they sent so far
+ * of the size they reserved, so the user sees what is using space (the
+ * Drive counts what they sent; the link's byte limit, what they reserved).
+ */
+export function receivedCell(s) {
+  const up = s.uploading && Number.isInteger(s.uploading.files) ? s.uploading : { files: 0, bytes: 0, size: 0 };
+  const files = Math.max(0, (s.files ?? 0) - up.files);
+  const bytes = Math.max(0, (s.bytes ?? 0) - (up.size ?? 0));
+  const onlyFiles = (s.accept || ['files']).join() === 'files';
+  const word = (n) => (onlyFiles ? `file${n === 1 ? '' : 's'}` : `item${n === 1 ? '' : 's'}`);
+  return h('td.mono', { dataset: { label: 'Received' } },
+    h('span', { text: `${files} ${word(files)}, ${formatBytes(bytes)}` }),
+    up.files > 0 ? h('span.rev-uploading.muted', { text: ` · uploading now: ${up.files} ${word(up.files)}, ${formatBytes(up.bytes ?? 0)} of ${formatBytes(up.size ?? 0)} sent` }) : null);
+}
+
 /** The banners over an open Drive: the owner acting as its user, a personal kit that is out of date, and the upgrade of a Drive made before the key model v2. */
 function banners(client, deps) {
   const out = [];
@@ -1449,7 +1466,7 @@ function mountApp(mount, client, deps) {
           h('td', { dataset: { label: 'Label' }, text: s.label || '(no label)' }),
           h('td.mono', { dataset: { label: 'Created' }, text: formatDate(s.created) }),
           h('td.mono', { dataset: { label: 'Expires' }, text: expiresText(s, now) }),
-          h('td.mono', { dataset: { label: 'Received' }, text: `${s.files} ${(s.accept || ['files']).join() === 'files' ? `file${s.files === 1 ? '' : 's'}` : `item${s.files === 1 ? '' : 's'}`}, ${formatBytes(s.bytes)}` }),
+          receivedCell(s),
           h('td.mono', { dataset: { label: 'Views' }, text: s.views === null || s.views === undefined ? 'unlimited' : `${s.left ?? 0} left of ${s.views}` }),
           h('td.mono', { dataset: { label: 'Status' }, text: `${s.status}${s.password ? ' · password' : ''}${s.captcha ? ' · CAPTCHA' : ''} · accepts ${acceptWords(s.accept)}` }),
           cell));

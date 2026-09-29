@@ -247,7 +247,7 @@ describe('L-3: idle sessions lapse; open sessions are counted per network', () =
     expect((await begin(r, { ip })).status).toBe(200);
   }, 60000);
 
-  it('a session with a file still being sent stays open for the role\'s filePendingSec', async () => {
+  it('a session with a file still being sent stays open for the role\'s filePendingSec (the file itself is released after RECEIVE_IDLE_SEC with no chunk)', async () => {
     const u = await receiver('r3-l3-busy', { filePendingSec: 3600 });
     const r = await newReverse(u.cookie);
     const ip = freshIp();
@@ -255,8 +255,15 @@ describe('L-3: idle sessions lapse; open sessions are counted per network', () =
     const f = await reserve(r, g, { bytes: randomBytes(10), ip });
     vi.useFakeTimers({ now: Date.now() + (SESSION_IDLE_SEC + 60) * 1000, toFake: ['Date'] });
     const key = await importFileKey(b64urlFromBytes(f.fk));
-    expect((await putChunk(r.id, f.node, 0, await encryptChunk(key, 0, 1, f.bytes), f.data.uploadToken, ip)).status).toBe(200);
-    expect((await rv(r.id, `/files/${f.node}/finalize`, { headers: { 'x-reverse-grant': g, 'x-upload-token': f.data.uploadToken }, ip })).status).toBe(200);
+    // No chunk for 10 minutes: that reservation was released (C-2; 410 released, never counted)…
+    const late = await putChunk(r.id, f.node, 0, await encryptChunk(key, 0, 1, f.bytes), f.data.uploadToken, ip);
+    expect([late.status, (await late.json()).error]).toEqual([410, 'released']);
+    // …but the session is still open: the uploader reserves the file again and finishes it.
+    const again = await reserve(r, g, { bytes: f.bytes, ip });
+    expect(again.res.status).toBe(201);
+    const k2 = await importFileKey(b64urlFromBytes(again.fk));
+    expect((await putChunk(r.id, again.node, 0, await encryptChunk(k2, 0, 1, again.bytes), again.data.uploadToken, ip)).status).toBe(200);
+    expect((await rv(r.id, `/files/${again.node}/finalize`, { headers: { 'x-reverse-grant': g, 'x-upload-token': again.data.uploadToken }, ip })).status).toBe(200);
   }, 60000);
 });
 
@@ -374,7 +381,8 @@ describe('Info: sessions, empty files and keep-alives', () => {
     const ct = await encryptChunk(key, 0, 1, f.bytes);
     const t0 = Date.now();
     vi.useFakeTimers({ now: t0, toFake: ['Date'] });
-    for (let t = 3000; t < RECEIVE_MAX_SEC; t += 3000) {
+    // Re-sent within RECEIVE_IDLE_SEC each time (a chunk every 590 s), so it is never released as idle.
+    for (let t = 590; t < RECEIVE_MAX_SEC; t += 590) {
       vi.setSystemTime(t0 + t * 1000);
       expect((await putChunk(r.id, f.node, 0, ct, f.data.uploadToken, ip)).status, String(t)).toBe(200);
     }

@@ -623,6 +623,7 @@ export class DriveClient {
     for (let tries = 0; ; tries++) {
       const { node: n } = await api.node(id);
       if (!n || n.v1) throw new Error('This item waits for the Drive upgrade: rename it afterwards.');
+      if (this.#typed && n.kind === 'file') this.#checkRename(await this.decode(n), clean);
       try {
         const sealedName = await this.#withKek(n.mek, (kek) => sealName(kek, this.#where(n.mek, n.ks), 'name', clean));
         await api.update(id, { name: sealedName, ks: n.ks, mek: n.mek });
@@ -632,6 +633,27 @@ export class DriveClient {
         throw e;
       }
     }
+  }
+
+  /**
+   * The role's file-type rule on a rename (the server checks the same on what
+   * it stores: src/lib/drivepolicy.js renameTypeRefusal): a file may not be
+   * given a name whose type the rule refuses, unless it keeps the type it has
+   * (the same extension: the rule is for new files, docs/DRIVE.md §5).
+   * `d`: the file as decode() reads it. Throws DrivePolicyError with the reason.
+   */
+  #checkRename(d, name) {
+    const { types } = declare([{ path: name, type: d.type || '' }]);
+    const bad = uncheckableExt(name) || refusedTypes(this.policy.mode, this.policy.rules, types).length > 0;
+    if (!bad) return;
+    if (d.name !== null && d.name !== undefined) {
+      const was = declare([{ path: d.name, type: d.type || '' }]).types;
+      if (!uncheckableExt(d.name) === !uncheckableExt(name) && was[0]?.ext === types[0]?.ext && was[0]?.mime === types[0]?.mime) return;
+    }
+    if (uncheckableExt(name)) throw new DrivePolicyError(`“${name}” has an unusual extension that cannot be checked against your administrator’s file-type policy, so the file was not renamed.`, 'type');
+    // A rename changes the extension (the stored type stays): name it by that.
+    const what = types[0]?.ext ? `.${types[0].ext}` : describeType(refusedTypes(this.policy.mode, this.policy.rules, types)[0]);
+    throw new DrivePolicyError(`Your administrator does not allow ${what} files in the Drive, so the file was not renamed to “${name}”.`, 'type');
   }
 
   /**

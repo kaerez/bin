@@ -35,7 +35,7 @@ import { NODE_ID_RE, ROOT, MAX_REVERSE_FILES, RECEIVED_FAIL_REASONS } from '../d
 import { encField } from './drive.js';
 import { KEY_RE, MEK_ID_RE } from '../../public/js/drivekeys.js';
 import { userKeys, checkNewItem, checkLinkKey, fieldKeys, toRest, fromRest } from '../lib/mek.js';
-import { normalizeAccept, widening as widensKinds, isKind, KIND_ACTIONS, KIND_PLURALS, DEFAULT_ACCEPT } from '../../public/js/receivekinds.js';
+import { normalizeAccept, widening as widensKinds, limitsWidening, isKind, KIND_ACTIONS, KIND_PLURALS, DEFAULT_ACCEPT } from '../../public/js/receivekinds.js';
 import { driveTypeRefusal, sealedTypeRefusal, typedPolicy } from '../lib/drivepolicy.js';
 
 export const REVERSE_ID_RE = /^r[A-Za-z0-9_-]{22}$/;
@@ -72,9 +72,13 @@ async function proofHashOf(b64) {
 }
 
 const parsed = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return null; } };
-/** A stored link key → its sealed {iv, ct} (the field layer removed), or null when it does not open. */
+/**
+ * A stored link key → its sealed {iv, ct} (the field layer removed), or null when it does not open.
+ * A link key is always stored at rest: one in plain text (written to storage by someone other than
+ * the Worker) is refused, never handed out (fails closed: the link shows no key).
+ */
 async function linkPriv(fk, uid, id, stored) {
-  try { return parsed(await fromRest(fk, uid, 'linkKey', id, stored)); } catch { return null; }
+  try { return parsed(await fromRest(fk, uid, 'linkKey', id, stored, { plain: false })); } catch { return null; }
 }
 
 /** A bound on a byte / file count: null (none) or an integer in [1, max]; undefined when invalid. */
@@ -441,10 +445,11 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
     // The lock first, before anything is checked or written (the admin may have locked it since `row` was read).
     if (!admin && await dir.isShareLocked(id)) return err(423, 'share_locked', 'The administrator has locked this share; it cannot be changed.');
     // A change that weakens the link's protection — removing or changing its
-    // password, turning its CAPTCHA off, no expiry, unlimited views — needs
-    // what creating one needs: the user's password or a passkey (a stolen
-    // session alone cannot turn a link into an open, lasting upload channel).
-    // Never through an API key; the owner acting as the user, or changing it
+    // password, turning its CAPTCHA off, no expiry, unlimited views, new kinds
+    // it accepts, its own file types or size limits loosened — needs what
+    // creating one needs: the user's password or a passkey (a stolen session
+    // alone cannot turn a link into an open, lasting upload channel). Never
+    // through an API key; the owner acting as the user, or changing it
     // directly, confirms nothing, as for every other change to the account.
     if (!admin) {
       cur = await drive.reverseStatus(owner, id);
@@ -452,10 +457,11 @@ export async function changeReverse(env, dir, row, body, { uid, actor, admin = n
         await dir.markShareEnded(id, 'ended');
         return err(410, 'gone', 'This share no longer exists.');
       }
-      const weak = weakening(change, cur);
+      // The limits as they will be stored (maxBytes "none" is the role's limit, when it has one).
+      const weak = weakening(change, cur, set.opts || {});
       if (weak.length) {
         if (channel === 'api') {
-          return err(403, 'step_up_required', 'Removing or changing an upload link’s password, turning its CAPTCHA off, removing its expiry or its views limit, or letting it accept files, links or credentials it did not, needs your password or a passkey in the browser; an API key cannot do it.', { weakens: weak });
+          return err(403, 'step_up_required', 'Removing or changing an upload link’s password, turning its CAPTCHA off, removing its expiry or its views limit, letting it accept files, links or credentials it did not, or loosening its file types or size limits, needs your password or a passkey in the browser; an API key cannot do it.', { weakens: weak });
         }
         if (!impersonating) {
           const g = await ipContext(env, request);
@@ -560,21 +566,29 @@ export async function pauseReverse(env, dir, row, on, { uid, actor, channel = 'a
 
 /**
  * Which parts of `change` weaken reverse share `cur` (its state in the Drive:
- * expires, views, password, captcha, accept) → a list of names (empty: none).
+ * expires, views, password, captcha, accept and its limits) → a list of
+ * names (empty: none). `opts`: the new limits as they will be stored.
  * Adding a password where there is none, turning the CAPTCHA on, an expiry,
  * fewer views or tighter limits never weaken it. Letting it accept files,
  * links or credentials it did not does ('accept'): each is a new way for an
  * anonymous sender to reach the user (a file of any type, a link to follow, a
  * secret entrusted to a channel that is not end-to-end); a note is plain text
- * shown inertly, less than a file carries, and does not.
+ * shown inertly, less than a file carries, and does not. So does loosening
+ * its own file limits ('types', 'maxFiles', 'maxBytes', 'maxFileBytes':
+ * receivekinds.js limitsWidening): a file type it refused, or more or larger
+ * files than it took. Raising its views or extending its expiry (within the
+ * role's limits) is the Extend of every share and does not.
  */
-export function weakening(change, cur) {
+export function weakening(change, cur, opts = {}) {
   const out = [];
   if (change.expires === null && !(cur.expires >= NO_EXPIRY)) out.push('expires');
   if (change.views === null && cur.views !== null && cur.views !== undefined) out.push('views');
   if (change.password !== undefined && cur.password) out.push('password');
   if (change.captcha === false && cur.captcha) out.push('captcha');
   if (change.accept !== undefined && widensKinds(cur.accept || DEFAULT_ACCEPT, change.accept).length) out.push('accept');
+  // Its own file limits loosened (`opts`: the new limits as they will be stored): file types less
+  // restrictive, and most files, most bytes or largest file raised or removed (receivekinds.js).
+  out.push(...limitsWidening(cur, opts));
   return out;
 }
 
@@ -624,7 +638,13 @@ export async function handleReversePublic(request, env, url) {
   if (!id || !REVERSE_ID_RE.test(id)) return failed(env, g, err(404, 'not_found', 'Not found.'));
   const dir = directory(env);
   const tg = await dir.reverseTarget(id);
-  if (tg.state === 'unknown') return failed(env, g, err(404, 'not_found', 'Not found.'));
+  if (tg.state === 'unknown') {
+    // The link of an account deleted since (its index row and Drive are gone): a grant or upload token
+    // it issued is a genuine uploader's late request (the Directory keeps their hashes for a day:
+    // reverseLateAdd), answered 410 and never counted; anything else is a guess.
+    if ((action === 'files' || action === 'done') && (await lateOfDeleted(dir, id, request))) return err(410, 'gone', GONE);
+    return failed(env, g, err(404, 'not_found', 'Not found.'));
+  }
 
   // A link proof, where one is sent, must be this share's (a late visitor with
   // the right link is not counted as a guess; anyone else is).
@@ -786,11 +806,16 @@ export async function handleReversePublic(request, env, url) {
     const bytes = await readCappedBody(request.body, MAX_CHUNK_CT);
     if (bytes === null) return err(413, 'too_large', 'Chunk is too large.');
     const i = Number(idx);
-    const r = await drive.reversePutChunk(uid, id, node, await hashToken(token), i, bytes);
+    // The upload's content counts in the Drive as it arrives: each chunk must fit (docs/REVERSE.md §4).
+    const r = await drive.reversePutChunk(uid, id, node, await hashToken(token), i, bytes, { capacity: tg.capacity ?? HARD_MAX_DRIVE_BYTES });
     if (r.status === 'forbidden') return failed(env, g, err(403, 'bad_token', 'Wrong upload token.'));
     if (r.status === 'bad_index') return err(400, 'bad_index', 'No such chunk index.');
     if (r.status === 'bad_size') return err(400, 'bad_size', `Chunk ${i} must be exactly ${r.expected} bytes.`);
+    if (r.status === 'full') return err(413, 'drive_full', 'There is not enough space left for that file.');
+    // No chunk for 10 minutes: the reservation was released (never counted); the session may reserve it again.
+    if (r.status === 'released') return err(410, 'released', 'This upload waited too long without data and was released: send the file again.');
     if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finished.');
+    await dir.setDriveUsed(uid, r.used);
     return json({ ok: true });
   }
   const grant = grantOf(request);
@@ -803,6 +828,8 @@ export async function handleReversePublic(request, env, url) {
     if (r.status === 'forbidden') return failed(env, g, err(403, 'bad_token', 'Wrong upload token.'));
     if (r.status === 'incomplete') return err(409, 'incomplete', `Chunk ${r.missing} has not been uploaded.`);
     if (r.status === 'busy') return json({ error: 'busy', message: 'A chunk of this file is still being stored. Try again in a moment.' }, 409, { 'retry-after': '1' });
+    // The user's drive-bytes quota is reached (the uploader learns nothing of it).
+    if (r.status === 'quota') return err(429, 'not_accepting', NOT_ACCEPTING);
     if (r.status !== 'ok') return err(410, 'gone', 'This upload has expired or was already finished.');
     return json({ ok: true });
   }
@@ -825,9 +852,19 @@ export async function handleReversePublic(request, env, url) {
  * reserved or dropped (the Drive keeps them for a day: rgone)? → { known, state }.
  */
 async function issuedBy(env, uid, id, request) {
+  const hashes = await requestHashes(request);
+  return hashes.length ? driveStub(env, uid).grantKnown(uid, id, hashes) : { known: false, state: 'gone' };
+}
+/** The hashes of the session grant and upload token `request` carries (as the Drive stores them). */
+async function requestHashes(request) {
   const hashes = [];
   for (const t of [grantOf(request), uploadTokenOf(request)]) if (t) hashes.push(await hashToken(t));
-  return hashes.length ? driveStub(env, uid).grantKnown(uid, id, hashes) : { known: false, state: 'gone' };
+  return hashes;
+}
+/** Did link `id`, of an account deleted since, issue the grant or upload token `request` carries (Directory reverseLate)? */
+async function lateOfDeleted(dir, id, request) {
+  const hashes = await requestHashes(request);
+  return hashes.length > 0 && (await dir.reverseLateKnown(id, hashes)) === true;
 }
 /**
  * A grant-bearing request its session no longer takes: a grant or token the
@@ -879,6 +916,10 @@ async function createFile(request, env, g, drive, uid, id, tg, grant) {
     const refused = refusedTypes(rules.mode, rules.rules, types);
     if (refused.length) return err(403, 'file_type_not_allowed', `This link does not accept ${refused.map(describeType).join(', ')} files.`, { refused });
   }
+  // A received file is Drive storage: its size counts under the user's drive-bytes quotas when it is
+  // finished (reverseFinalize). Refused now, before anything is sent, when it could not fit there.
+  const room = await directory(env).authorizeReceivedBytes(uid, { size: body.size, dry: true });
+  if (!room.ok) return room.status === 429 ? err(429, 'not_accepting', NOT_ACCEPTING) : err(410, 'gone', GONE);
   const uploadToken = genToken();
   // At rest, under the user's field layer (the Drive object sees only these).
   const fk = await fieldKeys(env, uid);

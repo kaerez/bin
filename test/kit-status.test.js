@@ -173,9 +173,10 @@ describe('the personal kit: last download, version and the stale notice', () => 
     expect((await post(`${K}/subs`, { candidate: c.id, rotate: true, ...STEP }, oc)).status).toBe(200);
     expect(await kitState(u.cookie)).toMatchObject({ version: v0.n + 1, last: { version: v0.n }, stale: true });
     expect(await driveState(u.cookie)).toMatchObject({ stale: true });
-    // The owner acting as the user sees the user's Drive state, but can neither download nor clear it.
+    // The owner acting as the user gets none of the kit's state (kg F4: it is the user's own), and can
+    // neither download nor clear it.
     const ic = await impersonate(u.id);
-    expect(await driveState(ic)).toMatchObject({ stale: true });
+    expect(await driveState(ic)).toBeUndefined();
     const imp = await post('/api/private/drive/kit', {}, ic);
     expect([imp.status, await errorOf(imp)]).toEqual([403, 'impersonating']);
     expect(await errorOf(await fetchJson('/api/private/drive/kit', { cookie: ic }))).toBe('impersonating');
