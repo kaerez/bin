@@ -35,7 +35,7 @@ async function roleForUser(uid, cookie) {
   let r = await call('/api/private/admin/roles', { method: 'POST', body: JSON.stringify({ name }) });
   let id = r.status === 201 ? (await r.json()).id : null;
   if (!id) id = (await (await call('/api/private/admin/roles', { method: 'GET' })).json()).roles.find((x) => x.name === name)?.id;
-  r = await call(`/api/private/admin/users/${uid}/role`, { method: 'PUT', body: JSON.stringify({ roleId: id }) });
+  r = await call(`/api/private/admin/users/${uid}/role`, { method: 'PUT', body: JSON.stringify({ roleId: id, ...OWNER_STEP }) });
   if (r.status !== 200) throw new Error(`role for ${uid}: ${r.status} ${await r.text()}`);
   userRoles.set(uid, id);
   return id;
@@ -76,19 +76,30 @@ const ownerNow = (cookie) => { let c = cookie; while (c && replacedOwner.has(c))
 export const liveCookie = (cookie) => ownerNow(cookie);
 
 // Admin changes that weaken a security control need the owner's step-up
-// (src/lib/settings.js weakenedSettings / weakenedLimits; an allow IP rule).
-// Suites that set such options for what they test send the owner's password
-// proof with every settings, limits and IP-rule write (it is ignored when the
-// change weakens nothing, and refused for anyone but the owner); `step:
-// false` sends the body as it is, for the tests of the step-up itself
-// (audit-auth.test.js).
+// (src/lib/settings.js weakenedSettings / weakenedLimits / weakenedQuotas; an
+// allow IP rule; a looser role for a user, a role deleted, a role's quota
+// switch; lifting a block rule, a Guard block, a lockout or a browser id's
+// block). Suites that set such options for what they test send the owner's
+// password proof with every such write (it is ignored when the change weakens
+// nothing, and refused for anyone but the owner); a DELETE or bare POST gets
+// it as a JSON body. `step: false` sends the body as it is, for the tests of
+// the step-up itself (audit-auth.test.js, audit-w3a.test.js).
 const WEAKENING_WRITE = (method, path) => (method === 'PATCH' && (path === '/api/private/admin/settings' || path === '/api/private/admin/limits'))
-  || (method === 'POST' && path === '/api/private/admin/ip-rules');
+  || (method === 'POST' && (path === '/api/private/admin/ip-rules' || path === '/api/private/admin/guard/unblock'))
+  || (method === 'PUT' && path === '/api/private/admin/quotas')
+  || (method === 'PUT' && /^\/api\/private\/admin\/users\/[A-Za-z0-9_-]{16}\/role$/.test(path))
+  || (method === 'POST' && /^\/api\/private\/admin\/users\/[A-Za-z0-9_-]{16}\/unlock$/.test(path))
+  || (method === 'POST' && /^\/api\/private\/admin\/public\/trackers\/[A-Za-z0-9_-]{12}$/.test(path))
+  || ((method === 'PATCH' || method === 'DELETE') && /^\/api\/private\/admin\/roles\/[A-Za-z0-9_-]{16}$/.test(path))
+  || (method === 'DELETE' && /^\/api\/private\/admin\/ip-rules\/[A-Za-z0-9_-]{16}$/.test(path));
 
 export async function fetchJson(path, { method = 'GET', body: asGiven, cookie: passed, headers = {}, ip, csrf = true, alias = true, step = true } = {}) {
   const cookie = alias ? ownerNow(passed) : passed;
   const plain = asGiven && typeof asGiven === 'object' && !Array.isArray(asGiven);
-  const body = step && plain && WEAKENING_WRITE(method, path) && asGiven.current === undefined && asGiven.reauth === undefined ? { ...asGiven, ...OWNER_STEP } : asGiven;
+  const weakening = step && WEAKENING_WRITE(method, path);
+  const typed = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
+  const body = weakening && asGiven === undefined && !typed ? { ...OWNER_STEP }
+    : weakening && plain && asGiven.current === undefined && asGiven.reauth === undefined ? { ...asGiven, ...OWNER_STEP } : asGiven;
   const res = await send(path, { method, body, cookie, headers, ip, csrf });
   if (body !== asGiven && res.status === 403 && (await res.clone().json().catch(() => ({}))).error === 'wrong_password') {
     throw new Error(`${method} ${path}: the owner's password is not "owner-password" here; send the step-up explicitly`);

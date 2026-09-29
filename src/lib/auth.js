@@ -17,7 +17,7 @@ import { sealToken, openToken } from './jwt.js';
 import { getCookie, sessionCookie, clearCookie, HttpError, assertNotCrossSite, assertStateChangeShape } from './http.js';
 import { csrfTokenFor, csrfCookie, clearCsrfCookie, assertCsrf } from './csrf.js';
 import { genSessionId, hashToken } from './ids.js';
-import { directory } from './guard.js';
+import { directory, ipContext, isBlocked, rateLimit, API_KEY_FAILURES } from './guard.js';
 
 export const SESSION_COOKIE = '__Host-secbin_sess';
 const SLIDE_SEC = 60;
@@ -146,9 +146,19 @@ export async function authenticate(request, env, { allowApiKey = false, scope = 
     const m = /^Bearer (sbk_[A-Za-z0-9_-]{43})$/.exec(authz.trim());
     if (!m) throw new HttpError(401, 'invalid_api_key', 'Invalid API key.');
     if (!allowApiKey) throw new HttpError(403, 'api_key_not_allowed', 'API keys cannot be used here (only to create shares, read the policy, and read or manage the key user’s own shares).');
+    // Anyone can send a made-up key, and each one asks the Directory: a network that sent
+    // too many refused keys (API_KEY_FAILURES, counted only on a refusal, so a working key
+    // is never counted) is refused before the Directory is asked, until its block ends.
+    const g = await ipContext(env, request);
+    const b = await isBlocked(env, g, 'api-key');
+    if (b.blocked) throw keysRateLimited(b);
     const res = await directory(env).authKey(await hashToken(m[1]));
     if (res?.disabled) throw accountDisabled();
-    if (!res) throw new HttpError(401, 'invalid_api_key', 'Invalid, expired or disabled API key.');
+    if (!res) {
+      const rl = await rateLimit(env, g, 'api-key', API_KEY_FAILURES);
+      if (!rl.ok) throw keysRateLimited(rl);
+      throw new HttpError(401, 'invalid_api_key', 'Invalid, expired or disabled API key.');
+    }
     // Each key does only what it was created for (least privilege).
     if (scope && !(res.scopes || []).includes(scope)) {
       throw new HttpError(403, 'scope_denied', `This API key does not have the "${scope}" scope.`);
@@ -166,6 +176,12 @@ export async function authenticate(request, env, { allowApiKey = false, scope = 
   }
   await checkCsrf(request, env, s);
   return { user: s.user, actor: s.actor, claims: s.claims, maxAgeSec: s.maxAgeSec, setCookie: s.setCookie, session: s.session, channel: 'all' };
+}
+
+/** 429 for a network blocked in the `api-key` scope (b: the block, with its end when known). */
+function keysRateLimited(b) {
+  const retry = b.until ? Math.max(1, b.until - now()) : API_KEY_FAILURES.blockSec;
+  return new HttpError(429, 'rate_limited', 'Too many invalid API keys from your network. Try again later.', b.until ? { until: b.until } : undefined, { 'retry-after': String(retry) });
 }
 
 /** The actor recorded for an action: the user, or { id: owner, imp: true } while impersonating. */

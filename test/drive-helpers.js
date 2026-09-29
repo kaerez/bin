@@ -33,13 +33,17 @@ export function someBytes(n) {
   return b;
 }
 
-/** Set role options for `uid` (a role of their own). */
-export async function driveLimits(uid, patch) {
+/**
+ * Set role options for `uid` (a role of their own). Turning the Drive on weakens nothing but
+ * still needs the owner's step-up: `step` is the owner's password proof when it is not
+ * "owner-password" in the file (else the helper sends that one).
+ */
+export async function driveLimits(uid, patch, step = null) {
   const oc = await owner();
-  const r = await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: uid, channel: 'all', patch } });
+  const r = await fetchJson('/api/private/admin/limits', { method: 'PATCH', cookie: oc, body: { scope: uid, channel: 'all', patch, ...(step ?? {}) } });
   if (r.status !== 200) throw new Error(`limits: ${r.status} ${await r.text()}`);
 }
-export const enableDrive = (uid, extra = {}) => driveLimits(uid, { driveEnabled: true, ...extra });
+export const enableDrive = (uid, extra = {}, step = null) => driveLimits(uid, { driveEnabled: true, ...extra }, step);
 
 // ── the session's keys ──────────────────────────────────────────────────────
 const keyCache = new Map();

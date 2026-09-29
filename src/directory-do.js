@@ -21,7 +21,7 @@ import { ARGON2 } from '../public/js/format.js';
 import {
   SETTINGS, checkSetting, settingsWithDefaults, crossCheckSettings, logValue, LIMITS, checkLimit, resolveLimits, restrictForApi, MAX_API_KEYS, API_SCOPES, DEFAULT_KEY_SCOPES, PASSWORD_POLICY_KEYS,
   UNLIMITED, checkQuota, quotaBucket, checkViewerRule, DEFAULT_VIEWER_RULES, MAX_PASSKEYS, HARD_MAX_DRIVE_BYTES, MAX_REVERSE_ACTIVE,
-  CAPTCHA_KEYS, resolveCaptcha, REVERSE_KEYS, NO_EXPIRY, checkReversePassword, weakenedSettings, weakenedLimits,
+  CAPTCHA_KEYS, resolveCaptcha, REVERSE_KEYS, NO_EXPIRY, checkReversePassword, weakenedSettings, weakenedLimits, weakenedQuotas,
 } from './lib/settings.js';
 import { normalizeRule, parseIp, parseRule, ruleContains } from './lib/ip.js';
 import { EXPORT_FORMAT, MAX_EXPORT_USERS, USER_PARTS, OWNER_PARTS } from './lib/portable.js';
@@ -314,6 +314,13 @@ const MIGRATIONS = [
     m.sql.exec(`CREATE INDEX IF NOT EXISTS opens_unsealed ON opens(id) WHERE ${UNSEALED_OPENS}`);
     m.sql.exec("INSERT INTO meta (k, v) VALUES ('records.pass', '1') ON CONFLICT(k) DO UPDATE SET v = excluded.v");
   },
+  // 20: failed sign-ins and failed step-ups in the log (login.failed, stepup.failed: sign-in
+  // records, sealed like the others): the partial index of the unsealed sign-in rows is rebuilt
+  // for the longer RECORD_ACTIONS (its condition must match UNSEALED_ACTIVITY word for word).
+  (m) => {
+    m.sql.exec('DROP INDEX IF EXISTS activity_unsealed');
+    m.sql.exec(`CREATE INDEX IF NOT EXISTS activity_unsealed ON activity(id) WHERE ${UNSEALED_ACTIVITY}`);
+  },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
@@ -402,7 +409,21 @@ const KEY_INFO = Object.freeze({
  * keyring (SECURITY.md, "Records at rest"). Every other entry is stored as it is.
  */
 const RECORD_ACTIONS = new Set(['login', 'login.password_ok', 'logout', 'account.locked', 'account.unlocked', 'sessions.revoked',
-  'passkey.added', 'passkey.removed', 'guard.blocked', 'guard.unblocked']);
+  'passkey.added', 'passkey.removed', 'guard.blocked', 'guard.unblocked', 'login.failed', 'stepup.failed']);
+/**
+ * Failed sign-ins (`login.failed`) and failed step-ups (`stepup.failed`) are
+ * added up, per account (or unknown username, by its keyed hash) and action,
+ * in one entry per FAILED_LOG_SEC: its detail says how many, how, when the
+ * last one was and (for a sign-in) from which address, sealed like every
+ * sign-in record. So a guessing run cannot flood the log. Unknown usernames
+ * get at most UNKNOWN_FAILED_ROWS entries of their own per FAILED_LOG_SEC;
+ * after that they share one ("n:*").
+ */
+const FAILED_LOG_SEC = 3600;
+const UNKNOWN_FAILED_ROWS = 100;
+const FAILED_DETAIL_RE = /^(unknown (?:username|passkey) )?failed=(\d{1,9}) via=([a-z0-9 ,+-]{1,120}) last=(\d{1,12})(?: from=(\S{1,64}))?$/;
+/** The subject of failed passkey sign-ins with a passkey no account has. */
+const UNKNOWN_PASSKEY = 'n:passkey';
 /**
  * The unsealed rows the records pass reads, as the partial indexes of
  * migration 19 define them (the query repeats the index's condition, word for
@@ -833,7 +854,9 @@ export class Directory extends DurableObject {
         this.sql.exec('DELETE FROM failures WHERE user_id = ?', owner.id);
         // Recovery must get the owner in even if their passkeys are lost too.
         this.#dropPasskeys(owner.id);
-        this.#log(owner.id, owner.id, 'owner.recovered', `username=${username} (passkeys removed)`);
+        // A recovery is a takeover response: the owner's API keys stop working too.
+        const keys = this.#dropApiKeys(owner.id);
+        this.#log(owner.id, owner.id, 'owner.recovered', `username=${username} (passkeys removed, API keys revoked=${keys})`);
       } else {
         const id = newId();
         this.sql.exec("INSERT INTO users (id, username, role, pw_salt, pw_t, pw_verifier, created, updated) VALUES (?, ?, 'owner', ?, ?, ?, ?, ?)",
@@ -880,7 +903,7 @@ export class Directory extends DurableObject {
     return key;
   }
 
-  async login({ username, verifier, lockoutOff = false }) {
+  async login({ username, verifier, lockoutOff = false, ip = null }) {
     const found = this.#loginUser(username);
     const ts = now();
     const s = this.#settings();
@@ -890,12 +913,13 @@ export class Directory extends DurableObject {
     const u = found && this.#loginUser(username);
     if (!u || u.id !== found.id) {
       timingSafeEqualHex(String(verifier), '0'.repeat(64)); // similar work either way
-      return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or password.');
+      return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or password.', 'password', ip);
     }
     const locked = this.#lockedUntil(u, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     if (typeof verifier !== 'string' || !timingSafeEqualHex(verifier, u.pw_verifier)) {
       this.#passwordFailure(u, ts, s, lockoutOff, pre);
+      await this.#logFailure('login.failed', u.id, 'password', ip);
       return fail(401, 'invalid_login', 'Wrong username or password.');
     }
     if (u.disabled) return fail(403, 'account_disabled', 'This account is disabled.');
@@ -914,13 +938,15 @@ export class Directory extends DurableObject {
    * locked exactly like a real account (under a keyed hash of the name), so
    * "423 locked" versus "401" does not reveal which usernames exist.
    */
-  async #unknownLoginFailure(username, ts, s, lockoutOff, message) {
+  async #unknownLoginFailure(username, ts, s, lockoutOff, message, how, ip = null) {
     const key = await crypto.subtle.importKey('raw', utf8(`secbin-lockout/v1:${this.#meta('secret')}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8(String(username).toLowerCase())));
     const phantom = { id: `n:${b64urlFromBytes(mac.subarray(0, 18))}`, role: 'user' };
     const locked = this.#lockedUntil(phantom, ts, lockoutOff);
     if (locked) return fail(423, 'account_locked', 'This account is temporarily locked after too many failed logins.', { until: locked });
     this.#passwordFailure(phantom, ts, s, lockoutOff);
+    // Logged as for a real account, under the same keyed hash (never the name typed).
+    await this.#logFailure('login.failed', phantom.id, how, ip);
     return fail(401, 'invalid_login', message);
   }
 
@@ -947,6 +973,55 @@ export class Directory extends DurableObject {
     this.sql.exec('INSERT INTO failures (user_id, count, start, locked_until) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET count = excluded.count, start = excluded.start, locked_until = excluded.locked_until',
       u.id, lockedUntil ? 0 : count, lockedUntil ? ts : start, lockedUntil);
     if (lockedUntil && !u.id.startsWith('n:')) this.#log(null, u.id, 'account.locked', `until=${lockedUntil}`, pre);
+  }
+
+  /**
+   * A failed sign-in (`login.failed`: `subject` an account id, a keyed hash of
+   * an unknown username "n:…", or UNKNOWN_PASSKEY) or a failed step-up
+   * (`stepup.failed`, the account's own) in the log, the owner's included:
+   * added to the entry of this subject and action of the last FAILED_LOG_SEC
+   * ("failed=3 via=password,recovery code last=<unix> from=<address>"), else
+   * a new one. Written after the caller's decision (and its lockout and
+   * counters, which are exact), so this await changes no outcome; each write
+   * is sealed first and applied only if the entry did not change meanwhile
+   * (else read again), and never lost. `how`: what failed; `ip`: the caller's
+   * address for a sign-in (sealed with the entry, never in the clear).
+   */
+  async #logFailure(action, subject, how, ip = null) {
+    const ts = now();
+    const unknown = subject.startsWith('n:');
+    const head = subject === UNKNOWN_PASSKEY ? 'unknown passkey ' : unknown ? 'unknown username ' : '';
+    const actor = action === 'stepup.failed' ? subject : null;
+    const from = typeof ip === 'string' && /^[0-9A-Fa-f.:]{2,64}$/.test(ip) ? ip : null;
+    const since = ts - FAILED_LOG_SEC;
+    let subj = subject;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const row = this.sql.exec('SELECT id, rk, rn, detail, actor_id, subject_id, action FROM activity WHERE subject_id = ? AND action = ? AND ts > ? ORDER BY id DESC LIMIT 1',
+        subj, action, since).toArray()[0];
+      if (!row && unknown && subj !== 'n:*') {
+        // Many unknown names at once (a spray): past the cap, they share one entry.
+        const many = this.sql.exec("SELECT COUNT(*) AS c FROM activity WHERE action = ? AND subject_id LIKE 'n:%' AND ts > ?", action, since).one().c;
+        if (many >= UNKNOWN_FAILED_ROWS) { subj = 'n:*'; attempt--; continue; }
+      }
+      const prev = row ? FAILED_DETAIL_RE.exec((await this.#recordValue(row.rk, Directory.#activityWhere(row), row.detail)) ?? '') : null;
+      const ways = new Set(prev ? prev[3].split(',') : []);
+      ways.add(how);
+      const text = `${head}failed=${prev ? Number(prev[2]) + 1 : 1} via=${[...ways].slice(0, 6).join(',')} last=${ts}${from ? ` from=${from}` : ''}`;
+      if (!row || !prev) {
+        // The first in this window (or an entry that no longer reads): a new one.
+        this.#log(actor, subj, action, text, await this.#preseal([[actor, subj, action, text]]));
+        return;
+      }
+      const k = await this.#sealKey('activity');
+      const rn = k ? recordNonce() : null;
+      const stored = k ? await sealRecord(k.key, Directory.#activityWhere({ rn, actor_id: row.actor_id, subject_id: row.subject_id, action }), text) : text;
+      // Applied only if the entry is still what was read (another failure, or the records pass, may have written it).
+      const done = this.sql.exec('UPDATE activity SET detail = ?, rk = ?, rn = ? WHERE id = ? AND detail = ? AND rk IS ? AND rn IS ? RETURNING id',
+        stored, k ? k.kid : null, rn, row.id, row.detail, row.rk, row.rn).toArray().length;
+      if (done) return;
+    }
+    const text = `${head}failed=1 via=${how} last=${ts}${from ? ` from=${from}` : ''}`;
+    this.#log(actor, subj, action, text, await this.#preseal([[actor, subj, action, text]]));
   }
 
   /** Session timeouts: the server-wide ones, or the account's role's (never for the owner). */
@@ -1094,18 +1169,28 @@ export class Directory extends DurableObject {
    * within `lockout.windowSec`, every session of the account is ended —
    * owner included — and the holder must log in again.
    */
-  async changePassword(uid, { current, reauth, origin, rpId, salt, t, verifier, actorId = uid, lockoutOff = false }) {
+  async changePassword(uid, { current, reauth, origin, rpId, salt, t, verifier, actorId = uid, lockoutOff = false, revokeKeys = true }) {
     const u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     const wrong = await this.#confirmChange(u, actorId, { current, reauth, origin, rpId }, lockoutOff);
     if (wrong) return wrong;
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
-    this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), uid);
-    this.#log(actorId, uid, 'password.changed');
+    let keys = 0;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), uid);
+      // "Also revoke my API keys" (on unless the user unticks it): a key taken with the password goes too.
+      if (revokeKeys !== false) keys = this.#dropApiKeys(uid);
+      this.#log(actorId, uid, 'password.changed', revokeKeys !== false ? `API keys revoked=${keys}` : 'API keys kept');
+    });
     // Passkeys and recovery codes are not tied to the password: tell the user
     // they still work (Account asks them to review them).
-    return { ok: true, ver: u.sess_ver + 1, passkeys: this.#passkeyCount(uid), recoveryLeft: this.#recoveryLeft(uid) };
+    return { ok: true, ver: u.sess_ver + 1, passkeys: this.#passkeyCount(uid), recoveryLeft: this.#recoveryLeft(uid), keysRevoked: keys };
+  }
+
+  /** Revoke every API key of an account (synchronous) → how many there were. */
+  #dropApiKeys(uid) {
+    return this.sql.exec('DELETE FROM api_keys WHERE user_id = ? RETURNING id', uid).toArray().length;
   }
 
   /** Change one's own username (needs the password or a passkey, unless impersonated). */
@@ -1169,8 +1254,16 @@ export class Directory extends DurableObject {
     return null;
   }
 
-  /** A failed step-up: after lockout.max within the window, every session of the account ends. */
-  #stepUpFailure(u, lockoutOff, code, message, pre = null) {
+  /**
+   * A failed step-up: after lockout.max within the window, every session of
+   * the account ends. Decided and counted first, then logged (stepup.failed).
+   */
+  async #stepUpFailure(u, lockoutOff, code, message, pre = null) {
+    const r = this.#stepUpFailed(u, lockoutOff, code, message, pre);
+    await this.#logFailure('stepup.failed', u.id, code === 'reauth_failed' ? 'passkey' : 'password');
+    return r;
+  }
+  #stepUpFailed(u, lockoutOff, code, message, pre) {
     const ts = now();
     if (!lockoutOff) {
       const st = this.#settings();
@@ -1574,22 +1667,27 @@ export class Directory extends DurableObject {
   }
 
   /** Sign in with a passkey alone (mode "any" only). */
-  async passkeyLogin({ challengeId, credential, origin, rpId }) {
+  async passkeyLogin({ challengeId, credential, origin, rpId, ip = null }) {
     const exp = await this.#checkLoginChallenge(challengeId);
     if (!exp) return fail(400, 'challenge_expired', 'That sign-in request expired. Try again.');
     const id = assertionId(credential);
     const p = id && this.sql.exec('SELECT * FROM passkeys WHERE id = ?', id).toArray()[0];
     const u = p && this.#user(p.user_id);
-    if (!u || (u.role !== 'owner' && u.role !== 'user')) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
+    if (!u || (u.role !== 'owner' && u.role !== 'user')) {
+      await this.#logFailure('login.failed', UNKNOWN_PASSKEY, 'passkey', ip);
+      return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
+    }
     // Spend the challenge before verifying (single use, even if this attempt fails).
     const ts = now();
     this.sql.exec('DELETE FROM webauthn_spent WHERE exp <= ?', ts);
     const fresh = this.sql.exec('INSERT INTO webauthn_spent (challenge, exp) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING challenge', challengeId, exp).toArray().length;
     if (!fresh) return fail(400, 'challenge_expired', 'That sign-in request was already used. Try again.');
     const [r, pre] = await Promise.all([this.#checkAssertion(p, credential, challengeId, origin, rpId), this.#preseal([[u.id, u.id, 'login', `passkey=${p.name}`]])]);
-    if (!r.ok) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
     const handle = this.#passkeyHandle(p, u);
-    if (r.userHandle && handle && r.userHandle !== handle) return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
+    if (!r.ok || (r.userHandle && handle && r.userHandle !== handle)) {
+      await this.#logFailure('login.failed', u.id, 'passkey', ip);
+      return fail(401, 'invalid_passkey', 'The passkey could not be verified.');
+    }
     const mode = this.#passkeyMode(u);
     if (mode === 'off') return fail(403, 'passkeys_disabled', 'Passkeys are not enabled for this account.');
     if (mode === 'second') return fail(403, 'password_first', 'This account signs in with its password first, then the passkey.');
@@ -1599,12 +1697,12 @@ export class Directory extends DurableObject {
   }
 
   /** Sign in with a recovery code alone (in every passkey mode). */
-  async recoveryLogin({ username, code, lockoutOff = false }) {
+  async recoveryLogin({ username, code, lockoutOff = false, ip = null }) {
     const found = this.#loginUser(username);
     const ts = now();
     const s = this.#settings();
     const hash = await this.#codeHash(code);
-    if (!found) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.');
+    if (!found) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.', 'recovery code', ip);
     // The entries it may write, sealed first. The sign-in names how many codes are left: that
     // count is read before the seal and again after it, and a code spent meanwhile elsewhere
     // means sealing again (a few times at most).
@@ -1612,9 +1710,11 @@ export class Directory extends DurableObject {
       const left = this.#recoveryLeft(found.id);
       const pre = await this.#preseal([[found.id, found.id, 'login', `recovery code (${left - 1} left)`], Directory.#lockedEntry(found, ts, s)]);
       const u = this.#loginUser(username);
-      if (!u || u.id !== found.id) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.');
+      if (!u || u.id !== found.id) return this.#unknownLoginFailure(username, ts, s, lockoutOff, 'Wrong username or recovery code.', 'recovery code', ip);
       if (this.#recoveryLeft(u.id) !== left) continue;
-      return this.#recoveryLoginChecked(u, hash, ts, s, lockoutOff, pre);
+      const r = this.#recoveryLoginChecked(u, hash, ts, s, lockoutOff, pre);
+      if (!r.ok && r.status === 401) await this.#logFailure('login.failed', u.id, 'recovery code', ip);
+      return r;
     }
     return fail(409, 'busy', 'Please try again.');
   }
@@ -1644,7 +1744,7 @@ export class Directory extends DurableObject {
    * code for the challenge issued by login(). A few tries per challenge; each
    * failure counts toward the account lockout.
    */
-  async secondFactor({ challengeId, credential, code, origin, rpId, lockoutOff = false }) {
+  async secondFactor({ challengeId, credential, code, origin, rpId, lockoutOff = false, ip = null }) {
     const ts = now();
     const challenge = () => (typeof challengeId === 'string' && challengeId.length <= 40
       && this.sql.exec("SELECT * FROM webauthn_challenges WHERE id = ? AND purpose = 'second'", challengeId).toArray()[0]) || null;
@@ -1697,6 +1797,7 @@ export class Directory extends DurableObject {
     }
     if (!how) {
       this.#passwordFailure(u, ts, s, lockoutOff, pre);
+      await this.#logFailure('login.failed', u.id, byCode ? 'recovery code after password' : 'passkey after password', ip);
       return fail(401, 'invalid_second_factor', byCode ? 'That recovery code is not valid (each works once).' : 'The passkey could not be verified.');
     }
     // Spend the challenge; a concurrent success already did → refuse this one.
@@ -2137,10 +2238,19 @@ export class Directory extends DurableObject {
   }
 
   /** Admin: unblock, block or forget a tracker (by its hash prefix shown in the list). */
-  async adminTracker(prefix, action, actorId) {
+  async adminTracker(prefix, action, actorId, step = null) {
     if (typeof prefix !== 'string' || !/^[A-Za-z0-9_-]{12}$/.test(prefix)) return fail(400, 'invalid', 'Unknown tracker.');
-    const rows = this.sql.exec("SELECT id_hash FROM trackers WHERE substr(id_hash, 1, 12) = ?", prefix).toArray();
+    if (!['unblock', 'block', 'forget'].includes(action)) return fail(400, 'invalid', 'action must be unblock, block or forget');
+    let rows = this.sql.exec("SELECT id_hash FROM trackers WHERE substr(id_hash, 1, 12) = ?", prefix).toArray();
     if (rows.length !== 1) return fail(404, 'not_found', 'Unknown tracker.');
+    // Unblocking a browser id, or forgetting it (its block and what it used of the public
+    // quotas go), lets it create again: the owner confirms (A-4). Blocking only tightens.
+    if (action !== 'block') {
+      const wrong = await this.#confirmWeakening(actorId, [`tracker.${action}`], step);
+      if (wrong) return wrong;
+      rows = this.sql.exec("SELECT id_hash FROM trackers WHERE substr(id_hash, 1, 12) = ?", prefix).toArray();
+      if (rows.length !== 1) return fail(404, 'not_found', 'Unknown tracker.');
+    }
     const h = rows[0].id_hash;
     if (action === 'unblock') this.sql.exec("UPDATE trackers SET blocked = 0, reason = '' WHERE id_hash = ?", h);
     else if (action === 'block') this.sql.exec("UPDATE trackers SET blocked = 1, reason = 'admin' WHERE id_hash = ?", h);
@@ -4398,15 +4508,26 @@ export class Directory extends DurableObject {
     if (u.role === 'owner') return fail(403, 'use_account_page', 'Change the owner password from Account, with the current password.');
     const bad = this.#checkCredential(salt, t, verifier);
     if (bad) return fail(400, 'invalid_credential', bad);
-    this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), id);
-    this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
-    // Passkeys and recovery codes are not tied to the password and stay
-    // (remove them separately if the account may have been taken over).
-    this.#log(actorId, id, 'password.reset_by_admin');
-    return { ok: true, ver: u.sess_ver + 1 };
+    let keys = 0;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('UPDATE users SET pw_salt = ?, pw_t = ?, pw_verifier = ?, sess_ver = sess_ver + 1, updated = ? WHERE id = ?', salt, t, verifier, now(), id);
+      this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
+      // A reset is how an account taken over is got back: its API keys stop working with its
+      // sessions. Passkeys and recovery codes are not tied to the password and stay (remove
+      // them separately if the account may have been taken over).
+      keys = this.#dropApiKeys(id);
+      this.#log(actorId, id, 'password.reset_by_admin', `API keys revoked=${keys}`);
+    });
+    return { ok: true, ver: u.sess_ver + 1, keysRevoked: keys };
   }
 
-  async unlockUser(id, actorId) {
+  async unlockUser(id, actorId, step = null) {
+    // Lifting a lockout lets the account be guessed at again: the owner confirms (A-4). An
+    // account with no failures counted has nothing to lift.
+    if (this.sql.exec('SELECT 1 FROM failures WHERE user_id = ?', String(id)).toArray().length) {
+      const wrong = await this.#confirmWeakening(actorId, ['account.unlock'], step);
+      if (wrong) return wrong;
+    }
     const pre = await this.#preseal([[actorId, id, 'account.unlocked']]);
     this.sql.exec('DELETE FROM failures WHERE user_id = ?', id);
     this.#log(actorId, id, 'account.unlocked', '', pre);
@@ -4506,6 +4627,43 @@ export class Directory extends DurableObject {
   }
 
   /**
+   * #confirmWeakening for a change made outside this object (lifting a Guard
+   * block, src/routes/admin.js) → { ok: true } or the failure to return.
+   */
+  async confirmWeakening(actorId, weak, step = null) {
+    return (await this.#confirmWeakening(actorId, Array.isArray(weak) ? weak.map(String) : [], step)) ?? { ok: true };
+  }
+
+  /** The limits (both channels) a user in role scope `scope` ('' Default, "r:<id>") has. */
+  #limitsIn(scope) {
+    const all = resolveLimits(this.#limitRows('', 'all'), scope ? this.#limitRows(scope, 'all') : {});
+    return { all, api: restrictForApi(all, this.#limitRows('', 'api'), scope ? this.#limitRows(scope, 'api') : {}) };
+  }
+
+  /** The quota list a user in role scope `scope` is counted against: the role's own, or Default's. */
+  #quotasIn(scope, ownQuotas = null) {
+    const r = scope ? this.#role(scope.slice(2)) : null;
+    const own = r ? (ownQuotas ?? !!r.own_quotas) : false;
+    return this.sql.exec('SELECT channel, kind, n, unit, max FROM quotas WHERE user_id = ?', own ? scope : '').toArray();
+  }
+
+  /**
+   * What moving users from role scope `from` to `to` weakens (A-1): each
+   * role option that resolves looser on either channel (weakenedLimits), and
+   * "quotas" when the quota list they are counted against allows more
+   * (weakenedQuotas). [] for none.
+   */
+  #roleChangeWeakens(from, to) {
+    if (from === to) return [];
+    const s = this.#settings();
+    const a = this.#limitsIn(from);
+    const b = this.#limitsIn(to);
+    const weak = new Set([...weakenedLimits(a.all, b.all, s), ...weakenedLimits(a.api, b.api, s)]);
+    if (weakenedQuotas(this.#quotasIn(from), this.#quotasIn(to)).length) weak.add('quotas');
+    return [...weak];
+  }
+
+  /**
    * The limits admin scope `key` resolves to on `channel`, from the scope's
    * own rows for that channel (`rows`): the all-channel limits (the Default
    * role's rows, then the scope's), or the API's, which only narrow them.
@@ -4555,13 +4713,21 @@ export class Directory extends DurableObject {
     return { ok: true };
   }
 
-  async setQuotas(scopeIn, list, actorId) {
+  async setQuotas(scopeIn, list, actorId, step = null) {
     const sc = this.#adminScope(scopeIn);
     if (sc.ok === false) return sc;
     const scopeUserId = sc.key;
     if (!Array.isArray(list) || list.length > 50) return fail(400, 'invalid', 'quotas must be a list (max 50)');
     let clean;
     try { clean = list.map((q) => checkQuota(q, { publicAccount: scopeUserId === PUBLIC_ID })); } catch (e) { return fail(400, 'invalid_quota', e.message); }
+    // A quota removed, raised or given a shorter period needs the owner's confirmation (A-2),
+    // compared on the list the scope's accounts are counted against now (a role saving its own
+    // list stops using Default's).
+    const before = scopeUserId.startsWith('r:') ? this.#quotasIn(scopeUserId) : this.sql.exec('SELECT channel, kind, n, unit, max FROM quotas WHERE user_id = ?', scopeUserId).toArray();
+    const loosened = weakenedQuotas(before, clean);
+    const wrong = await this.#confirmWeakening(actorId, loosened.length ? ['quotas'] : [], step);
+    if (wrong) return wrong;
+    if (scopeUserId.startsWith('r:') && !this.#role(scopeUserId.slice(2))) return fail(404, 'not_found', 'Role not found.');
     this.ctx.storage.transactionSync(() => {
       const old = this.sql.exec('SELECT id FROM quotas WHERE user_id = ?', scopeUserId).toArray();
       for (const o of old) this.sql.exec('DELETE FROM usage WHERE quota_id = ?', o.id);
@@ -4654,9 +4820,18 @@ export class Directory extends DurableObject {
   }
 
   /** Rename a role, or choose whether it has its own quota list (instead of Default's). */
-  async updateRole(id, { name, ownQuotas }, actorId) {
-    const r = this.#role(id);
+  async updateRole(id, { name, ownQuotas }, actorId, step = null) {
+    let r = this.#role(id);
     if (!r) return fail(404, 'not_found', 'Role not found.');
+    // Switching between the role's own quota list and Default's: needs the owner's confirmation
+    // when the list its users would be counted against allows more (A-2).
+    if (typeof ownQuotas === 'boolean' && ownQuotas !== !!r.own_quotas) {
+      const loosened = weakenedQuotas(this.#quotasIn(roleScope(id)), this.#quotasIn(roleScope(id), ownQuotas));
+      const wrong = await this.#confirmWeakening(actorId, loosened.length ? ['quotas'] : [], step);
+      if (wrong) return wrong;
+      r = this.#role(id);
+      if (!r) return fail(404, 'not_found', 'Role not found.');
+    }
     let label = r.name;
     if (name !== undefined) {
       const n = this.#roleName(name);
@@ -4703,10 +4878,16 @@ export class Directory extends DurableObject {
   }
 
   /** Delete a custom role; its users move to the Default role. */
-  async deleteRole(id, actorId) {
+  async deleteRole(id, actorId, step = null) {
     const r = this.#role(id);
     if (!r) return fail(404, 'not_found', 'Role not found.');
     const sc = roleScope(r.id);
+    // Its users fall back to Default: when that is looser for them, the owner confirms (A-1).
+    if (this.sql.exec("SELECT 1 FROM users WHERE role = 'user' AND role_id = ? LIMIT 1", id).toArray().length) {
+      const wrong = await this.#confirmWeakening(actorId, this.#roleChangeWeakens(sc, ''), step);
+      if (wrong) return wrong;
+      if (!this.#role(id)) return fail(404, 'not_found', 'Role not found.');
+    }
     let moved = 0;
     this.ctx.storage.transactionSync(() => {
       moved = this.sql.exec("SELECT COUNT(*) AS c FROM users WHERE role = 'user' AND role_id = ?", id).one().c;
@@ -4720,8 +4901,8 @@ export class Directory extends DurableObject {
   }
 
   /** Give a user a role ("default" or a custom role id). The owner's role cannot change. */
-  async setUserRole(uid, roleId, actorId) {
-    const u = this.#user(uid);
+  async setUserRole(uid, roleId, actorId, step = null) {
+    let u = this.#user(uid);
     if (!u) return fail(404, 'not_found', 'User not found.');
     if (u.role === 'owner') return fail(403, 'owner_role', 'The owner always has the Owner role.');
     if (u.role !== 'user') return fail(403, 'forbidden', 'The public account always has the Public role.');
@@ -4735,6 +4916,13 @@ export class Directory extends DurableObject {
       next = r.id;
       label = r.name;
     }
+    // A role that is looser for this user (any option, on either channel, or the quotas) needs
+    // the owner's confirmation (A-1); a tighter or equal one needs nothing.
+    const wrong = await this.#confirmWeakening(actorId, this.#roleChangeWeakens(this.#scopeOf(u), next ? roleScope(next) : ''), step);
+    if (wrong) return wrong;
+    u = this.#user(uid);
+    if (!u || u.role !== 'user') return fail(404, 'not_found', 'User not found.');
+    if (next && !this.#role(next)) return fail(404, 'not_found', 'Role not found.');
     this.sql.exec('UPDATE users SET role_id = ?, updated = ? WHERE id = ?', next, now(), uid);
     this.#log(actorId, uid, 'role.assigned', `role=${label}`);
     return { ok: true, roleId: next ?? 'default' };
@@ -4851,9 +5039,17 @@ export class Directory extends DurableObject {
     return { ok: true, id, cidr: c };
   }
 
-  async removeIpRule(id, actorId) {
-    const r = this.sql.exec('SELECT cidr, action FROM ip_rules WHERE id = ?', id).toArray()[0];
+  async removeIpRule(id, actorId, step = null) {
+    let r = this.sql.exec('SELECT cidr, action FROM ip_rules WHERE id = ?', id).toArray()[0];
     if (!r) return fail(404, 'not_found', 'Rule not found.');
+    // Removing a block rule lets its addresses in again, as an allow rule would: the owner
+    // confirms (A-4). Removing an allow rule only tightens.
+    if (r.action === 'block') {
+      const wrong = await this.#confirmWeakening(actorId, ['ipRule.block'], step);
+      if (wrong) return wrong;
+      r = this.sql.exec('SELECT cidr, action FROM ip_rules WHERE id = ?', id).toArray()[0];
+      if (!r) return fail(404, 'not_found', 'Rule not found.');
+    }
     this.sql.exec('DELETE FROM ip_rules WHERE id = ?', id);
     this.#log(actorId, null, 'iprule.removed', `${r.action} ${r.cidr}`);
     return { ok: true };

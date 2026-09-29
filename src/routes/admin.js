@@ -24,6 +24,16 @@ const fromDirWeak = (r) => err(r.status, r.error, r.message, r.weakens ? { weake
 /** The session a new one replaces (impersonation starting or ending): revoked with it. */
 const replaced = (a) => ({ sid: a.claims.sid, exp: a.claims.exp });
 const ID_RE = /^[A-Za-z0-9_-]{16}$/;
+/**
+ * A request's JSON body when it has one, else {}: for a DELETE or a bare POST
+ * (sent with X-Secbin-Intent) that may carry the owner's step-up.
+ */
+const optionalBody = (request) => (request.body !== null && (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json' ? readJsonBody(request) : {});
+/** The owner's step-up in `body`, when given (the Directory decides whether the change needs it), with the kill switch. */
+async function weakeningStep(env, request, url, body) {
+  const g = await ipContext(env, request);
+  return { g, step: { ...((await stepUpIfGiven(body, url)) ?? {}), lockoutOff: g.off.all } };
+}
 // Where limits, quotas and viewer rules are set: "global" (the Default role),
 // "role:<id>" (a custom role) or the public account's id.
 const SCOPE_RE = /^(global|role:default|role:[A-Za-z0-9_-]{16}|[A-Za-z0-9_-]{16})$/;
@@ -179,8 +189,10 @@ export async function handleAdmin(request, env, url) {
   if (tm) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const body = await readJsonBody(request);
-    const r = await dir.adminTracker(tm[1], body.action, me);
-    return r.ok ? json(r) : fromDir(r);
+    // Unblocking or forgetting a browser id needs the step-up (the Directory decides).
+    const { g, step } = await weakeningStep(env, request, url, body);
+    const r = await dir.adminTracker(tm[1], body.action, me, step);
+    return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
   }
 
   if (p === '/api/private/admin/overview') {
@@ -234,8 +246,14 @@ export async function handleAdmin(request, env, url) {
     const body = await readJsonBody(request);
     if (!SCOPE_RE.test(String(body.scope))) return err(400, 'invalid_scope', SCOPE_MSG);
     const scope = body.scope === 'global' ? '' : body.scope;
-    const r = p.endsWith('quotas') ? await dir.setQuotas(scope, body.list, me) : await dir.setViewerRules(scope, body.list, me);
-    return r.ok ? json(r) : fromDir(r);
+    if (!p.endsWith('quotas')) {
+      const r = await dir.setViewerRules(scope, body.list, me);
+      return r.ok ? json(r) : fromDir(r);
+    }
+    // A quota removed, raised or with a shorter period needs the step-up (the Directory decides).
+    const { g, step } = await weakeningStep(env, request, url, body);
+    const r = await dir.setQuotas(scope, body.list, me, step);
+    return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
   }
 
   // Roles: list and create (or duplicate with `from`); one role's detail,
@@ -252,13 +270,18 @@ export async function handleAdmin(request, env, url) {
     if (request.method === 'GET') { const r = await dir.roleDetail(roleM[1]); return r.ok ? json(r) : fromDir(r); }
     if (request.method === 'PATCH') {
       const body = await readJsonBody(request);
-      const r = await dir.updateRole(roleM[1], { name: body.name, ownQuotas: body.ownQuotas }, me);
-      return r.ok ? json(r) : fromDir(r);
+      // Switching to a looser quota list (the role's own or Default's) needs the step-up.
+      const { g, step } = await weakeningStep(env, request, url, body);
+      const r = await dir.updateRole(roleM[1], { name: body.name, ownQuotas: body.ownQuotas }, me, step);
+      return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
     }
     if (request.method === 'DELETE') {
       assertIntent(request);
-      const r = await dir.deleteRole(roleM[1], me);
-      return r.ok ? json(r) : fromDir(r);
+      // Its users fall back to Default: when that is looser for them, the step-up (in a JSON body).
+      const body = await optionalBody(request);
+      const { g, step } = await weakeningStep(env, request, url, body);
+      const r = await dir.deleteRole(roleM[1], me, step);
+      return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
     }
     return methodNotAllowed('GET, PATCH, DELETE');
   }
@@ -324,17 +347,22 @@ export async function handleAdmin(request, env, url) {
       // The Drive's password wrap opens only with the old password now.
       await drivePasswordChanged(env, uid, { reset: true });
       if (uid === me) {
-        // Resetting your own password ends your other sessions; keep this one.
+        // Resetting your own password ends your other sessions; keep this one (with its absolute end).
         const s = await cachedSettings(env);
-        const { cookie } = await issueSession(env, { uid: me, ver: r.ver, settings: { idleSec: s['session.idleSec'], absSec: s['session.absSec'] } });
-        return json({ ok: true }, 200, { 'set-cookie': cookie });
+        const { cookie } = await issueSession(env, { uid: me, ver: r.ver, settings: { idleSec: s['session.idleSec'], absSec: s['session.absSec'] }, iat: a.claims.iat, notAfter: a.claims.exp });
+        return json({ ok: true, keysRevoked: r.keysRevoked }, 200, { 'set-cookie': cookie });
       }
-      return json({ ok: true });
+      // The account's API keys were revoked with its sessions (its passkeys and recovery codes stay).
+      return json({ ok: true, keysRevoked: r.keysRevoked });
     }
     if (action === 'unlock') {
       if (request.method !== 'POST') return methodNotAllowed('POST');
       assertIntent(request);
-      return json(await dir.unlockUser(uid, me));
+      // Lifting a lockout needs the step-up (in a JSON body), as an allow rule does.
+      const body = await optionalBody(request);
+      const { g, step } = await weakeningStep(env, request, url, body);
+      const r = await dir.unlockUser(uid, me, step);
+      return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
     }
     if (action === 'passkeys') {
       // Remove an account's passkeys and recovery codes. Another user's: no
@@ -352,8 +380,10 @@ export async function handleAdmin(request, env, url) {
     if (action === 'role') {
       if (request.method !== 'PUT') return methodNotAllowed('PUT');
       const body = await readJsonBody(request);
-      const r = await dir.setUserRole(uid, body.roleId, me);
-      return r.ok ? json(r) : fromDir(r);
+      // A role that is looser for this user needs the step-up (the Directory compares them).
+      const { g, step } = await weakeningStep(env, request, url, body);
+      const r = await dir.setUserRole(uid, body.roleId, me, step);
+      return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
     }
     if (action === 'impersonate') {
       if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -422,9 +452,12 @@ export async function handleAdmin(request, env, url) {
   if (rm) {
     if (request.method !== 'DELETE') return methodNotAllowed('DELETE');
     assertIntent(request);
-    const r = await dir.removeIpRule(rm[1], me);
+    // Removing a block rule needs the step-up (in a JSON body); an allow rule's removal does not.
+    const body = await optionalBody(request);
+    const { g, step } = await weakeningStep(env, request, url, body);
+    const r = await dir.removeIpRule(rm[1], me, step);
     invalidateGuardCaches();
-    return r.ok ? json(r) : fromDir(r);
+    return r.ok ? json(r) : afterRefusal(env, g, r, fromDirWeak(r));
   }
 
   if (p === '/api/private/admin/guard') {
@@ -448,6 +481,12 @@ export async function handleAdmin(request, env, url) {
     const typed = isGuardTag(body.key) ? null : await guardKeyTyped(env, body.key);
     const key = typed === null ? body.key : await guardKeyFor(env, typed);
     const stub = guardShardFor(env, key);
+    if (gm[1] === 'unblock') {
+      // Lifting a block (and the network's counter) lets it try again: the step-up, as an allow rule.
+      const { g, step } = await weakeningStep(env, request, url, body);
+      const ok = await dir.confirmWeakening(me, ['guard.unblock'], step);
+      if (!ok.ok) return afterRefusal(env, g, ok, fromDirWeak(ok));
+    }
     // The row's address, for the view and the audit entry (sealed there like every sign-in record).
     const row = await stub.row(body.scope, key);
     if (gm[1] === 'unblock') {

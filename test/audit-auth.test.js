@@ -213,9 +213,9 @@ describe('F-4: weakening a security control needs the owner\'s password or a pas
       expect((await overview()).settings).toEqual(before);
     }
     // Several at once: all are named; unrelated or tightening keys in the same patch are fine.
-    await needsStepUp(await settings({ csrfTokens: false, 'lockout.max': 20, 'lockout.lockSec': 3600, 'files.grantSec': 7200 }), ['csrfTokens', 'lockout.max']);
-    expect((await settings({ 'lockout.max': 5, 'lockout.lockSec': 3600, 'files.grantSec': 7200, 'a11y.contact': 'aa@example.test' })).status).toBe(200);
-    expect((await settings({ 'lockout.max': 10, 'lockout.lockSec': 900, 'files.grantSec': 3600 }, OWNER_STEP)).status).toBe(200);
+    await needsStepUp(await settings({ csrfTokens: false, 'lockout.max': 20, 'lockout.lockSec': 3600, 'files.pendingSec': 7200 }), ['csrfTokens', 'lockout.max']);
+    expect((await settings({ 'lockout.max': 5, 'lockout.lockSec': 3600, 'files.pendingSec': 7200, 'a11y.contact': 'aa@example.test' })).status).toBe(200);
+    expect((await settings({ 'lockout.max': 10, 'lockout.lockSec': 900, 'files.pendingSec': 3600 }, OWNER_STEP)).status).toBe(200);
   }, 60_000);
 
   it('settings: a passkey confirms too', async () => {

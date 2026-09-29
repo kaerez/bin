@@ -165,7 +165,11 @@ export function crossCheckSettings(merged) {
 //   'rank'  — down the option's RANK order (strongest last);
 //   'added' — a list that gains an entry (link rules: anything more may be shared);
 //   'types' — the file-type list, read with its mode: a rule removed from a
-//             block list, or added to an allow list (a looser mode is 'rank').
+//             block list, or added to an allow list (a looser mode is 'rank');
+//   'cleared' — a text that had something and is emptied (the anonymous-tracking notice).
+// Every setting and role option is classified (weakening or not, and why) in
+// SECURITY.md, "Admin changes that weaken a control"; test/weakening.test.js
+// fails when an option is added without a classification (NOT_WEAKENING).
 const LOOSER = {
   up: (a, b) => b > a,
   down: (a, b) => b < a,
@@ -175,45 +179,104 @@ const LOOSER = {
   keep: (a, b) => b !== null && (a === null || b < a),
   max: (a, b) => a !== null && (b === null || b > a),
   added: (a, b) => (Array.isArray(b) ? b : []).some((x) => !(Array.isArray(a) ? a : []).includes(x)),
+  cleared: (a, b) => typeof a === 'string' && a.trim() !== '' && String(b ?? '').trim() === '',
 };
 const WEAKER_SETTINGS = {
   csrfTokens: 'off',
   'session.idleSec': 'up', 'session.absSec': 'up',
+  // The owner's own file shares: recipients may download for longer after opening.
+  'files.grantSec': 'up',
   'lockout.max': 'up', 'lockout.windowSec': 'down', 'lockout.lockSec': 'down',
   ...Object.fromEntries(['login', 'setup', 'invalid'].flatMap((s) => [[`guard.${s}.max`, 'up'], [`guard.${s}.windowSec`, 'down'], [`guard.${s}.blockSec`, 'down']])),
   'guard.v6Prefix': 'up',
   'public.enabled': 'on',
+  // How anonymous creators are counted (PUBLIC_TRACKING_RANK), the notice that tells them, and
+  // how long an idle browser id is kept.
+  'public.tracking': 'rank', 'public.notice': 'off', 'public.noticeText': 'cleared', 'public.trackerIdleSec': 'up',
   'public.newTrackersPerIp': 'up', 'public.newTrackersWindowSec': 'down',
   'log.maxAgeSec': 'down', 'log.maxEntries': 'down', 'log.ownerMaxAgeSec': 'keep', 'log.ownerMaxEntries': 'keep',
 };
+/**
+ * The settings that never weaken a control, each with its reason (the
+ * classification is complete: every setting is here or in WEAKER_SETTINGS).
+ */
+export const NOT_WEAKENING_SETTINGS = Object.freeze({
+  'files.pendingSec': 'how long an unfinished upload is kept before it is discarded: nobody can open it meanwhile',
+  ...Object.fromEntries(Object.keys(A11Y_SETTINGS).map((k) => [k, 'the accessibility statement: public text, no control'])),
+});
 /** Orders for 'rank' options, weakest first. */
 const MODE_RANK = { off: 0, allow: 1, require: 2 };
 const RANK = {
   passkeys: { off: 0, any: 1, second: 2 },
   shareCaptcha: MODE_RANK, reverseCaptcha: MODE_RANK, reversePassword: MODE_RANK,
   fileTypeMode: { any: 0, block: 1, allow: 2 },
+  // Refused when both are over < counted by one of them < refused when either is over.
+  'public.tracking': { 'both-permissive': 0, tracker: 1, ip: 1, 'both-restrictive': 2 },
 };
 /** The role options that weaken sign-in, sessions, the log, or what a share or link may be, when loosened. */
 const WEAKER_LIMITS = {
-  passkeys: 'rank', pwMinLength: 'down', pwUpper: 'off', pwLower: 'off', pwDigit: 'off', pwSymbol: 'off',
+  passkeys: 'rank', passkeysMax: 'up', pwMinLength: 'down', pwUpper: 'off', pwLower: 'off', pwDigit: 'off', pwSymbol: 'off',
   sessionIdleSec: 'up', sessionAbsSec: 'up', logMaxAgeSec: 'keep', logMaxEntries: 'keep',
   shareCaptcha: 'rank', shareCaptchaDefault: 'unset', reverseCaptcha: 'rank', reverseCaptchaDefault: 'unset',
   reversePassword: 'rank', reversePasswordDefault: 'unset',
-  maxExpireSec: 'max', maxViews: 'max', allowUnlimitedViews: 'on',
+  maxExpireSec: 'max', maxViews: 'max', allowUnlimitedViews: 'on', fileGrantSec: 'up',
   reverseMaxExpireSec: 'max', reverseMaxViews: 'max', reverseNoExpiry: 'on', reverseAllowUnlimitedViews: 'on',
-  files: 'on', url: 'on', secret: 'on', apiEnabled: 'on',
-  // Receive links that may take files, links or credentials, as the outgoing files / url / secret
+  text: 'on', files: 'on', url: 'on', secret: 'on', apiEnabled: 'on', apiMaxKeys: 'max',
+  // The in-browser viewer renders what anyone sent in the recipient's page (a wider surface than a download).
+  viewer: 'on',
+  // Read receipts: what a sender sees of the people who open their shares (personal data).
+  receiptIp: 'on', receiptLocation: 'on', receiptBrowser: 'on', receiptOs: 'on', receiptLanguages: 'on',
+  // The Drive, and Receive links: anyone with such a link uploads into the user's Drive.
+  driveEnabled: 'on', reverseEnabled: 'on', reverseMaxActive: 'max',
+  // Receive links that may take files, notes, links or credentials, as the outgoing text / files / url / secret
   // (a link adding files, links or credentials to what it accepts needs the user's step-up too).
-  reverseFiles: 'on', reverseUrl: 'on', reverseSecret: 'on',
+  reverseFiles: 'on', reverseText: 'on', reverseUrl: 'on', reverseSecret: 'on',
   fileTypeMode: 'rank', fileTypeRules: 'types', urlRules: 'added',
 };
+/** The role options that never weaken a control, each with its reason (with WEAKER_LIMITS: every option). */
+export const NOT_WEAKENING_LIMITS = Object.freeze({
+  openerDelete: 'lets a recipient end a share early: less exposure, not more',
+  maxFilesPerShare: 'a size bound (resources), not an access control; volume is bounded by the quotas, which are',
+  maxShareBytes: 'a size bound (resources); volume is bounded by the quotas',
+  maxFileBytes: 'a size bound (resources); volume is bounded by the quotas',
+  maxFolderDepth: 'the shape of a file share, not who may open it',
+  viewerMaxBytes: 'a size bound of the viewer, which is itself an option (viewer)',
+  viewerCustomRules: 'which viewer rules apply: they only choose how a file the recipient may already download is shown',
+  filePendingSec: 'how long an unfinished upload is kept: nobody can open it meanwhile',
+  driveMaxBytes: 'the Drive\'s capacity (resources)',
+  driveMaxFileBytes: 'a size bound (resources)',
+  reverseMaxBytes: 'a size bound (resources) of one Receive link',
+  reverseEdit: 'changing a link stays within the role\'s bounds, and a change that weakens a link needs the user\'s own step-up',
+});
 /** Exported for the docs and tests: what counts as weakening. */
 export const WEAKENING_SETTINGS = Object.freeze(Object.keys(WEAKER_SETTINGS));
 export const WEAKENING_LIMITS = Object.freeze(Object.keys(WEAKER_LIMITS));
 
 /** The settings whose change from `before` to `after` (complete maps) weakens a control. */
 export function weakenedSettings(before, after) {
-  return Object.entries(WEAKER_SETTINGS).filter(([k, dir]) => LOOSER[dir](before[k], after[k])).map(([k]) => k);
+  return Object.entries(WEAKER_SETTINGS).filter(([k, dir]) => (dir === 'rank' ? (RANK[k][after[k]] ?? 0) < (RANK[k][before[k]] ?? 0) : LOOSER[dir](before[k], after[k]))).map(([k]) => k);
+}
+
+// A quota period in seconds, at its shortest and longest (a calendar month or year varies).
+const PERIOD_MIN = { s: 1, m: 60, h: 3600, d: 86400, mo: 28 * 86400, y: 365 * 86400 };
+const PERIOD_MAX = { s: 1, m: 60, h: 3600, d: 86400, mo: 31 * 86400, y: 366 * 86400 };
+
+/**
+ * The quotas a change of an applicable quota list from `before` to `after`
+ * loosens ("<channel>:<kind>" each, [] for none): a quota of `before` is kept
+ * only when `after` has one of the same channel and kind that allows at most
+ * as many (`max`) in at least as long a period. So a quota removed, its max
+ * raised or its period shortened (10 a day → 10 an hour) is loosening; a
+ * quota added, a lower max or a longer period is not. The comparison is
+ * conservative: a list that only replaces one kind with a broader one may be
+ * reported too (the owner then confirms).
+ */
+export function weakenedQuotas(before, after) {
+  const b = Array.isArray(before) ? before : [];
+  const a = Array.isArray(after) ? after : [];
+  const atLeastAsLong = (n, q) => (n.unit === q.unit ? n.n >= q.n : n.n * PERIOD_MIN[n.unit] >= q.n * PERIOD_MAX[q.unit]);
+  const kept = (q) => a.some((n) => n.channel === q.channel && n.kind === q.kind && n.max <= q.max && atLeastAsLong(n, q));
+  return [...new Set(b.filter((q) => !kept(q)).map((q) => `${q.channel}:${q.kind}`))];
 }
 
 /**

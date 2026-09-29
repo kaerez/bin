@@ -14,7 +14,15 @@ beforeAll(async () => { oc = await owner(); });
 // Role limits that loosen a control need the owner's step-up (sent with every limits write, as fetchJson does).
 const raw = async (path, { method = 'GET', body } = {}) => SELF.fetch(`${ORIGIN}${path}`, { method, redirect: 'manual',
   headers: { cookie: oc, 'content-type': 'application/json', 'x-secbin-intent': '1', 'cf-connecting-ip': freshIp(), ...(await csrfHeaders(oc)) },
-  body: body === undefined ? undefined : JSON.stringify(method === 'PATCH' && path === '/api/private/admin/limits' ? { ...body, ...OWNER_STEP } : body) });
+  body: stepped(method, path, body) });
+// The writes that may weaken a control carry the owner's step-up (limits; quotas, a user's role, a
+// role's quota switch and its deletion: audit W3 A-1, A-2), as the helpers' fetchJson does.
+const WEAKENING = (method, path) => (method === 'PATCH' && path === '/api/private/admin/limits') || (method === 'PUT' && path === '/api/private/admin/quotas')
+  || (method === 'PUT' && /\/users\/[A-Za-z0-9_-]{16}\/role$/.test(path)) || ((method === 'PATCH' || method === 'DELETE') && /\/admin\/roles\/[A-Za-z0-9_-]{16}$/.test(path));
+function stepped(method, path, body) {
+  if (WEAKENING(method, path)) return JSON.stringify({ ...(body ?? {}), ...OWNER_STEP });
+  return body === undefined ? undefined : JSON.stringify(body);
+}
 const roles = async () => (await (await raw('/api/private/admin/roles')).json()).roles;
 const newRole = async (name) => { const r = await raw('/api/private/admin/roles', { method: 'POST', body: { name } }); expect(r.status).toBe(201); return (await r.json()).id; };
 const assign = (uid, roleId) => raw(`/api/private/admin/users/${uid}/role`, { method: 'PUT', body: { roleId } });

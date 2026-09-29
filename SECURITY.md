@@ -629,7 +629,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   absolute timeouts. Starting an impersonation and "Return to admin" each issue a new session
   (a new id, so a new CSRF token) that keeps the absolute end of the sign-in it came from, and
   revoke the session they replace: switching back and forth never extends a session or leaves
-  the old cookie usable. Missing/invalid `SIG`/`ENC` ⇒ login is unavailable (`503`), public links
+  the old cookie usable. The session a password change issues (the owner's reset of their own
+  included) keeps that end too, so knowing the password never keeps one session alive past
+  `session.absSec` (or the role's `sessionAbsSec`). Missing/invalid `SIG`/`ENC` ⇒ login is unavailable (`503`), public links
   keep working.
 - **When a session ends in an open page** (public/dashboard/js/session-timeout.js): the page
   warns two minutes before (WCAG 2.2.1), measuring its clock against the server's time (`now` in
@@ -804,6 +806,14 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     history or command-line arguments. The examples in `examples/api/` read `SECBIN_API_KEY`
     only.
   - The built-in public account never holds keys.
+  - **Credential resets revoke keys.** An admin password reset and an owner recovery through
+    `AUTHN` revoke every API key of the account, with its sessions (a key taken during a
+    takeover must not outlive the response to it); the reset keeps passkeys and recovery codes,
+    as the maintainer rule says. A user's own password change offers "Also revoke my API keys",
+    ticked by default (`revokeKeys`, true unless sent `false`); the log entry says how many keys
+    went (`API keys revoked=N`, or `API keys kept`). After a suspected takeover: reset the
+    password (or change it with the box ticked), remove unknown passkeys, create new recovery
+    codes, then create new keys (recommendation).
 - **Roles replace per-user settings.** Every account has exactly one role (the Default role
   unless given another), and the owner's is the locked Owner role. The migration that introduced
   roles deleted any per-user overrides and wrote one audit entry with how many (`roles.migrated`),
@@ -883,6 +893,29 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking. The Guard's rows are keyed by a keyed hash of the network and hold its address
     only sealed ("Records at rest" below);
+  - **sign-in attempts are checked and counted at once.** A password, passkey, recovery-code or
+    second-step sign-in, and a set-up token, is counted against the network (`login`, `setup`)
+    in the same Guard call that checks the network's block, before the Directory is asked
+    (`Guard.attempt`). The attempt that reaches `guard.<scope>.max` is still evaluated (a wrong
+    one answers `429 blocked`) and blocks those after it; an attempt that did not fail (signed
+    in, or refused for another reason: a locked or disabled account, a malformed request, a
+    failed human check, an expired challenge) gives its count back, and a sign-in that reached
+    the limit and succeeded lifts the block it made. So concurrent requests from one network
+    never get more than `guard.<scope>.max` evaluated per window (the owner, who has no account
+    lockout, included). A failed step-up still counts after the answer (`afterRefusal`), as it
+    needs a signed-in session;
+  - **anonymous calls that reach the Directory** have per-network limits of their own, checked
+    before it is asked, generous enough never to touch normal use, and seen and lifted by the
+    owner with the others (Admin → Security):
+    - `api-key`: a well-formed API key the Directory refuses (unknown, expired, revoked, API use
+      off) counts; a working key never does. At 600 refusals in 10 minutes, every API-key
+      request from the network is refused for 10 minutes (`429 rate_limited`, `Retry-After`),
+      a working key included, before the key is looked up;
+    - `passkey-options`: every usernameless passkey challenge (`POST
+      /api/auth/passkey/options`) counts, as for prelogin: at most 600 per 10 minutes;
+    - `auth-challenge`: a passkey sign-in or second step with a made-up, expired or already used
+      challenge (`400 challenge_expired`; not a wrong credential, so not in `login`) counts: at
+      most 120 per 10 minutes, and its block refuses both routes before the Directory is asked;
   - manual allow/block rules for IPv4/IPv6 addresses, CIDR blocks and inclusive ranges
     (`10.0.0.5-10.0.0.20`; allow wins; blocks deny the whole API and dashboard). A block rule
     that covers the owner's own address is refused unless an allow rule covers them first.
@@ -932,7 +965,47 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
         credentials); `fileTypeMode`
         towards any (allow → block → any), or, with the same mode, a type added to an allow
         list or removed from a block list; `urlRules` gaining a rule;
-    - IP rules: adding an allow rule.
+      - since audit W3 (A-5): `text`, `reverseText`, `viewer`, `driveEnabled` and
+        `reverseEnabled` turned on (notes, notes on Receive links, the in-browser viewer of what
+        anyone sent, the Drive, Receive links that let anyone upload into it); `receiptIp`,
+        `receiptLocation`, `receiptBrowser`, `receiptOs` and `receiptLanguages` turned on (what
+        a sender sees of the people who open their shares); a higher or removed `apiMaxKeys` or
+        `reverseMaxActive`, a higher `passkeysMax` (more credentials and links per account); a
+        longer `fileGrantSec`;
+    - settings, since audit W3: a longer `files.grantSec` (the owner's own file shares);
+      `public.tracking` towards both-permissive (both-restrictive → tracker or ip →
+      both-permissive; tracker and ip rank alike); `public.notice` off, or `public.noticeText`
+      emptied; a longer `public.trackerIdleSec` (how long an idle browser id is kept);
+    - **quotas** (the main bound on anonymous creation and on each role's volume): for the
+      Default role, a custom role or the public account, a quota list that allows more than the
+      one it replaces — a quota removed, its `max` raised or its period shortened (10 a day → 10
+      an hour), per channel and kind; the months and years are compared at their shortest and
+      longest, so the comparison errs towards asking. A role switching between its own list and
+      Default's (`ownQuotas`) is compared on the list its users would be counted against;
+    - **roles for users:** giving a user a role that is looser for them than their current one
+      (any option above, on either channel, or their quota list), and deleting a role that has
+      users when Default is looser for them. A tighter or equal role, and deleting an unused
+      role, need nothing. (An API key never reaches these routes: `403 api_key_not_allowed`.)
+    - IP rules: adding an allow rule, or removing a block rule;
+    - lifting a network or account control: a Guard block lifted or a network's count cleared
+      (`guard/unblock`), a locked account unlocked (only when it has failures counted), an
+      anonymous browser id unblocked or forgotten (forgetting also resets what it used of the
+      public quotas). Placing a block needs nothing. `DELETE` and bare `POST` routes take the
+      step-up in a JSON body.
+
+    **Not weakening**, with the reasons (`NOT_WEAKENING_SETTINGS`, `NOT_WEAKENING_LIMITS` in
+    `src/lib/settings.js`; `test/audit-w3a.test.js` fails for an option that is in neither
+    list): `files.pendingSec` and `filePendingSec` (how long an unfinished upload is kept:
+    nobody can open it meanwhile); the accessibility statement (public text); `openerDelete` (a
+    recipient ending a share early lowers exposure); the size bounds `maxFilesPerShare`,
+    `maxShareBytes`, `maxFileBytes`, `driveMaxBytes`, `driveMaxFileBytes`, `reverseMaxBytes` and
+    `viewerMaxBytes` (resources, not access; volume is bounded by the quotas, which are
+    weakening); `maxFolderDepth` (the shape of a share, not who may open it);
+    `viewerCustomRules` and the viewer rules themselves (they choose how a file the recipient may
+    already download is shown); `reverseEdit` (a user's change stays within the role, and one
+    that weakens a link needs the user's own step-up). Re-enabling a disabled account, creating
+    accounts and the owner's changes to other users' credentials need nothing either (the
+    owner's session is the authority, a maintainer rule).
     The Turnstile keys (Security → CAPTCHA) need the step-up for every change, removing them
     included.
     Imports already need the step-up for every part. The owner acting as a user cannot reach
@@ -1035,8 +1108,11 @@ codes as safe as the password.
     change keep the passkeys and recovery codes, and an import never changes an existing
     account's password, recovery codes or passkeys (it can only add passkeys). After a takeover, remove them as well. After a user's own change, Account
     says how many still work and asks the user to remove any passkey they do not recognise.
-  - Owner recovery through `AUTHN` also removes the owner's passkeys and recovery codes; the
-    Drive keys are not tied to them and stay as they are (see "Drive keys").
+  - Owner recovery through `AUTHN` also removes the owner's passkeys and recovery codes, and
+    revokes the owner's API keys; the Drive keys are not tied to them and stay as they are (see
+    "Drive keys"). An admin password reset revokes the account's API keys too (not its passkeys
+    or recovery codes), and a user's own password change does unless "Also revoke my API keys"
+    is unticked (see "API keys").
 - Passkeys and recovery codes leave the server only in an export where the owner ticked
   "Passkeys" or "Recovery codes" (separate parts) for that account, the owner's own row
   included. The file carries the public keys (useless without the authenticator), each with the
@@ -1227,7 +1303,7 @@ What is sealed, table by table (everything else in these rows stays in the clear
 | Where | Sealed | In the clear, and why |
 |---|---|---|
 | Directory `opens` (read receipts: a share's opens and a Receive link's upload sessions) | `ip`, `country`, `region`, `city`, `browser`, `browser_ver`, `os`, `langs` | `id`, `share_id`, `user_id`, `ts`: the per-share list, retention (log age limits, the share's pruning) and clearing; `ip_h`, a keyed hash of the address, for the "one receipt per address per minute" throttle; `rk`, the key id; `rn`, the row's random nonce |
-| Directory `activity`: the sign-in entries (`login`, `login.password_ok`, `logout`, `account.locked`, `account.unlocked`, `sessions.revoked`, `passkey.added`, `passkey.removed`, `guard.blocked`, `guard.unblocked`) | `detail` (a passkey's name, how the sign-in was made, a lockout's end, a blocked address) | `id`, `ts`, `actor_id`, `subject_id`, `action`, `imp`, `adm`: who sees an entry (My activity, the audit), retention and clearing; `rk`; `rn` |
+| Directory `activity`: the sign-in entries (`login`, `login.password_ok`, `logout`, `account.locked`, `account.unlocked`, `sessions.revoked`, `passkey.added`, `passkey.removed`, `guard.blocked`, `guard.unblocked`, `login.failed`, `stepup.failed`) | `detail` (a passkey's name, how the sign-in was made, a lockout's end, a blocked address, how many sign-ins failed, how and from which address) | `id`, `ts`, `actor_id`, `subject_id`, `action`, `imp`, `adm`: who sees an entry (My activity, the audit), retention and clearing; `rk`; `rn` |
 | Guard `tracking` and `blocks` (per-network counters and blocks: login, setup, invalid, rate limits) | `addr` (the address or IPv6 prefix, for the owner's view) | `scope`, the counters and times: the rule; `key`, `h:` + a keyed hash of the address, for the lookups; `rk` |
 
 Nothing else holds an address, a browser or a location at rest. Sessions are stateless (the
@@ -1310,6 +1386,28 @@ sealed record to another share, account or action, but this layer is not an inte
 for the log as a whole: someone who can write the storage can still delete rows, or insert rows
 in the clear (`rk` NULL), which read as written.
 
+### Failed sign-ins and step-ups in the log
+
+- **What is recorded.** Every evaluated failed sign-in — a wrong password, passkey, recovery
+  code or second step, the owner's included (the owner has no lockout, so the log is the record
+  of guessing at the owner) — is recorded as `login.failed`, and every failed step-up (a wrong
+  password or passkey confirming a change) as `stepup.failed`. Refusals made before a
+  credential is looked at (a network block, a locked or disabled account, an expired
+  challenge, a malformed request) are not; the Guard and the lockout record those.
+- **Added up, not one row each.** One entry per account (or unknown username) and action per
+  hour: `failed=<n> via=<how, …> last=<unix time>` and, for a sign-in, `from=<address>` (the
+  last one). A guessing run therefore cannot flood the log or push other entries out. An
+  unknown username is recorded under the same keyed hash the lockout counts it by (subject
+  `n:…`), never the name typed, with `unknown username` in front; past 100 such entries in an
+  hour they share one (subject `n:*`). A passkey no account has shares one entry (`n:passkey`).
+  The refusal is identical for real and unknown names, and both paths do the same work.
+- **Sealed and kept like the other sign-in records.** The detail (with the address) is sealed at
+  rest ("Records at rest"); an entry is sealed before it is written or updated, and an update is
+  applied only if the entry did not change meanwhile. The entry is written after the decision,
+  so it changes no outcome. Entries about the owner follow the owner's own retention; the others
+  the global and role limits below. A user sees the entries about their own account in My
+  activity; the owner sees all of them in the audit.
+
 ### Activity log retention and clearing
 
 - The activity/audit log is kept for at most `log.maxAgeSec` (default 365 days) and
@@ -1375,7 +1473,9 @@ in the clear (`rk` NULL), which read as written.
   Turnstile secret is as sensitive as the database. Keep the file and its passphrase apart,
   export only the parts you need, and delete files you no longer need (recommendation).
 - Imports are re-validated field by field on the server with the same checkers as the admin API
-  (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`), are
+  (`src/lib/portable.js`: exact key sets, types and ranges, credential format, `t = 3`; a custom
+  role may not take a built-in role's name, "Owner", "Default" or "Public", in any case and
+  trimmed, and no user may be given the Owner or the Public role), are
   previewed as a dry run, and are applied in one storage transaction or not at all. Replacing
   an account's credentials ends its sessions and revokes its API keys (its shares stay). IP
   rules are only ever added, never removed, and an import that would block the importing

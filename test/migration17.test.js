@@ -36,8 +36,8 @@ const reverseBounds = (name) => runInDurableObject(stub(name), (i, s) => s.stora
 const version = (name) => runInDurableObject(stub(name), (i, s) => s.storage.sql.exec("SELECT v FROM meta WHERE k = 'schema_version'").one().v);
 
 describe('migration 17 on a multi-version upgrade (audit C2)', () => {
-  it('the schema is at 19 (17, then 18: the Receive kinds in the Default role, 19: sign-in records sealed, records.test.js); the runs below go through all three', () => {
-    expect(SCHEMA_VERSION).toBe(19);
+  it('the schema is at 20 (17, then 18: the Receive kinds in the Default role, 19: sign-in records sealed, records.test.js, 20: failed sign-ins logged, audit-w3a.test.js); the runs below go through all of them', () => {
+    expect(SCHEMA_VERSION).toBe(20);
   });
 
   it('from the oldest schema (0 → 17 in one run): the Default role keeps its bound for reverse shares, per channel', async () => {

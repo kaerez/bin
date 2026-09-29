@@ -337,7 +337,7 @@ describe('the upgrade, after the audit (in order: the escrow material stays unti
   // while Drives wait; only the wraps an AUTHN owner recovery kept stay. The waiting Drives still upgrade.
   it('owner wrap pruning: a passkey the owner removes, and codes the owner replaces, lose their wraps while a Drive waits; the recovery\'s held wraps stay; a waiting Drive still upgrades through the escrow', async () => {
     const later = await makeUser('waits-for-escrow');
-    await enableDrive(later.id);
+    await enableDrive(later.id, {}, ownerStep()); // the owner's password changed above (the step-up of a role option)
     const laterDrive = await legacyDrive(later.id, main.createDriveKey(), { items: 1, link: false });
     const wrapRefs = () => runInDurableObject(driveOf(ownerId), (i, s) => s.storage.sql.exec('SELECT kind, ref FROM wraps ORDER BY kind, ref').toArray().map((w) => `${w.kind}:${w.ref}`));
     const held = await wrapRefs(); // kept by the AUTHN recovery above (their credentials are gone)
@@ -401,7 +401,7 @@ describe('the upgrade, after the audit (in order: the escrow material stays unti
 describe('L6: the wrap hygiene while a Drive waits', () => {
   it('regenerated recovery codes and an admin "remove all passkeys" drop the wraps of the credentials that went; a self password change marks the password wrap stale', async () => {
     const u = await makeUser('l6-user');
-    await enableDrive(u.id);
+    await enableDrive(u.id, {}, ownerStep());
     escrow ??= await main.createEscrowKeyPair();
     const ref = await main.recoveryRef(CODE);
     await runInDurableObject(dirStub(), (i, s) => {

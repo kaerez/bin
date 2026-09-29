@@ -138,8 +138,17 @@ describe('the account page while the owner acts as the user', () => {
     $('#pw-form').requestSubmit();
     await tick();
     expect(policyChecks).toEqual({ user: 0, owner: 1 });
-    expect(last('changePassword').args[0]).toEqual({ salt: 's', t: 3, proof: 'p' });
+    // "Also revoke my API keys" is ticked by default (audit W3 A-8).
+    expect(last('changePassword').args[0]).toEqual({ salt: 's', t: 3, proof: 'p', revokeKeys: true });
     expect($('#pw-msg').textContent).toMatch(/carol2’s sessions were signed out/);
+    expect($('#pw-revoke-keys').checked).toBe(true); // ticked again after the change
+    solve('pw-turnstile');
+    $('#pw-new').value = 'x';
+    $('#pw-new2').value = 'x';
+    $('#pw-revoke-keys').checked = false;
+    $('#pw-form').requestSubmit();
+    await tick();
+    expect(last('changePassword').args[0]).toEqual({ salt: 's', t: 3, proof: 'p', revokeKeys: false });
 
     solve('passkey-turnstile');
     $('#passkey-form').requestSubmit();

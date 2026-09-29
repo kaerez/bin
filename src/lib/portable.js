@@ -117,13 +117,15 @@ export const OWNER_PARTS = ['passkeys', 'recoveryCodes'];
 export const MAX_FILE_PASSKEYS = 10;
 export const MAX_FILE_RECOVERY_CODES = 20;
 const ROLE_NAME_MAX = 64;
+/** The built-in roles' names, which no custom role may take (as the Directory's RESERVED_ROLE_NAMES; any case, trimmed). */
+const BUILT_IN_ROLES = ['owner', 'default', 'public'];
 
 function role(v, i) {
   const where = `system.roles[${i}]`;
   keys(v, where, ['name', 'ownQuotas', 'limits', 'quotas', 'viewerRules']);
   // eslint-disable-next-line no-control-regex
   if (typeof v.name !== 'string' || !v.name.trim() || v.name.length > ROLE_NAME_MAX || /[\u0000-\u001f\u007f]/.test(v.name)) throw new PortableError(`${where}: invalid name`);
-  if (['owner', 'default'].includes(v.name.trim().toLowerCase())) throw new PortableError(`${where}: "${v.name}" is a built-in role`);
+  if (BUILT_IN_ROLES.includes(v.name.trim().toLowerCase())) throw new PortableError(`${where}: "${v.name.trim()}" is a built-in role`);
   if (typeof v.ownQuotas !== 'boolean') throw new PortableError(`${where}: ownQuotas must be true or false`);
   return {
     name: v.name.trim(),
@@ -249,6 +251,7 @@ function roleName(v, where) {
   // eslint-disable-next-line no-control-regex
   if (typeof v !== 'string' || !v.trim() || v.length > ROLE_NAME_MAX || /[\u0000-\u001f\u007f]/.test(v)) throw new PortableError(`${where}: invalid role`);
   if (v.trim().toLowerCase() === 'owner') throw new PortableError(`${where}: the Owner role belongs to the owner only`);
+  if (v.trim().toLowerCase() === 'public') throw new PortableError(`${where}: the Public role belongs to the public (anonymous) account only`);
   return v.trim();
 }
 

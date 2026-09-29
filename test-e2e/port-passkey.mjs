@@ -105,7 +105,13 @@ try {
   await p.fill('#login-user', 'owner'); await p.fill('#login-pass', PW); await p.click('#login-btn');
   await p.waitForURL(/\/dashboard\/(\?.*)?$/, { timeout: 60000 });
   const ownerId = (await api(p, '/api/private/me')).body.user.id;
-  check('Default role: Drive on', (await api(p, '/api/private/admin/limits', { method: 'PATCH', body: JSON.stringify({ scope: 'global', channel: 'all', patch: { driveEnabled: true } }) })).status === 200);
+  // Turning the Drive on is weakening (audit W3 A-5): the owner's password proof confirms it.
+  const ownerStep = await p.evaluate(async (pw) => {
+    const { stretch } = await import('/js/pwauth.js');
+    const { salt, t } = await (await fetch('/api/auth/prelogin', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner' }) })).json();
+    return { current: await stretch(pw, salt, t) };
+  }, PW);
+  check('Default role: Drive on', (await api(p, '/api/private/admin/limits', { method: 'PATCH', body: JSON.stringify({ scope: 'global', channel: 'all', patch: { driveEnabled: true }, ...ownerStep }) })).status === 200);
   await p.goto(`${BASE}/dashboard/admin/`);
   await p.click('.tab[data-tab="users"]');
   const up = p.locator('.admin-panel[data-panel="users"]');

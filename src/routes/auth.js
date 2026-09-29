@@ -6,7 +6,7 @@
 import { json, err, readJsonBody, assertIntent, assertNotCrossSite, methodNotAllowed } from '../lib/http.js';
 import { authnToken, sessionKeys } from '../lib/config.js';
 import { readSession, issueSession, logoutCookie, unconfigured, checkCsrf } from '../lib/auth.js';
-import { ipContext, isBlocked, recordFailure, directory, rateLimit, PRELOGIN, PRELOGIN_USER, SETUP_CANDIDATE } from '../lib/guard.js';
+import { ipContext, isBlocked, directory, rateLimit, attempt, refundAttempt, PRELOGIN, PRELOGIN_USER, SETUP_CANDIDATE, PASSKEY_OPTIONS, AUTH_CHALLENGE } from '../lib/guard.js';
 import { sha256Hex, utf8, bytesFromB64url, timingSafeEqualHex } from '../../public/js/bytes.js';
 import { requireTurnstile, TURNSTILE_ACTIONS } from '../lib/turnstile.js';
 import { requestOptions } from '../lib/webauthn.js';
@@ -27,17 +27,50 @@ export async function verifierFrom(dB64) {
   return sha256Hex(buf);
 }
 
+/** 429 rate_limited for a rate-limit scope's block (`rl`: rateLimit's answer), with Retry-After. */
+function rateLimited(rl) {
+  const res = err(429, 'rate_limited', 'Too many requests from your network. Try again later.', rl.until ? { until: rl.until } : undefined);
+  res.headers.set('retry-after', String(rl.until ? Math.max(1, rl.until - Math.floor(Date.now() / 1000)) : 600));
+  return res;
+}
+
 const blockedErr = (b) => err(429, 'blocked', 'Too many attempts from your network. Try again later.', b.until ? { until: b.until } : undefined);
 
-/** A Directory login result → the session cookie, or the error (failures count against the IP). */
-async function signedIn(env, g, res) {
+/**
+ * `fn()` as one counted attempt of `scope` (guard.js attempt: checked and
+ * counted in one Guard call before the Directory is asked, so concurrent
+ * requests from a network cannot get more than the limit evaluated) → its
+ * response. `fn(at)` gives the count back (refundAttempt) for an attempt
+ * that did not fail; anything it throws (a malformed body, a refused human
+ * check) gives it back too. `also`: rate-limit scopes whose block refuses too.
+ */
+async function counted(env, g, scope, fn, also = []) {
+  const at = await attempt(env, g, scope, also);
+  if (at.blocked) return at.scope !== scope ? rateLimited(at) : blockedErr(at); // a rate limit's block answers as the rate limit
+  try {
+    return await fn(at);
+  } catch (e) {
+    await refundAttempt(env, g, scope, at);
+    throw e;
+  }
+}
+
+/**
+ * A Directory login result → the session cookie, or the error. The attempt
+ * (`at`) was counted against the network before the Directory was asked: a
+ * wrong credential (401) keeps its count (the one that reached the limit
+ * answers 429), anything else gives it back.
+ */
+async function signedIn(env, g, res, at) {
   if (!res.ok) {
     if (res.status === 401) {
-      const r = await recordFailure(env, g, 'login');
-      if (r.newlyBlocked) return blockedErr(r);
+      if (at?.newlyBlocked) return blockedErr(at);
+    } else {
+      await refundAttempt(env, g, 'login', at);
     }
     return err(res.status, res.error, res.message, res.until ? { until: res.until } : undefined);
   }
+  await refundAttempt(env, g, 'login', at);
   // A recovery code spent by this sign-in no longer unlocks the Drive either:
   // its wrap goes now, and comes back once in this response, so this sign-in
   // can still open the Drive with it (docs/DRIVE.md §3).
@@ -63,15 +96,17 @@ async function setupToken(request, env) {
   // Setup disabled (AUTHN unset/deleted/too short): reject everything, cleanly.
   if (!authnHash) return { refused: err(404, 'setup_disabled', 'Setup is disabled.') };
   const g = await ipContext(env, request);
-  const b = await isBlocked(env, g, 'setup');
-  if (b.blocked) return { refused: blockedErr(b) };
-  const body = await readJsonBody(request);
+  // Checked and counted at once (a wrong token keeps its count; the right one gives it back).
+  const at = await attempt(env, g, 'setup');
+  if (at.blocked) return { refused: blockedErr(at) };
+  let body;
+  try { body = await readJsonBody(request); } catch (e) { await refundAttempt(env, g, 'setup', at); throw e; }
   const presented = typeof body.token === 'string' ? body.token.trim() : '';
   const presentedHash = await sha256Hex(utf8(presented));
   if (!timingSafeEqualHex(presentedHash, authnHash)) {
-    const r = await recordFailure(env, g, 'setup');
-    return { refused: r.newlyBlocked ? blockedErr(r) : err(403, 'bad_token', 'The setup token is incorrect.') };
+    return { refused: at.newlyBlocked ? blockedErr(at) : err(403, 'bad_token', 'The setup token is incorrect.') };
   }
+  await refundAttempt(env, g, 'setup', at);
   return { body, authnHash, g };
 }
 
@@ -186,20 +221,21 @@ export async function handleAuth(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     if (!sessionKeys(env)) return unconfigured().toResponse();
     const g = await ipContext(env, request);
-    const b = await isBlocked(env, g, 'login');
-    if (b.blocked) return blockedErr(b);
-    // The human check comes before the password is looked at, and after the
-    // body is read (a malformed request spends no token).
-    const body = await readJsonBody(request);
-    await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
-    const verifier = await verifierFrom(body.proof);
-    const res = await directory(env).login({ username: body.username, verifier: verifier ?? '', lockoutOff: g.off.all });
-    if (res.ok && res.secondFactor) {
-      // Right password; the account also needs a passkey (or recovery code).
-      const f = res.secondFactor;
-      return json({ ok: true, secondFactor: { challengeId: f.challengeId, publicKey: requestOptions(f, url.hostname), recoveryLeft: f.recoveryLeft } });
-    }
-    return signedIn(env, g, res);
+    return counted(env, g, 'login', async (at) => {
+      // The human check comes before the password is looked at, and after the
+      // body is read (a malformed request spends no token).
+      const body = await readJsonBody(request);
+      await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
+      const verifier = await verifierFrom(body.proof);
+      const res = await directory(env).login({ username: body.username, verifier: verifier ?? '', lockoutOff: g.off.all, ip: g.ip });
+      if (res.ok && res.secondFactor) {
+        // Right password; the account also needs a passkey (or recovery code).
+        await refundAttempt(env, g, 'login', at);
+        const f = res.secondFactor;
+        return json({ ok: true, secondFactor: { challengeId: f.challengeId, publicKey: requestOptions(f, url.hostname), recoveryLeft: f.recoveryLeft } });
+      }
+      return signedIn(env, g, res, at);
+    });
   }
 
   // ── passkeys: sign in alone, or as the second step of a password login ──
@@ -212,6 +248,9 @@ export async function handleAuth(request, env, url) {
     const g = await ipContext(env, request);
     const b = await isBlocked(env, g, 'login');
     if (b.blocked) return blockedErr(b);
+    // Anyone may ask, so every request counts, per network (PASSKEY_OPTIONS), before the Directory.
+    const rl = await rateLimit(env, g, 'passkey-options', PASSKEY_OPTIONS);
+    if (!rl.ok) return rateLimited(rl);
     const r = await directory(env).passkeyLoginOptions();
     return json({ challengeId: r.challengeId, publicKey: requestOptions(r, url.hostname) });
   }
@@ -219,20 +258,29 @@ export async function handleAuth(request, env, url) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     if (!sessionKeys(env)) return unconfigured().toResponse();
     const g = await ipContext(env, request);
-    const b = await isBlocked(env, g, 'login');
-    if (b.blocked) return blockedErr(b);
-    const body = await readJsonBody(request); // before the human check: a malformed request spends no token
-    // The second step rides on the password step's human check.
-    if (p !== '/api/auth/second-factor') await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
-    const dir = directory(env);
-    const origin = url.origin;
-    const rpId = url.hostname;
-    const res = p === '/api/auth/passkey/login'
-      ? await dir.passkeyLogin({ challengeId: body.challengeId, credential: body.credential, origin, rpId })
-      : p === '/api/auth/recovery'
-        ? await dir.recoveryLogin({ username: body.username, code: body.code, lockoutOff: g.off.all })
-        : await dir.secondFactor({ challengeId: body.challengeId, credential: body.credential, code: body.code, origin, rpId, lockoutOff: g.off.all });
-    return signedIn(env, g, res);
+    // A challenge made up, expired or already used (400 challenge_expired) is not a wrong
+    // credential, so it does not count in `login`; it counts in `auth-challenge`, whose block
+    // refuses these routes before the Directory is asked.
+    const challenged = p !== '/api/auth/recovery';
+    return counted(env, g, 'login', async (at) => {
+      const body = await readJsonBody(request); // before the human check: a malformed request spends no token
+      // The second step rides on the password step's human check.
+      if (p !== '/api/auth/second-factor') await requireTurnstile(env, request, TURNSTILE_ACTIONS.login);
+      const dir = directory(env);
+      const origin = url.origin;
+      const rpId = url.hostname;
+      const res = p === '/api/auth/passkey/login'
+        ? await dir.passkeyLogin({ challengeId: body.challengeId, credential: body.credential, origin, rpId, ip: g.ip })
+        : p === '/api/auth/recovery'
+          ? await dir.recoveryLogin({ username: body.username, code: body.code, lockoutOff: g.off.all, ip: g.ip })
+          : await dir.secondFactor({ challengeId: body.challengeId, credential: body.credential, code: body.code, origin, rpId, lockoutOff: g.off.all, ip: g.ip });
+      if (challenged && !res.ok && res.error === 'challenge_expired') {
+        await refundAttempt(env, g, 'login', at);
+        const rl = await rateLimit(env, g, 'auth-challenge', AUTH_CHALLENGE);
+        if (!rl.ok) return rateLimited(rl);
+      }
+      return signedIn(env, g, res, at);
+    }, challenged ? ['auth-challenge'] : []);
   }
 
   if (p === '/api/auth/logout') {

@@ -241,6 +241,8 @@
                             </svg>
                         </button>
                     </div>
+                    <label class="inline"><input type="checkbox" id="pw-revoke-keys" checked aria-describedby="pw-revoke-keys-hint" /> Also revoke my API keys</label>
+                    <p class="mono muted" id="pw-revoke-keys-hint">Scripts using them stop working. Keep them only if you are sure nobody else had your password.</p>
                     <div class="turnstile" id="pw-turnstile" hidden></div>
                     <button type="submit" class="cta" id="pw-btn">Change password</button>
                     <p class="msg" id="pw-msg" role="alert" hidden></p>

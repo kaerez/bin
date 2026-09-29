@@ -97,17 +97,52 @@ export class Guard extends DurableObject {
     return r && r.until > now() ? { blocked: true, until: r.until } : { blocked: false };
   }
 
+  /** A block on any of `scopes` for `key` → { blocked, until, scope } (the first found). */
+  #blockedIn(scopes, key) {
+    for (const scope of scopes) {
+      const r = this.sql.exec('SELECT until FROM blocks WHERE scope = ? AND key = ?', scope, key).toArray()[0];
+      if (r && r.until > now()) return { blocked: true, until: r.until, scope };
+    }
+    return { blocked: false };
+  }
+
   /**
    * Record one failure; returns the (possibly new) block state. `sealed`:
    * the network's address for the owner's view ({ addr, rk }: sealed under
    * key id `rk`, or in the clear with rk null), kept with the row. `carry`:
    * the network's failures counted before the tags ({ count, start }, taken
-   * from its legacy row by legacyTake), added to this window's.
+   * from its legacy row by legacyTake), added to this window's. `also`:
+   * other scopes whose block refuses this one too (nothing is counted then).
    */
-  async fail(scope, key, rule, sealed = null, carry = null) {
+  async fail(scope, key, rule, sealed = null, carry = null, also = []) {
+    return this.#count(scope, key, rule, sealed, carry, also, false);
+  }
+
+  /**
+   * One attempt, checked and counted in this one call (so concurrent attempts
+   * from a network never get past the limit, SECURITY.md "Brute-force
+   * protection"): refused while `scope` (or a scope in `also`) is blocked;
+   * else counted at once, and the attempt that reaches `rule.max` blocks the
+   * scope for those after it but is itself let through (`newlyBlocked`), so
+   * exactly `rule.max` attempts are evaluated per window, as when failures
+   * were counted after the answer. An attempt that did not fail gives its
+   * count back (refund).
+   */
+  async attempt(scope, key, rule, sealed = null, carry = null, also = []) {
+    return this.#count(scope, key, rule, sealed, carry, also, true);
+  }
+
+  /** An attempt that did not fail: its count goes back, and the block it made (`unblock`) is lifted. */
+  async refund(scope, key, { unblock = false } = {}) {
+    if (unblock) this.sql.exec('DELETE FROM blocks WHERE scope = ? AND key = ?', scope, key);
+    else this.sql.exec('UPDATE tracking SET count = count - 1 WHERE scope = ? AND key = ? AND count > 0', scope, key);
+    return { ok: true };
+  }
+
+  async #count(scope, key, rule, sealed, carry, also, letThrough) {
     await this.#legacyWrite(key);
     const ts = now();
-    const blocked = await this.check(scope, key);
+    const blocked = this.#blockedIn([scope, ...(Array.isArray(also) ? also : [])], key);
     if (blocked.blocked) return blocked;
     const addr = str(sealed?.addr);
     const rk = addr === null ? null : str(sealed?.rk);
@@ -123,7 +158,7 @@ export class Guard extends DurableObject {
       this.sql.exec('INSERT OR REPLACE INTO blocks (scope, key, until, since, addr, rk) VALUES (?, ?, ?, ?, ?, ?)', scope, key, until, ts, addr, rk);
       this.sql.exec('DELETE FROM tracking WHERE scope = ? AND key = ?', scope, key);
       await this.#schedule(until);
-      return { blocked: true, until, newlyBlocked: true };
+      return { blocked: !letThrough, until, newlyBlocked: true };
     }
     const expires = start + rule.windowSec;
     this.sql.exec('INSERT OR REPLACE INTO tracking (scope, key, count, start, expires, addr, rk) VALUES (?, ?, ?, ?, ?, ?, ?)', scope, key, count, start, expires, addr, rk);
