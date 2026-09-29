@@ -363,7 +363,7 @@ async function rootOpens(env, dir, me, { key = null, stored = false, extra = nul
           const k = keks.get(l.mek);
           if (!k) continue;
           try {
-            const sealed = JSON.parse(await fromRest(await fieldKeys(env, uid), uid, 'linkKey', l.id, l.priv));
+            const sealed = JSON.parse(await fromRest(await fieldKeys(env, uid), uid, 'linkKey', l.id, l.priv, { plain: false }));
             (await openLinkKey(k, { userId: uid, mekId: l.mek, linkId: l.id }, sealed)).fill(0);
             return true;
           } catch { /* not under that root */ }
@@ -399,7 +399,7 @@ async function subOpens(env, dir, me, uid, mekId, key, extra) {
     }
     const l = page.links[0];
     if (!l) return false;
-    const sealed = JSON.parse(await fromRest(await fieldKeys(env, uid), uid, 'linkKey', l.id, l.priv));
+    const sealed = JSON.parse(await fromRest(await fieldKeys(env, uid), uid, 'linkKey', l.id, l.priv, { plain: false }));
     (await openLinkKey(kek, { userId: uid, mekId, linkId: l.id }, sealed)).fill(0);
     return true;
   } catch {
@@ -553,7 +553,8 @@ async function sealStep(env, uid, job, given = null) {
   const fk = page.links.length ? await fieldKeys(env, uid) : null;
   for (const l of page.links) {
     try {
-      const sealed = JSON.parse(await fromRest(fk, uid, 'linkKey', l.id, l.priv));
+      // A link key is always stored at rest: one in plain text is refused (counted as failed), never re-sealed.
+      const sealed = JSON.parse(await fromRest(fk, uid, 'linkKey', l.id, l.priv, { plain: false }));
       const k = keys.keks.get(l.mek);
       let opened;
       if (job.kind === 'root') {
@@ -590,12 +591,13 @@ async function atRestStep(env, uid, job) {
   const page = await drive.atRestPage(uid, { after: cursor(job.after) });
   if (!page.links.length && !page.received.length) return null;
   const fk = await fieldKeys(env, uid);
+  // A value in plain text (a received item of the release before, or one written to storage by
+  // someone other than the Worker) is left as it is: never sealed now, so a root change cannot make
+  // it trusted — every read refuses it (fromRest with plain: false).
   const fresh = async (field, ref, v) => {
-    if (!v) return v;
-    if (isAtRest(v)) {
-      try { await fromRest({ cur: fk.cur, old: null }, uid, field, ref, v); return null; } catch { /* under the old root */ }
-    }
-    return toRest(fk, uid, field, ref, await fromRest(fk, uid, field, ref, v));
+    if (!v || !isAtRest(v)) return null;
+    try { await fromRest({ cur: fk.cur, old: null }, uid, field, ref, v); return null; } catch { /* under the old root */ }
+    return toRest(fk, uid, field, ref, await fromRest(fk, uid, field, ref, v, { plain: false }));
   };
   const links = [];
   const received = [];
@@ -648,7 +650,7 @@ async function verifyStep(env, uid, job) {
     const k = keys.keks.get(l.mek);
     try {
       if (!k) throw new Error('no key');
-      const sealed = JSON.parse(await fromRest({ cur: fk.cur, old: null }, uid, 'linkKey', l.id, l.priv));
+      const sealed = JSON.parse(await fromRest({ cur: fk.cur, old: null }, uid, 'linkKey', l.id, l.priv, { plain: false }));
       (await openLinkKey(k.kek, { userId: uid, mekId: l.mek, linkId: l.id }, sealed)).fill(0);
     } catch {
       fail(l.id);
@@ -664,7 +666,8 @@ async function verifyRestStep(env, uid, job) {
   const fk = await fieldKeys(env, uid);
   const only = { cur: fk.cur, old: null };
   const fail = failOf(job);
-  // A value stored before the field layer (plain) needs no root; a sealed one must open under the new one.
+  // A sealed value must open under the new field keys; one in plain text needs no root (it was left as
+  // it is, and every read refuses it).
   const check = async (field, ref, v) => { if (v && isAtRest(v)) await fromRest(only, uid, field, ref, v); };
   for (const l of page.links) {
     try { await check('linkKey', l.id, l.priv); } catch { fail(l.id); }

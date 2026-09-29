@@ -11,8 +11,10 @@
 //     `note` (plain text, Markdown or code), `url`, `secret`, `file`, `drive`.
 //   Drive — `drive-upload`: each file added to the Drive by an upload (a
 //     folder upload counts each file); `drive-bytes`: the bytes those files
-//     hold (each file's size, counted when its upload is reserved); files
-//     taken in from Receive links are not counted by either.
+//     hold (each file's size, counted when its upload is reserved), and those
+//     of each file received through a Receive link (Drive storage too:
+//     counted when it is finished); a received file never counts under
+//     `drive-upload` (the Receive kinds count its session).
 //   Receive — `receive` (every receive action), `receive-link` (a new Receive
 //     link), `receive-upload` (an upload session through one of the user's
 //     links, of any kind — counted for the user, never the anonymous

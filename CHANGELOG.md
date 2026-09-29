@@ -54,6 +54,48 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
   (`\u001b`), newlines and tabs kept (a CRLF line end is shown as a newline), so a note cannot
   write the clipboard (OSC 52), retitle the window or redraw the screen. `--raw` prints the exact
   text; a pipe and `--out` always get it.
+- **A Receive link can no longer fill the Drive without sending data** (security audit W3,
+  C-2). A reservation counted its whole size in the user's Drive at once, and lasted the role's
+  `filePendingSec` (a day with a chunk now and then), so anyone holding a link could reserve the
+  space left, send nothing, and have every upload of the user's refused (`413 drive_full`),
+  with nothing showing why. Now a received upload counts in the Drive only as its chunks arrive
+  (each must fit: `413 drive_full`), with its sealed fields from the reservation, where the whole
+  file must merely fit the space left; what a link's uploads in progress have reserved and not
+  sent, counting each one's next chunk, may not pass 40 MiB (a chunk for each of the 5 uploads a
+  network may run; `429 busy`); a reservation with no chunk started for 10 minutes is released
+  (the start of each chunk request is stored before its body is read, so a slow sender's chunk
+  still arriving never is). Its late chunks get `410 released`, never counted as guesses; the
+  session may reserve it again, and the uploader page sends the file again once. The Drive's Receive… list and the Receive API
+  (`uploading`) show each link's uploads in progress with what they sent so far of the size
+  they reserved. Large multi-chunk uploads work as before.
+- **A rename is held to the role's file-type rule** (C-1): the Drive checked the rule on what it
+  stores at upload and take-in, but a rename (or a new metadata type) could turn `report.pdf`
+  into `tool.exe`. `PATCH /api/private/drive/nodes/<id>` now opens the new name and metadata as
+  they will be stored and applies the same check (`403 file_type_not_allowed`), written only if
+  the item is still as checked; a file's metadata can no longer be removed (`meta: null`: `400`);
+  the Drive page refuses such a rename first, with the reason. A file already in the Drive that
+  keeps its type can still be renamed.
+- **Deleting a link's folder, or the account, no longer counts uploaders as guessing** (C-3): the
+  upload tokens of uploads in progress in a deleted folder (or a pending item deleted on its own)
+  are kept as late ones, as on a revoke, and an account deletion keeps its links' late hashes in
+  the Directory for a day (`reverse_late`: hashes and link ids only), so late chunks, finalizes
+  and `done` get an uncounted `410` and a genuine uploader's network is never blocked.
+- **Loosening a Receive link's own file limits needs the step-up** (C-4): removing or loosening its
+  file types, and raising or removing its most files, total bytes or largest file, are weakening
+  changes — the password or a passkey in the browser, `403 step_up_required` (with `weakens`) for
+  an API key, as for the other weakening changes. Tightening them needs nothing.
+- **Files received count under `drive-bytes`** (C-5): a file received through a Receive link is
+  Drive storage, so its size counts under the user's quotas of kind `drive-bytes` when it is
+  finished (checked when it is reserved; past the quota the uploader gets the neutral `429
+  not_accepting`). It never counts under `drive-upload`: the Receive kinds count its session.
+- **"Go back" on a root change re-checks the sub-MEKs** (C-6) after sealing them again and before
+  it writes (`409 changed`), as the change itself does, so a sub-MEK added at the same moment is
+  never left under the root that goes.
+- **The owner acting as a user gets no personal-kit state** (audit kg F4): `GET
+  /api/private/drive` leaves `kit` out while impersonating (the page already hid it).
+- **Link keys stored in plain text are refused** (audit RT2-4): like a received item's fields, a
+  link key is always stored sealed at rest; one found in plain text is never handed out or
+  re-sealed (the link shows no key), and a root change no longer seals a plain value at rest.
 - **Sign-in and viewer records are sealed at rest.** Read receipts (the opener's address,
   location, browser, system and languages), the detail of the activity log's sign-in entries
   (sign-ins, sign-outs, lockouts, passkeys added or removed, blocked and unblocked addresses) and

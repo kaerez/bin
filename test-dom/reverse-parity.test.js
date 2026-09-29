@@ -418,6 +418,44 @@ describe('the Edit form of a Receive link', () => {
     expect(document.querySelector('input[id$="-confirm"]').closest('.dfield').hidden).toBe(true);
   });
 
+  it('asks for the account password when a change loosens the link\'s file types or size limits (audit W3 C-4)', async () => {
+    const M = 1024 * 1024;
+    const link = { ...cur, maxFiles: 5, maxBytes: M, maxFileBytes: M / 2, types: { mode: 'allow', rules: ['ext:pdf', 'ext:txt'] }, captcha: false, password: false };
+    const roleMaxBytes = 10 * M;
+    for (const p of [{ types: null }, { types: { mode: 'block', rules: ['ext:exe'] } }, { types: { mode: 'allow', rules: ['ext:pdf', 'ext:exe'] } },
+      { maxFiles: null }, { maxFiles: 6 }, { maxFileBytes: null }, { maxFileBytes: M / 2 + 1 }, { maxBytes: M + 1 }, { maxBytes: null }]) {
+      expect(weakensLink(p, link, { roleMaxBytes }), JSON.stringify(p)).toBe(true);
+    }
+    for (const p of [{ types: { mode: 'allow', rules: ['ext:pdf'] } }, { maxFiles: 4 }, { maxFileBytes: M / 2 - 1 }, { maxBytes: M - 1 }]) {
+      expect(weakensLink(p, link, { roleMaxBytes }), JSON.stringify(p)).toBe(false);
+    }
+    expect(weakensLink({ maxBytes: null }, { ...link, maxBytes: roleMaxBytes }, { roleMaxBytes })).toBe(false); // "none" is the role's limit: unchanged
+    expect(weakensLink({ types: { mode: 'block', rules: ['ext:exe'] } }, { ...link, types: null })).toBe(false); // any type → fewer: tighter
+    // In the form: "any type" again shows the confirmation and asks for it on save.
+    const seen = [];
+    const f = mount(reverseEditForm(link, { limits: { reverseMaxBytes: roleMaxBytes }, user: { username: 'u' } }, { confirm: async (input) => { seen.push(input.value); return { current: 'proof' }; }, passkey: false }));
+    const box = document.querySelector('input[id$="-confirm"]').closest('.dfield');
+    expect(box.hidden).toBe(true);
+    expect(box.textContent).toMatch(/loosens its file types or size limits/);
+    const mode = document.querySelector('select[id$="-types"]');
+    mode.value = 'any';
+    mode.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(box.hidden).toBe(false);
+    document.querySelector('input[id$="-confirm"]').value = 'typed';
+    const o = f.read();
+    expect(o.patch).toEqual({ types: null });
+    expect(await f.stepUp(o.patch)).toEqual({ current: 'proof' });
+    expect(seen).toEqual(['typed']);
+    // Back to the listed types, a smaller largest file: nothing loosens it.
+    mode.value = 'allow';
+    mode.dispatchEvent(new Event('change', { bubbles: true }));
+    const fileMb = document.querySelector('input[id$="-filesize"]');
+    fileMb.value = '0.25';
+    fileMb.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(box.hidden).toBe(true);
+    expect(await f.stepUp(f.read().patch)).toEqual({});
+  });
+
   it('a link with no expiry: "Give it an expiry"; the form reads what changed', () => {
     const f = mount(reverseEditForm({ ...cur, expires: null, views: null, used: 3 }, { limits: { reverseNoExpiry: true } }));
     const radios = [...document.querySelectorAll('fieldset.rev-edit-group')[0].querySelectorAll('input')];

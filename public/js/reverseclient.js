@@ -160,9 +160,24 @@ export class ReverseUpload {
   /**
    * Encrypt and upload one file (`path` relative, `file` a File/Blob) → its
    * node id. `item`: the kind marker of a note, link or credential (sent as
-   * one item of its own session; no file-type declaration).
+   * one item of its own session; no file-type declaration). An upload the
+   * server released for want of data (`410 released`) is sent again once,
+   * with a new reservation.
    */
-  async uploadOne({ path, file, type, item = null }, { onProgress, signal } = {}) {
+  async uploadOne(entry, opts = {}) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.#uploadOnce(entry, opts);
+      } catch (e) {
+        // Released: no chunk reached the server for 10 minutes, so it gave the reservation back
+        // (docs/REVERSE.md §4). The session still takes files: send this one again, once.
+        if (attempt === 0 && e instanceof ApiError && e.status === 410 && e.code === 'released' && !opts.signal?.aborted) continue;
+        throw e;
+      }
+    }
+  }
+
+  async #uploadOnce({ path, file, type, item = null }, { onProgress, signal } = {}) {
     if (!this.grant) throw new Error('Start the upload first.');
     const clean = cleanPath(path);
     const size = file.size;

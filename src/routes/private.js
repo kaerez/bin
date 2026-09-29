@@ -373,6 +373,8 @@ async function receiveLinks(env, dir, uid, rows) {
       ...(x ? {
         folder: x.folder, accept: x.accept, password: x.password, note: x.note, maxFiles: x.maxFiles, maxBytes: x.maxBytes,
         maxFileBytes: x.maxFileBytes, types: x.types, pending: x.pending, failed: x.failed,
+        // Uploads in progress: how many, the bytes sent so far and the size reserved (what is using space).
+        uploading: x.uploading,
       } : { folder: null }),
     };
   });

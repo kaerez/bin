@@ -208,6 +208,28 @@ describe('the round trip', () => {
     await expect(openLink({ pathname: `/r/${id}`, hash: fragmentOf((await createReverseKey()).pub), api: S.api })).rejects.toThrow(LinkError);
   });
 
+  it('an upload the server released for want of data (410 released) is sent again once, with a new reservation (audit W3 C-2)', async () => {
+    const id = newReverseId();
+    const { pub } = await createReverseKey();
+    const S = fakeApi({ pub, id });
+    const put = S.api.putChunk;
+    let released = 1;
+    S.api.putChunk = async (...a) => {
+      if (released-- > 0) throw new ApiError('This upload waited too long without data and was released: send the file again.', 410, 'released');
+      return put(...a);
+    };
+    const up = await openLink({ pathname: `/r/${id}`, hash: fragmentOf(pub), api: S.api });
+    await up.begin({});
+    expect(await up.upload([{ path: 'a.txt', file: new Blob([utf8('x')]) }])).toEqual({ files: 1, bytes: 1 });
+    // Two reservations: the released one given back, the new one finished.
+    expect(S.files.size).toBe(2);
+    expect(S.cancelled).toHaveLength(1);
+    expect([...S.files.values()].filter((f) => f.done)).toHaveLength(1);
+    // Released again: not retried a second time.
+    released = 2;
+    await expect(up.upload([{ path: 'b.txt', file: new Blob([utf8('y')]) }])).rejects.toMatchObject({ status: 410, code: 'released' });
+  });
+
   it('checkFiles applies the link\'s limits before anything is sent', () => {
     const f = (path, n) => ({ path, file: new Blob([new Uint8Array(n)]) });
     expect(checkFiles([], {}).ok).toBe(false);

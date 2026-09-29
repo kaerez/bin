@@ -201,6 +201,24 @@ describe('Drive: moving a link from its Edit, and the folders’ Shares', () => 
   });
 });
 
+describe('Drive: the Receive… list shows uploads in progress (audit W3 C-2)', () => {
+  it('what arrived, and what is being sent now with its size so far, so the user sees what is using space', async () => {
+    await server();
+    await seedLink('root', { label: 'busy', files: 3, bytes: 3000 + 4096, uploading: { files: 1, bytes: 1024, size: 4096, held: 3072, since: now() - 30 } });
+    await seedLink('root', { label: 'quiet', files: 2, bytes: 2048 });
+    const r = await startDrive(mountPoint(), deps(profileWith({})));
+    await r.app.ready;
+    $('#drive-receive').click();
+    await until(() => $('#drive-rev-table')?.querySelectorAll('tbody tr').length === 2);
+    const cell = (label) => [...$('#drive-rev-table').querySelectorAll('tbody tr')].find((tr) => tr.children[0].textContent === label).querySelector('td[data-label="Received"]');
+    // The reserved file is not counted as received: 2 of the 3, 3000 bytes of the reserved total.
+    expect(cell('busy').textContent).toBe('2 files, 2.9 KB · uploading now: 1 file, 1.0 KB of 4.0 KB sent');
+    expect(cell('busy').querySelector('.rev-uploading')).not.toBeNull();
+    expect(cell('quiet').textContent).toBe('2 files, 2.0 KB');
+    expect(cell('quiet').querySelector('.rev-uploading')).toBeNull();
+  });
+});
+
 describe('Drive: Pause and Resume', () => {
   it('the Receive… list pauses a link (with the intent header) and resumes it; Edit stays for a link the user paused, not one the owner’s start over paused', async () => {
     await server();

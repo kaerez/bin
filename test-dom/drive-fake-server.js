@@ -262,6 +262,8 @@ export function fakeServer({ role = 'user', enabled = true, capacity = 1 << 30 }
         password: !!r.password, note: !!r.note, captcha: r.captcha === true, maxFiles: r.maxFiles ?? null, maxBytes: r.maxBytes ?? null, maxFileBytes: r.maxFileBytes ?? null, types: r.types ?? null, files: r.files, bytes: r.bytes,
         views: r.views ?? null, used: r.used ?? 0, left: r.views === null || r.views === undefined ? null : Math.max(0, r.views - (r.used ?? 0)),
         accept: r.accept ?? ['files'], held: r.held === true,
+        // Uploads in progress (the server's #uploading): reserved, not finished.
+        uploading: r.uploading ?? { files: 0, bytes: 0, size: 0, held: 0, since: null },
       }));
       return ok({ reverse: rows });
     }

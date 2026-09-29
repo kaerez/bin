@@ -104,8 +104,15 @@ mtimes**, the viewer opt-in and its policy snapshot (all inside the encrypted ma
   limit needs no declaration there — the Drive object checks it against its own tree on an
   upload, a new folder, a move (a folder with the folders inside it) and a take-in. A take-in
   from a Receive link is held to the role's Drive rules as well as the link's own, so a link
-  cannot bring into the Drive a type or depth the role refuses there. Files already in a Drive
-  are never deleted by a new or tighter rule.
+  cannot bring into the Drive a type or depth the role refuses there. A **rename or a change of
+  a file's metadata** is held to the same rule on what it will store (`PATCH
+  /api/private/drive/nodes/<id>`: the new name and metadata, opened in memory with the item's
+  keys, then `sealedTypeRefusal`), so renaming `report.pdf` to `tool.exe`, or sealing a refused
+  MIME type into its metadata, is `403 file_type_not_allowed`; the write is a compare-and-set on
+  the name and metadata checked (a concurrent rename cannot slip past), a file's metadata cannot
+  be removed (`meta: null`: `400`), and the Drive page checks the same before it sends a rename.
+  Files already in a Drive are never deleted by a new or tighter rule, and one that keeps the
+  type it has (the same extension and MIME type) may still be renamed.
 - Access-proof *hashes*, delete/upload/grant/API-key *hashes*, and password verifiers
   (`SHA-256("secbin-auth/v2" ‖ Argon2id(password))`).
 
@@ -856,7 +863,8 @@ text; a pipe and `--out` always get it).
     user's own (no actor, no trace of the impersonation), and in the owner-only admin audit with
     the owner as the real actor (`imp`). Getting the user's keys is the owner's own action
     (`drive.keys_used`, admin audit only). The personal kit and the upgrade are the user's own
-    (`403 impersonating`); a restore from a personal kit is the owner's only, from Admin →
+    (`403 impersonating`; `GET /api/private/drive` leaves the kit's state out for the owner
+    acting as the user); a restore from a personal kit is the owner's only, from Admin →
     Security → Keys, never while acting as the user (`403`).
 - **Admin share management**: the owner sees every user's shares and can change a share's label, views
   and expiry, revoke it, or **lock** it.
@@ -1122,6 +1130,12 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   under the previous root is `409 stale_keys`), so the server can always re-seal it later;
   re-seals are compare-and-set writes on the stored keys and sealed fields, so a change made
   meanwhile (a rename) is never overwritten.
+- **The field layer fails closed.** A link key and a received item's path, metadata and wrap are
+  always stored at rest under the user's field key. One found in plain text (written to the Drive
+  object's storage by anyone but the Worker) is refused wherever it is read — the link then shows
+  no key, and a received item is listed as unreadable — and a root change never seals such a
+  value at rest (it is left as it is and still refused), so it cannot be made trusted. Only the
+  link keys of the release before, which its upgrade opens in the browser, are read as stored.
 - **Key jobs cover every Drive.** A re-seal, a sub-MEK delete and a root change visit every
   account with a user salt (a Drive whose only content is a reverse link included). A sub-MEK is
   deleted only when a count over them finds nothing under it; a root change removes the
@@ -1131,7 +1145,10 @@ browser, but **it is not end-to-end encrypted**: the server holds the keys that 
   fingerprint typed (the items listed stay unreadable, and their count, kept with the root
   change, is in the admin audit), each with the step-up; the key kit made meanwhile holds both
   roots. A previous root from a key kit is put back only when it opens something here, and "go
-  back" leads only to a root this server worked with or one that opens items here.
+  back" leads only to a root this server worked with or one that opens items here. A change and
+  a "go back" both check, after sealing the sub-MEKs again and before they write, that neither
+  root nor any sub-MEK changed meanwhile (`409 changed`), so a sub-MEK added at the same moment is
+  never left sealed under the root that goes.
 - **The keyring.** Created on first need, and only if there never was one: a lost keyring is
   never replaced silently (the Drive says the keys are missing and the key kit restores them).
   Restores and imports never replace a working key, and add only what proved to belong: a
@@ -1716,12 +1733,26 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   raise a link's own). A file's sealed path, metadata and wrap count towards the link's bytes, so
   empty files are not free. Every limit is checked
   atomically in the user's Drive object when a file is reserved; chunk sizes are checked exactly.
+  **A reservation does not take the Drive's space.** The Drive counts a received upload's sealed
+  fields from its reservation and its content only as its chunks arrive (each chunk must fit,
+  checked again as it is recorded: `413 drive_full`); at the reservation the whole file must fit
+  the space left, but nothing more is charged. What a link's uploads in progress have reserved and
+  not sent, counting each one's next chunk (8 MiB at most), may not pass 40 MiB (a chunk for each
+  of the 5 uploads one network may run at once; `429 busy` past it), and a reservation with no
+  chunk started for 10 minutes (or the role's `filePendingSec`, when shorter) is released (a
+  chunk request's start is stored before its body is read, so a slow chunk still arriving is
+  never released): its
+  reservation goes, its late chunks get `410 released` (never counted) and its session, while
+  open, may reserve the file again (the uploader page does so once). So an uploader who reserves
+  files and sends nothing cannot fill the user's Drive, nor hold a link's limits for long. The
+  Drive's Receive… list and the Receive API (`uploading`) show each link's uploads in progress,
+  what they sent so far and the size they reserved.
   Only the session that reserved a file may finalize or cancel it, and a reservation must finish
   within 24 hours however often its chunks are re-sent (a session, too, ends 24 hours after it
   began).
   Upload-session grants and upload tokens are 256-bit and stored as SHA-256 hashes; unfinished
-  uploads are purged after the role's `filePendingSec` without progress and give their
-  reservation back. A chunk whose write to R2 is still in flight blocks that file's finalize
+  uploads are released (purged) after 10 minutes without a chunk and give their reservation
+  back. A chunk whose write to R2 is still in flight blocks that file's finalize
   (`409 busy`), so a late chunk write never lands on, or is deleted from, a finished file; a
   write that finishes after its upload ended (cancelled, revoked, purged) is deleted. An uploader can fill the user's Drive up to the link's limits: the user
   chooses those limits, and revokes the link at any time.
@@ -1752,15 +1783,19 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   is sent in plain text, but like the uploads to the link they are not end-to-end (the server
   holds the keys that open the link's key, so it can read the note and test guesses at the
   password; a copy of the Drive object alone cannot). A change that weakens the link — its
-  password removed or changed, its CAPTCHA turned off, no expiry, unlimited views, or accepting
+  password removed or changed, its CAPTCHA turned off, no expiry, unlimited views, accepting
   files, links or credentials it did not (each a new way for an anonymous sender to reach the
   user: a file of any type, a link to follow, a secret entrusted to a channel that is not
-  end-to-end; a note is plain text shown inertly, so adding one is not weakening) — needs the
+  end-to-end; a note is plain text shown inertly, so adding one is not weakening), or its own
+  file limits loosened (its file types removed or made less restrictive — the mode changed, a
+  type added to an allow list or dropped from a block list — or its most files, total bytes or
+  largest file raised or removed) — needs the
   account password or a passkey, as creating a link does (a stolen session alone cannot turn a
   link into an open, lasting upload channel), and is refused for API keys even with `manage`
   (`403 step_up_required`); the owner acting as the user confirms nothing. Tightening a link
   (a password added where it had none, the CAPTCHA on, an expiry, fewer views, tighter limits)
-  and the label need no confirmation, through the API too. Changing the password keeps the link's lockout state and its
+  and the label need no confirmation, through the API too; nor do more views or a later expiry
+  (within the role's limits), the Extend of every share. Changing the password keeps the link's lockout state and its
   sessions already started. The owner changing a link directly (Admin → Shares) may change its
   views and expiry only (a link with no expiry only where the user's role allows it); the
   password, the note, the limits and the CAPTCHA are the user's. Changes are refused on revoked,
@@ -1786,12 +1821,17 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
   deliberately closed, so it counts as weakening: the password proof or a passkey, refused for an
   API key (`403 step_up_required`) — a leaked `manage` key cannot reopen a link. A link an owner's
   start over paused cannot be resumed.
-- **Late uploader requests are never counted.** An uploader whose session a pause, a revoke or an
-  expiry ended still sends what it had under way. The Drive keeps the hashes of the grants and
-  upload tokens of ended sessions and uploads for 24 hours (`rgone`), and a request that presents
-  one is answered (`409 paused`, `410`, or `403 bad_grant` for a session that simply ended) without
-  a Guard count; only an unknown or forged id, grant or token counts. So pausing or revoking a link
-  can never get its uploaders' network blocked.
+- **Late uploader requests are never counted.** An uploader whose session a pause, a revoke, an
+  expiry, its folder's deletion or its account's deletion ended still sends what it had under
+  way. The Drive keeps the hashes of the grants and upload tokens of ended sessions and uploads for
+  24 hours (`rgone`) — those of uploads in progress too when their folder, or the item itself, is
+  deleted — and a request that presents one is answered (`409 paused`, `410`, or `403 bad_grant`
+  for a session that simply ended) without a Guard count; only an unknown or forged id, grant or
+  token counts. When an account is deleted, its Drive hands the Directory those hashes, with their
+  link ids, first (`reverse_late`: hashes only, each for a day at most, at most 20 000 per
+  account), so the requests of its links' uploaders are still answered `410` and uncounted once
+  the account and its Drive are gone. So pausing, revoking or deleting a link, its folder or its
+  account can never get its uploaders' network blocked.
 - **Receipts.** Each upload session granted is recorded as a read receipt for the link's user
   (*Read receipts*): the uploader page says so, and the same visibility, throttling and
   retention apply.
@@ -1844,7 +1884,10 @@ Design and interface: [`docs/REVERSE.md`](./docs/REVERSE.md).
 - **Quotas** (role option lists; public/js/quotakinds.js) are checked and counted in one
   synchronous Directory step, so concurrent creations cannot pass a quota: outgoing shares
   (every share, or by type), Drive uploads (`drive-upload`, each file, and `drive-bytes`, its
-  size, checked together in the same step at the upload's start: one refused, neither counted) and
+  size, checked together in the same step at the upload's start: one refused, neither counted),
+  files received through a Receive link (their size under `drive-bytes` when each is finished,
+  checked at its reservation; never under `drive-upload`: they are Drive storage, and the Receive
+  kinds count their sessions) and
   Receive (`receive-link`, `receive-upload`, and `receive-file`, `receive-note`, `receive-url`,
   `receive-secret` by what an upload session sends). An API-only quota narrows API creations only; the
   Drive and Receive have no API channel. The public account's quotas count per anonymous
