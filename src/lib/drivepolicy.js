@@ -1,6 +1,7 @@
 // drivepolicy.js — the role's file-type rules (fileTypeMode / fileTypeRules,
-// public/js/filepolicy.js) for what goes into a Drive: an upload and a file
-// taken in from a Receive link. When a type policy applies, the browser
+// public/js/filepolicy.js) for what goes into a Drive: an upload, a file
+// taken in from a Receive link, and a file's rename or metadata change
+// (renameTypeRefusal). When a type policy applies, the browser
 // declares the file's { ext, mime } (from the name and type it seals), checked
 // first (driveTypeRefusal) and never stored. Then, because the Worker opens a
 // new item's sealed name and metadata anyway (src/lib/mek.js checkNewItem),

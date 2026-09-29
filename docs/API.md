@@ -176,8 +176,9 @@ reached: 10 notes per 1d via the API.", quota: { channel, kind, n, unit, max } }
 `all` (every note, link, credential, file share and Drive share), `text` (notes, links and
 credentials), `note` (plain text, Markdown or code), `url`, `secret`, `files` (file and Drive
 shares), `file`, `drive`; the Drive: `drive-upload` (each file uploaded), `drive-bytes` (the
-bytes uploaded: `max` and the count are bytes, and the message names a size, e.g. "Quota
-reached: 1.0 GB uploaded to the Drive per 1d."); Receive: `receive` (all below),
+bytes uploaded, and those of each file received through a Receive link once it is finished:
+`max` and the count are bytes, and the message names a size, e.g. "Quota reached: 1.0 GB
+uploaded to the Drive per 1d."; a received file never counts under `drive-upload`); Receive: `receive` (all below),
 `receive-link` (a new reverse share), `receive-upload` (an upload session through one of your
 links, whatever it sends), and by what a session sends: `receive-file` (files),
 `receive-note`, `receive-url`, `receive-secret`. A key only ever meets the outgoing kinds (the
@@ -535,13 +536,13 @@ only: an API key gets `403 api_key_not_allowed`, whatever its scopes. Its routes
 
 | Method & path | Body → result |
 | --- | --- |
-| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration }` (`current`: the current sub-MEK's id; `migration`: null, or what the upgrade of a Drive made before the key model v2 still has to do; `capacity` / `maxFile` null = no limit) |
+| `GET /api/private/drive` | → `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration, kit }` (`kit`: the personal kit's state, left out while the owner acts as the user; `current`: the current sub-MEK's id; `migration`: null, or what the upgrade of a Drive made before the key model v2 still has to do; `capacity` / `maxFile` null = no limit) |
 | `POST /api/private/drive/keys` | `{}` → `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — the session's KEKs, derived by the server (docs/DRIVE.md §3); the browser keeps them in the page's memory only. `503 keys_missing`, `409 salt_missing`; the owner acting as the user gets the user's (in the admin audit) |
 | `POST /api/private/drive/kit` · `…/kit/verify` | the personal kit: its content after `current` / `reauth`; a read-only check by check values. Not while impersonating |
 | `POST /api/private/drive/kit/restore` · `GET`, `PUT …/kit/items` | `403 owner_only` for everyone: only the owner restores from a personal kit (`POST /api/private/admin/keys/users/<userId>/kit-restore`, [docs/DRIVE.md](./DRIVE.md) §3.1) |
 | `GET /api/private/drive/migrate` · `GET …/migrate/items` · `PUT …/migrate` · `POST …/migrate/finish` · `POST …/migrate/retire` | the one-time upgrade of the user's own Drive made before the key model v2 (docs/DRIVE.md §3.3): `409 already_upgraded` once it is done; `retire` (`{ ids, current \| reauth }`) ends the links of the release before that the old key does not open. Not while impersonating |
 | `GET /api/private/drive/nodes/:id` | → `{ node, children, path }` (`root` is the top folder) |
-| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta?, ks?, mek? }` — move / rename (a new name comes with the item's own `ks` and `mek`: `409 stale_keys`, `400 bad_seal`; a move past the role's folder depth: `403 folder_too_deep`) |
+| `PATCH /api/private/drive/nodes/:id` | `{ parent?, name?, meta?, ks?, mek? }` — move / rename (a new name comes with the item's own `ks` and `mek`: `409 stale_keys`, `400 bad_seal`; a move past the role's folder depth: `403 folder_too_deep`; a file's new name or metadata is held to the role's file-type rule on what it would store, `403 file_type_not_allowed`, unless it keeps its type; `meta: null` for a file: `400 invalid`) |
 | `DELETE /api/private/drive/nodes/:id` | header `X-Secbin-Intent: 1` — recursive; ends every share of it |
 | `GET /api/private/drive/nodes/:id/shares` | → `{ shares }` — the active shares of the item |
 | `POST /api/private/drive/folders` | `{ id, parent, name, meta?, ks, mek }` → `201 { id }` (`403 folder_too_deep` past the role's folder depth) |
@@ -596,13 +597,17 @@ Admin → Roles apply on top):
 | `current` / `reauth` | the confirmation a weakening change needs (below) |
 
 A change that **weakens** a link — its password removed or changed, its CAPTCHA turned off, no
-expiry, unlimited views, files, links or credentials it did not accept — needs what creating one needs: the password proof (`current`) or a
+expiry, unlimited views, files, links or credentials it did not accept, or its own file limits
+loosened (`types` removed or less restrictive: the mode changed, a type added to an allow list or
+dropped from a block list; `maxFiles`, `maxBytes` or `maxFileBytes` raised or removed; `weakens`
+names them `types`, `maxFiles`, `maxBytes`, `maxFileBytes`) — needs what creating one needs: the password proof (`current`) or a
 passkey (`reauth`) in the same body (`400 reauth_required`, `403 wrong_password` /
 `reauth_failed`, counted as failed confirmations), and is refused for an API key even with
 `manage` (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing.
 Tightening needs no confirmation and works with an API key: adding a password to a link with
 none, turning the CAPTCHA on, an expiry (extended within the role, or given to a link with none),
-fewer views or more within the role's limit, tighter file limits, the label.
+fewer views or more within the role's limit, tighter file limits (fewer types, lower limits), the
+label.
 
 → `{ ok, expires, views, left, used, accept, folder }` (`expires` `null`: none). A revoked or ended link can only
 be relabelled (`409 not_active`); a locked one not at all (`423`). The owner changing another
@@ -633,14 +638,16 @@ reverse shares (`403 reverse_disabled` otherwise), and every route reaches only 
 
 A link is `{ id, label, created, expires, status, locked, captcha, paused, held, opens, views,
 used, left, received: { files, bytes }, folder, accept, password, note, maxFiles, maxBytes,
-maxFileBytes, types, pending, failed }`: `expires` `null` for no expiry; `status` as in the share
+maxFileBytes, types, pending, failed, uploading }`: `expires` `null` for no expiry; `status` as in the share
 index (`active`, `revoked`, `expired`, `ended`); `paused` is `true` while it takes no uploads and
 `held` when you paused it (you can resume it); `opens` counts its upload sessions (its receipts);
 `views` is its views (`null`: unlimited), `used` and `left` the views used and left; `folder` the
 id of the Drive folder it receives into (`"root"`: the top folder; its name stays encrypted);
 `accept` what it takes (`files`, `note`, `url`, `secret`); `password` and `note` say only
 **whether** it has them (neither is ever returned, nor is its key); `pending` / `failed` the items
-waiting to be taken in / that could not be. A link that has left the Drive (ended more than 30
+waiting to be taken in / that could not be; `uploading` its uploads in progress, `{ files, bytes
+(sent so far), size (reserved), held (reserved and not sent, up to each one's next chunk), since
+}` — what is using space (the Drive counts what they sent). A link that has left the Drive (ended more than 30
 days ago) has the index's fields only (`folder: null`).
 
 Pausing and resuming need no `reverseEdit` (like the label and revoking); both need an active link
@@ -753,7 +760,8 @@ print(res.status_code, res.json())
 Scope: `manage`. The folder id is a folder of your own Drive (`"root"`: its top folder; a link's
 `folder` above says where it receives into now). A change that weakens the link (no expiry,
 unlimited views, its CAPTCHA off, its password removed or changed, files, links or credentials it
-did not accept) is `403 step_up_required`: make it in the browser.
+did not accept, its file types or size limits loosened) is `403 step_up_required`: make it in the
+browser.
 
 curl:
 

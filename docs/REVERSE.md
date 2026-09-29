@@ -241,23 +241,36 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
     share, 30 days after its expiry, as before).
 - The share index row has `captcha` too (My shares and Admin → Shares show it).
 - Received files are ordinary `nodes` rows (kind `file`, parent = the target folder), R2 objects
-  under `d/<userId>/<nodeId>/<i>`, counted in the Drive's capacity from the moment they are
-  reserved. Until it is taken in, a received file also counts its sealed path, metadata and
+  under `d/<userId>/<nodeId>/<i>`. A reservation is **not** charged its size: the Drive counts a
+  received upload's content as its chunks arrive (`nodes.got`, the plaintext bytes of the chunks
+  received; each new chunk must fit, checked again as it is recorded: `413 drive_full`), and the
+  whole file once it is finished. At the reservation the whole file must fit the space left
+  (`413 drive_full`), a check only. What a link's uploads in progress have reserved and not sent,
+  counting each one's next chunk only (8 MiB at most), may not pass 40 MiB (`RECEIVE_HOLD_MAX`: a
+  chunk for each of the 5 uploads one network may run at once): past it a reservation gets `429
+  busy`. So an uploader who reserves and sends nothing cannot fill the Drive; one who sends data
+  fills it only with what it sent, within the link's limits. Until it is taken in, a received file also counts its sealed path, metadata and
   wrap as stored (the uploader chose them: at most 1400 + 1024 characters and the fixed-size
   wrap, plus the field layer), so an uploader cannot store data outside the capacity; once taken
   in (name ≤ 512, meta ≤ 1024, DEK ≤ 128 characters, and its salt) it counts like any Drive file. Upload tokens are stored hashed (`upload_hash`), and a pending upload with no chunk for
-  the role's `filePendingSec` is purged by the Drive's alarm, as for the user's own uploads.
+  **10 minutes** (`RECEIVE_IDLE_SEC`, or the role's `filePendingSec` when shorter) is
+  **released**: its chunk after that answers `410 released` (never counted by the Guard), the
+  Drive's alarm purges it and gives its reservation back (`rgone.released` keeps its token for
+  that answer), and its session, while it is open, may reserve the file again — the uploader page
+  sends it again once. Past `RECEIVE_MAX_SEC` (24 hours) a reservation is purged whatever its
+  chunks (`410 gone`).
 - A session with no unfinished file lapses **10 minutes** after its last activity; while it has a
   file reserved and not finished it lasts the role's `filePendingSec` from its last activity (the
   file reserved, a chunk of it), never past the share's expiry and never more than **24 hours**
   after it began. The deadline slides both ways: once nothing is unfinished (its last file
   finished or was cancelled) the session is idle again and lapses 10 minutes later, giving its
-  per-network slot back. A reserved file must be finished within 24 hours of its reservation, however
+  per-network slot back. A file released for want of data (above) leaves its session as it was:
+  open until its deadline, so the uploader can reserve the file again. A reserved file must be finished within 24 hours of its reservation, however
   often its chunks are re-sent; the alarm purges it after that and gives its reservation back.
 - Hard ceilings: 1 000 reverse shares per Drive (an ended one is dropped 30 days after it ended —
   as long as the share index keeps its row — once all its received files are taken in or
   deleted), **5 open sessions per uploader network** and 100 per reverse share, 10 000 files
-  per reverse share.
+  per reverse share, 40 MiB reserved and not sent per reverse share (above).
 
 ## 5. Options and role options
 
@@ -285,7 +298,12 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
   `weakens: ["paused"]`); the owner acting as the user confirms nothing.
 - **Late requests are not guesses.** The Drive keeps, for 24 hours, the hashes of the session
   grants and upload tokens of every session or upload that ended — done, lapsed, paused, revoked,
-  its folder deleted (`rgone`). An uploader whose session ended under it (a pause, a revoke) still
+  released, its folder deleted (the uploads in progress there too), the item deleted on its own
+  (`rgone`). When the user's **account is deleted**, its Drive hands those hashes (and those of the
+  sessions and uploads still open) to the Directory first, with their link ids
+  (`reverse_late`, each for at most a day, at most 20 000 per account): once the account and its
+  Drive are gone, a request to one of its links that carries one is answered `410` and never
+  counted. An uploader whose session ended under it (a pause, a revoke) still
   sends what it had under way: a finalize, the next reservation, a chunk, `done`. Such a request,
   carrying a grant or token the link issued, is answered `409 paused` while the link is paused,
   `410` once it has ended, else `403 bad_grant`, and is never counted in the Guard; only an
@@ -366,10 +384,12 @@ All base64url, no padding. `public/js/reversekeys.js` implements this section.
 | `PATCH /api/private/receive/<id>` | as `PATCH /api/private/shares/<id>` below (a session, or an API key with `manage`) |
 | `POST /api/private/receive/<id>/pause` · `…/resume` | pause or resume it (`X-Secbin-Intent`; a session or an API key with `manage`) → `{ ok, paused }`; resume weakens the link: a JSON body `{ current \| reauth }` (the step-up: `400 reauth_required`, `403 wrong_password` / `reauth_failed`; none while the owner acts as the user), `403 step_up_required` for an API key; `409 not_active` (ended), `409 not_paused` (resuming a link the user did not pause), `423` (locked). Logged as `share.updated` with `paused` / `resumed` |
 | `POST /api/private/receive/<id>/revoke` | revoke (as `/api/private/shares/<id>/revoke`; like it, whatever the role's reverse shares now: ending a link is always the user's to do) |
-| `PATCH /api/private/shares/<id>` | change it (My shares' Edit; a session, or an API key with `manage`): `{ label?, expires? (a time, or null: none), views? (null: unlimited), maxFiles?, maxBytes?, maxFileBytes?, types?, accept?, captcha?, password? ({ salt, t, ph } or null), note? ({ iv, ct } or null), folder? }` → `{ ok, expires, views, left, used, accept, folder }`. Everything but the label needs `reverseEdit` (`403 reverse_edit_disabled`) and an active link (`409 not_active`), and each value its own option (§5). **Expiry** follows the rule of regular shares — it can only be extended (`400`) — except that any link may be made indefinite (`reverseNoExpiry`) and one with no expiry may be given one. **Views** may be raised or lowered, never below the views already used (`400`, with `used`). The password and the note are made in the user's browser from the link's key (§3), which the session's KEK opens: neither is sent in plain text, but the server, which holds the keys that open the link's key, can read the note and test guesses at the password (not end-to-end, like the uploads). A change that **weakens** the link — its password removed or changed (not added where it had none), its CAPTCHA turned off, no expiry, unlimited views, or `accept` gaining files, links or credentials (each a new way for an anonymous sender to reach the user: a file of any type, a link to follow, a secret entrusted to a channel that is not end-to-end; a **note** is plain text shown inertly, less than a file carries, so adding one is not weakening, nor is removing any kind) — needs the password proof (`current`) or a passkey (`reauth`), as creating a link does (`400 reauth_required`, `403 wrong_password` / `reauth_failed`), and is refused for API keys (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing. Tightening needs no confirmation. The lock is checked before anything is written; the Drive is changed first and put back if the index then refuses (a lock in between), so the two never differ. The index and the Drive change together; the index holds the CAPTCHA the uploader's `begin` checks. An undo whose old folder was deleted meanwhile keeps the link and its waiting items in the new folder (that move stands, logged `folder=<id> kept`; the answer says `kept: ["folder"]`). The owner changing a user's link directly (Admin → Shares) may change its label, expiry and views only (`403 user_only`), and a link with no expiry only where the user's role allows it. **Folder** (`folder`: a folder id of the user's own Drive, `root` its top folder): as §5 says — `404 folder_not_found` (not in the Drive: another user's, deleted, unknown, a received item), `400 not_a_folder`, `403 folder_too_deep` with `max`, `409 folder_full`; the link's waiting items move with it (`nodes.parent`, in one step with the link), and an undo (the index refused the change) moves them back. Logged as `folder=<id>` |
+| `PATCH /api/private/shares/<id>` | change it (My shares' Edit; a session, or an API key with `manage`): `{ label?, expires? (a time, or null: none), views? (null: unlimited), maxFiles?, maxBytes?, maxFileBytes?, types?, accept?, captcha?, password? ({ salt, t, ph } or null), note? ({ iv, ct } or null), folder? }` → `{ ok, expires, views, left, used, accept, folder }`. Everything but the label needs `reverseEdit` (`403 reverse_edit_disabled`) and an active link (`409 not_active`), and each value its own option (§5). **Expiry** follows the rule of regular shares — it can only be extended (`400`) — except that any link may be made indefinite (`reverseNoExpiry`) and one with no expiry may be given one. **Views** may be raised or lowered, never below the views already used (`400`, with `used`). The password and the note are made in the user's browser from the link's key (§3), which the session's KEK opens: neither is sent in plain text, but the server, which holds the keys that open the link's key, can read the note and test guesses at the password (not end-to-end, like the uploads). A change that **weakens** the link — its password removed or changed (not added where it had none), its CAPTCHA turned off, no expiry, unlimited views, `accept` gaining files, links or credentials (each a new way for an anonymous sender to reach the user: a file of any type, a link to follow, a secret entrusted to a channel that is not end-to-end; a **note** is plain text shown inertly, less than a file carries, so adding one is not weakening, nor is removing any kind), or its own file limits loosened — `types` removed or less restrictive (the mode changed, a type added to an allow list or dropped from a block list), `maxFiles`, `maxBytes` (null: the role's `reverseMaxBytes`, compared as that) or `maxFileBytes` raised or removed (`weakens`: `types`, `maxFiles`, `maxBytes`, `maxFileBytes`); more views or a later expiry (the Extend of every share) are not — needs the password proof (`current`) or a passkey (`reauth`), as creating a link does (`400 reauth_required`, `403 wrong_password` / `reauth_failed`), and is refused for API keys (`403 step_up_required`, with `weakens`); the owner acting as the user confirms nothing. Tightening needs no confirmation. The lock is checked before anything is written; the Drive is changed first and put back if the index then refuses (a lock in between), so the two never differ. The index and the Drive change together; the index holds the CAPTCHA the uploader's `begin` checks. An undo whose old folder was deleted meanwhile keeps the link and its waiting items in the new folder (that move stands, logged `folder=<id> kept`; the answer says `kept: ["folder"]`). The owner changing a user's link directly (Admin → Shares) may change its label, expiry and views only (`403 user_only`), and a link with no expiry only where the user's role allows it. **Folder** (`folder`: a folder id of the user's own Drive, `root` its top folder): as §5 says — `404 folder_not_found` (not in the Drive: another user's, deleted, unknown, a received item), `400 not_a_folder`, `403 folder_too_deep` with `max`, `409 folder_full`; the link's waiting items move with it (`nodes.parent`, in one step with the link), and an undo (the index refused the change) moves them back. Logged as `folder=<id>` |
 
 A row: `{ id, folder, label, created, expires (null: none), status, locked, priv, password: bool, note: bool,
-captcha: bool, views (null: unlimited), used, left, maxFiles, maxBytes, maxFileBytes, types, accept, files, bytes, pending, held }` (`status` as the share index
+captcha: bool, views (null: unlimited), used, left, maxFiles, maxBytes, maxFileBytes, types, accept, files, bytes, pending, held, uploading }` (`uploading`: its uploads in progress,
+`{ files, bytes (sent so far), size (reserved), held (reserved and not sent, up to each one's next
+chunk), since }`; `files` / `bytes` count them too, as reserved; `status` as the share index
 has it: `active`, `revoked`, `expired`, `ended`, or `paused` while it takes no uploads — `held`:
 the user paused it; `pending` = received files waiting to be taken in, `failed` = those the
 browser could not take in). `GET /api/private/drive` adds
@@ -392,9 +412,9 @@ without a JSON body carry `X-Secbin-Intent: 1`.
 | `POST …/open` | `X-Link-Proof` | `{ note, password: null \| { salt, t }, expires (null: none), captcha, accept, limits: { maxFiles, maxBytes, maxFileBytes, types, filesLeft, bytesLeft } }` (`captcha`: the link has the CAPTCHA and the server has Turnstile keys; `accept`: what it takes now — what it accepts that its user's role allows). Not a view; `410` once the views are used up, or when the role allows nothing it accepts. The views are not shown to the uploader |
 | `POST …/human` | `X-Secbin-Turnstile` (action `reverse-upload`) | a CAPTCHA grant for this link: `{ grant, expires }` (10 minutes, bound to the uploader's network; `{ grant: null }` when the link needs none). Needs no link proof. A link whose views are used up (or that ended) answers `410` before any CAPTCHA check, and gets no grant |
 | `POST …/begin` | `X-Link-Proof`, `X-Key-Proof` (password only), `X-Secbin-Human` (a grant) or `X-Secbin-Turnstile` (a token), when the link has the CAPTCHA; an optional JSON body `{ type: 'files' \| 'note' \| 'url' \| 'secret' }` (none: files) | a session of that kind: `{ grant, expires }` — one view (§5); a kind the link (or its user's role, now) does not take: `403 kind_not_accepted` (`kind`), before the views, the CAPTCHA and the password: with its views used up, `410` before the CAPTCHA and the password are looked at. The CAPTCHA comes before the password: without it no guess is answered (`403 captcha_required`). A grant starts one session, whatever the answer (a wrong password spends it too). The password is checked in the user's Drive with a lockout per link: 10 wrong ones within 15 minutes, from any networks, lock it for 15 minutes (`429 password_locked { until }`, the right password too; `open` shows `password.lockedUntil`) |
-| `POST …/files` | `X-Reverse-Grant`; JSON `{ id, name, meta, size, wrap, types? }` | reserve one file → `201 { id, uploadToken, chunks }` (limits, capacity; `types` for a files session only). The session's kind must still be one the link and its user's role take (`403 kind_not_accepted`); a note, link or credential session reserves one item (`409 one_item`) of at most its kind's size (`413 item_too_large`) |
-| `PUT …/files/<nodeId>/chunk/<i>` | `X-Upload-Token`; `application/octet-stream` | chunk `i`, exact size |
-| `POST …/files/<nodeId>/finalize` | `X-Reverse-Grant`, `X-Upload-Token` | `{ ok }` (only the session that reserved the file: else `403 bad_grant`) |
+| `POST …/files` | `X-Reverse-Grant`; JSON `{ id, name, meta, size, wrap, types? }` | reserve one file → `201 { id, uploadToken, chunks }` (limits; the whole file must fit the Drive's space left, nothing of it is charged yet, §4; `types` for a files session only). The session's kind must still be one the link and its user's role take (`403 kind_not_accepted`); a note, link or credential session reserves one item (`409 one_item`) of at most its kind's size (`413 item_too_large`); `429 busy` when the link's uploads in progress have 40 MiB reserved and not sent (§4); `429 not_accepting` when the file could not fit the user's `drive-bytes` quota |
+| `PUT …/files/<nodeId>/chunk/<i>` | `X-Upload-Token`; `application/octet-stream` | chunk `i`, exact size; counted in the Drive as it arrives (`413 drive_full` when it does not fit); `410 released` when the file had no chunk for 10 minutes (reserve it again, §4) |
+| `POST …/files/<nodeId>/finalize` | `X-Reverse-Grant`, `X-Upload-Token` | `{ ok }` (only the session that reserved the file: else `403 bad_grant`); its size counts under the user's `drive-bytes` quota now (`429 not_accepting` past it: nothing counted, the file stays unfinished and the uploader cancels it) |
 | `DELETE …/files/<nodeId>` | `X-Reverse-Grant`, `X-Upload-Token` | cancel an unfinished upload (its reservation is given back; only the session that reserved it) |
 | `POST …/done` | `X-Reverse-Grant` | end the session: `{ files, bytes }` (logged; one that sent nothing gives its quota back) |
 
@@ -405,10 +425,13 @@ in the previous release: §9), `423 share_locked` (the
 admin locked it),
 `403 bad_link`, `401 password_required` (the password is needed; `{ salt, t }` in the body),
 `403 bad_password`, `403 bad_grant`, `403 bad_token`, `403 captcha_required`, `403 turnstile_*`, `413 file_too_large` /
-`share_full` / `drive_full`, `409 too_many_files` (none left: `open` shows `filesLeft: 0`),
+`share_full` / `drive_full`, `410 released` (a chunk of a file released for want of data: send
+it again, §4), `409 too_many_files` (none left: `open` shows `filesLeft: 0`),
 `400 declaration_required` / `403 file_type_not_allowed`, `429 busy` (too many open sessions from
-this network, or on the link), `429 not_accepting` (`begin`: the user's quota of upload sessions
-received, kind `receive-upload` or `receive`, is reached; the answer is only "This link can’t
+this network, or on the link; `files`: the link's uploads in progress have 40 MiB reserved and
+not sent), `429 not_accepting` (`begin`: the user's quota of upload sessions
+received, kind `receive-upload` or `receive`, is reached; `files` and `finalize`: the file could
+not fit, or no longer fits, the user's `drive-bytes` quota; the answer is only "This link can’t
 accept more uploads right now. Try again later.", with nothing of the quota), `429 password_locked`, `429 rate_limited` (more than 30 CAPTCHA
 checks from this network within 10 minutes, on `human` or a `begin` with a token; a failed token
 counts as an invalid request), `429 blocked`.
@@ -420,7 +443,10 @@ for the user (never the uploader): at `begin`, before the
 password is checked. A session that does not start (wrong password, busy, paused) or that ends
 having sent no file — `done`, or lapsing — is given back; one that sent a file stays counted. A
 new link counts under `receive-link` and `receive` (given back when its creation does not
-complete). Files taken in from a link are not Drive uploads (`drive-upload`, `drive-bytes`).
+complete). A file received is **Drive storage**: its size counts under the user's `drive-bytes`
+quotas when it is finished (checked at its reservation, counted at its finalize: `429
+not_accepting`, neutral, past it), never under `drive-upload` (the Receive kinds above count its
+session). Taking it in counts nothing more.
 
 ### 6.3 The owner acting as the user ("Log in as")
 
@@ -466,7 +492,9 @@ many files arrive.
   or hidden) and the account password (or, left empty, a passkey when the account has one;
   hidden while the owner acts as the user), then the link with copy and a QR code, and the folder's reverse shares (label,
   created, expiry, files and bytes received, status) with Copy link, Revoke, Edit and Pause /
-  Resume.
+  Resume. The "Received" cell also names the uploads in progress, with what they sent so far of
+  the size they reserved ("uploading now: 1 file, 8.0 MB of 20 MB sent"), so the user sees what
+  is using space; they are not counted as received until they finish.
 - When the Drive page opens, the browser takes the received files in (a status line: added,
   renamed, placed higher up, and the ones that could not be
   added with **Review them**, a dialog to delete them or try again; then the folder shows them).
@@ -504,7 +532,8 @@ many files arrive.
   the note (keep, replace or add, remove), each as the role allows. After a move, the folders'
   Shares and Receive… lists show the link under its new folder. The password and the note are sealed in the
   browser, which opens the Drive's keys for it only when one of them changes. While the changes
-  weaken the link (the password removed or changed, the CAPTCHA off, no expiry, unlimited views)
+  weaken the link (the password removed or changed, the CAPTCHA off, no expiry, unlimited views,
+  its file types or size limits loosened)
   the form shows "Your account password (to confirm it is you)" (or a passkey), as the Receive…
   dialog does; never while the owner acts as the user. The same **Edit**
   is in the Drive, on each link of the Receive… dialog's list and of a folder's Shares dialog (the
