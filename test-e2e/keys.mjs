@@ -354,8 +354,14 @@ try {
   await p.waitForSelector('#kx-build', { timeout: 60000 });
   await p.check('#kx-root');
   await p.selectOption('#kx-subs', 'all');
-  await p.fill('#kx-search', 'ali');
-  check('export: the user search filters the list', await p.isVisible(`#kx-users li[data-id="${aliceId}"]`) && await p.isHidden(`#kx-users li[data-id="${ownerId}"]`));
+  // The whole name: the search also matches user ids, and a random id can hold "ali".
+  await p.fill('#kx-search', 'alice');
+  // Wait for the list to show the filter before judging it (and before "Select all" acts on it).
+  const filtered = await p.waitForFunction(([a, o]) => {
+    const row = (id) => document.querySelector(`#kx-users li[data-id="${id}"]`);
+    return row(a)?.checkVisibility() === true && row(o)?.checkVisibility() === false;
+  }, [aliceId, ownerId], { timeout: 30000 }).then(() => true, () => false);
+  check('export: the user search filters the list', filtered);
   await p.click('#drive-keys-port button:has-text("Select all")');
   await p.fill('#kx-search', '');
   await p.check('#kx-salts'); await p.check('#kx-keks');
