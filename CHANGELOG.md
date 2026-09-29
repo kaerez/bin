@@ -15,6 +15,51 @@ longer be opened, and the v1 anonymous endpoint (`POST /api/paste`) is gone (`41
 
 ### Security
 
+- **Security audit W3, part A (authentication and authorization).**
+  - **A looser role needs the owner's step-up.** Giving a user a role that is looser for them
+    (any role option, on either channel, or the quota list they are counted against) and deleting
+    a role whose users would fall back to a looser Default role now need the owner's password or
+    a passkey (`400 reauth_required` with what loosens; in the `DELETE`'s JSON body for a
+    deletion). A tighter or equal role needs nothing.
+  - **Quota changes that loosen need it too:** a quota removed, raised or given a shorter period,
+    for the Default role, a custom role or the public account, and a role switching between its
+    own quota list and Default's when the other list allows more.
+  - **Per-network limits before the Directory** for anonymous calls that reached it unlimited:
+    refused API keys (`api-key`: 600 per 10 minutes, counted only on a refusal; past that the
+    network's API-key requests are refused before the lookup), usernameless passkey challenges
+    (`passkey-options`: 600 per 10 minutes, every request) and passkey sign-ins or second steps
+    with a made-up, expired or used challenge (`auth-challenge`: 120 per 10 minutes). `429
+    rate_limited` with `Retry-After`; the owner sees and lifts them in Admin → Security.
+  - **Lifting a control needs the step-up:** removing a block rule, lifting a Guard block or
+    clearing a network's count, unlocking a locked account, and unblocking or forgetting an
+    anonymous browser id (as adding an allow rule already did). Placing a block needs nothing.
+  - **More options count as weakening:** `reverseEnabled`, `driveEnabled`, `text`,
+    `reverseText`, `viewer` and the read-receipt details (`receiptIp`, `receiptLocation`,
+    `receiptBrowser`, `receiptOs`, `receiptLanguages`) turned on; a higher or removed
+    `apiMaxKeys` and `reverseMaxActive`; a higher `passkeysMax`; a longer `fileGrantSec` and
+    `files.grantSec`; `public.tracking` towards both-permissive; `public.notice` off or its text
+    emptied; a longer `public.trackerIdleSec`. Every setting and role option is now classified,
+    with the reason for those that are not (`NOT_WEAKENING_SETTINGS`, `NOT_WEAKENING_LIMITS`),
+    and a test fails for an option added without one.
+  - **The sign-in limit is checked and counted at once:** each password, passkey, recovery-code
+    or second-step sign-in (and each set-up token) is counted against the network in the same
+    Guard call that checks its block, before the Directory is asked, and given back when it did
+    not fail. Concurrent wrong passwords from one network can no longer get more than
+    `guard.login.max` evaluated per window.
+  - **Failed sign-ins and failed step-ups are logged:** `login.failed` (wrong password, passkey,
+    recovery code or second step; the owner's included) and `stepup.failed`, added up per
+    account and action per hour (how many, how, when the last was and, for a sign-in, from which
+    address), sealed like the other sign-in records. An unknown username is recorded under a
+    keyed hash only, with the same refusal as a real one; past 100 such entries an hour they
+    share one. They follow the log's retention (the owner's entries the owner's limits).
+    Directory migration 20 rebuilds the index of unsealed sign-in rows for the two actions.
+  - **Credential resets revoke API keys:** an admin password reset and an owner recovery revoke
+    the account's API keys (passkeys and recovery codes are kept on a reset). A user's own
+    password change offers "Also revoke my API keys", ticked by default (`revokeKeys`).
+  - **A password change keeps the session's absolute end**, as impersonation does.
+  - **An import refuses a custom role named "Public"** (any case, trimmed) and a user's role
+    "Public", as the admin panel does.
+
 - **Share passwords have a per-share lockout** (security audit W3, B-1). Wrong passwords were
   limited only per network, so guesses spread over many networks (the /64s of one IPv6 /48, for
   example) were never refused. Now each share counts its wrong passwords from any network:

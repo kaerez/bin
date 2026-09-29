@@ -45,8 +45,8 @@ const audit = async (subject) => (await (await fetchJson(`/api/private/admin/aud
 
 describe('role options and migration 14', () => {
   it('reverse shares are off by default, need the Drive too, and join the Default role', async () => {
-    expect(SCHEMA_VERSION).toBe(19); // 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2 (drive-keys.test.js); 17: reverse-share options (reverse-parity.test.js); 18: what Receive links accept (receive-types.test.js); 19: sign-in records sealed (records.test.js)
-    expect(await dirStub().schemaVersion()).toBe(19);
+    expect(SCHEMA_VERSION).toBe(20); // 20: failed sign-ins and step-ups logged (audit-w3a.test.js); 15: CAPTCHA on shares (captcha.test.js); 16: the Drive key model v2 (drive-keys.test.js); 17: reverse-share options (reverse-parity.test.js); 18: what Receive links accept (receive-types.test.js); 19: sign-in records sealed (records.test.js)
+    expect(await dirStub().schemaVersion()).toBe(20);
     const rows = await runInDurableObject(dirStub(), (inst, state) => state.storage.sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all' AND key LIKE 'reverse%' ORDER BY key").toArray());
     expect(rows).toEqual([
       // Migration 17: views, expiry, the password and editing (reverse-parity.test.js).

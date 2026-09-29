@@ -127,7 +127,15 @@ try {
   check('set-up: done, and the page says to download the key kit', /Drive keys were created.*key kit/.test(await p.textContent('#setup-msg')));
   await login(p, 'owner', PW);
   const ownerId = (await api(p, '/api/private/me')).body.user.id;
-  const lim = await api(p, '/api/private/admin/limits', { method: 'PATCH', body: JSON.stringify({ scope: 'global', channel: 'all', patch: { driveEnabled: true } }) });
+  // Turning the Drive on is weakening (audit W3 A-5): the owner's password proof confirms it.
+  const ownerStep = await p.evaluate(async (pw) => {
+    const { stretch } = await import('/js/pwauth.js');
+    // Its prelogin counts under another address (wrangler dev takes the header), so the suite's many
+    // confirmations stay within the per-network prelogin limit for one name (20 per 10 minutes).
+    const { salt, t } = await (await fetch('/api/auth/prelogin', { method: 'POST', headers: { 'content-type': 'application/json', 'cf-connecting-ip': '192.0.2.77' }, body: JSON.stringify({ username: 'owner' }) })).json();
+    return { current: await stretch(pw, salt, t) };
+  }, PW);
+  const lim = await api(p, '/api/private/admin/limits', { method: 'PATCH', body: JSON.stringify({ scope: 'global', channel: 'all', patch: { driveEnabled: true }, ...ownerStep }) });
   check('Default role: Drive on', lim.status === 200);
   await p.goto(`${BASE}/dashboard/admin/`);
   await p.click('.tab[data-tab="users"]');

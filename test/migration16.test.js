@@ -17,7 +17,7 @@ beforeAll(async () => { oc = await owner(); });
 
 describe('migration 16 from the Directory the release before left', () => {
   it('comes after #65\'s CAPTCHA (15); 17 (reverse-share options, reverse-parity.test.js), 18 (what Receive links accept, receive-types.test.js) and 19 (sign-in records, records.test.js) follow it', () => {
-    expect(SCHEMA_VERSION).toBe(19);
+    expect(SCHEMA_VERSION).toBe(20); // 20: failed sign-ins and step-ups logged (audit-w3a.test.js)
   });
 
   it('every account gets a salt; the Drives that may hold anything of the release before wait; every Drive opens', async () => {

@@ -155,7 +155,9 @@ const guard = async (fn, okText) => {
  * CSRF tokens off or anonymous sharing on; loosening the lockout, the
  * brute-force or rate limits, the sessions, the log retention; a role option
  * that loosens sign-in or widens what its shares, links and API keys may be;
- * an allow IP rule: weakenedSettings / weakenedLimits in src/lib/settings.js). Hidden until the server answers that this change does (400
+ * an allow IP rule; a looser role or quota list for users, a role deleted;
+ * lifting a lockout, a Guard block, a block rule or a browser id's block:
+ * weakenedSettings / weakenedLimits / weakenedQuotas in src/lib/settings.js). Hidden until the server answers that this change does (400
  * reauth_required, with what it weakens); then the owner's password, or a
  * passkey with the field left empty, goes with the next save. A change that
  * tightens, or weakens nothing, never asks.
@@ -559,6 +561,7 @@ function quotasEditor(scope, list, { publicAccount = false } = {}) {
   const allowed = publicAccount ? PUBLIC_QUOTA_KINDS : QUOTA_KINDS;
   const box = h('div.stack');
   const rows = h('div.stack');
+  const reconfirm = stepUpSlot();
   const addRow = (q = { channel: 'all', kind: 'all', n: 1, unit: 'd', max: 10 }) => {
     const channel = h('select.input', { 'aria-label': 'Via (channel)' }, ...[['all', 'GUI + API'], ['api', 'API only']].map(([v, t]) => h('option', { value: v, text: t, selected: q.channel === v })));
     channel.value = q.channel;
@@ -600,7 +603,8 @@ function quotasEditor(scope, list, { publicAccount = false } = {}) {
   box.appendChild(rows);
   box.appendChild(h('div.btn-row', {},
     h('button.btn', { type: 'button', text: 'Add quota', on: { click: () => addRow() } }),
-    h('button.btn', { type: 'button', text: 'Save quotas', on: { click: () => guard(() => admin.quotas(scope, [...rows.children].map((r) => r.read())), 'Quotas saved.') } })));
+    h('button.btn', { type: 'button', text: 'Save quotas', on: { click: () => reconfirm.save((step) => admin.quotas(scope, [...rows.children].map((r) => r.read()), step), 'Quotas saved.') } })));
+  box.appendChild(reconfirm.el); // a quota removed, raised or with a shorter period asks for the password or a passkey
   box.appendChild(h('p.mono.muted', { text: 'Fixed windows (months/years are UTC calendar periods). GUI and API creations count together; an "API only" quota can only restrict API use further.' }));
   box.appendChild(h('p.mono.muted', { text: QUOTA_HELP.outgoing }));
   box.appendChild(h('p.mono.muted', { text: publicAccount ? 'The public account has no Drive, so only outgoing shares it can make are counted: notes, links, credentials and file shares.' : QUOTA_HELP.webOnly }));
@@ -684,6 +688,7 @@ async function renderUsersInto() {
     h('p.mono.muted', { text: 'When the user’s role has the Drive, their Drive is ready at once: its keys come from the server (Security → Keys), not from their password.' })));
 
   const body = h('tbody');
+  const userStep = stepUpSlot(); // a looser role, or lifting a lockout, asks for the password or a passkey
   // The built-in public account is managed on the Public role, and the owner
   // (you) on Account: neither is listed here.
   for (const u of data.users.filter((x) => x.role !== 'public' && x.role !== 'owner')) {
@@ -691,18 +696,20 @@ async function renderUsersInto() {
     actions.appendChild(h('button.btn', { type: 'button', text: 'Manage', dataset: { focusKey: `user:${u.id}:manage` }, on: { click: () => openUser(u.id) } }));
     actions.appendChild(h('button.btn', { type: 'button', text: 'Log in as', on: { click: async () => { if (await guard(() => admin.impersonate(u.id))) location.href = '/dashboard/'; } } }));
     actions.appendChild(h('button.btn', { type: 'button', text: u.disabled ? 'Enable' : 'Disable', dataset: { focusKey: `user:${u.id}:toggle` }, on: { click: async () => { await guard(() => admin.updateUser(u.id, { disabled: !u.disabled }), u.disabled ? 'User enabled.' : 'User disabled.'); renderUsers(); } } }));
-    if (u.locked) actions.appendChild(h('button.btn', { type: 'button', text: 'Unlock', on: { click: async () => { await guard(() => admin.unlock(u.id), 'Unlocked.'); renderUsers(); } } }));
+    if (u.locked) actions.appendChild(h('button.btn', { type: 'button', text: 'Unlock', on: { click: async () => { if (await userStep.save((step) => admin.unlock(u.id, step), 'Unlocked.')) renderUsers(); } } }));
     const del = h('button.btn.danger', { type: 'button', text: 'Delete' });
     armConfirm(del, 'Delete user + revoke shares?', async () => { await guard(() => admin.deleteUser(u.id, true), 'User deleted.'); renderUsers(); });
     actions.appendChild(del);
     // One role per user; changing it applies at once.
     const pick = h('select.input', { 'aria-label': `Role of ${u.username}`, dataset: { focusKey: `user:${u.id}:role` } }, ...assignable.map((r) => h('option', { value: r.id, text: r.name, selected: r.id === u.roleId })));
-    pick.onchange = async () => { if (!(await guard(() => admin.setUserRole(u.id, pick.value), `${u.username} now has the role ${pick.selectedOptions[0].textContent}.`))) renderUsers(); };
+    // A looser role asks for the password or a passkey first: the choice goes back, to be made again once it is entered.
+    pick.onchange = async () => { if (!(await userStep.save((step) => admin.setUserRole(u.id, pick.value, step), `${u.username} now has the role ${pick.selectedOptions[0].textContent}.`))) pick.value = u.roleId; };
     body.appendChild(h('tr', {}, h('td', { dataset: { label: 'User' }, text: u.username }), h('td', { dataset: { label: 'Role' } }, pick),
       h('td', { dataset: { label: 'Status' } }, h(`span.pill.${u.disabled ? 'bad' : u.locked ? 'warn' : 'ok'}`, { text: u.disabled ? 'disabled' : u.locked ? 'locked' : 'active' })),
       h('td.mono', { dataset: { label: 'Drive' }, text: driveUsage(u.drive) }),
       h('td.mono', { dataset: { label: 'Created' }, text: formatDate(u.created) }), h('td.cell-actions', {}, actions)));
   }
+  p.appendChild(userStep.el);
   p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['User', 'Role', 'Status', 'Drive', 'Created', ''].map(th))), body)));
   p.appendChild(h('div', { id: 'user-detail' }));
 }
@@ -844,6 +851,7 @@ async function renderRolesInto(openId) {
     h('p.mono.muted', { text: 'Every user has exactly one role: Default unless you choose another (Users). A new role starts with every option on "same as Default", so it follows Default until you change an option.' })));
 
   const body = h('tbody');
+  const rolesStep = stepUpSlot(); // deleting a role whose users would get a looser Default asks for the password or a passkey
   for (const r of data.roles) {
     const actions = h('div.btn-row.row-actions');
     if (r.locked) {
@@ -863,7 +871,7 @@ async function renderRolesInto(openId) {
       if (!r.builtin) {
         const del = h('button.btn.danger', { type: 'button', text: 'Delete' });
         armConfirm(del, r.users ? `Delete; ${r.users} user${r.users === 1 ? '' : 's'} move${r.users === 1 ? 's' : ''} to Default?` : 'Delete?', async () => {
-          if (await guard(() => admin.deleteRole(r.id), 'Role deleted.')) renderRoles();
+          if (await rolesStep.save((step) => admin.deleteRole(r.id, step), 'Role deleted.')) renderRoles();
         });
         actions.appendChild(del);
       }
@@ -873,6 +881,7 @@ async function renderRolesInto(openId) {
       h('td.mono', { dataset: { label: 'Kind' }, text: r.locked ? 'built in, locked' : r.builtin ? 'built in' : 'custom' }),
       h('td.cell-actions', {}, actions)));
   }
+  p.appendChild(rolesStep.el);
   p.appendChild(h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Role', 'Users', 'Kind', ''].map(th))), body)));
   p.appendChild(h('div', { id: 'role-detail' }));
   if (openId) await openRole(openId);
@@ -984,8 +993,9 @@ async function publicRole(box, reopen) {
 
   const t = data.trackers;
   const body = h('tbody');
+  const trackerStep = stepUpSlot(); // unblocking or forgetting a browser id asks for the password or a passkey
   for (const r of t.rows) {
-    const act = (action, label, cls = 'btn') => h(`button.${cls}`, { type: 'button', text: label, on: { click: async () => { if (await guard(() => admin.tracker(r.id, action), `Browser id ${action === 'forget' ? 'forgotten' : `${action}ed`}.`)) reopen(); } } });
+    const act = (action, label, cls = 'btn') => h(`button.${cls}`, { type: 'button', text: label, on: { click: async () => { if (await trackerStep.save((step) => admin.tracker(r.id, action, step), `Browser id ${action === 'forget' ? 'forgotten' : `${action}ed`}.`)) reopen(); } } });
     body.appendChild(h('tr', {},
       h('td.mono', { dataset: { label: 'Id' }, text: r.id }),
       h('td.mono', { dataset: { label: 'First seen' }, text: formatDate(r.created) }),
@@ -996,7 +1006,8 @@ async function publicRole(box, reopen) {
   }
   box.appendChild(h('div.card.stack', {},
     h('h3.field-label', { text: `Anonymous browser ids (${t.total}, ${t.blocked} blocked)` }),
-    h('p.mono.muted', { text: 'Ids are shown as a prefix of their keyed hash; the ids themselves are not stored. Forgetting one also resets its quota usage.' }),
+    h('p.mono.muted', { text: 'Ids are shown as a prefix of their keyed hash; the ids themselves are not stored. Forgetting one also resets its quota usage. Unblocking or forgetting one asks for your password or a passkey.' }),
+    trackerStep.el,
     t.rows.length ? h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Id', 'First seen', 'Last seen', 'Shares', 'Status', ''].map(th))), body)) : h('p.mono.muted', { text: 'None yet.' })));
 }
 
@@ -1042,18 +1053,20 @@ async function openRole(id, { scroll = true } = {}) {
       limitsEditor({ scope, channel: 'api', rows: d.limits.api, effective: d.effective.api, onSaved: reopen })));
     const own = [h('input', { type: 'radio', name: `own-quotas-${id}`, value: 'default', checked: !d.role.ownQuotas }), h('input', { type: 'radio', name: `own-quotas-${id}`, value: 'own', checked: d.role.ownQuotas })];
     const quotaBox = h('div', { hidden: !d.role.ownQuotas }, quotasEditor(scope, d.quotas));
+    const ownStep = stepUpSlot(); // a looser quota list asks for the password or a passkey
     for (const r of own) {
       r.onchange = async () => {
         if (!r.checked) return;
         const ownQuotas = r.value === 'own';
         quotaBox.hidden = !ownQuotas;
-        await guard(() => admin.updateRole(id, { ownQuotas }), ownQuotas ? 'This role now uses its own quota list (save it below).' : 'This role now uses Default\'s quotas.');
+        const done = await ownStep.save((step) => admin.updateRole(id, { ownQuotas }, step), ownQuotas ? 'This role now uses its own quota list (save it below).' : 'This role now uses Default\'s quotas.');
+        if (!done) { own[ownQuotas ? 0 : 1].checked = true; quotaBox.hidden = ownQuotas; } // back as it is: choose again once confirmed
       };
     }
     box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Quotas' }),
       h('fieldset.range', {}, h('legend', { text: 'Which quotas apply' }),
         h('label.radio-opt', {}, own[0], h('span', { text: 'Same as Default' })), h('label.radio-opt', {}, own[1], h('span', { text: 'This role\'s own list (instead of Default\'s)' }))),
-      quotaBox));
+      ownStep.el, quotaBox));
     box.appendChild(h('div.card.stack', {}, h('h3.field-label', { text: 'Viewer rules (used when "Use this role\'s own viewer rules" is yes)' }), rulesEditor(scope, d.viewerRules)));
   }
   if (scroll) {
@@ -1329,33 +1342,36 @@ async function renderSecurity() {
     rbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'Range' }, text: r.cidr }),
       h('td', { dataset: { label: 'Action' } }, h(`span.pill.${r.action === 'allow' ? 'ok' : 'bad'}`, { text: r.action })),
       h('td.mono', { dataset: { label: 'Expires' }, text: r.expires ? formatDate(r.expires) : 'never' }), h('td', { dataset: { label: 'Note' }, text: r.note }),
-      h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Remove', on: { click: async () => { await guard(() => admin.removeIpRule(r.id), 'Rule removed.'); renderSecurity(); } } }))));
+      h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Remove', on: { click: async () => { if (await reconfirm.save((step) => admin.removeIpRule(r.id, step), 'Rule removed.')) renderSecurity(); } } }))));
   }
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Manual IP rules' }),
-    h('p.mono.muted', { text: 'Block rules deny the whole API and dashboard. Allow beats block, and its addresses are never blocked or rate-limited, so adding an allow rule asks for your password or a passkey. Leave the duration empty for a permanent rule.' }),
+    h('p.mono.muted', { text: 'Block rules deny the whole API and dashboard. Allow beats block, and its addresses are never blocked or rate-limited, so adding an allow rule, or removing a block rule, asks for your password or a passkey. Leave the duration empty for a permanent rule.' }),
     h('div.toolbar', {}, labelled(cidr), labelled(action), h('div.field-inline', { role: 'group', 'aria-labelledby': 'rule-ttl-l', 'aria-describedby': 'rule-ttl-h' }, h('span.field-label', { id: 'rule-ttl-l', text: 'Rule duration' }), ttl, h('span.mono.muted', { id: 'rule-ttl-h', text: 'empty: until removed' })), labelled(note), add),
     reconfirm.el,
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['Range', 'Action', 'Expires', 'Note', ''].map(th))), rbody))));
 
   // A row's key is a keyed hash of the network; the address comes opened by the server (it is sealed at rest).
   const shownAddr = (r) => r.addr || r.key;
+  // Lifting a block or clearing a network's count lets it try again: the password or a passkey.
+  const blockStep = stepUpSlot();
+  const trackStep = stepUpSlot();
   const bbody = h('tbody');
   for (const b of g?.blocks || []) {
     bbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: shownAddr(b) }), h('td.mono', { dataset: { label: 'Scope' }, text: b.scope }),
       h('td.mono', { dataset: { label: 'Since' }, text: formatDate(b.since) }), h('td.mono', { dataset: { label: 'Until' }, text: formatDate(b.until) }),
-      h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Unblock', on: { click: async () => { await guard(() => admin.unblock(b.scope, b.key), 'Unblocked.'); renderSecurity(); } } }))));
+      h('td.cell-actions', {}, h('button.btn', { type: 'button', text: 'Unblock', on: { click: async () => { if (await blockStep.save((step) => admin.unblock(b.scope, b.key, step), 'Unblocked.')) renderSecurity(); } } }))));
   }
   const tbody = h('tbody');
   for (const t of g?.tracking || []) {
     tbody.appendChild(h('tr', {}, h('td.mono', { dataset: { label: 'IP / prefix' }, text: shownAddr(t) }), h('td.mono', { dataset: { label: 'Scope' }, text: t.scope }),
       h('td.mono', { dataset: { label: 'Failures' }, text: String(t.count) }), h('td.mono', { dataset: { label: 'Window ends' }, text: formatDate(t.expires) }),
       h('td.cell-actions', {}, h('div.btn-row.row-actions', {},
-        h('button.btn', { type: 'button', text: 'Clear', on: { click: async () => { await guard(() => admin.unblock(t.scope, t.key), 'Cleared.'); renderSecurity(); } } }),
+        h('button.btn', { type: 'button', text: 'Clear', on: { click: async () => { if (await trackStep.save((step) => admin.unblock(t.scope, t.key, step), 'Cleared.')) renderSecurity(); } } }),
         h('button.btn.danger', { type: 'button', text: 'Block 24h', on: { click: async () => { await guard(() => admin.block(t.scope, t.key, 86400), 'Blocked.'); renderSecurity(); } } })))));
   }
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Currently blocked' }),
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Currently blocked' }), blockStep.el,
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['IP / prefix', 'Scope', 'Since', 'Until', ''].map(th))), bbody))));
-  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Being tracked' }),
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Being tracked' }), trackStep.el,
     h('div.table-wrap', {}, h('table.table', {}, h('thead', {}, h('tr', {}, ...['IP / prefix', 'Scope', 'Failures', 'Window ends', ''].map(th))), tbody)),
     h('div.btn-row', {}, h('button.btn', { type: 'button', text: 'Refresh', on: { click: renderSecurity } }))));
 }

@@ -41,7 +41,10 @@ A key created without a choice of scopes gets `notes`, `files` and `policy` (cre
 `read` and `manage` must be chosen explicitly. Scopes can be changed later (Account → API keys →
 Edit; changing a key needs your password or a passkey). Keys can expire, can be revoked at any
 time, and stop working at once when the administrator turns API use off for the account or
-disables it.
+disables it. A password reset by the administrator and an owner recovery revoke every key of the
+account; so does changing your own password on Account, unless you untick **Also revoke my API
+keys** (`revokeKeys: false` in `POST /api/private/me/password`; the answer's `keysRevoked` says
+how many went). Create new keys afterwards.
 
 What a key can reach is always **your own shares only** — never another user's, whatever its
 scopes — under the same rules as the dashboard's **My shares** page:
@@ -148,7 +151,7 @@ SPEC.md §10). The ones specific to keys and shares:
 
 | Status | `error` | When |
 | --- | --- | --- |
-| 401 | `invalid_api_key` | malformed, unknown, expired or revoked key, or API use is off for the account |
+| 401 | `invalid_api_key` | malformed, unknown, expired or revoked key, or API use is off for the account. A well-formed key that is refused counts against your network (`429 rate_limited` below); a working key never does |
 | 403 | `scope_denied` | the key lacks the scope the route needs (the message names it) |
 | 403 | `api_key_not_allowed` | a route keys never reach (account, keys, admin panel) |
 | 403 | `account_disabled` | the account is disabled |
@@ -165,7 +168,7 @@ SPEC.md §10). The ones specific to keys and shares:
 | 400 | `invalid_captcha` | `captcha` is not `true` or `false` |
 | 403 | `captcha_disabled` | `captcha: true` while your role has the CAPTCHA off |
 | 403 | `captcha_required` | a recipient route of a share with the CAPTCHA — or of a missing or ended share, while Turnstile is on — without a grant (open it in a browser) |
-| 429 | `rate_limited` | too many requests from your network: CAPTCHA checks on the share CAPTCHA routes (30 per 10 minutes); rejected CAPTCHA tokens on sign-in, account changes and anonymous creation (60 per 10 minutes; accepted tokens are never counted); sign-in prelogins (`POST /api/auth/prelogin`, 600 per 10 minutes, and 20 per username); chunk fetches of shares that have ended (600 per 10 minutes); attempts on shares whose password is locked (120 per 10 minutes); the anonymous tracker (`GET /api/public/t`, 600 per 10 minutes). `Retry-After` says when to try again |
+| 429 | `rate_limited` | too many requests from your network: CAPTCHA checks on the share CAPTCHA routes (30 per 10 minutes); rejected CAPTCHA tokens on sign-in, account changes and anonymous creation (60 per 10 minutes; accepted tokens are never counted); sign-in prelogins (`POST /api/auth/prelogin`, 600 per 10 minutes, and 20 per username); chunk fetches of shares that have ended (600 per 10 minutes); attempts on shares whose password is locked (120 per 10 minutes); the anonymous tracker (`GET /api/public/t`, 600 per 10 minutes); refused API keys (600 per 10 minutes: past that, **every** API-key request from the network is refused for 10 minutes, a working key included, before the key is looked up); usernameless passkey sign-in challenges (`POST /api/auth/passkey/options`, 600 per 10 minutes); passkey sign-ins and second steps with a made-up, expired or used challenge (120 per 10 minutes). `Retry-After` says when to try again; the administrator sees these blocks (scopes `api-key`, `passkey-options`, `auth-challenge`) and can lift them |
 | 410 | `gone` | the share has ended (expired, used up, revoked or deleted) — also for a chunk fetch with a download grant of a share that ended during the download, which is never counted as an invalid request; and "delete now" (`POST /api/(paste\|file)/:id/expire`) for an id that was never a share, which is counted |
 | 403 | `bad_grant` | a chunk fetch without a valid download grant, whatever the chunk index (counted as an invalid request); with a valid grant an index out of range is `404` |
 | 429 | `quota_exceeded`, `blocked` | a creation quota, or too many invalid requests from your network |
@@ -805,6 +808,9 @@ Revoking works as for shares: `POST /api/private/receive/:id/revoke` (or
   Prefer short lifetimes and the narrowest scopes; keep `read` and `manage` for the tools that
   need them.
 - Keys are stored only as hashes; the server cannot show a key again.
+- A leaked key outlives a password change only if you untick "Also revoke my API keys": after a
+  suspected takeover, change the password with it ticked (the default), or ask the administrator
+  to reset it, which always revokes the keys.
 - Every response (API answers, chunks, errors and redirects as well as pages) carries
   `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` and a
   `Permissions-Policy` that turns off every powerful browser feature.

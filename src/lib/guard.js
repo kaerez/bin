@@ -223,26 +223,56 @@ async function legacy(env, g, ask) {
   return r;
 }
 
-/** One failure on the caller's tag, counting on (and taking) its failures from before the tags; a block from before refuses at once. */
-async function failOnTag(env, g, scope, rule) {
+/**
+ * One failure on the caller's tag, counting on (and taking) its failures from before the tags; a block from before refuses at once.
+ * `how`: 'fail' (Guard.fail) or 'attempt' (Guard.attempt); `also`: other scopes whose block refuses too.
+ */
+async function failOnTag(env, g, scope, rule, how = 'fail', also = []) {
   const tag = await tagOf(env, g);
   const before = await legacy(env, g, (s) => s.legacyTake(scope, g.key));
   if (before?.blocked) return { blocked: true, until: before.until };
-  return shard(env, tag).fail(scope, tag, rule, await sealedAddr(env, g, scope, tag), before?.carry ?? null);
+  return shard(env, tag)[how](scope, tag, rule, await sealedAddr(env, g, scope, tag), before?.carry ?? null, also);
 }
+
+const ruleOf = (g, scope) => ({ max: g.settings[`guard.${scope}.max`], windowSec: g.settings[`guard.${scope}.windowSec`], blockSec: g.settings[`guard.${scope}.blockSec`] });
 
 /** Record one failure for `scope`; returns the block state after it (an invalid request from IPv6 counts for its /48 too). */
 export async function recordFailure(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   const s = g.settings;
-  const rule = { max: s[`guard.${scope}.max`], windowSec: s[`guard.${scope}.windowSec`], blockSec: s[`guard.${scope}.blockSec`] };
-  const own = await failOnTag(env, g, scope, rule);
+  const own = await failOnTag(env, g, scope, ruleOf(g, scope));
   const w = scope === 'invalid' ? wideContext(g) : null;
   if (!w) return own;
   const wtag = await tagOf(env, w);
   const wide = await shard(env, wtag).fail(WIDE_INVALID, wtag, wideInvalidRule(s), await sealedAddr(env, w, WIDE_INVALID, wtag));
   if (!wide.blocked) return own;
   return { blocked: true, until: Math.max(own.until ?? 0, wide.until ?? 0) || null, newlyBlocked: !!(own.newlyBlocked || wide.newlyBlocked) };
+}
+
+/**
+ * One sign-in (or set-up) attempt for `scope` ('login' or 'setup'), checked
+ * and counted before the Directory is asked, in one Guard call: concurrent
+ * attempts from one network can never get more than `guard.<scope>.max`
+ * evaluated per window (SECURITY.md, "Brute-force protection"). → { blocked,
+ * until? } or { blocked: false, counted, newlyBlocked? }: the attempt that
+ * reaches the limit is let through and blocks those after it. An attempt that
+ * did not fail gives its count back (refundAttempt). `also`: rate-limit
+ * scopes whose block refuses this attempt too (their counts are their own).
+ */
+export async function attempt(env, g, scope, also = []) {
+  if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false, counted: false };
+  if (g.manual === 'block') return { blocked: true, manual: true };
+  const r = await failOnTag(env, g, scope, ruleOf(g, scope), 'attempt', also);
+  if (r.blocked) return { blocked: true, until: r.until, scope: r.scope ?? scope };
+  return { blocked: false, counted: true, newlyBlocked: !!r.newlyBlocked, until: r.until };
+}
+
+/** The attempt `at` did not fail (signed in, or refused for another reason): its count goes back. */
+export async function refundAttempt(env, g, scope, at) {
+  if (!at?.counted || at.refunded) return;
+  at.refunded = true;
+  const tag = await tagOf(env, g);
+  await shard(env, tag).refund(scope, tag, { unblock: !!at.newlyBlocked });
 }
 
 /**
@@ -303,6 +333,22 @@ export const ENDED_CHUNKS = { max: 601, windowSec: 600, blockSec: 600 };
  */
 export const SETUP_CANDIDATE = { max: 21, windowSec: 600, blockSec: 600 };
 /**
+ * Anonymous calls that reach the Directory and are refused (SECURITY.md,
+ * "Brute-force protection"), each checked before the Directory is asked:
+ *   API_KEY_FAILURES — made-up (unknown, expired, disabled) API keys: a
+ *     network may send API_KEY_FAILURES.max − 1 per window, then every API-key
+ *     request from it is refused (`429 rate_limited`) until the block ends;
+ *     requests with a working key are never counted;
+ *   PASSKEY_OPTIONS — usernameless passkey challenges (POST
+ *     /api/auth/passkey/options): every request counts, as for prelogin;
+ *   AUTH_CHALLENGE — passkey sign-ins and second steps with a challenge that
+ *     is made up, expired or already used (`400 challenge_expired`): only
+ *     those count.
+ */
+export const API_KEY_FAILURES = { max: 601, windowSec: 600, blockSec: 600 };
+export const PASSKEY_OPTIONS = { max: 601, windowSec: 600, blockSec: 600 };
+export const AUTH_CHALLENGE = { max: 121, windowSec: 600, blockSec: 600 };
+/**
  * Password attempts on a share whose password is locked (src/lib/sharepw.js):
  * refused before the password is checked and never counted as invalid (the
  * right one may be among them), so they have a limit of their own: at most
@@ -317,6 +363,6 @@ export const PASSWORD_LOCKED = { max: 121, windowSec: 600, blockSec: 600 };
 export const TRACKER_FETCH = { max: 601, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
 export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'prelogin-user', 'public-trackers', 'ended-chunks', 'setup-candidate',
-  'invalid-wide', 'password-locked', 'tracker-fetch'];
+  'invalid-wide', 'password-locked', 'tracker-fetch', 'api-key', 'passkey-options', 'auth-challenge'];
 
 export { shard as guardShardFor };

@@ -218,14 +218,18 @@ function wirePassword() {
       const step = await confirmStep($('#pw-current'));
       const token = await (await check).take();
       const cred = await newCredential(newPassword);
-      const r = await changePassword({ ...step, ...cred }, token);
-      form.reset();
+      // "Also revoke my API keys" (ticked by default): the keys go with the other sessions.
+      const revokeKeys = $('#pw-revoke-keys').checked;
+      const r = await changePassword({ ...step, ...cred, revokeKeys }, token);
+      form.reset(); // the box is ticked again for the next change
       // Passkeys and recovery codes are not tied to the password.
       const still = r.passkeys ? ` Your ${r.passkeys} passkey${r.passkeys === 1 ? '' : 's'} and ${r.recoveryLeft} recovery code${r.recoveryLeft === 1 ? '' : 's'} still work: if someone else may have had access, remove any passkey you do not recognise and create new recovery codes below.` : '';
       // Impersonating: the user's sessions end; the owner's carries on.
-      const done = acting() ? `Password changed. ${profile.user.username}’s sessions were signed out.` : 'Password changed. Your other sessions were signed out.';
+      const keys = r.keysRevoked ? ` ${r.keysRevoked} API key${r.keysRevoked === 1 ? ' was' : 's were'} revoked.` : '';
+      const done = acting() ? `Password changed. ${profile.user.username}’s sessions were signed out.${keys}` : `Password changed. Your other sessions were signed out.${keys}`;
       showMsg(msg, acting() ? `${done} Their passkeys and recovery codes are unchanged.` : `${done}${still}`, false);
       toast(done);
+      if (r.keysRevoked) renderKeys();
     } catch (err) {
       const text = refusal(err);
       showMsg(msg, text);

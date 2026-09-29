@@ -677,8 +677,8 @@ describe('migration 17 from the Directory the release before left', () => {
         defaults: Object.fromEntries(sql.exec("SELECT key, value FROM limits WHERE user_id = '' AND channel = 'all'").toArray().map((x) => [x.key, JSON.parse(x.value)])),
       };
     });
-    expect(SCHEMA_VERSION).toBe(19);
-    expect(after.version).toBe('19'); // 18 (what Receive links accept) and 19 (sign-in records sealed) run after it
+    expect(SCHEMA_VERSION).toBe(20);
+    expect(after.version).toBe('20'); // 18 (what Receive links accept), 19 (sign-in records sealed) and 20 (failed sign-ins logged) run after it
     expect(after.cols).toContain('ended');
     expect(after.rows).toEqual(expect.arrayContaining([
       { user_id: '', channel: 'all', value: '86400' },

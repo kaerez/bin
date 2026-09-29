@@ -121,12 +121,14 @@ export async function handlePrivate(request, env, url, ctx) {
   if (p === '/api/private/me/password') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
     const body = await readJsonBody(request); // before the human check: a malformed request spends no token
+    if (body.revokeKeys !== undefined && typeof body.revokeKeys !== 'boolean') return err(400, 'invalid', 'revokeKeys must be true or false.');
     await requireTurnstile(env, request, TURNSTILE_ACTIONS.password);
     const g = await ipContext(env, request);
     const step = await confirmation(body); // the current password or a passkey (none while impersonating)
     const next = await verifierFrom(body.proof);
     if (!next) return err(400, 'invalid_credential', 'Invalid password proof.');
-    const r = await dir.changePassword(a.user.id, { ...step, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all });
+    // "Also revoke my API keys": on unless the request says false.
+    const r = await dir.changePassword(a.user.id, { ...step, salt: body.salt, t: body.t, verifier: next, lockoutOff: g.off.all, revokeKeys: body.revokeKeys !== false });
     if (!r.ok) return afterRefusal(env, g, r, fromDir(r));
     // A Drive still waiting for its upgrade: its password wrap of the release
     // before opens only with the old password now, so it is marked stale (no
@@ -135,10 +137,13 @@ export async function handlePrivate(request, env, url, ctx) {
     await drivePasswordChanged(env, a.user.id, { reset: !!a.actor });
     // Impersonating: the user's sessions end, the owner's session (bound to
     // the owner's own session version) carries on unchanged.
-    if (a.actor) return withAuth(a, json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }));
-    // The session version moved on (all other sessions end); keep this device signed in.
-    const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env) });
-    return json({ ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft }, 200, { 'set-cookie': cookie });
+    const out = { ok: true, passkeys: r.passkeys, recoveryLeft: r.recoveryLeft, keysRevoked: r.keysRevoked };
+    if (a.actor) return withAuth(a, json(out));
+    // The session version moved on (all other sessions end); keep this device signed in. The new
+    // session keeps the sign-in's absolute end (as impersonation does): a password change never
+    // extends a session.
+    const { cookie } = await issueSession(env, { uid: a.user.id, ver: r.ver, settings: await sessionSettings(env), iat: a.claims.iat, notAfter: a.claims.exp });
+    return json(out, 200, { 'set-cookie': cookie });
   }
 
   if (p === '/api/private/me/activity') {
