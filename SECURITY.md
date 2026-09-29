@@ -32,7 +32,7 @@ Treat secbin as a **security-sensitive cryptographic application**, not a normal
 4. **No view is ever spent on a wrong link or a wrong password.** The server verifies two
    access proofs (`SPEC.md` §2) before releasing ciphertext or decrementing a view. The public
    head carries no wrapped key, so a password cannot be attacked offline by someone who only
-   holds the link; online guesses are rate-limited per IP (§6).
+   holds the link; online guesses are limited per network and per share (§6).
 5. **Exact view limits** enforced atomically by Durable Objects.
 6. **No key exfiltration through the app's own code** (§4): strict CSP, first-party assets only,
    DOM construction only, and a viewer that never executes content.
@@ -236,7 +236,16 @@ compromise. Defenses:
   are computed in the page (WebCrypto HMAC), never by the server. The CLI never takes a
   credential from its arguments (only a file, stdin or hidden prompts) and, when printing a
   link or credential to a terminal, escapes control characters (newlines and tabs kept);
-  `--out` files get the exact value. Plain notes are printed as they are, like `cat`.
+  `--out` files get the exact value. Notes (plain text, Markdown, code) printed to a terminal
+  are escaped the same way: C0 and C1 control characters, ESC and DEL become `\u001b` and so
+  on, so a note cannot run terminal escape sequences (write the clipboard with OSC 52, change
+  the window title, redraw the screen); a CRLF line end is shown as a newline. `secbin get
+  --raw` prints the exact text to the terminal; a pipe and `--out` always get the exact text.
+- **The renderers run in linear time.** Markdown links are found by a linear scan (the pattern
+  it replaces retried from every `[` to the end of the paragraph: 300 000 `[` froze a tab for
+  about 35 seconds), and the highlighter's heuristic and tokenizer never read the rest of a note
+  again for each long word, unclosed string or unclosed block comment. The output is the same.
+  The size and node budgets (`MAX_MD_BYTES`, `MAX_HIGHLIGHT_BYTES`, …) bound the rest.
 - **"Delete now"** by a recipient needs both access proofs (so only someone who can open the
   share), the sender's opt-in *and* the admin's permission — checked again at the moment of
   deletion, so withdrawing it also covers shares created earlier. It is refused while the admin
@@ -577,6 +586,9 @@ Its trust anchor is your local installation. It never follows symlinks when send
 downloads to the output directory, refuses to write through symlinks or overwrite without
 `--force`, and reads the API key from `SECBIN_API_KEY` or a file — never a flag value. Share URLs
 passed as arguments are visible to other local processes; `secbin get -` reads one from stdin.
+What it prints to a terminal from a share (notes, links, credentials, file names) has its control
+characters escaped, so a sender cannot run terminal escape sequences (`--raw` prints a note's exact
+text; a pipe and `--out` always get it).
 
 ## 5. Trust boundaries
 
@@ -889,7 +901,35 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     counted. Those uncounted answers each cost a Directory lookup, so they have a generous
     per-network limit of their own (`ended-chunks`: at most 600 per 10 minutes, then
     `429 rate_limited` with `Retry-After`), which is never an invalid fetch and which the owner
-    sees and lifts with the others;
+    sees and lifts with the others. The grant is checked before the chunk index, so without a
+    valid grant every chunk request gets the same counted `403 bad_grant` whatever its index: the
+    route does not tell a share's chunk count or a Drive share's files. "Delete now"
+    (`…/expire`) on an id that was never a share is the same counted `410 gone` as on the other
+    routes;
+  - **IPv6 is also counted per /48** in the `invalid` scope (the Guard scope `invalid-wide`): a
+    /48 may make 16 times `guard.invalid.max` invalid requests within `guard.invalid.windowSec`,
+    then all of it is blocked for `guard.invalid.blockSec`, so rotating the /64s of one
+    allocation does not multiply the budget. The owner sees and lifts these blocks with the
+    others;
+  - **share passwords are also counted per share**, from any network (`src/lib/sharepw.js`):
+    `share.pwMaxFails` wrong passwords (default 20) within `share.pwWindowSec` (default 15
+    minutes) lock that share's password for `share.pwLockSec` (default 15 minutes), twice as
+    long on each lock after the first (at most 64 times as long, and at most 30 days). The count
+    is kept where the proof is checked, in the same step (the BurnPaste and FileShare objects;
+    for KV notes a row in the Directory, dropped with the share's index row), so concurrent
+    guesses are counted one after another. While it is locked every attempt on `open` and on
+    "delete now" gets `429 password_locked` with `until` before its password is checked, the
+    right one too, so a lock says nothing about a guess; the wrong password that locks it gets
+    `403 bad_password` with `until`. The right password, once accepted, clears the count. Each
+    lock is recorded in the share user's activity (`share.password_locked`: the share, until
+    when and which lock, never an address). The link proof is checked first, so only someone
+    with the link's key can count failures or learn of a lock; shares without a password have
+    nothing to guess and are not counted. This bounds online guessing of a leaked link's
+    password whatever the number of networks; the cost is that a holder of the link can keep its
+    password locked for everyone, as for Receive links. Attempts on a locked share are not
+    invalid fetches (the right password may be among them) but have a per-network limit of
+    their own (`password-locked`: 120 per 10 minutes, then `429 rate_limited`). The right key
+    for a share that has ended and the right password are never counted as invalid;
   - rule: X failures within a window ⇒ block for a duration; the admin sees and manages blocks
     and tracking. The Guard's rows are keyed by a keyed hash of the network and hold its address
     only sealed ("Records at rest" below);
@@ -942,8 +982,9 @@ passed as arguments are visible to other local processes; `secbin get -` reads o
     every step-up (failures count toward the account's limit and the network's login failures;
     `400 reauth_required` with the list of what the change weakens when it is missing).
     Tightening, and every other change, needs nothing. What counts (`src/lib/settings.js`):
-    - Settings: CSRF tokens off; a higher `lockout.max` or `guard.*.max`, a shorter
-      `lockout.windowSec`, `lockout.lockSec`, `guard.*.windowSec` or `guard.*.blockSec`; a
+    - Settings: CSRF tokens off; a higher `lockout.max`, `share.pwMaxFails` or `guard.*.max`,
+      a shorter `lockout.windowSec`, `lockout.lockSec`, `share.pwWindowSec`,
+      `share.pwLockSec`, `guard.*.windowSec` or `guard.*.blockSec`; a
       longer `guard.v6Prefix`; longer `session.idleSec` or `session.absSec` (the owner's own
       sessions); `public.enabled` turned on; a higher `public.newTrackersPerIp` or a shorter
       `public.newTrackersWindowSec`; a shorter `log.maxAgeSec` or a smaller `log.maxEntries`;
@@ -1521,6 +1562,9 @@ in the clear (`rk` NULL), which read as written.
   browser keeps it in four places: the `__Host-secbin_aid` cookie (HttpOnly, Secure,
   SameSite=Strict, 400 days), the ETag of `GET /api/public/t` (`Cache-Control: private,
   no-cache`, so the browser revalidates with `If-None-Match`), `localStorage` and IndexedDB.
+  Every call of that route reaches the Directory, so a network may make at most 600 per 10
+  minutes (the Guard scope `tracker-fetch`, then `429 rate_limited` with `Retry-After`; a page
+  asks once per visit).
   - On every visit all copies are sent (at most one per store). The id presented most often
     wins and every missing, malformed, forged or expired copy is re-seeded from it
     (self-healing). Only ids this server issued count, so random values cannot outvote or block

@@ -275,14 +275,14 @@ Common errors on any route:
 |---|---|---|---|
 | `GET /api/config` | public viewer policy; `turnstile`: the Turnstile site key, or `null` when the human check is off; `accessibility`: the statement page, plain text: `{contact, coordinator, reviewed, statements}`, where `reviewed` is a `YYYY-MM-DD` date or empty and `statements` holds one block per language (the main one first, an optional second one): `{lang, dir, title, commitmentHeading, commitment[], standardHeading, standard[], reviewLabel, reviewNote[], doneHeading, done[], limitsHeading, limits[], reportHeading, report[], noContact, coordinatorHeading}` (arrays are paragraphs or list items; an empty heading in the second block means "use the main block's") | 200 | |
 | `GET /api/paste/:id` | head (§5.3) | 200 | 404, 410, 429 |
-| `POST /api/paste/:id/open` | `X-Link-Proof`, `X-Key-Proof`; spends a view if limited | 200 opened note | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `cross_site`, 404, 410, 429 |
+| `POST /api/paste/:id/open` | `X-Link-Proof`, `X-Key-Proof`; spends a view if limited | 200 opened note | 400 `missing_proof`, 403 `bad_link` / `bad_password` (with `until` when that failure locked the password) / `cross_site`, 404, 410, 429 `password_locked` `{until}` / `rate_limited` / `blocked` |
 | `DELETE /api/paste/:id` | `X-Delete-Token` | 200 | 400, 403 `bad_token`, 404 |
 | `GET /api/file/:id` | head | 200 | 410, 429 |
 | `POST /api/file/:id/open` | proofs; spends a view; issues a grant | 200 `{paste, grant, grantExpires, chunks, padded}` | as notes; at most 20 live grants per client (a reopen replaces its oldest); 429 `busy` (+ `Retry-After`) when 2000 are live |
-| `GET /api/file/:id/chunk/:i` | `X-Download-Grant` | 200 `application/octet-stream` | 403 `bad_grant`, 404, 410 |
+| `GET /api/file/:id/chunk/:i` | `X-Download-Grant` (checked before the index: without a valid grant, `403 bad_grant` whatever `i`) | 200 `application/octet-stream` | 403 `bad_grant`, 404 (an index out of range, with a valid grant), 410 |
 | `POST /api/file/:id/extend` | `X-Download-Grant` | 200 `{grantExpires, extensionsLeft}`: the grant now ends the sender's role's window from now, never past the share's expiry; spends no view; after the last view the purge waits for it | 403 `bad_grant`, 409 `extend_limit` (at most 10 per grant), 410 |
 | `DELETE /api/file/:id` | `X-Delete-Token` | 200 | as notes |
-| `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable` and the sender's account still has `openerDelete`; not after a file share's last view; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 |
+| `POST /api/{paste,file}/:id/expire` | "delete now" by a recipient: the same two proofs as `open`; only when `meta.deletable` and the sender's account still has `openerDelete`; not after a file share's last view; spends no view | 200 `{status:"deleted"}` | 400 `missing_proof`, 403 `bad_link` / `bad_password` / `not_allowed`, 423 `share_locked`, 404/410 (410 `gone` for an id that was never a share, counted), 429 `password_locked` / `rate_limited` |
 | `POST /api/{paste,file}/:id/human` | `X-Secbin-Intent: 1`; a Turnstile token (`share-open`) → a new CAPTCHA grant, or `X-Secbin-Human` → that grant renewed (10 min from now, at most 12 h after the check); looks nothing up, spends nothing; at most 30 token checks per network per 10 min; a missing or failed token counts as invalid | 200 `{grant, expires}` (`grant: null` without Turnstile keys) | 400 `missing_intent`, 403 `turnstile_*` / `captcha_required`, 429 `rate_limited` / `blocked` |
 | `POST /api/paste` | v1 anonymous create — removed | — | 410 |
 
@@ -291,7 +291,19 @@ Every `404`/`410` for an id that was never a share, `bad_link`, `bad_password`, 
 that existed (still in the share index: expired, used up, revoked or deleted within the last 30
 days) is not counted when the request's link proof matches the one the index kept (or it sent
 none, as `GET /api/paste/:id` does); a wrong link proof for such a share is counted. The answer
-is `gone` either way.
+is `gone` either way. An IPv6 caller's invalid failures also count for its /48 (16 times the
+per-network maximum; Guard scope `invalid-wide`).
+
+**Share passwords** (a share whose `adata.kdf` is `argon2id-hkdf`) are also counted per share,
+from any network, on `open` and `expire`: `share.pwMaxFails` wrong key proofs (default 20)
+within `share.pwWindowSec` (default 900 s) lock the share's password for `share.pwLockSec`
+(default 900 s), doubled on each later lock (at most 64 times, at most 30 days); the right
+password clears the count. The failure that locks it answers `403 bad_password` with `until`
+(unix seconds). While locked, every attempt (after the link proof, before the key proof) answers
+`429 password_locked` `{until}` + `Retry-After`, the right password too, spends nothing and is not
+an invalid failure; those answers have a per-network limit (120 per 10 minutes, then `429
+rate_limited`). The share's owner gets a `share.password_locked` activity entry
+(`id=<id> until=<unix> lock=<n>`).
 
 ### Public creation (anonymous, off by default)
 
@@ -303,7 +315,7 @@ access" for the counting modes.
 | Method & path | Notes | Success | Errors |
 |---|---|---|---|
 | `GET /api/public/profile` | what the composer needs | 200 `{enabled, tracking, notice, limits, caps, viewer, quotas}` | |
-| `GET /api/public/t` | resolve the tracker: cookie `__Host-secbin_aid`, `If-None-Match`, and `X-Secbin-Aid-Copies: ls=<id>;idb=<id>` | 200 `{mode, aid, status: new\|ok\|healed}` + cookie + `ETag`; 304 when every copy agrees; `{mode:"ip", aid:null}` in `ip` mode | 403 `tracker_conflict` / `tracker_blocked` |
+| `GET /api/public/t` | resolve the tracker: cookie `__Host-secbin_aid`, `If-None-Match`, and `X-Secbin-Aid-Copies: ls=<id>;idb=<id>` | 200 `{mode, aid, status: new\|ok\|healed}` + cookie + `ETag`; 304 when every copy agrees; `{mode:"ip", aid:null}` in `ip` mode | 403 `tracker_conflict` / `tracker_blocked`, 429 `rate_limited` (+ `Retry-After`; at most 600 per network per 10 minutes) |
 | `POST /api/public/paste` `{paste}` (any `label` is dropped) | tracker modes: the cookie and `X-Secbin-Aid` must match | 201 as §10 private | 428 `tracker_required`, 403 `tracker_blocked` or any creation limit, 429 `quota_exceeded` / `tracker_rate_limited` (a new id's first creation over the per-network limit) / `busy` |
 | `POST /api/public/file` | as the private route | 201 | as above |
 | `PUT /api/public/file/:id/chunk/:i`, `POST …/finalize` | `X-Upload-Token` | as the private routes | as the private routes |

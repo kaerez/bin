@@ -40,6 +40,7 @@ import {
   guardTag, guardWhere, isGuardTag, recordNonce,
 } from './lib/records.js';
 import { GUARD_SHARDS, guardShardIndex } from './guard-do.js';
+import { sharePwRule, pwLockedUntil, pwFailed, pwDirty } from './lib/sharepw.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
@@ -105,6 +106,8 @@ CREATE TABLE IF NOT EXISTS user_salts (user_id TEXT PRIMARY KEY, salt TEXT NOT N
 CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL, purpose TEXT NOT NULL DEFAULT 'sub');
 CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, v1_items INTEGER, v1_links INTEGER, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS record_keys (kid TEXT PRIMARY KEY, sealed TEXT NOT NULL, under TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS share_pw (id TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0, since INTEGER, until INTEGER,
+  strikes INTEGER NOT NULL DEFAULT 0);
 `;
 
 // Ordered, idempotent schema migrations for Directories created by an older
@@ -2795,6 +2798,40 @@ export class Directory extends DurableObject {
     if (!r) return 'unknown';
     if (typeof lh !== 'string' || typeof r.lh !== 'string') return 'ok';
     return r.lh.length === lh.length && timingSafeEqualHex(r.lh, lh) ? 'ok' : 'wrong_link';
+  }
+
+  /**
+   * A password attempt on a KV note (the Worker compared the key proof: `right`),
+   * under the share's password lockout (src/lib/sharepw.js, the settings'
+   * share.pw* rule), counted from any network in this one synchronous step →
+   * { status: 'ok' } (the count cleared), { status: 'pw_locked', until } while
+   * it is locked (whatever the proof), or { status: 'bad_password', locked }
+   * ({ until, strike } when this failure locked it: the Worker has it logged,
+   * sharePasswordLocked, as for the other kinds). The count (share_pw) is
+   * dropped with the share's index row.
+   */
+  async sharePasswordAttempt(id, right) {
+    if (typeof id !== 'string') return { status: 'bad_password', locked: null };
+    const t = now();
+    const row = this.sql.exec('SELECT n, since, until, strikes FROM share_pw WHERE id = ?', id).toArray()[0] ?? null;
+    const until = pwLockedUntil(row, t);
+    if (until) return { status: 'pw_locked', until };
+    if (right === true) {
+      if (pwDirty(row)) this.sql.exec('DELETE FROM share_pw WHERE id = ?', id);
+      return { status: 'ok' };
+    }
+    const f = pwFailed(row, sharePwRule(this.#settings()), t);
+    this.sql.exec(`INSERT INTO share_pw (id, n, since, until, strikes) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET n = excluded.n, since = excluded.since, until = excluded.until, strikes = excluded.strikes`,
+    id, f.next.n, f.next.since, f.next.until, f.next.strikes);
+    return { status: 'bad_password', locked: f.locked };
+  }
+
+  /** A share's password was locked (by the failure the Worker just refused): its user's log says so, until when and which lock it is. */
+  async sharePasswordLocked(id, locked) {
+    if (typeof id !== 'string' || !locked || !Number.isSafeInteger(locked.until) || !Number.isSafeInteger(locked.strike)) return;
+    const row = this.sql.exec('SELECT user_id FROM shares WHERE id = ?', id).toArray()[0];
+    if (row) this.#log(null, row.user_id, 'share.password_locked', `id=${id} until=${locked.until} lock=${locked.strike}`);
   }
 
   async isShareLocked(id) {
@@ -5661,6 +5698,8 @@ export class Directory extends DurableObject {
     this.sql.exec("DELETE FROM shares WHERE status = 'pending' AND created < ?", ts - PENDING_REVERSE_SEC);
     // Receipts go with their share: once the share row is gone nobody can see them.
     this.sql.exec('DELETE FROM opens WHERE share_id NOT IN (SELECT id FROM shares)');
+    // A KV note's password lockout goes with it too.
+    this.sql.exec('DELETE FROM share_pw WHERE id NOT IN (SELECT id FROM shares)');
     // Records stored in the clear or under an earlier root's key (SECURITY.md, "Records at rest"); sooner again while some are left.
     let more = false;
     try { more = await this.#recordPass(); } catch (e) { console.warn('secbin: records pass not finished', e && e.name ? e.name : 'error'); }

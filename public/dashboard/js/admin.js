@@ -1100,6 +1100,9 @@ async function renderSettings() {
   p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Account lockout (owner excluded)' }),
     h('p.mono.muted', { text: "Counts wrong passwords per account, from any network, and locks only that account. The owner is never locked out, but per-IP protection still guards the owner's login. A password change is never blocked by a lockout." }),
     int('lockout.max', 'Failed logins allowed'), dur('lockout.windowSec', 'Within', 'Account lockout'), dur('lockout.lockSec', 'Then lock the account for')));
+  p.appendChild(h('div.card.stack', {}, h('h2.section-title', { text: 'Share password lockout' }),
+    h('p.mono.muted', { text: "Counts wrong passwords per share, from any network, and locks only that share's password: it stops many sources guessing one share. While it is locked every attempt is refused, the right password too. Each lock after the first lasts twice as long as the one before (up to 64 times the first). The share's user sees each lock in their activity. Per-IP protection (above) still counts every wrong password." }),
+    int('share.pwMaxFails', 'Wrong passwords allowed', 'Share password lockout'), dur('share.pwWindowSec', 'Within', 'Share password lockout'), dur('share.pwLockSec', 'Then lock the password for', 'Share password lockout')));
   const save = h('button.cta', { type: 'button', text: 'Save settings' });
   const reconfirm = stepUpSlot();
   save.onclick = async () => {

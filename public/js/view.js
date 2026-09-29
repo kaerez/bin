@@ -21,7 +21,7 @@ import { humanCheck } from './turnstile.js';
 import { clearSessionKey } from './drivekeys.js';
 import { ensureTracker } from './tracker.js';
 import { $, showView, toast, copyText, pill, countdownSwitch } from './ui.js';
-import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, friendlyError, nameEl } from './common.js';
+import { h, clear, showMsg, markInvalid, wirePeek, armConfirm, formatCoarse, formatDuration, formatBytes, formatDate, friendlyError, nameEl } from './common.js';
 import { ShareTypeError } from './sharetypes.js';
 import { linkCard, secretCard, stopTotp, noteKind, drawNote } from './typedview.js';
 import { itemExport, KIND_LABELS, KIND_PLURALS, ITEM_MAX_BYTES, SECRET_EXPORT_WARNING } from './receivekinds.js';
@@ -260,9 +260,22 @@ function wireDeleteNow(btn, meta, { kind, id, access }, msgEl) {
     } catch (e) {
       btn.disabled = false;
       showMsg(msgEl, e instanceof ApiError && e.status === 423 ? 'The administrator has locked this share; it cannot be deleted.'
-        : captchaNeeded(e) ? 'The CAPTCHA for this share has expired. Reload the page to complete it again.' : friendlyError(e));
+        : captchaNeeded(e) ? 'The CAPTCHA for this share has expired. Reload the page to complete it again.' : passwordLockText(e) ?? friendlyError(e));
     }
   });
+}
+
+/**
+ * The share's password is locked (too many wrong passwords from anywhere):
+ * `429 password_locked`, or the `403 bad_password` whose failure locked it
+ * (both with `until`) → the message, else null.
+ */
+function passwordLockText(e) {
+  if (!(e instanceof ApiError)) return null;
+  const until = Number.isSafeInteger(e.extra.until) ? e.extra.until : null;
+  if (e.code !== 'password_locked' && !(e.code === 'bad_password' && until)) return null;
+  const when = until ? ` at ${formatDate(until)}` : ' later';
+  return `${e.code === 'bad_password' ? 'Wrong password. ' : ''}Too many wrong passwords were tried for this share, so it is locked for now, even with the right password. Try again${when}.`;
 }
 
 function openError(e) {
@@ -274,6 +287,8 @@ function openError(e) {
 
 function readError(e) {
   if (!(e instanceof ApiError)) return status('Could not reach the server — check your connection and try again.', true);
+  const lock = passwordLockText(e);
+  if (lock) return status(lock, true);
   if (e.status === 429) return status('Too many invalid attempts from your network. Try again later.', true);
   if (e.status === 410 || e.status === 404) return status('This share has expired, has no views left, or never existed.', true);
   return status(friendlyError(e), true);
@@ -307,6 +322,8 @@ function passwordScreen(head, limited, open) {
       btn.disabled = false;
       btn.textContent = label;
       if (e instanceof PasswordRequired) { showMsg(msg, 'Please enter the password.'); markInvalid(input, msg); input.focus(); return; }
+      const lock = passwordLockText(e);
+      if (lock) { showMsg(msg, lock); markInvalid(input, msg); return; }
       if (e instanceof ApiError && e.code === 'bad_password') { showMsg(msg, 'Wrong password — try again.'); markInvalid(input, msg); input.select(); return; }
       openError(e);
     }

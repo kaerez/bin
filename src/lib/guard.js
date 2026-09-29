@@ -171,13 +171,42 @@ export async function ipContext(env, request) {
 
 const scopeOff = (g, scope) => (scope === 'setup' ? g.off.setup : g.off.all);
 
+/**
+ * The wider network of an IPv6 caller (its /48, when the Guard tracks longer
+ * prefixes), or null. Some counts are also kept per /48, so rotating the /64s
+ * of one allocation does not multiply them: invalid requests (WIDE_INVALID)
+ * and new anonymous senders (publicapi.js).
+ */
+export const WIDE_V6_PREFIX = 48;
+export function wideNetwork(g) {
+  const ip = parseIp(g.ip);
+  if (!ip || ip.v !== 6 || g.settings['guard.v6Prefix'] <= WIDE_V6_PREFIX) return null;
+  return trackingKey(g.ip, WIDE_V6_PREFIX);
+}
+/**
+ * Invalid requests are counted per network (the `invalid` scope) and, for
+ * IPv6, per /48 besides (the `invalid-wide` scope): a /48 may make
+ * WIDE_INVALID_FACTOR times guard.invalid.max within the same window before
+ * all of it is blocked for the same time.
+ */
+export const WIDE_INVALID_FACTOR = 16;
+const WIDE_INVALID = 'invalid-wide';
+const wideInvalidRule = (s) => ({ max: s['guard.invalid.max'] * WIDE_INVALID_FACTOR, windowSec: s['guard.invalid.windowSec'], blockSec: s['guard.invalid.blockSec'] });
+/** The caller's /48 as a context of its own (its tag computed for that key), or null. */
+const wideContext = (g) => { const key = wideNetwork(g); return key ? { ...g, key, tag: null, tagFor: null } : null; };
+
 /** Is this caller blocked for `scope`? Manual block applies to every scope. */
 export async function isBlocked(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
   if (g.manual === 'block') return { blocked: true, manual: true };
   const tag = await tagOf(env, g);
   const [cur, before] = await Promise.all([shard(env, tag).check(scope, tag), legacy(env, g, (s) => s.legacyCheck(scope, g.key))]);
-  return cur.blocked || !before?.blocked ? cur : { blocked: true, until: before.until };
+  const own = cur.blocked || !before?.blocked ? cur : { blocked: true, until: before.until };
+  if (own.blocked || scope !== 'invalid') return own;
+  const w = wideContext(g);
+  if (!w) return own;
+  const wtag = await tagOf(env, w);
+  return shard(env, wtag).check(WIDE_INVALID, wtag);
 }
 
 /**
@@ -207,10 +236,17 @@ async function failOnTag(env, g, scope, rule, how = 'fail', also = []) {
 
 const ruleOf = (g, scope) => ({ max: g.settings[`guard.${scope}.max`], windowSec: g.settings[`guard.${scope}.windowSec`], blockSec: g.settings[`guard.${scope}.blockSec`] });
 
-/** Record one failure for `scope`; returns the block state after it. */
+/** Record one failure for `scope`; returns the block state after it (an invalid request from IPv6 counts for its /48 too). */
 export async function recordFailure(env, g, scope) {
   if (scopeOff(g, scope) || g.manual === 'allow') return { blocked: false };
-  return failOnTag(env, g, scope, ruleOf(g, scope));
+  const s = g.settings;
+  const own = await failOnTag(env, g, scope, ruleOf(g, scope));
+  const w = scope === 'invalid' ? wideContext(g) : null;
+  if (!w) return own;
+  const wtag = await tagOf(env, w);
+  const wide = await shard(env, wtag).fail(WIDE_INVALID, wtag, wideInvalidRule(s), await sealedAddr(env, w, WIDE_INVALID, wtag));
+  if (!wide.blocked) return own;
+  return { blocked: true, until: Math.max(own.until ?? 0, wide.until ?? 0) || null, newlyBlocked: !!(own.newlyBlocked || wide.newlyBlocked) };
 }
 
 /**
@@ -312,8 +348,21 @@ export const SETUP_CANDIDATE = { max: 21, windowSec: 600, blockSec: 600 };
 export const API_KEY_FAILURES = { max: 601, windowSec: 600, blockSec: 600 };
 export const PASSKEY_OPTIONS = { max: 601, windowSec: 600, blockSec: 600 };
 export const AUTH_CHALLENGE = { max: 121, windowSec: 600, blockSec: 600 };
+/**
+ * Password attempts on a share whose password is locked (src/lib/sharepw.js):
+ * refused before the password is checked and never counted as invalid (the
+ * right one may be among them), so they have a limit of their own: at most
+ * PASSWORD_LOCKED.max − 1 per network per window, then `429 rate_limited`.
+ */
+export const PASSWORD_LOCKED = { max: 121, windowSec: 600, blockSec: 600 };
+/**
+ * The anonymous tracker (GET /api/public/t, which reaches the Directory): a
+ * network may ask at most TRACKER_FETCH.max − 1 times per window (a page asks
+ * once per visit).
+ */
+export const TRACKER_FETCH = { max: 601, windowSec: 600, blockSec: 600 };
 /** The Guard scopes of these rate limits (the admin can see and lift their blocks like the others). */
 export const RATE_LIMIT_SCOPES = ['captcha-verify', 'captcha-page', 'download-extend', 'turnstile-verify', 'prelogin', 'prelogin-user', 'public-trackers', 'ended-chunks', 'setup-candidate',
-  'api-key', 'passkey-options', 'auth-challenge'];
+  'invalid-wide', 'password-locked', 'tracker-fetch', 'api-key', 'passkey-options', 'auth-challenge'];
 
 export { shard as guardShardFor };

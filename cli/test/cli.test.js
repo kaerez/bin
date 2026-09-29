@@ -706,6 +706,84 @@ describe('interactive wizard (bare `secbin` on a TTY)', () => {
 
 // ── failure paths: network, malformed responses, file I/O ───────────────────
 
+describe('get: terminal control characters in notes (security audit W3 B-7)', () => {
+  // OSC 52 (write the clipboard), a title change, CSI colours and a C1 CSI, a bell,
+  // a carriage return that overwrites the line; newlines and tabs are ordinary text.
+  const HOSTILE = 'safe\ttext\r\nnext line\n\u001b]52;c;c2VjcmV0\u0007\u001b]0;title\u001b\\\u001b[31mred\u001b[0m\u009b2J rm -rf\rok\u007f\n';
+  const getAs = async (server, url, { tty, args = [] }) => {
+    const b = makeIo({ server });
+    b.io.stdoutIsTTY = tty;
+    const code = await run(['get', url, ...args], b.io);
+    return { code, out: b.text.out(), err: b.text.err() };
+  };
+
+  it('on a terminal, C0 and C1 controls, ESC and DEL are escaped; newlines and tabs are kept', async () => {
+    const server = makeServer();
+    const url = await createNote(server, HOSTILE, ['--views', 'unlimited']);
+    const g = await getAs(server, url, { tty: true });
+    expect(g.code).toBe(0);
+    // eslint-disable-next-line no-control-regex
+    expect(g.out).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    expect(g.out).toBe('safe\ttext\nnext line\n\\u001b]52;c;c2VjcmV0\\u0007\\u001b]0;title\\u001b\\\\u001b[31mred\\u001b[0m\\u009b2J rm -rf\\u000dok\\u007f\n');
+  });
+
+  it('--raw, a pipe, and --out give the exact text', async () => {
+    const server = makeServer();
+    const url = await createNote(server, HOSTILE, ['--views', 'unlimited']);
+    expect((await getAs(server, url, { tty: true, args: ['--raw'] })).out).toBe(HOSTILE);
+    expect((await getAs(server, url, { tty: false })).out).toBe(HOSTILE);
+    const f = join(tmp, 'note.txt');
+    expect((await getAs(server, url, { tty: true, args: ['--out', f] })).code).toBe(0);
+    expect(await readFile(f, 'utf8')).toBe(HOSTILE);
+  });
+
+  it('Markdown and code notes are escaped on a terminal too; --raw is for notes only', async () => {
+    const server = makeServer();
+    for (const fmt of ['markdown', 'code']) {
+      const url = await createNote(server, '# t\n\u001b[2Jx', ['--views', 'unlimited', '--fmt', fmt]);
+      expect((await getAs(server, url, { tty: true })).out).toBe('# t\n\\u001b[2Jx');
+    }
+    const file = join(tmp, 'a.txt');
+    await writeFile(file, 'x');
+    const s = makeIo({ server });
+    expect(await run(['send', file], s.io)).toBe(0);
+    const g = makeIo({ server });
+    expect(await run(['get', s.text.out().trim(), '--raw'], g.io)).toBe(2);
+    expect(g.text.err()).toMatch(/--raw applies to notes only/);
+  });
+});
+
+describe('get: a share whose password is locked (too many wrong passwords)', () => {
+  const until = 1893456000; // 2030-01-01T00:00:00Z
+  const lockedServer = (answer) => {
+    const server = makeServer();
+    const real = server.fetchImpl;
+    server.fetchImpl = async (u, init = {}) => (new URL(u).pathname.endsWith('/open')
+      ? new Response(JSON.stringify(answer), { status: answer.error === 'password_locked' ? 429 : 403, headers: { 'content-type': 'application/json' } })
+      : real(u, init));
+    return server;
+  };
+
+  it('429 password_locked says so and until when; nothing is opened', async () => {
+    const server = lockedServer({ error: 'password_locked', message: 'Too many wrong passwords for this share. Try again at 2030-01-01 00:00 UTC.', until });
+    const url = await createNote(server, 'guarded', ['--password-env', 'PW'], { PW: 'pw' });
+    const b = makeIo({ server, env: { PW: 'pw' } });
+    expect(await run(['get', url, '--password-env', 'PW'], b.io)).toBe(1);
+    expect(b.text.err()).toMatch(/too many wrong passwords were tried for this share: it is locked, even with the right password, until 2030-01-01T00:00:00Z/);
+    expect(b.text.out()).toBe('');
+  });
+
+  it('the wrong password that locked it says until when, and is not asked again on a terminal', async () => {
+    const server = lockedServer({ error: 'bad_password', message: 'Wrong password. Too many wrong passwords for this share: try again at 2030-01-01 00:00 UTC.', until });
+    const url = await createNote(server, 'guarded', ['--password-env', 'PW'], { PW: 'pw' });
+    const asked = [];
+    const b = makeIo({ server, tty: true, promptHidden: (q) => { asked.push(q); return Promise.resolve('typed'); }, confirm: () => Promise.resolve(true) });
+    expect(await run(['get', url], b.io)).toBe(1);
+    expect(asked).toEqual(['Password: ']); // the first prompt only: no second try against a locked share
+    expect(b.text.err()).toMatch(/wrong password \(the share was not opened\); too many wrong passwords were tried for this share: it is locked until 2030-01-01T00:00:00Z/);
+  });
+});
+
 describe('network and server failure paths', () => {
   const netFail = (code) => async () => {
     const e = new TypeError('fetch failed');
