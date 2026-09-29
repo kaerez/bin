@@ -91,7 +91,10 @@ ciphertext size and chunk count, timestamps, and which shares reference which no
   `"secbin-atrest/v1\n<userId>\n<field>\n<ref>"`: a reverse link's sealed private key (field
   `linkKey`, ref the link id) and a received file's uploader-sealed path, metadata and wrap
   (field `received`, refs `name:<id>`, `meta:<id>`, `wrap:<id>`). The Worker takes the layer off
-  before it hands them to the user's browser.
+  before it hands them to the user's browser. These values are always stored sealed: one found in
+  plain text is refused wherever it is read (a link then shows no key; a received item is listed
+  as unreadable), and a root change leaves it as it is rather than sealing it, so it never becomes
+  trusted. Only the link keys of the release before are read as stored (their upgrade, §3.3).
 - **The timeline.** The sub-MEK in effect at a time is the one with the latest start among those
   whose interval holds it; exactly one is open-ended; there is always one in effect now (the
   **current** one) and no gap from now on (`drivekeys.js` `effectiveAt`, `checkTimeline`). New
@@ -151,7 +154,8 @@ stored or logged in the clear — for:
   cleared. The owner runs the re-seal again (`POST …/keys/jobs { kind: 'root' }`, after putting
   them right: a kit, an import), goes back to the previous root (`POST …/keys/root/undo`: the
   roots swap, the sub-MEKs are sealed under the previous one again and every item is re-sealed
-  under it; then the root that was new goes), or removes the previous root and leaves those
+  under it; then the root that was new goes; like the change, it checks that neither root nor
+  any sub-MEK changed while it sealed them again, `409 changed`), or removes the previous root and leaves those
   items unreadable (`POST …/keys/root/drop-old`, its fingerprint typed; the page and the answer
   say how many; `keys.root_old_dropped` with that count). "Go back" returns only to a root this
   server worked with (`origin: 'changed'`), or to one put back from a key kit that opens items
@@ -426,7 +430,8 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   tables `meks(id, sealed, fp, from_ts, until_ts, created, note)`, `user_salts(user_id, salt,
   created)`, `mek_candidates(id, sid, key, exp, purpose)` and `drive_migration(user_id, state, v1_items,
   v1_links, updated)`.
-- Pending uploads older than the role's `filePendingSec` are purged by the Drive DO's alarm.
+- Pending uploads older than the role's `filePendingSec` are purged by the Drive DO's alarm; a
+  received upload after 10 minutes with no chunk (docs/REVERSE.md §4).
 
 ## 5. Role options (Admin → Roles; `LIMITS` in `src/lib/settings.js`)
 
@@ -442,8 +447,12 @@ row or an escrow wrap) as `pending` (`drive_migration`).
   `POST /api/private/drive/files` reserves it (`429 quota_exceeded` when either would pass its
   max: "Quota reached: 1.0 GB uploaded to the Drive per 1d."), and both given back when the
   Drive refuses it or the upload never completes (the browser deletes the unfinished file, or
-  the purge removes it; `refundDriveUploads`). Files taken in from reverse shares are counted
-  under Receive (docs/REVERSE.md §6.2), not here.
+  the purge removes it; `refundDriveUploads`). A file received through a Receive link is Drive
+  storage too: its size counts under `drive-bytes` when it is finished (its uploader's finalize;
+  checked, not counted, at its reservation, so one that could not fit is refused before anything is
+  sent), and the uploader is told only that the link cannot accept uploads now (`429
+  not_accepting`). It never counts under `drive-upload`: its upload session counts under the
+  Receive kinds (docs/REVERSE.md §6.2). Taking it in counts nothing more.
 - **File rules** (the role's `fileTypeMode` / `fileTypeRules` and `maxFolderDepth`, as for file
   shares: `public/js/filepolicy.js`) apply to the Drive itself, not only to Drive shares:
   - *Types:* with a type policy, `POST /api/private/drive/files` carries `types: [{ ext, mime }]`
@@ -470,9 +479,16 @@ row or an escrow wrap) as `pending` (`drive_migration`).
     received path makes folders only down to the role's depth limit (the rest flattened, as past
     the 8 levels a take-in makes; a link folder already deeper takes nothing in: reason
     `place`). So a Receive link is no way to bring into the Drive what the role refuses there.
+  - *Renames and metadata changes* (`PATCH /api/private/drive/nodes/<id>` with a new `name` or
+    `meta`): the Worker opens the file's name and metadata as they will be stored (the new value,
+    or the stored one) with the item's keys and checks them with `sealedTypeRefusal`, as for an
+    upload (`403 file_type_not_allowed`), unless the file keeps the type it has (the same
+    extension and MIME type); the change is written only if the item is still as checked
+    (`409 stale_keys` otherwise). A file's metadata cannot be removed (`meta: null`: `400
+    invalid`). The client checks a rename first (`DrivePolicyError`, with the reason).
   - *Existing files* are never deleted: a rule added or tightened later applies to new uploads,
-    folders, moves and take-ins only. Files and folders already in a Drive stay, open and can be
-    downloaded, renamed and deleted.
+    folders, moves, take-ins, renames and metadata changes only. Files and folders already in a
+    Drive stay, open and can be downloaded and deleted, and renamed within their own type.
 - Reverse shares' options (`reverseEnabled`, `reverseMaxActive`, `reverseMaxBytes`,
   `reverseMaxExpireSec`, `reverseNoExpiry`, `reverseMaxViews`, `reverseAllowUnlimitedViews`,
   `reversePassword`, `reversePasswordDefault`, `reverseEdit`, `reverseCaptcha`,
@@ -488,7 +504,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/private/drive` | `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration, kit }` (`kit`: the personal kit's state, as `GET …/kit`; `current`: the current sub-MEK's id; `migration`: null, or `{ pending, v1Items, v1Links, legacy }` while the Drive waits for its upgrade, §3.3; `capacity` null = no limit). A read with two side effects, both the server's own: the keyring is made on first need, and a Drive waiting for its upgrade with nothing of the release before in it is marked upgraded (the session cookie is `SameSite=Strict`, so no other site can cause either). A role without a Drive: `200 { enabled: false, capacity, maxFile, used }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
+| `GET /api/private/drive` | `{ enabled, capacity, maxFile, used, current, received, receivedFailed, migration, kit }` (`kit`: the personal kit's state, as `GET …/kit`, left out for the owner acting as the user; `current`: the current sub-MEK's id; `migration`: null, or `{ pending, v1Items, v1Links, legacy }` while the Drive waits for its upgrade, §3.3; `capacity` null = no limit). A read with two side effects, both the server's own: the keyring is made on first need, and a Drive waiting for its upgrade with nothing of the release before in it is marked upgraded (the session cookie is `SameSite=Strict`, so no other site can cause either). A role without a Drive: `200 { enabled: false, capacity, maxFile, used }` (every other Drive route: `403 drive_disabled`; the public account: `403 drive_unavailable`); the client reads `enabled: false`, `drive_disabled`, any 404 and any 403 other than `impersonating` as "no Drive" |
 | `POST /api/private/drive/keys` | `{}` → the session's KEKs (§3): `{ userId, current, changing, keys: [{ mekId, fp, from, until, kek, kekOld? }], missing, broken }` — every sub-MEK the Drive's items use, and the current one (`kekOld` while the owner changes the root MEK; `missing` / `broken`: sub-MEKs the Directory does not have or cannot open). `503 keys_missing` without a root MEK, `409 salt_missing` without the account's salt. Not to another site (`403`). The owner acting as the user gets the user's (`drive.keys_used`) |
 | `GET /api/private/drive/kit` | the personal kit's state (§3.1): `{ version, versionAt, last: { at, version } \| null, stale }` (no key detail) |
 | `POST /api/private/drive/kit` | the personal kit's content after the step-up (`current` \| `reauth`) and, with Turnstile on, a token for `account` (`X-Secbin-Turnstile`): `{ kit: { id, username, userSalt, current, keyVersion, keks: [{ mekId, fp, from, until, kek }] }, missing, broken, status }` (`status`: the state after this download, recorded; `drive.kit_exported`); `403 impersonating` for the owner acting as the user (as every kit route) |
@@ -501,7 +517,7 @@ All bodies JSON unless stated; errors `{ error, message }` as elsewhere.
 | `PUT /api/private/drive/files/<id>/chunk/<i>` | `application/octet-stream`, header `X-Upload-Token`; exact size check |
 | `POST /api/private/drive/files/<id>/finalize` | header `X-Upload-Token` → `{ ok, ch }` (the ciphertext hash); `409 busy` while a chunk of the file is still being written (finalize again), `409 incomplete` while one is missing |
 | `GET /api/private/drive/files/<id>/chunk/<i>` | ciphertext chunk for the user |
-| `PATCH /api/private/drive/nodes/<id>` | `{ parent?, name?, meta?, ks?, mek? }` move / rename → `{ ok }` (a new name or metadata comes with the item's own `ks` and `mek`: `409 stale_keys` when they changed, `400 bad_seal` when it does not open); 409 when `parent` is the node or inside it; `403 folder_too_deep` when the move would put the item, or a folder inside it, past the role's `maxFolderDepth`; the root cannot be moved, renamed or deleted |
+| `PATCH /api/private/drive/nodes/<id>` | `{ parent?, name?, meta?, ks?, mek? }` move / rename → `{ ok }` (a new name or metadata comes with the item's own `ks` and `mek`: `409 stale_keys` when they changed or the item changed meanwhile, `400 bad_seal` when it does not open; for a file, `403 file_type_not_allowed` when the role's file-type rule refuses what it would store, §5, and `400 invalid` for `meta: null`); 409 when `parent` is the node or inside it; `403 folder_too_deep` when the move would put the item, or a folder inside it, past the role's `maxFolderDepth`; the root cannot be moved, renamed or deleted |
 | `DELETE /api/private/drive/nodes/<id>` | recursive; ends referencing shares; frees capacity; also used by the client to drop a failed upload's `pending` node |
 | `POST /api/private/drive/shares` | `{ nodes: [file ids], views, expire, deletable?, label?, types?, depth?, paste, acc }` → `{ id, deletetoken }`: `nodes` lists **files** (the browser flattens folders), and `refs[i]` is `nodes[i]`; `types` / `depth` are the file-policy declaration, sent only when a policy applies (as for file shares); `paste` is the `encryptPaste` body (`acc` is also inside it) |
 | `GET /api/private/drive/nodes/<id>/shares` | shares referencing the node — for a folder, every share that references a file under it: `{ shares: [{ id, label, kind: 'drive', created, expires, views_total, left, status, locked }] }` (My shares' row fields; `views_total` / `left` null = unlimited) |
@@ -740,8 +756,9 @@ leave open:
   Children include pending files (`state: 'pending'`, `done` = chunks received). `DELETE`
   answers `{ ok, deleted, sharesEnded }`. Hard ceilings per Drive: 100 000 items, 10 000 per
   folder, 64 folder levels, 1 000 shares per item.
-- **Capacity.** `used` is every file's `size`, pending uploads included (reserved at
-  `POST …/files`), plus the characters of every item's sealed fields (name, meta, DEK) and its
+- **Capacity.** `used` is every file's `size`, the user's pending uploads included (reserved at
+  `POST …/files`) — a received upload still in progress counts only the chunks that arrived
+  (`nodes.got`, docs/REVERSE.md §4) —, plus the characters of every item's sealed fields (name, meta, DEK) and its
   salt, so they
   cannot store data outside the capacity; a folder, a file or a rename that would not fit is
   `413 drive_full`. Sealed names are at most 512 characters and metadata at most 1024.
@@ -780,8 +797,9 @@ leave open:
   1 000 shares counts live ones.
 - **Received files** (reverse shares, [`REVERSE.md`](./REVERSE.md)). `nodes.rs` names the
   reverse share of a file an anonymous uploader sent and the user's browser has not yet taken
-  in; such files count in the capacity (their content and, until taken in, their sealed path,
-  metadata and wrap, stored at rest under the field layer) but are left out of `children`,
+  in; such files count in the capacity (their content — while it uploads, only the chunks that
+  arrived — and, until taken in, their sealed path, metadata and wrap, stored at rest under the
+  field layer) but are left out of `children`,
   cannot be read, moved, renamed or shared, and are listed by `GET /api/private/drive/received`
   until taken in (`POST /api/private/drive/received/<id>` with the item sealed under the KEK like
   a new file). One whose field layer does not open is listed without its fields (the browser

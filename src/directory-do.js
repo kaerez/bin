@@ -42,6 +42,9 @@ import {
 import { GUARD_SHARDS, guardShardIndex } from './guard-do.js';
 import { sharePwRule, pwLockedUntil, pwFailed, pwDirty } from './lib/sharepw.js';
 
+// reverse_late: the late requests of a deleted account's Receive links (reverseLateAdd) — hashes of
+// the session grants and upload tokens they issued, each for a day at most. A table with no data to
+// convert: SCHEMA (run at every start) creates it in older Directories too, so no migration step.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, role TEXT NOT NULL,
   pw_salt TEXT NOT NULL, pw_t INTEGER NOT NULL, pw_verifier TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0,
@@ -106,6 +109,8 @@ CREATE TABLE IF NOT EXISTS user_salts (user_id TEXT PRIMARY KEY, salt TEXT NOT N
 CREATE TABLE IF NOT EXISTS mek_candidates (id TEXT PRIMARY KEY, sid TEXT NOT NULL, key TEXT NOT NULL, exp INTEGER NOT NULL, purpose TEXT NOT NULL DEFAULT 'sub');
 CREATE TABLE IF NOT EXISTS drive_migration (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, v1_items INTEGER, v1_links INTEGER, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS record_keys (kid TEXT PRIMARY KEY, sealed TEXT NOT NULL, under TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS reverse_late (rid TEXT NOT NULL, hash TEXT NOT NULL, exp INTEGER NOT NULL, PRIMARY KEY (rid, hash));
+CREATE INDEX IF NOT EXISTS reverse_late_exp ON reverse_late(exp);
 CREATE TABLE IF NOT EXISTS share_pw (id TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0, since INTEGER, until INTEGER,
   strikes INTEGER NOT NULL DEFAULT 0);
 `;
@@ -474,6 +479,13 @@ const ACCEPT_DETAIL_RE = /^accept=(?:files|note|url|secret)(?:,(?:files|note|url
 const FOLDER_DETAIL_RE = /^folder=(?:root|[A-Za-z0-9_-]{22})$/;
 /** A reverse-share id claimed but never completed (the Worker failed in between) is released after this long. */
 const PENDING_REVERSE_SEC = 600;
+/**
+ * A deleted account's late-request hashes (reverse_late): kept at most this
+ * long (as the Drive keeps its own, src/drive-do.js RECEIVE_MAX_SEC), and at
+ * most this many per deletion (the Drive's LATE_MAX).
+ */
+const RECEIVE_LATE_SEC = 86400;
+const LATE_MAX = 20000;
 /**
  * The tombstone of a reverse-share id (reverse_ids): a hash, so the ids of
  * links that ended and were pruned are not kept, only whether one existed.
@@ -1933,10 +1945,10 @@ export class Directory extends DurableObject {
    * each quota's current window → { ok, hits } (the hits give it back:
    * refund). `channel` 'api' also counts the API-only quotas. `keys`: who is
    * counted (the public account's anonymous subjects; by default the
-   * account); `needAll`: refused only when every key is over. The owner is
-   * never counted.
+   * account); `needAll`: refused only when every key is over; `dry`: only
+   * checked, nothing counted (no hits). The owner is never counted.
    */
-  #chargeQuotas(uid, channel, action, { keys = [uid], needAll = false } = {}) {
+  #chargeQuotas(uid, channel, action, { keys = [uid], needAll = false, dry = false } = {}) {
     const u = this.#user(uid);
     if (!u || u.role === 'owner') return { ok: true, hits: [] };
     const ts = now();
@@ -1957,6 +1969,8 @@ export class Directory extends DurableObject {
       }
       if (n > 0) for (const k of keys) hits.push({ quota_id: q.id, bucket, key: k, n });
     }
+    // `dry`: only whether it would fit now (nothing counted).
+    if (dry) return { ok: true, hits: [] };
     this.ctx.storage.transactionSync(() => {
       for (const h of hits) {
         this.sql.exec('INSERT INTO usage (quota_id, user_id, bucket, count, ts) VALUES (?, ?, ?, ?, ?) ON CONFLICT(quota_id, user_id, bucket) DO UPDATE SET count = count + excluded.count',
@@ -2021,6 +2035,23 @@ export class Directory extends DurableObject {
     if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
     if (!Number.isSafeInteger(size) || size < 0) return fail(400, 'invalid_size', 'size must be the file’s size in bytes.');
     const q = this.#chargeQuotas(uid, 'all', [{ action: 'drive-upload', n: 1 }, { action: 'drive-bytes', n: size }]);
+    return q.ok ? { ok: true, refund: q.hits } : q;
+  }
+
+  /**
+   * Count a file received through a Receive link of `uid` (finished: its
+   * chunks are all in the Drive): its `size` against the quotas of kind
+   * drive-bytes — it is Drive storage, as an upload's bytes are — never
+   * against drive-upload (the Receive quotas count the session) → { ok,
+   * refund } or 429 quota_exceeded (the Worker tells the uploader only that
+   * the link cannot accept uploads now). `dry`: whether it would fit now,
+   * nothing counted (a reservation, before anything is sent).
+   */
+  async authorizeReceivedBytes(uid, { size, dry = false } = {}) {
+    const u = this.#user(uid);
+    if (!u || u.disabled || u.role === 'public') return fail(403, 'forbidden', 'Account unavailable.');
+    if (!Number.isSafeInteger(size) || size < 0) return fail(400, 'invalid_size', 'size must be the file’s size in bytes.');
+    const q = this.#chargeQuotas(uid, 'all', [{ action: 'drive-bytes', n: size }], { dry });
     return q.ok ? { ok: true, refund: q.hits } : q;
   }
 
@@ -3685,7 +3716,14 @@ export class Directory extends DurableObject {
       resealed.push([r.id, await sealSubMek(old.key, r.id, k)]);
     }
     const recordKeys = await this.#rewrapRecordKeys(old, [root]);
-    if (this.#keyRoot()?.fp !== root.fp) return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
+    // Nothing may have changed while the sub-MEKs were sealed again (as mekChangeRoot checks): the
+    // root, the previous root, and the sub-MEK rows themselves — one added meanwhile (mekAdd runs
+    // during a root change) would stay sealed under the root that is going, and open no more.
+    const same = this.#mekRows();
+    if (this.#keyRoot()?.fp !== root.fp || this.#keyRoot('mek.rootOld')?.fp !== old.fp
+      || same.length !== rows.length || same.some((r, i) => r.id !== rows[i].id || r.sealed !== rows[i].sealed)) {
+      return fail(409, 'changed', 'The keyring changed meanwhile: try again.');
+    }
     this.ctx.storage.transactionSync(() => {
       this.#setMeta('mek.root', JSON.stringify({ key: b64urlFromBytes(old.key), fp: old.fp, created: old.created }));
       this.#setMeta('mek.rootOld', JSON.stringify({ key: b64urlFromBytes(root.key), fp: root.fp, created: root.created, origin: 'changed' }));
@@ -4430,6 +4468,39 @@ export class Directory extends DurableObject {
     const r = typeof id === 'string' ? this.sql.exec("SELECT captcha FROM shares WHERE id = ? AND status = 'active'", id).toArray()[0] : null;
     if (!r) return 'none';
     return r.captcha === 1 ? 'captcha' : 'open';
+  }
+
+  /**
+   * An account is being deleted: the hashes of the session grants and upload
+   * tokens its Receive links issued that a late request may still carry (the
+   * Drive's lateHashes: [{ hash, rid, exp }]), each kept until its `exp` (a
+   * day at most). Once the account's index rows and Drive are gone, such a
+   * request is a genuine uploader's late one (reverseLateKnown): answered 410,
+   * never counted as a guess. Hashes and link ids only.
+   */
+  async reverseLateAdd(rows) {
+    if (!Array.isArray(rows)) return { ok: true, added: 0 };
+    const t = now();
+    const ok = rows.filter((r) => r && typeof r.rid === 'string' && /^r[A-Za-z0-9_-]{22}$/.test(r.rid) && typeof r.hash === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(r.hash)
+      && Number.isSafeInteger(r.exp) && r.exp > t).slice(0, LATE_MAX);
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM reverse_late WHERE exp <= ?', t);
+      for (const r of ok) {
+        this.sql.exec('INSERT INTO reverse_late (rid, hash, exp) VALUES (?, ?, ?) ON CONFLICT(rid, hash) DO UPDATE SET exp = MAX(exp, excluded.exp)',
+          r.rid, r.hash, Math.min(r.exp, t + RECEIVE_LATE_SEC));
+      }
+    });
+    return { ok: true, added: ok.length };
+  }
+
+  /** Is one of `hashes` a grant or upload token that link `id`, of an account deleted since, issued (reverseLateAdd)? */
+  async reverseLateKnown(id, hashes = []) {
+    if (typeof id !== 'string' || !Array.isArray(hashes)) return false;
+    const t = now();
+    for (const h of hashes.filter((x) => typeof x === 'string' && x.length <= 128).slice(0, 4)) {
+      if (this.sql.exec('SELECT 1 FROM reverse_late WHERE rid = ? AND hash = ? AND exp > ?', id, h, t).toArray().length) return true;
+    }
+    return false;
   }
 
   /** The user a share belongs to (the Worker needs it to reach a reverse share's Drive). */
@@ -5688,6 +5759,7 @@ export class Directory extends DurableObject {
     this.sql.exec("DELETE FROM usage WHERE user_id IN (SELECT 'pub:t:' || id_hash FROM trackers WHERE last_seen < ?)", idleBefore);
     this.sql.exec('DELETE FROM trackers WHERE last_seen < ?', idleBefore);
     this.sql.exec('DELETE FROM ip_rules WHERE expires IS NOT NULL AND expires < ?', ts);
+    this.sql.exec('DELETE FROM reverse_late WHERE exp <= ?', ts);
     const expiring = this.sql.exec("SELECT id FROM shares WHERE kind = 'drive' AND status = 'active' AND expires > 0 AND expires < ?", ts).toArray().map((r) => r.id);
     this.sql.exec("UPDATE shares SET status = 'expired', ended = expires WHERE status = 'active' AND expires > 0 AND expires < ?", ts);
     await this.#dropDriveRefs(expiring);

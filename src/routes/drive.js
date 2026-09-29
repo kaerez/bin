@@ -37,7 +37,7 @@ import { binding } from '../lib/config.js';
 import { HARD_MAX_DRIVE_BYTES } from '../lib/settings.js';
 import { NODE_ID_RE, ROOT, KEYS_PAGE } from '../drive-do.js';
 import { handleReverseOwner } from './reverse.js';
-import { driveTypeRefusal, sealedTypeRefusal, typedPolicy } from '../lib/drivepolicy.js';
+import { driveTypeRefusal, sealedTypeRefusal, renameTypeRefusal, typedPolicy } from '../lib/drivepolicy.js';
 import { userKeys, keksOf, openItem, checkNewItem, checkField, checkLinkKey, openLink, fieldKeys, toRest, fromRest } from '../lib/mek.js';
 
 const fromDir = (r) => {
@@ -145,7 +145,8 @@ export async function handleDrive(request, env, url) {
       enabled: true, capacity: pol.capacity, maxFile: pol.maxFile, used: s.used,
       received: s.received, receivedFailed: s.receivedFailed, current: pol.current,
       // The personal kit against the keys now: the page's "download a new kit" notice (no key detail).
-      kit: pol.kit,
+      // It is the user's own: the owner acting as the user never gets its state (as every kit route).
+      ...(a.actor ? {} : { kit: pol.kit }),
       migration: pending || s.migration.v1Items || s.migration.v1Links ? { pending: true, v1Items: s.migration.v1Items, v1Links: s.migration.v1Links, legacy: s.migration.wraps > 0 } : null,
     };
     if (s.used !== pol.used) await dir.setDriveUsed(uid, s.used);
@@ -321,6 +322,10 @@ export async function handleDrive(request, env, url) {
         const keys = await userKeys(env, uid, { meks: [kf.mek] });
         if (patch.name !== undefined) await checkField(uid, keys, kf, 'name', patch.name);
         if (patch.meta) await checkField(uid, keys, kf, 'meta', patch.meta);
+        // A file keeps its metadata (its type is in it), and the role's file-type rule holds for what a
+        // rename or a metadata change stores, as for an upload (docs/DRIVE.md §5).
+        const refused = await fileChangeRefusal(drive(), uid, id, keys, kf, patch, pol.policy);
+        if (refused) return withAuth(a, refused);
       }
       const r = await drive().patchNode(uid, id, { ...patch, capacity: pol.capacity ?? HARD_MAX_DRIVE_BYTES, maxDepth: pol.policy.maxFolderDepth });
       if (!r.ok) return withAuth(a, fromDir(r));
@@ -350,6 +355,45 @@ export async function handleDrive(request, env, url) {
   }
 
   return err(404, 'not_found', 'Not found.');
+}
+
+/**
+ * A new name or metadata for item `id` (`patch`: its sealed fields, checked
+ * to open under the item's keys `kf`): a file's metadata cannot be removed
+ * (`meta: null`: 400), and with a type policy the name and metadata as they
+ * will be stored are opened (in memory only, zeroed after) and held to the
+ * role's file-type rules (renameTypeRefusal: a file may not get a type the
+ * role refuses; one keeping its stored type may still be renamed). The
+ * change is then made only if the item is still as read (`patch.was`: a
+ * compare-and-set), so a concurrent rename cannot slip past the check.
+ * → null or the refusal.
+ */
+async function fileChangeRefusal(drive, uid, id, keys, kf, patch, policy) {
+  if (patch.meta !== null && !typedPolicy(policy)) return null;
+  const cur = await drive.itemKeys(uid, id);
+  if (!cur.ok || cur.item.kind !== 'file') return null; // a folder (or none: the Drive answers)
+  if (patch.meta === null) return invalid('A file keeps its metadata: send it sealed as {iv, ct}.');
+  const from = cur.item.from;
+  if (cur.item.mek !== kf.mek || cur.item.ks !== kf.ks) return err(409, 'stale_keys', 'This item was re-sealed meanwhile: open it again and retry.');
+  const open = (name, meta) => openItem(uid, keksOf(keys, kf.mek), { kind: 'dir', ks: kf.ks, mek: kf.mek, name, meta });
+  let before = null;
+  let after = null;
+  try {
+    after = await open(patch.name ?? from.name, patch.meta ?? from.meta);
+    try { before = await open(from.name, from.meta); } catch { before = null; } // stored under neither: no type to keep
+    const refused = renameTypeRefusal(policy, before, after);
+    if (refused) return refused;
+  } catch {
+    return err(403, 'file_type_not_allowed', 'This file’s type cannot be checked against your role’s file-type rules, so it may not be kept in your Drive.');
+  } finally {
+    for (const x of [before, after]) {
+      if (!x) continue;
+      x.name.fill(0);
+      if (x.meta) x.meta.fill(0);
+    }
+  }
+  patch.was = { name: from.name, meta: from.meta };
+  return null;
 }
 
 /**
@@ -490,7 +534,7 @@ export async function saltCheck(env, dir, uid, salt, { ownerId = null, extra = n
     if (typeof r === 'string') return r;
     try {
       const fks = keysOf(r, 'fieldKey');
-      const sealed = JSON.parse(await fromRest({ cur: { linkKey: fks[0] }, old: fks[1] ? { linkKey: fks[1] } : null }, uid, 'linkKey', link.id, link.priv));
+      const sealed = JSON.parse(await fromRest({ cur: { linkKey: fks[0] }, old: fks[1] ? { linkKey: fks[1] } : null }, uid, 'linkKey', link.id, link.priv, { plain: false }));
       for (const kek of keysOf(r, 'kek')) {
         try { (await openLinkKey(kek, { userId: uid, mekId: link.mek, linkId: link.id }, sealed)).fill(0); return 'ok'; } catch { /* the next one */ }
       }
@@ -670,7 +714,8 @@ async function verifyPage(env, uid, after) {
   }
   const fk = page.links.length ? await fieldKeys(env, uid) : null;
   for (const l of page.links) {
-    try { (await openLink(uid, keys, l.id, l.mek, JSON.parse(await fromRest(fk, uid, 'linkKey', l.id, l.priv)))).pkcs8.fill(0); } catch { failed.push(l.id); }
+    // A link key is always stored at rest: one in plain text fails the check (fails closed).
+    try { (await openLink(uid, keys, l.id, l.mek, JSON.parse(await fromRest(fk, uid, 'linkKey', l.id, l.priv, { plain: false })))).pkcs8.fill(0); } catch { failed.push(l.id); }
   }
   return { verified: page.items.length + page.links.length, failed, next: page.next };
 }
@@ -975,6 +1020,11 @@ export async function destroyDrive(env, dir, uid, actor) {
   if (shares.length) await retry(() => dir.endDriveShares(uid, shares, actor, 'account deleted'));
   // Reverse shares have no FileShare record: their Directory rows end here.
   if (reverse.length) await retry(() => dir.endDriveShares(uid, reverse, actor, 'account deleted'));
+  // Their links issue nothing any more: the grants and upload tokens they issued are kept (hashes) in
+  // the Directory for a day, so an uploader's late request after the account is gone is answered 410
+  // and never counted as a guess (docs/REVERSE.md §5), as when a link is revoked.
+  const late = await retry(() => stub().lateHashes(uid));
+  if (late.late.length) await retry(() => dir.reverseLateAdd(late.late));
   const r = await retry(() => stub().destroy(uid));
   // A share made in between.
   for (const id of r.shares.filter((x) => !shares.includes(x))) await retry(() => fileStub(env, id).revoke());

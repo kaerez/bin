@@ -101,6 +101,11 @@ CREATE INDEX IF NOT EXISTS rgone_exp ON rgone(exp);
 // archive_*: an owner's Drive started over in the release before; kept as it
 // is until the owner deletes it (Admin → Security → Keys); nothing here opens
 // it, and it does not count towards the Drive's capacity.
+// rgone.released: the upload was released for want of data (RECEIVE_IDLE_SEC):
+// its late chunk is answered `410 released`, and the uploader sends it again.
+// nodes.got: the plaintext bytes of the chunks a received upload has sent so
+// far (only that counts in the Drive's capacity until it is finished: #used,
+// docs/REVERSE.md §4).
 const COLUMNS = [
   ['nodes', 'rs', 'TEXT'], ['nodes', 'rsess', 'TEXT'], ['nodes', 'rfail', 'INTEGER'], ['nodes', 'rwhy', 'TEXT'],
   ['reverse', 'sealed', 'INTEGER NOT NULL DEFAULT 0'], ['reverse', 'pwfails', 'INTEGER NOT NULL DEFAULT 0'],
@@ -115,6 +120,7 @@ const COLUMNS = [
   ['reverse', 'views', 'INTEGER'], ['reverse', 'used', 'INTEGER NOT NULL DEFAULT 0'],
   ['rsessions', 'kind', 'TEXT'],
   ['reverse', 'held', 'INTEGER'],
+  ['nodes', 'got', 'INTEGER'], ['rgone', 'released', 'INTEGER'],
 ];
 /** The Drive's meta of the release before (the key wraps' salt, pin and records): dropped by its upgrade. */
 const LEGACY_META = ['driveSalt', 'escrowPin', 'pwStale', 'kcv', 'kit', 'escrowVer', 'archiveGen', 'upgradeVerify', 'wrapsHeld'];
@@ -147,10 +153,36 @@ export const MAX_REVERSE_FILES = 10000;
 export const SESSION_IDLE_SEC = 600;
 /** A received file must be finished, and a session ends, at most this long after it started (keep-alives included). */
 export const RECEIVE_MAX_SEC = 86400;
+/**
+ * A received upload with no chunk for this long (or the role's
+ * filePendingSec, when shorter) is released: its reservation goes, and its
+ * session, while open, may reserve the file again (docs/REVERSE.md §4).
+ */
+export const RECEIVE_IDLE_SEC = SESSION_IDLE_SEC;
+/**
+ * What a link's received uploads in progress may have reserved and not sent
+ * yet, counting each one's next chunk only (at most CHUNK: a large file is
+ * sent a chunk at a time): CHUNK for each of the uploads one uploader network
+ * may run at once (MAX_SESSIONS_PER_NET). None of it counts in the Drive's
+ * capacity (only what arrived does), so reservations that send nothing
+ * neither fill the Drive nor hold up the link for long (RECEIVE_IDLE_SEC).
+ */
+export const RECEIVE_HOLD_MAX = CHUNK * MAX_SESSIONS_PER_NET;
+/**
+ * What a `nodes` row takes of the Drive's capacity, besides its sealed
+ * fields (SQL, on the row's own columns): a received upload still in
+ * progress, only what it sent so far (docs/REVERSE.md §4); anything else,
+ * its size.
+ */
+const CHARGED = "CASE WHEN rs IS NOT NULL AND state = 'pending' THEN COALESCE(got, 0) ELSE size END";
+/** What a received upload in progress has reserved and not sent, up to its next chunk (SQL): RECEIVE_HOLD_MAX. */
+const HELD = `MIN(${CHUNK}, size - COALESCE(got, 0))`;
 /** Wrong passwords for one link (from any network) within PW_WINDOW_SEC lock it for PW_LOCK_SEC. */
 export const PW_MAX_FAILS = 10;
 export const PW_WINDOW_SEC = 900;
 export const PW_LOCK_SEC = 900;
+/** Late-request hashes a deleted account's Drive hands the Directory at most (lateHashes). */
+export const LATE_MAX = 20000;
 /** Received files per page of GET /received. */
 export const RECEIVED_PAGE = 500;
 /**
@@ -250,8 +282,10 @@ export class Drive extends DurableObject {
    */
   #used() {
     // Every item's sealed name, metadata and file key count, received files
-    // included (the anonymous uploader chose them; docs/REVERSE.md §4).
-    const bytes = `COALESCE(SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END), 0)
+    // included (the anonymous uploader chose them; docs/REVERSE.md §4). A
+    // received upload still in progress counts what it sent so far, never the
+    // size it reserved (CHARGED).
+    const bytes = `COALESCE(SUM(CASE WHEN kind = 'file' THEN ${CHARGED} ELSE 0 END), 0)
       + COALESCE(SUM(LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0)), 0)`;
     // The sealed DEK and the salt count too (docs/DRIVE.md §10).
     const keys = 'COALESCE(SUM(COALESCE(LENGTH(dek), 0) + COALESCE(LENGTH(ks), 0)), 0)';
@@ -344,12 +378,16 @@ export class Drive extends DurableObject {
     if (!r2 || typeof r2.delete !== 'function') throw new Error('FILES binding missing: cannot delete Drive chunks');
     for (let i = 0; i < keys.length; i += 1000) await r2.delete(keys.slice(i, i + 1000));
   }
+  /** How long a received upload may go without a chunk before it is released (RECEIVE_IDLE_SEC, or filePendingSec when shorter). */
+  #receiveIdle() {
+    return Math.min(Number(this.#meta('pendingSec')) || 3600, RECEIVE_IDLE_SEC);
+  }
   async #schedulePurge() {
     const sec = Number(this.#meta('pendingSec')) || 3600;
-    const r = this.sql.exec("SELECT MIN(updated) AS t FROM nodes WHERE state = 'pending'").one();
+    const r = this.sql.exec("SELECT MIN(updated) AS t FROM nodes WHERE state = 'pending' AND rs IS NULL").one();
     const s = this.sql.exec('SELECT MIN(expires) AS t FROM rsessions').one();
-    const q = this.sql.exec("SELECT MIN(created) AS t FROM nodes WHERE state = 'pending' AND rs IS NOT NULL").one();
-    const times = [r.t === null ? null : r.t + sec, s.t, q.t === null ? null : q.t + RECEIVE_MAX_SEC].filter((x) => x !== null);
+    const q = this.sql.exec("SELECT MIN(created) AS t, MIN(updated) AS u FROM nodes WHERE state = 'pending' AND rs IS NOT NULL").one();
+    const times = [r.t === null ? null : r.t + sec, s.t, q.t === null ? null : q.t + RECEIVE_MAX_SEC, q.u === null ? null : q.u + this.#receiveIdle()].filter((x) => x !== null);
     if (!times.length) return;
     const at = Math.min(...times) * 1000;
     const cur = await this.ctx.storage.getAlarm();
@@ -930,7 +968,7 @@ export class Drive extends DurableObject {
    * re-sealed meanwhile, and the browser seals again). `maxDepth`: the role's
    * folder-depth limit (null: none) — a move may not put anything deeper.
    */
-  async patchNode(uid, id, { parent, name, meta, mek, ks, capacity = null, maxDepth = null }) {
+  async patchNode(uid, id, { parent, name, meta, mek, ks, was = null, capacity = null, maxDepth = null }) {
     this.#bind(uid);
     if (id === ROOT) return fail(400, 'root', 'The top folder cannot be moved or renamed.');
     const n = this.#node(id);
@@ -938,6 +976,13 @@ export class Drive extends DurableObject {
     if ((name !== undefined || meta !== undefined) && (!n.mek || n.mek !== mek || n.ks !== ks)) {
       return fail(409, 'stale_keys', 'This item was re-sealed meanwhile: open it again and retry.');
     }
+    // `was`: the sealed name and metadata the Worker checked the change against (the role's file
+    // types): changed meanwhile (another rename), the check no longer holds — read it again.
+    if (was && (n.name !== was.name || (n.meta ?? null) !== (was.meta ?? null))) {
+      return fail(409, 'stale_keys', 'This item changed meanwhile: open it again and retry.');
+    }
+    // A file keeps its metadata (its type is in it: the role's file-type rules read it).
+    if (meta === null && n.kind === 'file') return fail(400, 'invalid', 'A file keeps its metadata: send it sealed as {iv, ct}.');
     // Longer sealed fields take more of the capacity.
     const grow = (name !== undefined ? name.length - n.name.length : 0) + (meta !== undefined ? (meta ? meta.length : 0) - (n.meta ? n.meta.length : 0) : 0);
     if (grow > 0) {
@@ -981,6 +1026,10 @@ export class Drive extends DurableObject {
       const dirs = new Set(rows.filter((r) => r.kind === 'dir').map((r) => r.id));
       const reverse = this.sql.exec("SELECT id, folder FROM reverse WHERE status = 'active'").toArray().filter((r) => dirs.has(r.folder)).map((r) => r.id);
       this.ctx.storage.transactionSync(() => {
+        // Received uploads still in progress (the link's folder going, or one deleted on its own):
+        // their upload tokens stay known (rgone) and their reservations are given back, as when a
+        // link is revoked (#dropPending), so an uploader's late chunk is never counted as a guess.
+        for (const f of rows) if (f.kind === 'file' && f.state === 'pending' && f.rs) this.#dropPending(f);
         for (const rid of reverse) {
           this.sql.exec("UPDATE reverse SET status = 'revoked', ended = ? WHERE id = ?", nowSec(), rid);
           this.#buryGrants('rid = ?', rid);
@@ -1071,6 +1120,27 @@ export class Drive extends DurableObject {
   }
 
   /**
+   * The account is being deleted (its links have ended in the share index, so
+   * none issues anything new): the hashes of every session grant and upload
+   * token its links issued that a late request may still carry — open
+   * sessions, received uploads in progress, and those ended in the last
+   * RECEIVE_MAX_SEC (rgone) — with their links and until when they matter
+   * → { late: [{ hash, rid, exp }] } (at most LATE_MAX, the newest). The
+   * Directory keeps them after this Drive is gone (reverseLateAdd), so those
+   * requests are answered 410 and never counted as guesses.
+   */
+  async lateHashes(uid) {
+    this.#bind(uid);
+    const t = nowSec();
+    const exp = t + RECEIVE_MAX_SEC;
+    const rows = this.sql.exec(`SELECT hash, rid, ? AS exp FROM rsessions
+      UNION ALL SELECT upload_hash AS hash, rs AS rid, ? AS exp FROM nodes WHERE rs IS NOT NULL AND state = 'pending' AND upload_hash IS NOT NULL
+      UNION ALL SELECT hash, rid, exp FROM rgone WHERE exp > ?
+      ORDER BY exp DESC LIMIT ?`, exp, exp, t, LATE_MAX).toArray();
+    return { ok: true, late: rows.map((r) => ({ hash: r.hash, rid: r.rid, exp: r.exp })) };
+  }
+
+  /**
    * The account is deleted: remove every R2 object and all state. Returns the
    * shares that referenced it. Safe to repeat: a failure part-way leaves the
    * rows (a retry deletes the objects again), and a call after it finds an
@@ -1127,12 +1197,21 @@ export class Drive extends DurableObject {
       held: !!r.held,
       pending: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NULL", r.id).one().c,
       failed: this.sql.exec("SELECT COUNT(*) AS c FROM nodes WHERE rs = ? AND state = 'ready' AND rfail IS NOT NULL", r.id).one().c,
+      // Uploads in progress (reserved, not finished): how many, the bytes they sent so far and the
+      // size they reserved, so the user sees what is using the Drive's space and the link's bytes.
+      uploading: this.#uploading(r.id),
       // Received items kept in an archive (the owner started over), sealed as they arrived.
       kept: r.agen === null || r.agen === undefined ? 0 : this.sql.exec('SELECT COUNT(*) AS c FROM archive_nodes WHERE rs = ?', r.id).one().c,
     };
     // The link key as stored (sealed under the KEK of `mek`, and at rest by the Worker; mek null: the release before).
     if (priv) Object.assign(o, { priv: r.priv, mek: r.mek ?? null });
     return o;
+  }
+  /** A link's uploads in progress → { files, bytes (sent so far), size (reserved), held (reserved and not sent, up to each one's next chunk), since }. */
+  #uploading(id) {
+    const u = this.sql.exec(`SELECT COUNT(*) AS c, COALESCE(SUM(COALESCE(got, 0)), 0) AS got, COALESCE(SUM(size), 0) AS size,
+      COALESCE(SUM(${HELD}), 0) AS held, MIN(created) AS since FROM nodes WHERE rs = ? AND state = 'pending'`, id).one();
+    return { files: u.c, bytes: u.got, size: u.size, held: u.held, since: u.since ?? null };
   }
   /**
    * Remember the grants of link sessions about to be deleted (`cond`: a
@@ -1162,12 +1241,16 @@ export class Drive extends DurableObject {
     }
     return { known, state: this.#reverseState(this.#reverse(id)) };
   }
-  /** Give a pending (reserved) upload's allowance back and delete its rows (inside a transaction). */
-  #dropPending(f) {
+  /**
+   * Give a pending (reserved) upload's allowance back and delete its rows
+   * (inside a transaction). `released`: a received upload released for want
+   * of data (the alarm, RECEIVE_IDLE_SEC), which its uploader may send again.
+   */
+  #dropPending(f, { released = false } = {}) {
     // A received file's upload token stays known (rgone): its late chunks are not guesses.
     if (f.rs) {
       const up = this.sql.exec("SELECT upload_hash FROM nodes WHERE id = ? AND state = 'pending'", f.id).toArray()[0]?.upload_hash;
-      if (up) this.sql.exec('INSERT OR IGNORE INTO rgone (hash, rid, exp) VALUES (?, ?, ?)', up, f.rs, nowSec() + RECEIVE_MAX_SEC);
+      if (up) this.sql.exec('INSERT OR IGNORE INTO rgone (hash, rid, exp, released) VALUES (?, ?, ?, ?)', up, f.rs, nowSec() + RECEIVE_MAX_SEC, released ? 1 : null);
     }
     this.sql.exec('DELETE FROM upchunks WHERE node_id = ?', f.id);
     const row = this.sql.exec("SELECT LENGTH(name) + COALESCE(LENGTH(meta), 0) + COALESCE(LENGTH(fk), 0) AS o FROM nodes WHERE id = ? AND state = 'pending'", f.id).toArray()[0];
@@ -1298,7 +1381,11 @@ export class Drive extends DurableObject {
     // Paused (the owner started over) is not ended: the link resumes when the archive is restored.
     let opts = {};
     try { opts = JSON.parse(r.opts); } catch { /* none */ }
-    const v = { views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0, accept: acceptOf(opts), folder: r.folder };
+    // With the link's own limits (a change that loosens one weakens the link: src/routes/reverse.js weakening).
+    const v = {
+      views: r.views ?? null, left: viewsLeft(r), used: r.used ?? 0, password: !!r.ph, captcha: r.captcha !== 0, accept: acceptOf(opts), folder: r.folder,
+      maxFiles: opts.maxFiles ?? null, maxBytes: opts.maxBytes ?? null, maxFileBytes: opts.maxFileBytes ?? null, types: opts.types ?? null,
+    };
     // Paused by the user (`held`: they resume it), or by the owner's start over in the release before.
     if (st === 'paused') return { status: 'ok', paused: true, held: !!r.held, files: r.files, bytes: r.bytes, expires: r.expires, ...v };
     return st === 'active' ? { status: 'ok', files: r.files, bytes: r.bytes, expires: r.expires, ...v } : { status: 'gone', state: st, files: r.files, bytes: r.bytes, ...v };
@@ -1603,8 +1690,12 @@ export class Drive extends DurableObject {
   /**
    * Reserve one received file in the share's folder: every limit is checked
    * here at once — the share's (files, bytes, file size, declared types, as
-   * checked by the Worker), the Drive's capacity and largest file, and the
-   * tree's ceilings. A session that sends a note, a link or a credential
+   * checked by the Worker), the Drive's capacity (the whole file must fit
+   * now) and largest file, and the tree's ceilings. The reservation takes
+   * of the Drive only its sealed fields: its content counts as its chunks
+   * arrive (reversePutChunk), and what a link's uploads in progress have
+   * reserved and not sent is capped (RECEIVE_HOLD_MAX: `429 busy`), so an
+   * uploader who reserves and sends nothing cannot fill the Drive. A session that sends a note, a link or a credential
    * (rsessions.kind) reserves one item, of at most ITEM_MAX_BYTES of its
    * kind; the link's largest-file limit and file types are for files only.
    * Every received item counts towards the link's most files (`maxFiles`).
@@ -1638,12 +1729,20 @@ export class Drive extends DurableObject {
     }
     const bad = this.#checkNew(node) || this.#checkParent(r.folder);
     if (bad) return bad.error === 'exists' ? bad : fail(bad.status === 404 ? 410 : bad.status, bad.status === 404 ? 'gone' : bad.error, bad.message);
-    // The sealed fields take room too: they count against the capacity (#used).
+    // The whole file must fit in the Drive now (with its sealed fields), so that an upload that cannot
+    // finish is refused before it starts; but a reservation is not charged its size (docs/REVERSE.md §4):
+    // the Drive counts its sealed fields, then its content as it arrives.
     if (this.#used() + size + sealed > capacity) return fail(413, 'drive_full', 'There is not enough space left for that file.');
+    // What the link's uploads in progress have reserved and not sent (each up to its next chunk), this
+    // one included: at most RECEIVE_HOLD_MAX, so reservations that send nothing hold up little.
+    const hold = Math.min(CHUNK, size);
+    if (hold > 0 && this.sql.exec(`SELECT COALESCE(SUM(${HELD}), 0) AS h FROM nodes WHERE rs = ? AND state = 'pending'`, id).one().h + hold > RECEIVE_HOLD_MAX) {
+      return fail(429, 'busy', 'Too many uploads to this link are in progress. Try again in a moment.');
+    }
     const chunks = driveChunks(size);
     const t = nowSec();
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated, rs, rsess) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+      this.sql.exec("INSERT INTO nodes (id, parent, kind, name, meta, size, chunks, fk, state, upload_hash, created, updated, rs, rsess, got) VALUES (?, ?, 'file', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, 0)",
         node, r.folder, name, meta, size, chunks, fk, uploadHash, t, t, id, hash);
       this.sql.exec('UPDATE reverse SET files = files + 1, bytes = bytes + ?, sealed = sealed + ? WHERE id = ?', size, sealed, id);
       this.#touch(x, pendingSec);
@@ -1659,18 +1758,57 @@ export class Drive extends DurableObject {
    * late write never lands on, or is removed from, a finished file); if the
    * upload ended meanwhile (cancelled, revoked, purged) the object is deleted.
    */
-  async reversePutChunk(uid, id, node, uploadHash, i, bytes) {
-    this.#bind(uid);
+  /**
+   * Can chunk `i` of received upload `node` be sent now (the link active, the
+   * token right, the reservation neither past RECEIVE_MAX_SEC nor released
+   * for want of data)? → { status: 'ok', n } or the answer.
+   */
+  #chunkCheck(id, node, uploadHash, i) {
     const n = this.#node(node);
-    if (!n || n.rs !== id || this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
+    if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
+    // Released (its reservation went while the link still takes uploads: idle, see below): the
+    // uploader may reserve the file again in its session.
+    if (!n || n.rs !== id) return { status: this.#released(id, uploadHash) ? 'released' : 'gone' };
     const c = this.#pending(node, uploadHash);
     if (c.status !== 'ok') return c;
-    // Re-sent chunks keep a reservation alive, but not past RECEIVE_MAX_SEC.
+    // Re-sent chunks keep a reservation alive, but not past RECEIVE_MAX_SEC; one with no chunk
+    // started for RECEIVE_IDLE_SEC is released (the alarm purges it; its session may reserve the
+    // file again).
     if (c.n.created + RECEIVE_MAX_SEC <= nowSec()) return { status: 'gone' };
+    if (c.n.updated + this.#receiveIdle() <= nowSec()) return { status: 'released' };
     if (!Number.isInteger(i) || i < 0 || i >= c.n.chunks) return { status: 'bad_index' };
+    return { status: 'ok', n: c.n };
+  }
+
+  /**
+   * A chunk request of received upload `node` starts (the Worker calls this
+   * after its token check and before it reads the body): the reservation's
+   * last activity is now, stored, so a slow sender whose chunk is still
+   * arriving is never released by the idle rule (RECEIVE_IDLE_SEC counts
+   * from the last chunk that started), also if this object restarts
+   * meanwhile. → { status: 'ok' } or the answer reversePutChunk would give.
+   */
+  async reverseChunkStart(uid, id, node, uploadHash, i) {
+    this.#bind(uid);
+    const c = this.#chunkCheck(id, node, uploadHash, i);
+    if (c.status !== 'ok') return c;
+    this.sql.exec("UPDATE nodes SET updated = MAX(updated, ?) WHERE id = ? AND state = 'pending'", nowSec(), node);
+    await this.#schedulePurge();
+    return { status: 'ok' };
+  }
+
+  async reversePutChunk(uid, id, node, uploadHash, i, bytes, { capacity = null } = {}) {
+    this.#bind(uid);
+    const c = this.#chunkCheck(id, node, uploadHash, i);
+    if (c.status !== 'ok') return c;
     const expected = driveChunkSize(c.n.size, i);
     if (!bytes || bytes.byteLength !== expected) return { status: 'bad_size', expected };
+    // Its content counts in the Drive as it arrives: this chunk must fit (checked again as it is recorded).
+    if (this.#chunkFull(node, i, capacity)) return { status: 'full' };
     const key = driveChunkKey(uid, node, i);
+    // Its write is activity too (stored: it counts after a restart), and while it is in flight the
+    // alarm leaves the upload alone.
+    this.sql.exec("UPDATE nodes SET updated = MAX(updated, ?) WHERE id = ? AND state = 'pending'", nowSec(), node);
     this.inflight ??= new Map();
     this.inflight.set(node, (this.inflight.get(node) ?? 0) + 1);
     let h;
@@ -1682,21 +1820,52 @@ export class Drive extends DurableObject {
       if (left > 0) this.inflight.set(node, left); else this.inflight.delete(node);
     }
     const again = this.#pending(node, uploadHash);
-    if (again.status !== 'ok') {
-      // Still pending is the only way here to finish; anything else means the upload ended.
+    // Still pending is the only way here to finish; anything else means the upload ended. The
+    // Drive may have filled while the chunk was written (other uploads): checked again here, with
+    // nothing awaited between the check and the record.
+    const full = again.status === 'ok' && this.#chunkFull(node, i, capacity);
+    if (again.status !== 'ok' || full) {
+      // Not recorded (a chunk sent again is never "full": it adds nothing), so its object goes.
       await this.env.FILES.delete(key);
-      return { status: 'gone' };
+      return { status: full ? 'full' : 'gone' };
     }
     this.sql.exec('INSERT INTO upchunks (node_id, i, h) VALUES (?, ?, ?) ON CONFLICT(node_id, i) DO UPDATE SET h = excluded.h', node, i, h);
-    this.sql.exec('UPDATE nodes SET done = (SELECT COUNT(*) FROM upchunks WHERE node_id = ?), updated = ? WHERE id = ?', node, nowSec(), node);
+    // What it sent so far (plaintext bytes of its chunks): its content counts in the Drive as it arrives.
+    this.sql.exec(`UPDATE nodes SET done = (SELECT COUNT(*) FROM upchunks WHERE node_id = ?),
+      got = (SELECT COALESCE(SUM(MIN(?, nodes.size - upchunks.i * ?)), 0) FROM upchunks WHERE node_id = ?), updated = ? WHERE id = ?`,
+    node, CHUNK, CHUNK, node, nowSec(), node);
     // A large file's progress keeps the session that reserved it open (for its finalize).
     const x = c.n.rsess ? this.#session(id, c.n.rsess) : null;
     if (x) this.#touch(x, Number(this.#meta('pendingSec')) || 3600);
     await this.#schedulePurge();
-    return { status: 'ok' };
+    return { status: 'ok', used: this.#used() };
   }
 
-  /** Finish a received file: counted in the session (for the log). */
+  /** Was upload token `uploadHash` one of link `id`'s uploads released for want of data (rgone.released)? */
+  #released(id, uploadHash) {
+    return typeof uploadHash === 'string' && this.sql.exec('SELECT 1 FROM rgone WHERE hash = ? AND rid = ? AND exp > ? AND released = 1', uploadHash, id, nowSec()).toArray().length > 0;
+  }
+
+  /**
+   * Would chunk `i` of received upload `node` not fit in `capacity` (null: no
+   * check)? A chunk sent again adds nothing; a new one adds its plaintext
+   * bytes (CHARGED).
+   */
+  #chunkFull(node, i, capacity) {
+    if (capacity === null || capacity === undefined) return false;
+    if (this.sql.exec('SELECT 1 FROM upchunks WHERE node_id = ? AND i = ?', node, i).toArray().length) return false;
+    const n = this.#node(node);
+    if (!n) return false;
+    const more = driveChunkSize(n.size, i) - TAG;
+    return more > 0 && this.#used() + more > capacity;
+  }
+
+  /**
+   * Finish a received file: counted in the session (for the log), and its
+   * size under the user's quotas of kind drive-bytes (it is Drive storage:
+   * docs/DRIVE.md §5) — refused ('quota') when that would pass one; never
+   * under drive-upload (the Receive quotas count the session).
+   */
   async reverseFinalize(uid, id, hash, node, uploadHash, pendingSec) {
     this.#bind(uid);
     const x = this.#session(id, hash);
@@ -1707,8 +1876,20 @@ export class Drive extends DurableObject {
     if (n.state === 'pending' && !safeEq(n.rsess, hash)) return { status: 'bad_grant' };
     if (this.#reverseState(this.#reverse(id)) !== 'active') return { status: 'gone' };
     if (this.inflight?.get(node)) return { status: 'busy' };
-    const r = await this.finalize(uid, node, uploadHash);
-    if (r.status !== 'ok') return r;
+    // Not finished yet, done already or the wrong token: finalize's own answer, with nothing counted.
+    if (n.state !== 'pending' || !safeEq(uploadHash, n.upload_hash)
+      || this.sql.exec('SELECT COUNT(*) AS c FROM upchunks WHERE node_id = ?', node).one().c < n.chunks) return this.finalize(uid, node, uploadHash);
+    const dir = this.env.DIRECTORY.get(this.env.DIRECTORY.idFromName('directory'));
+    const q = await dir.authorizeReceivedBytes(uid, { size: n.size });
+    if (!q.ok) return q.status === 429 ? { status: 'quota' } : { status: 'gone' };
+    let r;
+    try {
+      r = await this.finalize(uid, node, uploadHash);
+    } catch (e) {
+      await dir.refund(uid, q.refund);
+      throw e;
+    }
+    if (r.status !== 'ok') { await dir.refund(uid, q.refund); return r; }
     this.sql.exec('UPDATE nodes SET rsess = NULL WHERE id = ?', node);
     this.sql.exec('UPDATE rsessions SET files = files + 1, bytes = bytes + ? WHERE hash = ?', n.size, hash);
     // With nothing left unfinished, the session is idle again.
@@ -1847,7 +2028,11 @@ export class Drive extends DurableObject {
   }
 
   // ── pending-upload purge ──────────────────────────────────────────────────
-  /** Uploads with no progress for the role's filePendingSec are deleted, with their chunks. */
+  /**
+   * Uploads with no progress for the role's filePendingSec are deleted, with
+   * their chunks; received ones after RECEIVE_IDLE_SEC with no chunk (or
+   * filePendingSec when shorter), or RECEIVE_MAX_SEC after their reservation.
+   */
   async alarm() {
     if (this.destroyed) return;
     const uid = this.#meta('uid');
@@ -1856,12 +2041,16 @@ export class Drive extends DurableObject {
     let purged = 0;
     let unfinished = [];
     await this.ctx.blockConcurrencyWhile(async () => {
-      const stale = this.sql.exec(`SELECT id, chunks, size, rs, created FROM nodes WHERE kind = 'file' AND state = 'pending'
-        AND (updated <= ? OR (rs IS NOT NULL AND created <= ?))`, nowSec() - sec, nowSec() - RECEIVE_MAX_SEC).toArray();
+      const t = nowSec();
+      const stale = this.sql.exec(`SELECT id, chunks, size, rs, created, updated FROM nodes WHERE kind = 'file' AND state = 'pending'
+        AND ((rs IS NULL AND updated <= ?) OR (rs IS NOT NULL AND (updated <= ? OR created <= ?)))`, t - sec, t - this.#receiveIdle(), t - RECEIVE_MAX_SEC).toArray()
+        // A received upload whose chunk is being written now is not idle (past RECEIVE_MAX_SEC it goes).
+        .filter((f) => !(f.rs && this.inflight?.get(f.id) && f.created > t - RECEIVE_MAX_SEC));
       if (!stale.length) return;
       await this.#deleteObjects(uid, stale);
       this.ctx.storage.transactionSync(() => {
-        for (const f of stale) this.#dropPending(f);
+        // A received upload idle (not one past RECEIVE_MAX_SEC) is released: its uploader may send it again.
+        for (const f of stale) this.#dropPending(f, { released: !!f.rs && f.created > t - RECEIVE_MAX_SEC });
       });
       purged = stale.length;
       unfinished = stale.filter((f) => !f.rs).map((f) => ({ t: f.created, size: f.size }));

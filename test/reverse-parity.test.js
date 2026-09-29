@@ -394,7 +394,9 @@ describe('changing a link after creation', () => {
     // "No limit" is the role's limit, as on create.
     expect((await patch(u.cookie, r.id, { maxBytes: null })).status).toBe(200);
     expect((await listed(u.cookie, r.id)).maxBytes).toBe(5000);
-    expect((await patch(u.cookie, r.id, { maxBytes: 2000, types: null })).status).toBe(200);
+    // Any file type again loosens the link: the step-up (C-4, reverse-audit tests); a smaller total does not.
+    expect(await errorOf(await patch(u.cookie, r.id, { maxBytes: 2000, types: null }))).toBe('reauth_required');
+    expect((await patch(u.cookie, r.id, { maxBytes: 2000, types: null, ...CONFIRM })).status).toBe(200);
     expect((await listed(u.cookie, r.id))).toMatchObject({ maxBytes: 2000, types: null, maxFiles: 1 });
     for (const bad of [{ maxFiles: 0 }, { maxFiles: 10001 }, { maxBytes: -1 }, { types: { mode: 'allow', rules: [] } }, { types: 'pdf' }]) {
       expect((await patch(u.cookie, r.id, bad)).status, JSON.stringify(bad)).toBe(400);

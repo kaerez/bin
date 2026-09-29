@@ -1,6 +1,7 @@
 // drivepolicy.js — the role's file-type rules (fileTypeMode / fileTypeRules,
-// public/js/filepolicy.js) for what goes into a Drive: an upload and a file
-// taken in from a Receive link. When a type policy applies, the browser
+// public/js/filepolicy.js) for what goes into a Drive: an upload, a file
+// taken in from a Receive link, and a file's rename or metadata change
+// (renameTypeRefusal). When a type policy applies, the browser
 // declares the file's { ext, mime } (from the name and type it seals), checked
 // first (driveTypeRefusal) and never stored. Then, because the Worker opens a
 // new item's sealed name and metadata anyway (src/lib/mek.js checkNewItem),
@@ -72,4 +73,32 @@ export function sealedTypeRefusal(policy, name, meta, declared, what = 'uploaded
   if (d && (d.length !== 1 || d[0].ext !== t.ext || d[0].mime !== t.mime)) return refuse(`The declared file type does not match the file’s stored type, so it may not be ${what} your Drive.`);
   if (refusedTypes(policy.mode, policy.rules, [t]).length) return refuse(`This file type may not be ${what} your Drive.`);
   return null;
+}
+
+/**
+ * A rename or a metadata change of a file (the PATCH of a Drive item): the
+ * rule on the name and metadata as they will be stored (`after`: opened
+ * bytes { name, meta }), as for an upload (sealedTypeRefusal) — so a rename
+ * is no way to give a file a type the role refuses. A file whose stored type
+ * stays what it was (`before`, opened likewise: the same extension and MIME
+ * type) may still be renamed, as the rule does not apply to files already in
+ * a Drive (docs/DRIVE.md §5). → null or the refusal.
+ */
+export function renameTypeRefusal(policy, before, after) {
+  if (!typedPolicy(policy)) return null;
+  const refused = sealedTypeRefusal(policy, after.name, after.meta, undefined, 'kept in');
+  if (!refused) return null;
+  const a = storedType(after.name, after.meta);
+  const b = before ? storedType(before.name, before.meta) : null;
+  return a && b && a.ext === b.ext && a.mime === b.mime ? null : refused;
+}
+
+/** A stored file's type as the rule reads it: { ext of the name, the metadata's `type` } (unchecked), or null when they do not parse. */
+function storedType(name, meta) {
+  try {
+    const m = meta ? JSON.parse(fromUtf8(meta)) : null;
+    return { ext: fileExt(fromUtf8(name)), mime: m && typeof m === 'object' && typeof m.type === 'string' ? m.type.toLowerCase() : null };
+  } catch {
+    return null;
+  }
 }

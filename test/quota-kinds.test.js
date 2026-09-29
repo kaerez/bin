@@ -7,16 +7,19 @@
 // refunds (refused after counting, a Drive upload that never completes, a
 // Receive session that sends nothing), the uploader's neutral 429, the
 // validation of kinds, and the Drive's bytes (drive-bytes: each upload's size,
-// counted with its file at the reservation, atomically, given back as it is).
+// counted with its file at the reservation, atomically, given back as it is;
+// and each file received through a Receive link, counted when it is finished).
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { owner, makeUser, fetchJson, createNote, freshIp, proofFor, USER_PW } from './helpers.js';
 import { enableDrive, createFile, uploadFile, del, putChunk, drive } from './drive-helpers.js';
-import { receiver, newReverse, begin, grantOf, send, rv, reserve, driveOf, dirStub, takeInAny, received, itemSession } from './reverse-helpers.js';
+import { receiver, newReverse, begin, grantOf, send, rv, reserve, driveOf, dirStub, takeInAny, received, itemSession, putChunk as revChunk } from './reverse-helpers.js';
+import { encryptChunk, importFileKey } from '../public/js/files.js';
 import { encryptPaste } from '../public/js/crypto.js';
 import { buildSecret } from '../public/js/sharetypes.js';
 import { b64urlFromBytes, randomBytes } from '../public/js/bytes.js';
 import { invalidateGuardCaches } from '../src/lib/guard.js';
+import { encodeItem } from '../public/js/receivekinds.js';
 import { validateExport, PortableError, EXPORT_FORMAT } from '../src/lib/portable.js';
 
 const PUBLIC_ID = 'public-user-0000';
@@ -41,8 +44,15 @@ const COUNTED_BY = {
   'receive-url': ['receive', 'receive-upload', 'receive-url'],
   'receive-secret': ['receive', 'receive-upload', 'receive-secret'],
 };
-// What an action adds to the quotas counted in bytes (the matrix's Drive upload is 10 bytes).
-const BYTES_OF = { 'drive-upload': 10 };
+// What the matrix's notes, links and credentials received hold.
+const ITEMS = { note: { text: '# hello', fmt: 'markdown' }, url: { url: 'https://example.com/doc' }, secret: { username: 'synthetic', password: 'not-a-real-one' } };
+// What an action adds to the quotas counted in bytes (drive-bytes): the matrix's Drive upload is
+// 10 bytes; a file received through a Receive link is Drive storage too (11 bytes, send()'s
+// default), and so is a note, link or credential received (its content).
+const BYTES_OF = {
+  'drive-upload': 10, 'receive-file': 11,
+  ...Object.fromEntries(Object.entries(ITEMS).map(([k, v]) => [`receive-${k}`, encodeItem(k, v).bytes.length])),
+};
 // A window long enough that no test crosses into the next one (a fixed window: 100 calendar years).
 const q = (kind, max = 100, channel = 'all') => ({ channel, kind, n: 100, unit: 'y', max });
 const setQuotas = (scope, list) => fetchJson('/api/private/admin/quotas', { method: 'PUT', cookie: oc, body: { scope, list } });
@@ -75,7 +85,8 @@ describe('every kind is counted by its actions, and only by them', () => {
     const f = await uploadFile(u.cookie, 'root', 10);
     const link = await newReverse(u.cookie, { accept: ['files', 'note', 'url', 'secret'] });
     expect(link.res.status).toBe(201);
-    expect((await setQuotas(u.id, KINDS.map((k) => q(k)))).status).toBe(200);
+    // (drive-bytes counts bytes: room for what the matrix uploads and receives.)
+    expect((await setQuotas(u.id, KINDS.map((k) => q(k, k === 'drive-bytes' ? 100000 : 100)))).status).toBe(200);
     expect(Object.values(await used(u.cookie)).every((n) => n === 0)).toBe(true);
 
     const actions = {
@@ -87,9 +98,9 @@ describe('every kind is counted by its actions, and only by them', () => {
       'drive-upload': async () => expect((await createFile(u.cookie, 'root', 10)).res.status).toBe(201),
       'receive-link': async () => expect((await newReverse(u.cookie)).res.status).toBe(201),
       'receive-file': () => uploadSession(link),
-      'receive-note': () => itemSession(link, 'note', { text: '# hello', fmt: 'markdown' }, { ip: freshIp() }),
-      'receive-url': () => itemSession(link, 'url', { url: 'https://example.com/doc' }, { ip: freshIp() }),
-      'receive-secret': () => itemSession(link, 'secret', { username: 'synthetic', password: 'not-a-real-one' }, { ip: freshIp() }),
+      'receive-note': () => itemSession(link, 'note', ITEMS.note, { ip: freshIp() }),
+      'receive-url': () => itemSession(link, 'url', ITEMS.url, { ip: freshIp() }),
+      'receive-secret': () => itemSession(link, 'secret', ITEMS.secret, { ip: freshIp() }),
     };
     const expected = Object.fromEntries(KINDS.map((k) => [`${k}:all`, 0]));
     for (const [action, run] of Object.entries(actions)) {
@@ -99,8 +110,10 @@ describe('every kind is counted by its actions, and only by them', () => {
       expect(await used(u.cookie), action).toEqual(expected);
     }
     // In sum: "all" counted the five outgoing shares (not the Drive upload or Receive); "receive" every Receive action;
-    // "receive-upload" the four upload sessions, whatever they sent.
-    expect(expected).toMatchObject({ 'all:all': 5, 'text:all': 3, 'files:all': 2, 'drive-upload:all': 1, 'drive-bytes:all': 10, 'receive:all': 5, 'receive-upload:all': 4 });
+    // "receive-upload" the four upload sessions, whatever they sent; "drive-upload" the one upload (never what was
+    // received); "drive-bytes" the bytes of the upload and of everything received.
+    const recvBytes = BYTES_OF['receive-file'] + BYTES_OF['receive-note'] + BYTES_OF['receive-url'] + BYTES_OF['receive-secret'];
+    expect(expected).toMatchObject({ 'all:all': 5, 'text:all': 3, 'files:all': 2, 'drive-upload:all': 1, 'drive-bytes:all': 10 + recvBytes, 'receive:all': 5, 'receive-upload:all': 4 });
     // Markdown and code notes are notes.
     await createNote(u.cookie, { text: '# md', fmt: 'markdown' });
     await createNote(u.cookie, { text: 'x = 1', fmt: 'code' });
@@ -355,17 +368,53 @@ describe('Drive bytes (drive-bytes)', () => {
     expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0, 'drive-upload:all': 0 });
   });
 
-  it('files taken in from a Receive link are not counted; the max may be past 10 000 000 (bytes), up to 1 PiB', async () => {
+  it('files received through a Receive link count their bytes (once, when finished; never as an upload); the max may be past 10 000 000 (bytes), up to 1 PiB', async () => {
     const u = await receiver('qk-bytes-recv');
-    await setQuotas(u.id, [q('drive-bytes', 5 * GiB)]);
+    await setQuotas(u.id, [q('drive-bytes', 5 * GiB), q('drive-upload', 1)]);
     const link = await newReverse(u.cookie);
     await uploadSession(link);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 11, 'drive-upload:all': 0 });
     const [it0] = (await received(u.cookie)).items;
     expect((await takeInAny(u.cookie, it0.id)).status).toBe(200);
-    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0 });
+    // Taking it in counts nothing more (its bytes were counted as it arrived).
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 11, 'drive-upload:all': 0 });
     expect((await setQuotas(u.id, [q('drive-bytes', 2 ** 50)])).status).toBe(200);
     expect(await errorBody(await setQuotas(u.id, [q('drive-bytes', 2 ** 50 + 1)]))).toEqual({ status: 400, error: 'invalid_quota', message: `quota max of kind drive-bytes must be 0–${2 ** 50} bytes` });
     expect((await setQuotas(u.id, [q('drive-upload', 10000001)])).status).toBe(400); // other kinds: as before
+  });
+
+  it('C-5: at the drive-bytes quota a Receive link takes no more files (a neutral 429 to the uploader), checked at the reservation and counted at the finish', async () => {
+    const u = await receiver('qk-bytes-recv-max');
+    await setQuotas(u.id, [q('drive-bytes', 30)]);
+    const link = await newReverse(u.cookie);
+    const ip = freshIp();
+    const g = await grantOf(link, { ip });
+    // Two 11-byte files each fit when they are reserved (nothing is counted before they finish)…
+    const a = await reserve(link, g, { ip, bytes: randomBytes(11) });
+    const b = await reserve(link, g, { ip, bytes: randomBytes(11) });
+    expect([a.res.status, b.res.status]).toEqual([201, 201]);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 0 });
+    // …a 31-byte one never could: refused before anything is sent, with nothing of the quota.
+    const big = await reserve(link, g, { ip, bytes: randomBytes(31) });
+    expect(await errorBody(big.res)).toEqual({ status: 429, error: 'not_accepting', message: 'This link can’t accept more uploads right now. Try again later.' });
+    const finish = async (f) => {
+      const key = await importFileKey(b64urlFromBytes(f.fk));
+      expect((await revChunk(link.id, f.node, 0, await encryptChunk(key, 0, 1, f.bytes), f.data.uploadToken, ip)).status).toBe(200);
+      return rv(link.id, `/files/${f.node}/finalize`, { headers: { 'x-reverse-grant': g, 'x-upload-token': f.data.uploadToken }, ip });
+    };
+    expect((await finish(a)).status).toBe(200);
+    expect((await finish(b)).status).toBe(200);
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 22 });
+    // The third finishes past the quota: refused at the finish (neutral), nothing counted; the uploader cancels it.
+    const c = await reserve(link, g, { ip, bytes: randomBytes(8) }); // 22 + 8 ≤ 30: reserved
+    const d = await reserve(link, g, { ip, bytes: randomBytes(8) });
+    expect([c.res.status, d.res.status]).toEqual([201, 201]);
+    expect((await finish(c)).status).toBe(200);
+    expect(await errorBody(await finish(d))).toEqual({ status: 429, error: 'not_accepting', message: 'This link can’t accept more uploads right now. Try again later.' });
+    expect(await used(u.cookie)).toEqual({ 'drive-bytes:all': 30 });
+    expect((await rv(link.id, `/files/${d.node}`, { method: 'DELETE', headers: { 'x-reverse-grant': g, 'x-upload-token': d.data.uploadToken }, ip })).status).toBe(200);
+    // Received files are never Drive uploads, and the user's own uploads share the same bytes.
+    expect(await errorBody((await createFile(u.cookie, 'root', 1)).res)).toMatchObject({ status: 429, error: 'quota_exceeded' });
   });
 });
 

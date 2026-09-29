@@ -222,9 +222,10 @@ working.
   - *Drive:* files uploaded (`drive-upload`: each file, a folder upload counting every file)
     and bytes uploaded (`drive-bytes`: each file's size, counted with the file when its upload
     starts; its max is in bytes, set in MiB or GiB, and the refusal names the size, e.g. "Quota
-    reached: 1.0 GB uploaded to the Drive per 1d."); files taken in from Receive links are not
-    counted by either, and both are given back when the Drive refuses the file or the upload
-    never completes;
+    reached: 1.0 GB uploaded to the Drive per 1d."); both are given back when the Drive refuses
+    the file or the upload never completes. A file received through a Receive link counts its
+    size under `drive-bytes` once it is finished (it is Drive storage), never under
+    `drive-upload`;
   - *Receive:* all receive (`receive`: everything below), new links (`receive-link`) and uploads
     received (`receive-upload`: each upload session through one of the user's links, whatever it
     sends, counted for the user; at the quota the uploader is told only that the link cannot
@@ -407,8 +408,9 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`SPEC.md`](./SPEC.md) (protocol,
   (sealed) name and type, which it opens to check the seal anyway, so a modified client that
   declares a false type is refused; the folder-depth limit is checked by the server against the Drive's
   own tree on every upload, new folder and move (and on files taken in from Receive links, on
-  top of the link's own type rules). Files already in a Drive stay when a rule is added or
-  tightened; only new uploads, folders and moves are refused.
+  top of the link's own type rules); a rename or a metadata change may not give a file a type
+  the rules refuse. Files already in a Drive stay when a rule is added or tightened (and can be
+  renamed within their type); only new uploads, folders, moves and changes of type are refused.
 
 ## Security
 
