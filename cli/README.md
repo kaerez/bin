@@ -174,10 +174,16 @@ steps as the browser:
    skipped automatically without a TTY).
 4. It sends the proofs to the server. The server checks them **before** it releases any
    ciphertext or spends a view. A wrong link or wrong password is refused, and the share
-   is untouched. When a typed password is wrong, you are asked once more on a TTY.
+   is untouched. When a typed password is wrong, you are asked once more on a TTY. After
+   too many wrong passwords for a share (from anyone), the server locks its password for a
+   while, even the right one: `secbin get` says until when (exit 1) and does not ask again.
 
 For **notes**, the plaintext goes to stdout, or to `--out <file>` with mode `0600`. The
-file is opened before the view is spent, so an unwritable path fails first.
+file is opened before the view is spent, so an unwritable path fails first. On a terminal,
+a note's control characters (C0 and C1, ESC, DEL) are escaped (`\u001b` and so on; newlines
+and tabs are kept, a CRLF line end is shown as a newline), so a sender cannot run terminal
+escape sequences such as a clipboard write (OSC 52) or a title change. `--raw` prints the exact
+text to the terminal. A pipe and `--out` always get the exact text.
 
 A **link** share prints the validated link on stdout and its real host on stderr (with a
 warning for internationalized look-alike names or plain HTTP); it is never opened for you. A
@@ -199,6 +205,7 @@ directory). Only the chunks that cover the selected files are downloaded.
 | `-y, --yes` | Skip the "this uses a view" confirmation |
 | `--password-env <VAR>` | Read the password from an environment variable. Otherwise you are prompted on a TTY. |
 | `--field <name>` | Credential share: print one field, or `code` for the current one-time code |
+| `--raw` | Note: print the exact text to the terminal, control characters included (only for text you trust; a pipe or `--out` gets the exact text anyway) |
 
 A share whose sender required a CAPTCHA opens in a browser only: `secbin get` stops with
 `This share requires a CAPTCHA; open it in a browser` (exit 1), and nothing is spent.
@@ -283,7 +290,9 @@ pulling the repository and re-running `npm install -g ./cli`.
   come only from a hidden prompt, an environment variable or a `0600` key file.
 - `--text` puts the note itself in argv. Pipe stdin or use `--file` for anything sensitive.
 - Server error messages and share labels are stripped of control characters before they are printed, so a
-  hostile server cannot inject terminal escapes.
+  hostile server cannot inject terminal escapes. What a share holds (notes, links, credentials,
+  file names) has its control characters escaped on a terminal, so a hostile sender cannot
+  either; `get --raw` turns that off for a note.
 - See the project's [`SECURITY.md`](https://github.com/kaerez/bin/blob/main/SECURITY.md)
   for the full threat model.
 

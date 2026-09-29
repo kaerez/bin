@@ -42,6 +42,13 @@ export const SETTINGS = {
   'lockout.max':         { type: 'int', min: 1, max: 100000, def: 10 },
   'lockout.windowSec':   { type: 'int', min: 1, max: 30 * DAY, def: 10 * MIN },
   'lockout.lockSec':     { type: 'int', min: 1, max: 365 * DAY, def: 15 * MIN },
+  // Share passwords (src/lib/sharepw.js): wrong passwords for one share, from
+  // any network, within the window lock that share's password for the lock
+  // time, twice as long on each lock after the first (the Guard's `invalid`
+  // scope counts them per network besides).
+  'share.pwMaxFails':    { type: 'int', min: 1, max: 10000, def: 20 },
+  'share.pwWindowSec':   { type: 'int', min: MIN, max: 30 * DAY, def: 15 * MIN },
+  'share.pwLockSec':     { type: 'int', min: MIN, max: 30 * DAY, def: 15 * MIN },
   // CSRF tokens (src/lib/csrf.js): cookie-authenticated changes must echo the
   // session's token in X-Secbin-CSRF. Off, every other CSRF guard still applies
   // (SameSite=Strict cookies, the Sec-Fetch-Site check, JSON or X-Secbin-Intent).
@@ -180,6 +187,7 @@ const WEAKER_SETTINGS = {
   csrfTokens: 'off',
   'session.idleSec': 'up', 'session.absSec': 'up',
   'lockout.max': 'up', 'lockout.windowSec': 'down', 'lockout.lockSec': 'down',
+  'share.pwMaxFails': 'up', 'share.pwWindowSec': 'down', 'share.pwLockSec': 'down',
   ...Object.fromEntries(['login', 'setup', 'invalid'].flatMap((s) => [[`guard.${s}.max`, 'up'], [`guard.${s}.windowSec`, 'down'], [`guard.${s}.blockSec`, 'down']])),
   'guard.v6Prefix': 'up',
   'public.enabled': 'on',

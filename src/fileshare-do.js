@@ -22,13 +22,20 @@
 // nothing — head, open, "delete now", chunks — unless the Worker has verified
 // a CAPTCHA grant for it (`human`); the answer is then 'captcha' and no view
 // is spent (src/lib/human.js).
+//
+// Wrong passwords (a share with one) are counted here, from any network, with
+// the proofs (src/lib/sharepw.js): at the rule's count the password is locked,
+// and while it is every open and "delete now" is refused ('pw_locked') before
+// its password is checked, the right one too. The count has its own key.
 
 import { DurableObject } from 'cloudflare:workers';
 import { verifyToken } from './lib/ids.js';
 import { timingSafeEqualHex } from '../public/js/bytes.js';
 import { CHUNK, TAG } from '../public/js/files.js';
+import { PASSWORD_KDF, pwLockedUntil, pwFailed, pwDirty } from './lib/sharepw.js';
 
 const KEY = 'rec';
+const PW_KEY = 'pw';
 // Download grants live under their own key, not inside the (up to ~1.9 MB)
 // record, and at most MAX_ACTIVE_GRANTS may be live at once — so repeated
 // opens of an unlimited share can never push the record past the storage
@@ -201,16 +208,40 @@ export class FileShare extends DurableObject {
   }
 
   /**
+   * The key proof, after the link proof, under the share's password lockout
+   * (`rule`: src/lib/sharepw.js) → null when it is right (the count cleared),
+   * else the refusal: { status: 'pw_locked', until } before any check while
+   * locked, or { status: 'bad_password', locked } (locked: { until, strike }
+   * when this failure locked it). Callers are inside blockConcurrencyWhile.
+   */
+  async #keyProof(rec, kh, rule) {
+    if (rec.paste?.adata?.kdf !== PASSWORD_KDF) return safeEq(kh, rec.acc.kh) ? null : { status: 'bad_password', locked: null };
+    const t = nowSec();
+    const st = await this.ctx.storage.get(PW_KEY);
+    const until = pwLockedUntil(st, t);
+    if (until) return { status: 'pw_locked', until };
+    if (safeEq(kh, rec.acc.kh)) {
+      if (pwDirty(st)) await this.ctx.storage.delete(PW_KEY);
+      return null;
+    }
+    const f = pwFailed(st, rule, t);
+    await this.ctx.storage.put(PW_KEY, f.next);
+    return { status: 'bad_password', locked: f.locked };
+  }
+
+  /**
    * Verify proofs, spend a view, register a grant (hash) valid for grantSec.
    * `client` is an opaque hash of the caller's tracking key (never an IP).
+   * `rule`: the password lockout's (#keyProof).
    */
-  async open(lh, kh, grantHash, grantSec, client = '', human = false) {
+  async open(lh, kh, grantHash, grantSec, client = '', human = false, rule = null) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const rec = await this.#live();
       if (!rec || rec.state !== 'active') return { status: 'gone' };
       if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
-      if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
+      const refused = await this.#keyProof(rec, kh, rule);
+      if (refused) return refused;
       const t = nowSec();
       let grants = await this.#grants(rec, t);
       const mine = grants.filter((g) => client && g.c === client);
@@ -259,7 +290,7 @@ export class FileShare extends DurableObject {
   }
 
   /** "Delete now" by someone holding both proofs, when the sender allowed it. */
-  async expireByOpener(lh, kh, human = false) {
+  async expireByOpener(lh, kh, human = false, rule = null) {
     return this.ctx.blockConcurrencyWhile(async () => {
       // Only an active share: after its last view, downloads already granted
       // run out on their own and are not cut short by a recipient.
@@ -267,7 +298,8 @@ export class FileShare extends DurableObject {
       if (!rec || rec.state !== 'active') return { status: 'gone' };
       if (rec.hc && human !== true) return { status: 'captcha' };
       if (!safeEq(lh, rec.acc.lh)) return { status: 'bad_link' };
-      if (!safeEq(kh, rec.acc.kh)) return { status: 'bad_password' };
+      const refused = await this.#keyProof(rec, kh, rule);
+      if (refused) return refused;
       if (rec.paste.meta.deletable !== true) return { status: 'not_allowed' };
       await this.#purge(rec);
       return { status: 'ok' };
@@ -305,13 +337,18 @@ export class FileShare extends DurableObject {
     });
   }
 
+  // The grant is checked before the index: without a valid one every chunk
+  // request gets the same 'bad_grant' (counted as invalid by the Worker), so
+  // the layout (a file share's chunk count, a Drive share's files and theirs)
+  // is never told to someone who has not opened the share.
+
   /** Is `grantHash` currently valid for chunk i? */
   async chunkAccess(grantHash, i, human = false) {
     const rec = await this.#live();
     if (!rec || rec.state === 'pending') return { status: 'gone' };
     if (rec.hc && human !== true) return { status: 'captcha' };
-    if (!Number.isInteger(i) || i < 0 || i >= rec.chunks) return { status: 'bad_index' };
     if (!(await this.#grants(rec)).some((g) => safeEq(g.h, grantHash))) return { status: 'bad_grant' };
+    if (!Number.isInteger(i) || i < 0 || i >= rec.chunks) return { status: 'bad_index' };
     return { status: 'ok', key: r2Key(rec.id, i) };
   }
 
@@ -320,10 +357,10 @@ export class FileShare extends DurableObject {
     const rec = await this.#live();
     if (!rec || rec.state === 'pending') return { status: 'gone' };
     if (rec.hc && human !== true) return { status: 'captcha' };
+    if (!(await this.#grants(rec)).some((g) => safeEq(g.h, grantHash))) return { status: 'bad_grant' };
     if (!Array.isArray(rec.refs) || !Number.isInteger(ref) || ref < 0 || ref >= rec.refs.length) return { status: 'bad_index' };
     const r = rec.refs[ref];
     if (!Number.isInteger(i) || i < 0 || i >= r.chunks) return { status: 'bad_index' };
-    if (!(await this.#grants(rec)).some((g) => safeEq(g.h, grantHash))) return { status: 'bad_grant' };
     return { status: 'ok', key: `${r.key}/${i}` };
   }
 

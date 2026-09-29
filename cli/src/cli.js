@@ -85,6 +85,9 @@ get flags:
   --field <name>         credential share: print one field (title, username,
                          password, url, totp, notes) or "code" (the current
                          one-time code) instead of the JSON
+  --raw                  note: print the exact text to the terminal (control
+                         characters are escaped there by default; a pipe or
+                         --out always gets the exact text)
 delete flags:
   --token-env <VAR>      read the delete token from an environment variable
   --now                  recipient delete (see above); --password-env <VAR> for
@@ -164,11 +167,15 @@ export function defaultIo() {
   return io;
 }
 
+/** A share's password lock end (the error body's `until`, unix seconds) as UTC, or null. */
+const lockedUntil = (e) => (Number.isSafeInteger(e.details?.until) && e.details.until > 0 ? new Date(e.details.until * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z') : null);
+
 function apiMessage(e) {
   const m = e.message; // already sanitized by client.js
   switch (e.code) {
     case 'bad_link': return 'the link is incomplete or corrupted (the share was not opened)';
-    case 'bad_password': return 'wrong password (the share was not opened)';
+    case 'bad_password': return `wrong password (the share was not opened)${lockedUntil(e) ? `; too many wrong passwords were tried for this share: it is locked until ${lockedUntil(e)}` : ''}`;
+    case 'password_locked': return `too many wrong passwords were tried for this share: it is locked, even with the right password, until ${lockedUntil(e) ?? 'later'} (nothing was opened)`;
     case 'bad_token': return 'wrong delete token (nothing was deleted)';
     case 'bad_grant': return 'the download window has expired — open the link again (this uses another view if the share is view-limited)';
     // A share with the CAPTCHA: only a browser can pass it (nothing was opened or spent).

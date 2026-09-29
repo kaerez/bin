@@ -2,7 +2,9 @@
 // proof-gated opens, file chunk downloads under a grant, delete-by-token, and
 // the public viewer policy. Every failure a guesser would produce (unknown id,
 // wrong #fragment, wrong password, bad grant, bad delete token) feeds the
-// Guard's "invalid" scope, and blocked callers are refused up front.
+// Guard's "invalid" scope, and blocked callers are refused up front. Wrong
+// passwords are also counted per share, from any network (src/lib/sharepw.js):
+// enough of them lock the share's password for a while (429 password_locked).
 //
 // A share with the CAPTCHA (its sender's role, src/lib/settings.js) serves
 // nothing of itself — head, open, "delete now", chunks — without a CAPTCHA
@@ -13,7 +15,8 @@
 
 import { json, err, HttpError, assertNotCrossSite, decodePathSegment, methodNotAllowed, SECURITY_HEADERS } from '../lib/http.js';
 import { kvGet, kvDelete, burnStub, fileStub } from '../lib/store.js';
-import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig, rateLimit, EXTEND_DOWNLOADS, ENDED_CHUNKS } from '../lib/guard.js';
+import { ipContext, isBlocked, recordFailure, directory, cachedPublicConfig, rateLimit, EXTEND_DOWNLOADS, ENDED_CHUNKS, PASSWORD_LOCKED } from '../lib/guard.js';
+import { sharePwRule, PASSWORD_KDF } from '../lib/sharepw.js';
 import { recordOpen } from '../lib/receipts.js';
 import { parseId, verifyToken, genToken, hashToken } from '../lib/ids.js';
 import { isProof } from '../../public/js/format.js';
@@ -72,6 +75,44 @@ async function goneFor(env, g, id, res, lh = null, hide = false) {
 const proofFailure = (status) => (status === 'bad_link'
   ? err(403, 'bad_link', 'The link is incomplete or corrupted.')
   : err(403, 'bad_password', 'Wrong password.'));
+
+const utcTime = (sec) => `${new Date(sec * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+
+/**
+ * A refused key proof under the share's password lockout (src/lib/sharepw.js;
+ * `r` from the store: 'bad_password' or 'pw_locked'). A wrong password counts
+ * as invalid for the network, as before; the one that locked the share is
+ * recorded in its user's log and says until when. While the password is
+ * locked every attempt gets `429 password_locked` before its password is
+ * checked: not an invalid request (the right password may be among them), but
+ * under a per-network limit of its own (PASSWORD_LOCKED).
+ */
+async function passwordRefused(env, g, id, r) {
+  if (r.status === 'pw_locked') {
+    const rl = await rateLimit(env, g, 'password-locked', PASSWORD_LOCKED);
+    if (!rl.ok) {
+      const res = err(429, 'rate_limited', 'Too many password attempts on locked shares from your network. Try again later.', rl.until ? { until: rl.until } : undefined);
+      res.headers.set('retry-after', String(PASSWORD_LOCKED.blockSec));
+      return res;
+    }
+    const res = err(429, 'password_locked', `Too many wrong passwords for this share. Try again at ${utcTime(r.until)}.`, { until: r.until });
+    res.headers.set('retry-after', String(Math.max(1, r.until - Math.floor(Date.now() / 1000))));
+    return res;
+  }
+  if (r.locked) {
+    await directory(env).sharePasswordLocked(id, r.locked);
+    return failed(env, g, err(403, 'bad_password', `Wrong password. Too many wrong passwords for this share: try again at ${utcTime(r.locked.until)}.`, { until: r.locked.until }));
+  }
+  return failed(env, g, proofFailure('bad_password'));
+}
+
+/** A KV note's key proof (the Worker holds the record) → null when accepted, else the store-shaped refusal. */
+async function kvKeyProof(env, id, rec, kh) {
+  const right = eqB64(kh, rec.acc.kh);
+  if (rec.paste?.adata?.kdf !== PASSWORD_KDF) return right ? null : { status: 'bad_password', locked: null };
+  const a = await directory(env).sharePasswordAttempt(id, right);
+  return a.status === 'ok' ? null : a;
+}
 
 export async function handlePublic(request, env, url) {
   const { pathname } = url;
@@ -213,20 +254,22 @@ async function readHead(env, g, id, info, human) {
 
 async function openPaste(env, g, id, info, { lh, kh }, human) {
   if (info.burn) {
-    const r = await burnStub(env, id).open(lh, kh, human);
+    const r = await burnStub(env, id).open(lh, kh, human, sharePwRule(g.settings));
     if (r.status === 'captcha') throw captchaRequired();
     if (r.status === 'ok') {
       if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
       return json(r.paste);
     }
-    if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
+    if (r.status === 'bad_link') return failed(env, g, proofFailure(r.status));
+    if (r.status === 'bad_password' || r.status === 'pw_locked') return passwordRefused(env, g, id, r);
     return goneFor(env, g, id, err(410, 'gone', GONE), lh, !human);
   }
   const rec = await kvGet(env, id);
   if (!rec) return goneFor(env, g, id, err(404, 'not_found', GONE), lh, !human);
   if (rec.hc && !human) throw captchaRequired();
   if (!eqB64(lh, rec.acc.lh)) return failed(env, g, proofFailure('bad_link'));
-  if (!eqB64(kh, rec.acc.kh)) return failed(env, g, proofFailure('bad_password'));
+  const refused = await kvKeyProof(env, id, rec, kh);
+  if (refused) return passwordRefused(env, g, id, refused);
   const p = rec.paste;
   return json({ v: p.v, ct: p.ct, wk: p.wk, adata: p.adata, meta: p.meta });
 }
@@ -236,7 +279,7 @@ async function openFile(env, g, id, { lh, kh }, human) {
   const client = (await hashToken(`grant-client:${g.key}`)).slice(0, 16);
   // The sender's role decides the download window and the viewer policy, now.
   const policy = await directory(env).shareOpenPolicy(id);
-  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client, human);
+  const r = await fileStub(env, id).open(lh, kh, await hashToken(grant), policy.grantSec, client, human, sharePwRule(g.settings));
   if (r.status === 'captcha') throw captchaRequired();
   if (r.status === 'ok') {
     if (r.paste.meta.left === 0) await directory(env).markShareEnded(id, 'consumed');
@@ -248,7 +291,8 @@ async function openFile(env, g, id, { lh, kh }, human) {
     }
     return json(out);
   }
-  if (r.status === 'bad_link' || r.status === 'bad_password') return failed(env, g, proofFailure(r.status));
+  if (r.status === 'bad_link') return failed(env, g, proofFailure(r.status));
+  if (r.status === 'bad_password' || r.status === 'pw_locked') return passwordRefused(env, g, id, r);
   if (r.status === 'busy') {
     return json({ error: 'busy', message: 'Too many downloads of this share are in progress. Try again in a few minutes.' }, 429, { 'retry-after': '300' });
   }
@@ -275,26 +319,30 @@ async function expireByOpener(env, g, id, info, { lh, kh }, human) {
   // Checked now, not only at creation: a lock, or the admin withdrawing the
   // sender's permission, stops "delete now" on existing shares too.
   const allowed = await dir.recipientDeleteStatus(id);
+  // An id the index does not know was never a share (or ended more than 30 days ago): the same
+  // counted "gone" as on the other routes. Ids that were shares are not counted (goneFor).
+  if (allowed === 'unknown') return goneFor(env, g, id, err(410, 'gone', GONE), lh, !human);
   if (allowed === 'locked') return err(423, 'share_locked', 'The administrator has locked this share; it cannot be deleted.');
   if (allowed !== 'ok') return err(403, 'not_allowed', 'Recipients may not delete this share.');
-  let status;
+  let r;
   if (info.file || info.burn) {
-    status = (await (info.file ? fileStub(env, id) : burnStub(env, id)).expireByOpener(lh, kh, human)).status;
+    r = await (info.file ? fileStub(env, id) : burnStub(env, id)).expireByOpener(lh, kh, human, sharePwRule(g.settings));
   } else {
     const rec = await kvGet(env, id);
-    if (!rec) status = 'gone';
-    else if (rec.hc && !human) status = 'captcha';
-    else if (!eqB64(lh, rec.acc.lh)) status = 'bad_link';
-    else if (!eqB64(kh, rec.acc.kh)) status = 'bad_password';
-    else if (rec.paste.meta.deletable !== true) status = 'not_allowed';
-    else { await kvDelete(env, id); status = 'ok'; }
+    if (!rec) r = { status: 'gone' };
+    else if (rec.hc && !human) r = { status: 'captcha' };
+    else if (!eqB64(lh, rec.acc.lh)) r = { status: 'bad_link' };
+    else r = (await kvKeyProof(env, id, rec, kh)) ?? (rec.paste.meta.deletable !== true ? { status: 'not_allowed' } : null);
+    if (rec && !r) { await kvDelete(env, id); r = { status: 'ok' }; }
   }
+  const { status } = r;
   if (status === 'captcha') throw captchaRequired();
   if (status === 'ok') {
     await dir.shareDeletedByRecipient(id);
     return json({ status: 'deleted', id });
   }
-  if (status === 'bad_link' || status === 'bad_password') return failed(env, g, proofFailure(status));
+  if (status === 'bad_link') return failed(env, g, proofFailure(status));
+  if (status === 'bad_password' || status === 'pw_locked') return passwordRefused(env, g, id, r);
   if (status === 'not_allowed') return err(403, 'not_allowed', 'The sender did not allow recipients to delete this share.');
   return goneFor(env, g, id, err(410, 'gone', GONE), lh, !human);
 }
@@ -342,6 +390,7 @@ async function downloadChunk(request, env, g, id, i, ref = null, human = false) 
   const stub = fileStub(env, id);
   const r = ref === null ? await stub.chunkAccess(await hashToken(grant), i, human) : await stub.chunkAccessRef(await hashToken(grant), ref, i, human);
   if (r.status === 'captcha') throw captchaRequired();
+  // Only with a valid grant (the store checks it first): its holder knows the share's layout.
   if (r.status === 'bad_index') return err(404, 'not_found', 'No such chunk.');
   // A share that has ended (expired, used up, revoked, deleted) while a recipient was still
   // downloading: its grants went with it, so the grant cannot be checked any more. As on the
