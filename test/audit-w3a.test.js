@@ -400,7 +400,9 @@ describe('A-7: failed sign-ins and step-ups are in the audit log', () => {
     await fetchJson('/api/auth/recovery', { method: 'POST', body: { username: 'w3a-audit-user', code: 'AAAA-AAAA-AAAA-AAAA' }, ip });
     const rows = await failures(u.id);
     expect(rows.length).toBe(1);
-    expect(rows[0].detail).toMatch(new RegExp(`^failed=4 via=password,recovery code last=\\d+ from=${ip.replace(/\./g, '\\.')}$`));
+    // The detail, parsed (no pattern built from the address).
+    const m = /^failed=(\d+) via=(.+) last=(\d+) from=(\S+)$/.exec(rows[0].detail);
+    expect(m && { failed: m[1], via: m[2], from: m[4] }).toEqual({ failed: '4', via: 'password,recovery code', from: ip });
     const stored = await runInDurableObject(dirStub(), (_i, s) => s.storage.sql.exec("SELECT detail, rk FROM activity WHERE subject_id = ? AND action = 'login.failed'", u.id).toArray());
     expect(stored.length).toBe(1);
     expect(stored[0].rk).toBeTruthy(); // sealed (the keyring exists since set-up)
